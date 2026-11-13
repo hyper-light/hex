@@ -1006,6 +1006,77 @@ fn an_agentfile_declaring_nesting_builds() {
     );
 }
 
+/// An image declaring agents or harnesses gives them its `ENV` (D59), so the build refuses
+/// one naming their domain, `SHARDS_DOMAIN`, which shards-init sets: written in the
+/// Agentfile or its base image's, as the daemon and init refuse it again. An image of
+/// neither keeps it, as BuildKit does.
+#[test]
+fn an_image_with_members_never_names_their_domain_in_its_env() {
+    use shards_agentfile::plan::{self, EpochSource, Options, Resolved, Resolver};
+    use shards_agentfile::platform::Platform;
+    /// Every base image, as one of one layer for linux/amd64 whose config's `Env` is its own.
+    struct Bases(&'static str);
+    impl Resolver for Bases {
+        fn resolve(&self, name: &[u8], _: Option<&Platform>, _: &[u8]) -> Result<Resolved, Vec<u8>> {
+            Ok(Resolved {
+                reference: name.to_vec(),
+                digest: None,
+                config: format!(
+                    r#"{{"architecture":"amd64","os":"linux","config":{{"Env":[{}]}},"rootfs":{{"type":"layers","diff_ids":["sha256:24454f830cdb571e2c4ad15481119c43b3cafd48dd869a9b2945d1036d1dc68d"]}}}}"#,
+                    self.0
+                )
+                .into_bytes(),
+            })
+        }
+
+        fn epoch(&self, _: &EpochSource) -> Result<Option<plan::Epoch>, Vec<u8>> {
+            Ok(None)
+        }
+    }
+    let opts = Options {
+        target_platform: Platform::new("linux", "amd64"),
+        build_platforms: vec![Platform::new("linux", "amd64")],
+        dialect: Dialect::Agentfile,
+        ..Default::default()
+    };
+    let base = Bases(r#""PATH=/usr/bin""#);
+    let refused = |text: &[u8], bases: &Bases| {
+        let e = plan::plan(text, &opts, bases).unwrap_err();
+        String::from_utf8_lossy(&e.message).into_owned()
+    };
+    for (text, bases) in [
+        (
+            &b"FROM alpine\nAGENT a FROM ./a\nENV SHARDS_DOMAIN=agent\n"[..],
+            &base,
+        ),
+        (b"FROM alpine\nHARNESS h FROM ./h\nENV SHARDS_DOMAIN=x\n", &base),
+        (
+            b"FROM alpine\nAGENT a FROM ./a\n",
+            &Bases(r#""SHARDS_DOMAIN=base""#),
+        ),
+    ] {
+        let e = refused(text, bases);
+        assert!(
+            e.contains("the image's ENV, which its agents and harnesses start with")
+                && e.contains("SHARDS_DOMAIN, which init sets"),
+            "{e}"
+        );
+    }
+    let built = plan::plan(b"FROM alpine\nAGENT a FROM ./a\nENV LANG=C.UTF-8\n", &opts, &base).unwrap();
+    assert_eq!(built.image.config.env, [b("PATH=/usr/bin"), b("LANG=C.UTF-8")]);
+    for text in [
+        &b"FROM alpine\nENV SHARDS_DOMAIN=x\n"[..],
+        b"FROM alpine\nNETWORK n\nENV SHARDS_DOMAIN=x\n",
+    ] {
+        let kept = plan::plan(text, &opts, &base).unwrap();
+        assert!(
+            kept.image.config.env.contains(&b("SHARDS_DOMAIN=x")),
+            "{:?}",
+            kept.image.config.env
+        );
+    }
+}
+
 /// The ports an Agentfile's image may reach past its microVM (D59), its network process's
 /// union: of each joined network that is not internal, those both its own grants and the
 /// microVM's for it (`EXPOSE ... FOR`) open outward (§12 answer 6); each once.
@@ -1536,54 +1607,6 @@ fn destinations_are_what_joined_networks_name_and_open() {
     let read = af::from_spec(&af::spec(&directives)).unwrap();
     assert_eq!(af::grants(&read), g);
     assert_eq!(af::spec(&read), af::spec(&directives));
-}
-
-/// Each member's reach by name (D236, §4.4), as an orchestrator holds it per member: a
-/// harness its network's destinations, the host itself among them, an agent its own and its
-/// remote MCP server's, and a member that joins no network nothing; each in the order the
-/// Agentfile declares its members, and none of another member's.
-#[test]
-fn each_member_reaches_its_own_names() {
-    use shards_agentfile::agentfile::{self as af, TargetKind};
-    let text = "FROM alpine\nHARNESS codex FROM ./codex\nAGENT helper FROM ./helper\nAGENT idle FROM ./idle\n\
-        NETWORK --egress=api.openai.com:443 --egress=host.docker.internal:7070 provider FOR codex\n\
-        NETWORK --egress=api.example:8443 other FOR helper\n\
-        EXPOSE --harnesses=codex 443 7070 AS egress FOR provider\nEXPOSE --agents=helper 8443 AS egress FOR other\n\
-        CONNECT codex WITH codex ON provider\nCONNECT helper WITH helper ON other\n\
-        MCP web FROM https://mcp.example:9443/sse FOR helper\n";
-    let directives = af::resolve_targets(&stage_directives(text)).unwrap();
-    af::connections(&directives).unwrap();
-    af::held(&directives).unwrap();
-    let reach = af::named_reach(&directives);
-    let said: Vec<(TargetKind, String, Vec<String>)> = reach
-        .iter()
-        .map(|(kind, name, named)| {
-            let named = named
-                .iter()
-                .map(|(host, port)| format!("{}:{port}", String::from_utf8_lossy(host)))
-                .collect();
-            (*kind, String::from_utf8_lossy(name).into_owned(), named)
-        })
-        .collect();
-    assert_eq!(
-        said,
-        [
-            (
-                TargetKind::Harness,
-                "codex".to_string(),
-                vec![
-                    "api.openai.com:443".to_string(),
-                    "host.docker.internal:7070".to_string()
-                ]
-            ),
-            (
-                TargetKind::Agent,
-                "helper".to_string(),
-                vec!["api.example:8443".to_string(), "mcp.example:9443".to_string()]
-            ),
-            (TargetKind::Agent, "idle".to_string(), Vec::new()),
-        ]
-    );
 }
 
 /// What no destination of a network's is, refused by name and why: one let in rather than

@@ -427,12 +427,13 @@ fn the_image_cases_hold_through_a_nodes_socket() {
 
 /// Joint plan step 12, AC-T7.4.1 (docs/design/shards-image-class.md §8): a macOS or Windows node holds a Shards image
 /// VM in its guest runtime, beside its host runtime, and the VM's guest runs no node of Hex's. Do forward a start, an
-/// inspect, a usage and a signal of an image VM's spec through the node's runtime. Expect: each back to run here,
-/// where the guest runtime answers it, never to a guest's node, which no guest holding it would refuse NoSuchBox.
+/// inspect, a usage, a signal and an exec of an image VM's spec through the node's runtime. Expect: each back to run
+/// here, where the guest runtime answers it, never to a guest's node, which no guest holding it would refuse
+/// NoSuchBox; and no guest boots.
 #[test]
 fn an_image_vms_calls_run_here_not_at_a_guests_node() {
     let dir = tempfile::tempdir().unwrap();
-    let (node, _) = guest_node(dir.path());
+    let (node, boots) = guest_node(dir.path());
     let image = BoxSpec {
         id: BoxId::new("image-forwarded").unwrap(),
         bounds: Bounds::default(),
@@ -452,6 +453,15 @@ fn an_image_vms_calls_run_here_not_at_a_guests_node() {
             id: id.clone(),
             signal: hex_api::Signal::KILL,
         },
+        Call::Exec {
+            id: id.clone(),
+            program: hex_api::Program::of(&["/bin/true"]),
+            streams: hex_core::wire::Streams {
+                stdin: false,
+                stdout: false,
+                stderr: false,
+            },
+        },
     ] {
         let said = format!("{call:?}");
         let routed = match node.runtime.forward_for(
@@ -468,4 +478,5 @@ fn an_image_vms_calls_run_here_not_at_a_guests_node() {
         };
         assert_eq!(routed, "back", "{said}");
     }
+    assert_eq!(boots.load(Ordering::SeqCst), 0, "a guest booted");
 }

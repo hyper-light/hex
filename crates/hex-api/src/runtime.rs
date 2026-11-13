@@ -1754,7 +1754,7 @@ pub enum GuestTime {
 impl GuestTime {
     /// One entry for every 8-bit vCPU index: a Shards VM numbers its vCPUs by 8-bit APIC id on x86_64
     /// (its MADT, at most 255; crates/vmm/src/arch/x86_64/acpi.rs) and has fewer on arm64 (123, its
-    /// GIC redistributor region; crates/vmm/src/arch/aarch64/mod.rs), at Shards 482c5d78. Bounds a
+    /// GIC redistributor region; crates/vmm/src/arch/aarch64/mod.rs), at Shards 482c5d78 and e82b9403. Bounds a
     /// report read off the wire, never a VM's admission, which is Shards' to refuse.
     pub const MAX_VCPUS: usize = 1 << u8::BITS;
 }
@@ -1837,7 +1837,7 @@ pub enum Upstream {
     /// A Shards image VM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP. Shards'
     /// guest CPU time work (221c7377, 6396a78b) gives it to the daemon's runs alone; D231's image runs
     /// don't carry it: `shards api-run` never asks its VM `GUEST_TIME`, and shards-api's image `Stats`
-    /// has no field for it (Shards 66113379).
+    /// has no field for it (Shards e82b9403).
     GuestCpuTimePerVcpu,
     /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
     /// endpoint.

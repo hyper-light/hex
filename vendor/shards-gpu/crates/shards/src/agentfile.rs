@@ -42,19 +42,30 @@ pub struct Agentfile {
     pub ipv6: bool,
     /// Who each port coming in past the microVM reaches (D122), for `shards read ports`.
     pub receivers: Vec<shards_agentfile::agentfile::Receiver>,
-    /// What each member reaches past the microVM by name (D236, §4.4), as
-    /// `shards_agentfile::agentfile::named_reach` reads it, for an orchestrator that holds
-    /// its members apart (`api_run`'s `held_apart`, `Narrowing::members`).
-    pub named: Vec<NamedReach>,
+    /// The setup entries giving its agents and harnesses the image's environment (D59),
+    /// [`members_env`]'s.
+    pub image_env: Vec<Vec<u8>>,
 }
 
-/// One member's reach by name: its kind and name, and each `host:port` it reaches, as the
-/// build lists a destination or a remote MCP server (D236, §4.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedReach {
-    pub kind: shards_agentfile::agentfile::TargetKind,
-    pub name: String,
-    pub reaches: Vec<String>,
+/// The setup entries giving the agents and harnesses of `agentfile` its image's environment
+/// `env` (D59), in its order, each checked as the build checks it: none where it declares
+/// neither. One naming their domain (`SHARDS_DOMAIN`), which shards-init sets, refuses the
+/// run in the build's words.
+pub fn members_env(agentfile: &Agentfile, env: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    if agentfile.domains == 0 {
+        return Ok(Vec::new());
+    }
+    env.iter()
+        .map(|e| {
+            shards_abi::run::members::image_env(e.as_bytes()).map_err(|why| {
+                shards_agentfile::agentfile::ImageEnvRefused {
+                    entry: e.as_bytes().to_vec(),
+                    why,
+                }
+                .to_string()
+            })
+        })
+        .collect()
 }
 
 /// Grants of destinations by name, each `host:port` as the build lists a remote MCP server
@@ -394,30 +405,17 @@ pub fn agentfile(rootfs: &std::path::Path, digest: &str) -> Result<Agentfile, St
         _ => false,
     });
     let (managed_labels, active_members) = managed_plan(&mut image, &directives).map_err(fail)?;
-    let mut named = Vec::new();
-    for (kind, name, reaches) in af::named_reach(&directives) {
-        let text = |b: Vec<u8>| {
-            String::from_utf8(b).map_err(|_| fail("a member's name or destination that is not UTF-8".into()))
-        };
-        named.push(NamedReach {
-            kind,
-            name: text(name)?,
-            reaches: reaches
-                .into_iter()
-                .map(|(host, port)| text([host.as_slice(), b":", port.to_string().as_bytes()].concat()))
-                .collect::<Result<_, _>>()?,
-        });
-    }
     let agentfile = Agentfile {
         managed_labels,
         active_members,
-        named,
         volumes,
         uplink: grants.past() || ingress,
         ipv6: af::ipv6(&directives),
         grants,
         domains: u32::try_from(domains).map_err(|_| fail("more agents and harnesses than uids".into()))?,
         receivers,
+        // The image's config's, given with it (`members_env`).
+        image_env: Vec::new(),
     };
     Ok(agentfile)
 }
@@ -502,6 +500,36 @@ fn managed_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An image's environment goes to its agents and harnesses whole, in its order, each
+    /// entry checked as the build checks it: one naming their domain refuses the run in the
+    /// build's words; an image of neither gives it no one.
+    #[test]
+    fn the_images_environment_is_its_members_as_its_build_checks_it() {
+        let members = Agentfile {
+            domains: 2,
+            ..Agentfile::default()
+        };
+        let env = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            members_env(&members, &env(&["PATH=/opt/bin:/usr/bin", "LANG=C.UTF-8"])).unwrap(),
+            [
+                &b"image-env=PATH=/opt/bin:/usr/bin"[..],
+                b"image-env=LANG=C.UTF-8"
+            ]
+        );
+        let refused = members_env(&members, &env(&["LANG=C", "SHARDS_DOMAIN=agent x"])).unwrap_err();
+        assert_eq!(
+            refused,
+            "the image's ENV, which its agents and harnesses start with: \"SHARDS_DOMAIN=agent x\": SHARDS_DOMAIN, which init sets"
+        );
+        assert!(members_env(&members, &env(&["NOEQUALS"])).is_err());
+        assert!(
+            members_env(&Agentfile::default(), &env(&["SHARDS_DOMAIN=x"]))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     /// What a run may give its command beside an image's agents and harnesses (D115): it is
     /// refused a privileged command, `/proc` unmasked, each capability that reaches them

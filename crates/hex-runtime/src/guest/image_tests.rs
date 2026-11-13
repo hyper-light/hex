@@ -498,8 +498,9 @@ fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -
 
 /// Joint plan step 12: do create, then start, an image VM of two vCPUs and 256 MiB with no command.
 /// Expect: create records it Creating and shows it Created, booting nothing; start writes Ready first
-/// and boots once, asking Shards for exactly its pinned image, its admitted size, no command, and none of
-/// its image's grants (default deny until goal 15 programs them); then it shows Running.
+/// and boots once, asking Shards for exactly its pinned image, its admitted size, no command, none of its
+/// image's grants (default deny until goal 15 programs them; no destination kept, D236) and no nesting grant
+/// (D234: no harness is a nested runtime); then it shows Running.
 #[test]
 fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
     let images = ModelImages::new();

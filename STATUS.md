@@ -67,6 +67,18 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 
 - Both AC benchmarks are now of-record (above). Remaining CP-T7.1 work: the first-consumer default-on
   flip (gated on a full dispatched-leg smoke) and the second consumer (the `hex` CI executor).
+- **Hex's wire over hyper-transport** (joint plan step 4; `docs/design/hex-quic.md`): built and merged
+  (`hex-quic`, `hex node --quic`, `hex node enroll`). TLS13_AES_256_GCM_SHA384 alone, mutual under kiln's CA by
+  CSR, learned waits per call kind and class. The hex-api conformance suite passes over QUIC with both ends
+  reporting the suite, in process and through `hex node` (HEX-QUIC-20, -23, -24), on Linux and macOS. Closes
+  with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
+  and a waits census over QUIC to seed its measuring waits.
+- **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
+  Shards `e82b9403` (D231 with D234-D236 and member stdin). Linux, macOS and Windows boot image VMs, D231's run
+  host started holding only its stdio (Hex's vendor/patches/shards 0001, offered upstream); a node on macOS or
+  Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and SHARDS_INIT aren't a pair serves none.
+  Closes with: guest time per vCPU in the run's stats (Shards', which Hex carries as a recorded change), the
+  class's wait records and its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's).
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

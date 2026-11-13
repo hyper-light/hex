@@ -207,6 +207,7 @@ fn members_of(labels: &[String], active: &[u32]) -> Vec<wire::MemberInfo> {
 fn staged(request: &wire::Request, members: &[wire::MemberInfo]) -> Result<Vec<Vec<u8>>, No> {
     use shards_abi::run::members as staging;
     let mut entries = Vec::new();
+    let mut worked = std::collections::BTreeSet::new();
     for m in &request.members {
         let info = members
             .iter()
@@ -238,8 +239,57 @@ fn staged(request: &wire::Request, members: &[wire::MemberInfo]) -> Result<Vec<V
                     .map_err(|e| No(Cause::Request, format!("{}: {}: {e}", m.name, f.path)))?,
             );
         }
+        // Its working directory, the project path it works in: one, as the guest takes one.
+        if let Some(w) = &m.workdir {
+            if !worked.insert(info.index) {
+                return Err(No(
+                    Cause::Request,
+                    format!("{}: {}", m.name, staging::Error::Twice),
+                ));
+            }
+            entries.push(
+                staging::workdir(info.index, w.as_bytes())
+                    .map_err(|e| No(Cause::Request, format!("{}: {w:?}: {e}", m.name)))?,
+            );
+        }
     }
     Ok(entries)
+}
+
+/// The members whose stdin `request` asks to write, by their declared index: each one the
+/// image declares and runs, ascending; every other member's stdin is `/dev/null` (plan step
+/// 5, D231 decision §3.3).
+fn inputs(request: &wire::Request, members: &[wire::MemberInfo]) -> Result<Vec<u32>, No> {
+    let mut inputs = Vec::new();
+    for m in request.members.iter().filter(|m| m.input) {
+        let info = members
+            .iter()
+            .find(|i| i.kind == m.kind && i.name == m.name)
+            .ok_or_else(|| {
+                No(
+                    Cause::Image,
+                    format!("{:?} {}: the image declares no such member", m.kind, m.name),
+                )
+            })?;
+        if !info.runs {
+            return Err(No(
+                Cause::Image,
+                format!(
+                    "{:?} {}: files alone, which run nothing to read a stdin",
+                    m.kind, m.name
+                ),
+            ));
+        }
+        if inputs.contains(&info.index) {
+            return Err(No(
+                Cause::Request,
+                format!("{:?} {}: its input asked for twice", m.kind, m.name),
+            ));
+        }
+        inputs.push(info.index);
+    }
+    inputs.sort_unstable();
+    Ok(inputs)
 }
 
 /// What of `granted` the orchestrator keeps: all of it, or each it names, each one
@@ -298,98 +348,6 @@ fn egress(
         }
     }
     Ok(Some(shards_net::encode_policy(&ports, &named, dns)))
-}
-
-/// Each member held to its reach of the destinations kept, where the request holds members
-/// apart (`Narrowing::members`, version 5). A member reaches each kept destination it reaches
-/// by name, its networks' destinations and its remote MCP servers' (`Agentfile::named`): its
-/// init lets it out to those alone and its agents' resolver answers it them, the network
-/// process holds the whole microVM to those kept, and D236's `held` makes the members that
-/// reach a port by name reach it alike. So a run that would let a member the image declares
-/// reach other than the request lets it (one the request names nowhere: none) is refused
-/// before it starts, a widening of what was asked; as is a member the request names that the
-/// image declares not, or names twice.
-fn held_apart(
-    agentfile: Option<&crate::agentfile::Agentfile>,
-    narrowing: &wire::Narrowing,
-) -> Result<(), No> {
-    use shards_agentfile::agentfile::TargetKind;
-    let Some(asked) = &narrowing.members else {
-        return Ok(());
-    };
-    let none = crate::agentfile::Agentfile::default();
-    let a = agentfile.unwrap_or(&none);
-    let kept: Vec<String> = match &narrowing.destinations {
-        wire::Keep::Only(items) => items.clone(),
-        wire::Keep::All => a
-            .grants
-            .destinations
-            .iter()
-            .map(|d| String::from_utf8_lossy(d).into_owned())
-            .collect(),
-    };
-    let kind_of = |k: TargetKind| match k {
-        TargetKind::Agent => wire::MemberKind::Agent,
-        TargetKind::Harness => wire::MemberKind::Harness,
-    };
-    for (i, m) in asked.iter().enumerate() {
-        if !a
-            .named
-            .iter()
-            .any(|n| kind_of(n.kind) == m.kind && n.name == m.name)
-        {
-            return Err(No(
-                Cause::Image,
-                format!("{:?} {}: the image declares no such member", m.kind, m.name),
-            ));
-        }
-        if asked.iter().take(i).any(|o| o.kind == m.kind && o.name == m.name) {
-            return Err(No(
-                Cause::Request,
-                format!("{:?} {}: its reach is named twice", m.kind, m.name),
-            ));
-        }
-    }
-    let said = |list: &[&str]| {
-        if list.is_empty() {
-            "none".to_string()
-        } else {
-            list.join(", ")
-        }
-    };
-    for n in &a.named {
-        let mut reach: Vec<&str> = n
-            .reaches
-            .iter()
-            .map(String::as_str)
-            .filter(|d| kept.iter().any(|k| k == d))
-            .collect();
-        reach.sort_unstable();
-        reach.dedup();
-        let mut lets: Vec<&str> = asked
-            .iter()
-            .find(|m| m.kind == kind_of(n.kind) && m.name == n.name)
-            .map(|m| m.destinations.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        lets.sort_unstable();
-        lets.dedup();
-        if reach != lets {
-            let word = match n.kind {
-                TargetKind::Agent => "agent",
-                TargetKind::Harness => "harness",
-            };
-            return Err(No(
-                Cause::Widening,
-                format!(
-                    "{word} {}: of the destinations kept it would reach {}, where the request lets it reach {} (D236)",
-                    n.name,
-                    said(&reach),
-                    said(&lets)
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Refuses a published port that would widen the run: one the image's Agentfile declares
@@ -549,6 +507,8 @@ mod hosted {
         server: Option<PathBuf>,
         /// Its managed output's members, labels and active ones, where it has any.
         capture: Option<(u32, Vec<u32>)>,
+        /// The members whose stdin its orchestrator writes, by their declared index.
+        inputs: Vec<u32>,
         /// Its domains' plug roots (D235), by name (`Users`), as its setup names them.
         roots: Vec<Vec<u8>>,
     }
@@ -658,9 +618,9 @@ mod hosted {
         }
         let members = super::members_of(&labels, &active);
         let staged = super::staged(request, &members)?;
+        let inputs = super::inputs(request, &members)?;
         super::ports_granted(&request.publish, agentfile.as_ref(), request.command.is_some())?;
         let egress = super::egress(agentfile.as_ref().map(|a| &a.grants), &request.egress)?;
-        super::held_apart(agentfile.as_ref(), &request.egress)?;
         if egress.is_some() {
             run.network = "bridge".into();
         }
@@ -731,8 +691,9 @@ mod hosted {
         crate::setup::security_setup(&mut setup, &run, version, None, &[], nesting.grant())
             .map_err(no(Cause::Request))?;
         let server = match &agentfile {
-            Some(_) => {
+            Some(a) => {
                 setup.extend(crate::setup::domain_seccomp(version).map_err(no(Cause::Boot))?);
+                setup.extend(a.image_env.iter().cloned());
                 Some(crate::guest::server_device(home).map_err(no(Cause::Boot))?)
             }
             None => None,
@@ -766,6 +727,13 @@ mod hosted {
                 activation.extend_from_slice(&m.to_be_bytes());
             }
             setup.push(activation);
+            if !inputs.is_empty() {
+                let mut named = managed::INPUT_KEY.to_vec();
+                for m in &inputs {
+                    named.extend_from_slice(&m.to_be_bytes());
+                }
+                setup.push(named);
+            }
             Some((count, active.clone()))
         };
         setup.extend(staged);
@@ -799,6 +767,7 @@ mod hosted {
             init,
             server,
             capture,
+            inputs,
             roots,
         })
     }
@@ -1285,10 +1254,45 @@ mod hosted {
         ended: HashMap<(u32, Channel), bool>,
     }
 
+    /// A member's stdin, which its orchestrator writes (plan step 5): its guest's input
+    /// connection once its VM hands it over, what the orchestrator sent and its writer has
+    /// not yet written, the room it was given and has not used, and its end.
+    #[derive(Default)]
+    struct Feed {
+        conn: Conn,
+        queued: std::collections::VecDeque<Vec<u8>>,
+        room: u64,
+        /// The orchestrator's end or abort, to go after what is queued.
+        end: Option<wire::StreamEnd>,
+        /// Its init told its end, or the run's ended: nothing more goes.
+        ended: bool,
+    }
+
+    /// A member's input connection, as far as this host has it: once here, never again.
+    #[derive(Default)]
+    enum Conn {
+        #[default]
+        Awaited,
+        Here(Stream),
+        Gone,
+    }
+
+    impl Conn {
+        /// Ends it, and none comes after.
+        fn end(&mut self) {
+            if let Conn::Here(conn) = std::mem::replace(self, Conn::Gone) {
+                shards_ipc::end(&conn);
+            }
+        }
+    }
+
     /// What the serving threads share.
     struct Live<'a> {
         answers: &'a Answers,
         flows: Mutex<Flows>,
+        /// Each input member's stdin, by its index.
+        feeds: Mutex<HashMap<u32, Feed>>,
+        fed: std::sync::Condvar,
         capture: Option<Mutex<Stream>>,
         link: Mutex<Stream>,
         /// Each exec's client end, by its number, held until the VM says it has it
@@ -1518,6 +1522,8 @@ mod hosted {
             let live = Live {
                 answers,
                 flows: Mutex::new(Flows::default()),
+                feeds: Mutex::new(plan.inputs.iter().map(|m| (*m, Feed::default())).collect()),
+                fed: std::sync::Condvar::new(),
                 capture: capture.map(|(ours, _)| Mutex::new(ours)),
                 link: Mutex::new(link),
                 held: Mutex::new(Some(HashMap::new())),
@@ -1585,6 +1591,16 @@ mod hosted {
     /// channel closed first, kills the VM, whose end then says `Stopped`.
     fn serve(live: &Live<'_>, input: io::Stdin, launched: &Launched, client: Stream) {
         std::thread::scope(|scope| {
+            let members: Vec<u32> = lock(&live.feeds).keys().copied().collect();
+            for member in members {
+                let started = std::thread::Builder::new()
+                    .name("api-run input".into())
+                    .spawn_scoped(scope, move || write_input(live, member));
+                if let Err(e) = started {
+                    let _ = writeln!(io::stderr(), "shards api-run: member {member}'s input: {e}");
+                    end_input(live, member);
+                }
+            }
             if let Some(capture) = &live.capture
                 && let Ok(reading) = lock(capture).try_clone()
             {
@@ -1650,6 +1666,10 @@ mod hosted {
                 }
             } else if m.kind == kind::DEVICED {
                 answered_device(live, &m.payload);
+            } else if m.kind == kind::MANAGED_INPUT {
+                input_arrived(live, &m.payload, m.fds);
+            } else if m.kind == kind::MANAGED_INPUT_ENDED {
+                input_ended(live, &m.payload);
             } else if let Some((answer, payload)) = super::relayed(m.kind, &m.payload) {
                 let _ = live.answers.send(answer, &[&payload]);
             }
@@ -1659,6 +1679,11 @@ mod hosted {
         lock(&live.held).take();
         // Device steps no answer will come for: their askers hear the VM has gone.
         *lock(&live.devices) = None;
+        // Its VM gone: no input goes on.
+        let members: Vec<u32> = lock(&live.feeds).keys().copied().collect();
+        for member in members {
+            end_input(live, member);
+        }
         if let Some(why) = failed {
             return RunEnd::Failed(why);
         }
@@ -1690,6 +1715,22 @@ mod hosted {
                     let room = flows.room.entry(key).or_insert(0);
                     *room = room.saturating_add(credit.bytes);
                     if live.flush(&mut flows, key).is_err() || live.grant(&mut flows, key).is_err() {
+                        break;
+                    }
+                }
+                wire::to_host::INPUT => {
+                    let Ok(given) = wire::Input::decode(&payload) else {
+                        break;
+                    };
+                    if input_given(live, given).is_err() {
+                        break;
+                    }
+                }
+                wire::to_host::INPUT_END => {
+                    let Ok(end) = wire::InputEnd::decode(&payload) else {
+                        break;
+                    };
+                    if input_end(live, end).is_err() {
                         break;
                     }
                 }
@@ -1753,6 +1794,215 @@ mod hosted {
         }
         live.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = vm.kill(shards_ipc::signal::SIGKILL);
+    }
+
+    /// A member's input connection, as its VM handed it over (`MANAGED_INPUT`): on Unix beside
+    /// the message, its VM's copy going as the VM is told this host has it (M24); on Windows,
+    /// where a VM gives its host no handle, a pipe this host makes, whose other end the VM is
+    /// given to relay the connection onto, as the daemon gives one (daemon.rs). Its
+    /// orchestrator is then given room for its first part. One the run does not await is
+    /// closed, or given no pipe: its init then tells its input's end.
+    fn input_arrived(live: &Live<'_>, payload: &[u8], fds: Vec<OwnedFd>) {
+        let member = <[u8; 4]>::try_from(payload).map(u32::from_be_bytes).ok();
+        let awaited = member.filter(|m| {
+            lock(&live.feeds)
+                .get(m)
+                .is_some_and(|f| matches!(f.conn, Conn::Awaited) && !f.ended)
+        });
+        #[cfg(unix)]
+        let conn = {
+            if let Err(e) = shards_ipc::send(&lock(&live.link), kind::MANAGED_INPUT, payload, &[]) {
+                let _ = writeln!(io::stderr(), "shards api-run: answering a member's input: {e}");
+            }
+            fds.into_iter().next().map(Stream::from)
+        };
+        #[cfg(windows)]
+        let conn = {
+            drop(fds);
+            let given = awaited
+                .ok_or("an input the run does not await".to_string())
+                .and_then(|_| {
+                    let (ours, theirs) = handed_pair().map_err(|e| e.to_string())?;
+                    let shared = theirs.share().map_err(|e| e.to_string())?;
+                    shards_ipc::send(&lock(&live.link), kind::MANAGED_INPUT, payload, &[shared.as_fd()])
+                        .map_err(|e| format!("giving its VM its pipe: {e}"))?;
+                    Ok(ours)
+                });
+            match given {
+                Ok(ours) => Some(ours),
+                Err(why) => {
+                    let _ = writeln!(io::stderr(), "shards api-run: a member's input connection: {why}");
+                    let _ = shards_ipc::send(&lock(&live.link), kind::MANAGED_INPUT, payload, &[]);
+                    None
+                }
+            }
+        };
+        let (Some(member), Some(conn)) = (awaited, conn) else {
+            let _ = writeln!(
+                io::stderr(),
+                "shards api-run: a member's input connection the run does not await, or without its descriptor"
+            );
+            return;
+        };
+        let room = protocol::CHUNK as u64;
+        {
+            let mut feeds = lock(&live.feeds);
+            let Some(feed) = feeds
+                .get_mut(&member)
+                .filter(|f| matches!(f.conn, Conn::Awaited) && !f.ended)
+            else {
+                shards_ipc::end(&conn);
+                return;
+            };
+            feed.conn = Conn::Here(conn);
+            feed.room = feed.room.saturating_add(room);
+        }
+        live.fed.notify_all();
+        let given = wire::InputRoom { member, bytes: room };
+        let _ = live.answers.send(wire::to_client::INPUT_ROOM, &[&given.encode()]);
+    }
+
+    /// A member's input's end, as its init told it (`MANAGED_INPUT_ENDED`): its orchestrator
+    /// told, its connection ended here.
+    fn input_ended(live: &Live<'_>, payload: &[u8]) {
+        let Ok(ended) = managed::InputEnded::decode(payload) else {
+            let _ = writeln!(
+                io::stderr(),
+                "shards api-run: a member's input end said malformed"
+            );
+            return;
+        };
+        end_input(live, ended.member);
+        let told = wire::InputEnded {
+            member: ended.member,
+            written: ended.written,
+            end: match ended.end {
+                managed::InputEnd::Closed => wire::StreamEnd::Closed,
+                managed::InputEnd::Aborted(errno) => wire::StreamEnd::Aborted(errno),
+            },
+        };
+        let _ = live.answers.send(wire::to_client::INPUT_ENDED, &[&told.encode()]);
+    }
+
+    /// Ends member `member`'s input here: nothing more goes, its connection ended, its
+    /// writer told.
+    fn end_input(live: &Live<'_>, member: u32) {
+        if let Some(feed) = lock(&live.feeds).get_mut(&member) {
+            feed.ended = true;
+            feed.queued.clear();
+            feed.conn.end();
+        }
+        live.fed.notify_all();
+    }
+
+    /// The orchestrator's bytes for a member's stdin, within the room it was given: queued
+    /// for its writer. Past its room, or for a member with no input, its contract is broken.
+    fn input_given(live: &Live<'_>, given: wire::Input) -> Result<(), ()> {
+        let mut feeds = lock(&live.feeds);
+        let feed = feeds.get_mut(&given.member).ok_or(())?;
+        let n = u64::try_from(given.bytes.len()).map_err(|_| ())?;
+        if n > feed.room || feed.end.is_some() {
+            return Err(());
+        }
+        feed.room -= n;
+        if !feed.ended && n > 0 {
+            feed.queued.push_back(given.bytes);
+        }
+        drop(feeds);
+        live.fed.notify_all();
+        Ok(())
+    }
+
+    /// The orchestrator's end of a member's stdin, or its abort, which ends its connection at
+    /// once, so that a writer held by a member that does not read lets go.
+    fn input_end(live: &Live<'_>, end: wire::InputEnd) -> Result<(), ()> {
+        let mut feeds = lock(&live.feeds);
+        let feed = feeds.get_mut(&end.member).ok_or(())?;
+        if feed.end.replace(end.end).is_some() {
+            return Err(());
+        }
+        if matches!(end.end, wire::StreamEnd::Aborted(_)) {
+            feed.queued.clear();
+            if let Conn::Here(conn) = &feed.conn {
+                shards_ipc::end(conn);
+            }
+        }
+        drop(feeds);
+        live.fed.notify_all();
+        Ok(())
+    }
+
+    /// What a member's input writer does next.
+    enum Write {
+        Part(Stream, Vec<u8>),
+        End(Stream),
+        Done,
+    }
+
+    /// Writes member `member`'s input to its connection as it comes, each part one `STDIN`
+    /// frame, the orchestrator given room for each part once it is in the connection, and its
+    /// end an empty frame; ends with its input. A part the connection refuses is not
+    /// delivered, nor any after: its init tells how the input ended.
+    fn write_input(live: &Live<'_>, member: u32) {
+        loop {
+            let next = {
+                let mut feeds = lock(&live.feeds);
+                loop {
+                    let Some(feed) = feeds.get_mut(&member) else {
+                        break Write::Done;
+                    };
+                    if feed.ended {
+                        break Write::Done;
+                    }
+                    if let Conn::Here(conn) = &feed.conn {
+                        let wants = !feed.queued.is_empty() || feed.end == Some(wire::StreamEnd::Closed);
+                        if wants {
+                            let Ok(conn) = conn.try_clone() else {
+                                break Write::Done;
+                            };
+                            break match feed.queued.pop_front() {
+                                Some(part) => Write::Part(conn, part),
+                                None => Write::End(conn),
+                            };
+                        }
+                    }
+                    feeds = live.fed.wait(feeds).unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            match next {
+                Write::Part(conn, part) => {
+                    let sent = u32::try_from(part.len()).ok().filter(|len| {
+                        (&conn)
+                            .write_all(&protocol::header(protocol::kind::STDIN, *len))
+                            .and_then(|()| (&conn).write_all(&part))
+                            .is_ok()
+                    });
+                    let Some(len) = sent else {
+                        // Its init tells how the input ended; nothing more goes meanwhile.
+                        if let Some(feed) = lock(&live.feeds).get_mut(&member) {
+                            feed.queued.clear();
+                            feed.conn.end();
+                        }
+                        continue;
+                    };
+                    if let Some(feed) = lock(&live.feeds).get_mut(&member) {
+                        feed.room = feed.room.saturating_add(u64::from(len));
+                    }
+                    let room = wire::InputRoom {
+                        member,
+                        bytes: u64::from(len),
+                    };
+                    let _ = live.answers.send(wire::to_client::INPUT_ROOM, &[&room.encode()]);
+                }
+                Write::End(conn) => {
+                    // Every part before it is in the connection; its init closes the
+                    // member's stdin, then tells the end.
+                    let _ = (&conn).write_all(&protocol::header(protocol::kind::STDIN, 0));
+                    return;
+                }
+                Write::Done => return,
+            }
+        }
     }
 
     /// Reads the run's managed output until it ends: each member's bytes to the
@@ -2168,6 +2418,8 @@ mod tests {
                 mode: 0o600,
                 bytes: wire::Secret::from("x"),
             }],
+            workdir: Some("/Users/ada/proj".into()),
+            input: false,
         }
     }
 
@@ -2181,8 +2433,27 @@ mod tests {
         )
         .ok()
         .unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert!(entries[0].starts_with(b"member-env=1\0K=v"));
+        assert_eq!(entries[2], b"member-workdir=1\0/Users/ada/proj");
+        // A relative or escaping working directory is refused, and so is a second one for
+        // the same member, as the guest refuses them.
+        for workdir in ["proj", "/Users/ada/../../etc"] {
+            let mut s = stage(wire::MemberKind::Harness, "codex");
+            s.workdir = Some(workdir.into());
+            assert!(
+                matches!(staged(&request(vec![s]), &members()), Err(No(Cause::Request, _))),
+                "{workdir}"
+            );
+        }
+        let twice = vec![
+            stage(wire::MemberKind::Harness, "codex"),
+            stage(wire::MemberKind::Harness, "codex"),
+        ];
+        assert!(matches!(
+            staged(&request(twice), &members()),
+            Err(No(Cause::Request, _))
+        ));
         for (kind, name, cause) in [
             (wire::MemberKind::Agent, "codex", Cause::Image),
             (wire::MemberKind::Harness, "nobody", Cause::Image),
@@ -2225,7 +2496,6 @@ mod tests {
             mcp: wire::Keep::Only(Vec::new()),
             destinations: wire::Keep::Only(vec!["host.docker.internal:7070".into()]),
             dns: false,
-            members: None,
         };
         let one = egress(Some(&grants), &narrowed).ok().unwrap().unwrap();
         assert_ne!(Some(one.clone()), all);
@@ -2238,7 +2508,6 @@ mod tests {
             mcp: wire::Keep::Only(Vec::new()),
             destinations: wire::Keep::Only(Vec::new()),
             dns: false,
-            members: None,
         };
         assert_eq!(egress(Some(&grants), &none).ok().unwrap(), None);
         // A destination the image does not grant, of another port or host: a widening.
@@ -2267,114 +2536,6 @@ mod tests {
             ..wire::Narrowing::default()
         };
         assert!(matches!(egress(None, &asked), Err(No(Cause::Widening, _))));
-    }
-
-    /// Each member held to its reach of the destinations kept (D236, version 5). Do: keep a
-    /// destination that harness codex and agent helper both reach by name, beside the host
-    /// itself that codex alone reaches, and hold each member to what the request lets it reach.
-    /// Expect: a request letting both reach the destination, and codex the host, passes; one
-    /// letting codex alone reach the destination, which helper would reach too, letting codex
-    /// none of what it would reach, or letting it reach more than it would, is refused as a
-    /// widening, naming the member and both reaches; a member the image declares not refused as
-    /// the image's, one named twice as the request's; a request holding no member apart, and
-    /// one keeping nothing, pass.
-    #[test]
-    fn each_member_is_held_to_its_reach_of_the_destinations_kept() {
-        use crate::agentfile::{Agentfile, NamedReach};
-        use shards_agentfile::agentfile::TargetKind;
-        let agentfile = Agentfile {
-            named: vec![
-                NamedReach {
-                    kind: TargetKind::Harness,
-                    name: "codex".into(),
-                    reaches: vec!["api.example:443".into(), "host.docker.internal:7070".into()],
-                },
-                NamedReach {
-                    kind: TargetKind::Agent,
-                    name: "helper".into(),
-                    reaches: vec!["api.example:443".into()],
-                },
-            ],
-            ..Agentfile::default()
-        };
-        let reach = |kind, name: &str, destinations: &[&str]| wire::MemberReach {
-            kind,
-            name: name.into(),
-            destinations: destinations.iter().map(|d| (*d).to_string()).collect(),
-        };
-        let held = |members: Option<Vec<wire::MemberReach>>| wire::Narrowing {
-            egress: wire::Keep::Only(Vec::new()),
-            mcp: wire::Keep::Only(Vec::new()),
-            destinations: wire::Keep::Only(vec![
-                "api.example:443".into(),
-                "host.docker.internal:7070".into(),
-            ]),
-            dns: false,
-            members,
-        };
-        let (harness, agent) = (wire::MemberKind::Harness, wire::MemberKind::Agent);
-        let both = vec![
-            reach(
-                harness,
-                "codex",
-                &["api.example:443", "host.docker.internal:7070"],
-            ),
-            reach(agent, "helper", &["api.example:443"]),
-        ];
-        assert!(held_apart(Some(&agentfile), &held(Some(both))).is_ok());
-        for (members, says) in [
-            (
-                vec![reach(
-                    harness,
-                    "codex",
-                    &["api.example:443", "host.docker.internal:7070"],
-                )],
-                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach none",
-            ),
-            (
-                vec![
-                    reach(harness, "codex", &[]),
-                    reach(agent, "helper", &["api.example:443"]),
-                ],
-                "harness codex: of the destinations kept it would reach api.example:443, host.docker.internal:7070, where the request lets it reach none",
-            ),
-            (
-                vec![
-                    reach(
-                        harness,
-                        "codex",
-                        &["api.example:443", "host.docker.internal:7070"],
-                    ),
-                    reach(agent, "helper", &["api.example:443", "host.docker.internal:7070"]),
-                ],
-                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach api.example:443, host.docker.internal:7070",
-            ),
-        ] {
-            match held_apart(Some(&agentfile), &held(Some(members))) {
-                Err(No(Cause::Widening, why)) => assert!(why.starts_with(says), "{why}"),
-                other => panic!("{says}: {:?}", other.map_err(|No(c, w)| (c, w))),
-            }
-        }
-        assert!(matches!(
-            held_apart(Some(&agentfile), &held(Some(vec![reach(harness, "nobody", &[])]))),
-            Err(No(Cause::Image, _))
-        ));
-        assert!(matches!(
-            held_apart(
-                Some(&agentfile),
-                &held(Some(vec![
-                    reach(agent, "helper", &[]),
-                    reach(agent, "helper", &[])
-                ]))
-            ),
-            Err(No(Cause::Request, _))
-        ));
-        assert!(held_apart(Some(&agentfile), &held(None)).is_ok());
-        let nothing_kept = wire::Narrowing {
-            destinations: wire::Keep::Only(Vec::new()),
-            ..held(Some(Vec::new()))
-        };
-        assert!(held_apart(Some(&agentfile), &nothing_kept).is_ok());
     }
 
     /// The run's request is one a warm VM takes: its log keeps something by the VM's own

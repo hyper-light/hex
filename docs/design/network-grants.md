@@ -2,7 +2,7 @@
 
 Each harness VM Hex launches reaches what its grants name and nothing else. It publishes nothing they don't
 name, and Hex's record of the VM shows every grant. This record states the grant model, who enforces it, what
-Hex can program through Shards today (`66113379`, which holds Shards' step 9: destinations, D236, and each
+Hex can program through Shards today (`e82b9403`, which holds Shards' step 9: destinations, D236, and each
 published port's receivers, D231's `Bound::to`) and what still waits on Shards. Decided by goal 15 with Hex's lead,
 2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
 VMs" (joint plan kiln `01a1cd8e862e7169a074db3d5fa33f3d`, "Decided by the person" 2); its ruling on step 9's
@@ -16,7 +16,7 @@ Hex's record of the VM".
 ## N1. The grant: who, to whom, which ports, which way
 
 Default deny is Shards' rule as well as this step's: "a network flow that no directive explicitly grants does
-not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `482c5d78`).
+not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `e82b9403`).
 A box's grants are a list of `hex_api::Grant` (`crates/hex-api/src/grants.rs`). The variant is the way:
 
 | Grant | Who | To whom | Ports | Way |
@@ -85,8 +85,9 @@ seven). Cilium's `toFQDNs` holds names the same way: "Cilium intercepts DNS resp
 Proxy", and the IPs those responses carry are allowed (`Documentation/security/policy/layer3.rst` at
 `cb21a81b`).
 
-What step 9's enforcer must also do for a grant to stay exact. Hex's conformance cases for the binding are
-these:
+What the enforcer must also do for a grant to stay exact. Shards' step 9 built it (D236: "a flow to its port
+reaches only an address its resolver answered for the name through it, or the address it is"), and its real-VM
+evidence is owed (D236, "Evidence owed"). Hex's conformance cases for the binding are these:
 
 - **Expiry.** A learned address stays pinned for its answer's TTL (RFC 1035 §3.2.1, RFC 2181 §8). A flow
   already admitted outlives its address's expiry, as Cilium's do ("live connections are not expired until they
@@ -108,9 +109,10 @@ carry another name in its TLS SNI, or in its HTTP authority inside TLS: domain f
 Wegmann and Paxson, "Blocking-resistant communication through domain fronting", PoPETs 2015(2), doi
 10.1515/popets-2015-0009). A grant's exactness has three levels, and the record states which one holds:
 
-1. the addresses learned for the name (step 9);
+1. the addresses learned for the name (D236 holds this one);
 2. the ClientHello's SNI equals the granted name. Encrypted Client Hello (RFC 9849, March 2026) hides the inner
-   name, so an ECH hello whose outer name isn't granted is refused (step 9);
+   name, so an ECH hello whose outer name isn't granted is refused. D236 does not hold this level: it rejected
+   names held by what a flow says, as a client chooses what it says;
 3. the HTTP authority equals the granted name. Only an enforcer that terminates TLS sees it: step 33's injector,
    which "terminates TLS only for granted hosts".
 
@@ -152,13 +154,13 @@ Alternatives considered:
 
 What would falsify N3:
 
-- a flow the network process admits that Hex's policy does not name, in step 9's conformance cases;
+- a flow the network process admits that Hex's policy does not name, in the enforcer's conformance cases (N2);
 - a grant Hex can't express through the network process's interface without widening it.
 
 Either would make Hex refuse that grant typed until the interface is exact. Neither would make Hex build its own
 enforcer.
 
-## N4. What Hex programs, through Shards `66113379`'s image boot (D231) and Hex's recorded change to it
+## N4. What Hex programs, through Shards `e82b9403`'s image boot (D231) and Hex's recorded change to it
 
 Hex boots harness images through `shards_api::image::ImageShards::boot`. The run host, `shards api-run`, gives
 the VM a NIC and its network process only when something passes the microVM: a published port, or a narrowing
@@ -194,7 +196,7 @@ reach by name, its networks' destinations and its remote MCP servers' (the agent
   by name shares it with a member reaching other names there, or any address by a port grant.
 
 D236 keeps `K` image-wide (`Narrowing.destinations`), and shards-api names no member's destinations before or
-after a boot, so Shards `66113379` alone gives Hex no way to keep a destination for some members and not others.
+after a boot, so Shards `e82b9403` alone gives Hex no way to keep a destination for some members and not others.
 The lead's ruling (R02, 2026-11-12) was (B): refuse rather than leave a window, and close it in Shards. Its
 alternatives:
 
@@ -221,7 +223,7 @@ grants bound it from above (a destination the image grants no one is refused as 
 run host from both sides (a member that would reach more than its grants, or less, refuses the boot). With a run
 host that lacks the change, a boot keeping a destination is refused by its channel version, typed, and never runs.
 
-| A box's grants | What Shards `66113379` with change 0002 holds | Hex |
+| A box's grants | What Shards `e82b9403` with change 0002 holds | Hex |
 |---|---|---|
 | none | `network none`: no NIC, no network process | programmed: nothing kept, no publish, version 4 |
 | `Publish` of a member's port at a host address, on any run | `Publish { guest_port, proto, host: Some(addr), host_port }`, for a port the image gives a member coming in, or (a run with a command of its own) any port the image doesn't declare as egress, which then reaches the command (D122) | programmed; held to the receiver Shards names as the boot returns (N6) |
