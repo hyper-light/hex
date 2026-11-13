@@ -12,15 +12,17 @@
 #   to any address, each of which Hex's narrowing drops unless a grant keeps it;
 # - in: its two ports, the one the test publishes and the one it doesn't.
 # Each input is an explicit variable, and a missing one stops it by name (no default stands in):
-# - HEX_GRANTS_BASE: the base image, one `shards build` can pull (image_real's HEX_IMAGE serves);
+# - HEX_GRANTS_BASE: the base image, a registry's, pinned by its digest (NAME@sha256:<64 hex>), which `shards build`
+#   pulls for this host's arch, with /bin/sh and tail (image_grants_real runs `/bin/sh -c "exec tail -f /dev/null"` as
+#   a run's own command); alpine's index serves linux/amd64 and linux/arm64:
+#   docker.io/library/alpine@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a;
 # - HEX_GRANTS_MEMBER: the harness's name, an Agentfile member's (lowercase letters, digits, '.', '_', '-');
 # - HEX_GRANTS_PORT, HEX_GRANTS_UNGRANTED_PORT: the two TCP ports it takes coming in;
 # - HEX_GRANTS_PROVIDER: a provider's host name, granted at TCP 443; HEX_GRANTS_UNGRANTED: a host name it tries at
 #   443 that no grant names;
 # - HEX_GRANTS_HOST_PORT: the host's TCP port granted as host.docker.internal:<port>, where the test listens;
-# - HEX_GRANTS_OPEN: an IPv4 address it tries at port 80, which only the port egress the image grants would reach;
-# - HEX_GRANTS_PROBE_WAIT_MS: how long the probe waits for a connection neither made nor refused, a bound the caller
-#   derives from its run's own (the test's answer waits for every target in turn).
+# - HEX_GRANTS_OPEN: an IPv4 address it tries at port 80, which only the port egress the image grants would reach.
+# The probe waits for each try's own answer from its TCP stack, so no wait is an input.
 # Runs on each host Shards boots guests on: Linux (KVM) and Windows (WHP, under Git Bash) on x86_64 and arm64, and
 # macOS (HVF) on arm64 (Intel Mac is unsupported). Needs rustc of the pinned toolchain (rust-toolchain.toml) with the
 # musl target installed: it installs nothing (RUSTUP_AUTO_INSTALL=0).
@@ -65,7 +67,10 @@ provider=$(need HEX_GRANTS_PROVIDER)
 ungranted=$(need HEX_GRANTS_UNGRANTED)
 host_port=$(need HEX_GRANTS_HOST_PORT)
 open=$(need HEX_GRANTS_OPEN)
-wait_ms=$(need HEX_GRANTS_PROBE_WAIT_MS)
+if ! [[ $base =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "build.sh: HEX_GRANTS_BASE $base isn't pinned by its digest (NAME@sha256:<64 hex>)" >&2
+    exit 2
+fi
 if [ -e "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
     echo "build.sh: $out is not empty" >&2
     exit 2
@@ -77,8 +82,8 @@ export RUSTUP_AUTO_INSTALL=0
 # Shards links its guest binaries.
 (cd -- "$repo" && rustc --edition 2024 -C opt-level=2 -C target-feature=+crt-static -C linker=rust-lld \
     -C link-self-contained=yes --target "$target" -o "$out/probe/bin/probe" crates/hex-cli/tests/image_grants_probe/bin.rs)
-printf '{"entrypoint":"probe","options":["--wait-ms","%s","--address","0.0.0.0","--listen","%s","--listen","%s","--egress","provider=%s:443","--egress","ungranted=%s:443","--egress","host=host.docker.internal:%s","--egress","open=%s:80"]}\n' \
-    "$wait_ms" "$port" "$ungranted_port" "$provider" "$ungranted" "$host_port" "$open" >"$out/probe/harness.json"
+printf '{"entrypoint":"probe","options":["--address","0.0.0.0","--listen","%s","--listen","%s","--egress","provider=%s:443","--egress","ungranted=%s:443","--egress","host=host.docker.internal:%s","--egress","open=%s:80"]}\n' \
+    "$port" "$ungranted_port" "$provider" "$ungranted" "$host_port" "$open" >"$out/probe/harness.json"
 printf 'FROM %s\n' "$base" >"$out/Dockerfile"
 cat >"$out/Agentfile" <<AGENTFILE
 FROM $base

@@ -51,6 +51,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.backing_usage"),
     // A capacity holder's release (joint plan step 13, CV6), learned as every kind is.
     Patience::measuring("client.answer.schedule.forget"),
+    // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
+    Patience::measuring("client.answer.links"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`,

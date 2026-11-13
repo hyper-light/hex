@@ -353,3 +353,46 @@ their reads reported. A stdin connection's reset is its program letting its stdi
 **Falsified by** a stream cut short whose owner reads a clean end (`tests::ac_t7_4_1_a_stream_cut_short_reads_as_cut`),
 or a program whose output stream was cut short ending without `Refusal::Broken` (hex-client
 `guest::tests::cut_short`, a carried stream and an asked one).
+
+## Q12. The node's links report
+
+Shards plan step 34 (kiln plan `01a1d2c1ef09707daafe3fe9b77754e6`), step 3: "hex-quic's Endpoint::negotiated holds each
+peer connection's suite and group, but no Hex surface reports it, so the Hex end of the kiln-Hex link can't be
+asserted. Report it on the node's own status surface (its control socket and hex's CLI), from the node's TLS state, so
+kiln and the E2E read the Hex end." kiln's E2E holds every link to `TLS13_AES_256_GCM_SHA384` at both of its ends,
+`kiln-hex` among them (kiln `crates/kiln/tests/vm_e2e`, `REQUIRED_LINKS`).
+
+**Chosen.** A call on the node's wire, `Call::Links`, answered `Answer::Links`: each peer connected to the node's
+endpoint, by the name its certificate carries (Q5), with the TLS 1.3 cipher suite and key exchange group the node's own
+handshake negotiated, each as its value in IANA's registries (TLS Cipher Suites, RFC 8446 §B.4; TLS Supported Groups,
+§4.2.7): the wire carries what TLS said, and its reader names it. The driver keeps each peer's name from the handshake
+its `Directory::identify` admitted (Q10; hyper-transport queues the peer's `Event::Connected` within the same call):
+the name is taken with that event, and one left, a connection hyper-transport's admission then refused, goes once the
+events are polled, so the names held are at most the handshakes the endpoint admits at once (the node's connections
+bound, Q8). It
+asks the endpoint for the suite and group as the report is asked (`Endpoint::negotiated`, vendor change 2), so the TLS
+state is their one owner, never a copy kept beside it, and a connection that has ended is no link though the driver
+hasn't heard yet. The report is one moment's, the driver's peers as it takes the command. A node's connections bound
+admits more peers than one message names (500 of 253-byte names, the longest a DNS name runs: a part's room of
+`MAX_MESSAGE` less its 27 bytes, over a link's 262), so the report comes in parts as a list does (`wire::links`, each
+part but the last `more`), and a client gathers them up to the connections the node's hello said it holds, each peer
+holding one at least: parts past that are refused, `Refusal::Exhausted`. Every transport asks it, the node's socket and
+its QUIC control port alike; a node without `--quic` refuses it, typed (`Refusal::Invalid` naming `links`). Its waits
+are each transport's own (`client.answer.links`, `client.quic.answer.links`, `client.guest.answer.links`), measuring
+until a census records them (Q7).
+
+`hex node links --socket <path>` asks the node serving `<path>` and says each link on a line of its own,
+`link <peer> suite <suite> group <group>`: the suite and group as rustls's Debug names them, as kiln's reach links say
+theirs (kiln `crates/kiln/src/reach/e2e.rs`, `Negotiated`), and `group none` where the handshake named none. A peer is
+its certificate's DNS name, which holds no space. HEX-QUIC-23 reads the node's end of its client's link through it.
+
+**Alternatives.** The suite in the hello's answer: that is the asking connection's own link, and kiln's E2E reads the
+node's end of kiln's link from wherever the node is asked. A metric of links by suite: a peer's name is a
+high-cardinality label (CLAUDE.md §10), and a count names no peer. The suite's name on the wire: a name is one
+library's spelling, the registry's value TLS's own. The suite and group copied at `Event::Connected`: a second copy of
+the TLS state. The report in one message: a node with more peers than it names could not report at all.
+
+**Falsified by** a node's report naming another suite or group than its handshake negotiated, missing a connected peer,
+or listing one whose connection has ended (HEX-QUIC-28, -29); a node without `--quic` answering anything but the typed
+refusal (HEX-QUIC-29); a report longer than one message read back otherwise than whole, or a client gathering more
+links than the node's connections (HEX-QUIC-30); `hex node links` saying a link otherwise than its line (HEX-QUIC-31).

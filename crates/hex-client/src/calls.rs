@@ -45,8 +45,8 @@ pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
 /// The kinds whose answer no box's class times, in their table's order ([`Transport::answers`]): a hello, a list, the
 /// network namespaces' counts; then the scheduler's operations in [`WaitKind`] order up to the person's release; then
-/// a native physical report and the backing lifecycle's three; then the release (joint plan step 13). Waits only
-/// append.
+/// a native physical report and the backing lifecycle's three; then the release (joint plan step 13); then the node's
+/// links (docs/design/hex-quic.md Q12). Waits only append.
 #[repr(usize)]
 enum PlainKind {
     Hello,
@@ -62,7 +62,7 @@ impl PlainKind {
 const SCHEDULED: usize = WaitKind::Forget as usize;
 
 /// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
-pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 5;
+pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 6;
 
 /// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
 /// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
@@ -177,6 +177,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             }
             Call::ReleaseBacking(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(2)?,
             Call::BackingUsage(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(3)?,
+            Call::Links => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(5)?,
             Call::Create(_)
             | Call::Start(_)
             | Call::Exec { .. }
@@ -227,7 +228,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         | Call::PhysicalReport
         | Call::InitializeBacking(_)
         | Call::ReleaseBacking(_)
-        | Call::BackingUsage(_) => return None,
+        | Call::BackingUsage(_)
+        | Call::Links => return None,
     })
 }
 
@@ -892,6 +894,10 @@ struct State {
     reading: bool,
     /// The execs whose `Proc` is in its wait, which the turn may be handed to.
     waiting: BTreeSet<u64>,
+    /// The most links a links report's parts before its last carry together: the node's connections, as its hello
+    /// said, each peer holding one at least (docs/design/hex-quic.md Q12). None before the hello, which every call
+    /// follows.
+    links_bound: Option<usize>,
 }
 
 impl State {
@@ -929,6 +935,8 @@ struct Waiting {
     offered: bool,
     /// A list's boxes from the parts that came so far.
     boxes: Vec<BoxInfo>,
+    /// A links report's links from the parts that came so far.
+    links: Vec<wire::Link>,
     /// Whether it can take the reader's turn: its request sent, or its send waiting for room with the send lock held.
     reads: bool,
     /// While its send waits for room with the reader's turn another's: the wake it waits on besides the connection,
@@ -1095,6 +1103,25 @@ impl<T: Transport> Shared<T> {
                         }
                     }
                 }
+                Answer::Links { links, more: true } => {
+                    let bound = state.links_bound.unwrap_or(0);
+                    if let Some(waiting) = state.calls.get_mut(&header.id) {
+                        if waiting.links.len().saturating_add(links.len()) > bound {
+                            if let Some(w) = state.calls.remove(&header.id) {
+                                w.answer.give(
+                                    header.id,
+                                    Err(Refusal::Exhausted {
+                                        what: "links in one report",
+                                        bound,
+                                    }),
+                                    &mut due,
+                                );
+                            }
+                        } else {
+                            waiting.links.extend(links);
+                        }
+                    }
+                }
                 answer => {
                     if matches!(&answer, Answer::Started { .. })
                         && state
@@ -1122,6 +1149,13 @@ impl<T: Transport> Shared<T> {
                                 waiting.boxes.extend(infos);
                                 Answer::Boxes {
                                     infos: std::mem::take(&mut waiting.boxes),
+                                    more,
+                                }
+                            }
+                            Answer::Links { links, more } => {
+                                waiting.links.extend(links);
+                                Answer::Links {
+                                    links: std::mem::take(&mut waiting.links),
                                     more,
                                 }
                             }
@@ -1380,6 +1414,7 @@ impl<'a, T: Transport> Caller<'a, T> {
                 answer: Taker::Wait(tx),
                 offered: false,
                 boxes: Vec::new(),
+                links: Vec::new(),
                 reads: false,
                 wake: None,
             },
@@ -2062,6 +2097,7 @@ impl<T: Transport> Core<T> {
                 known.agent.clone_from(&self.classes);
                 known.programs_bound = hello.budgets.programs;
                 drop(known);
+                self.conn.shared.state()?.links_bound = Some(hello.limits.connections);
                 self.budgets = hello.budgets;
                 Ok(self)
             }
@@ -2176,6 +2212,7 @@ impl<T: Transport> Core<T> {
                     answer: Taker::Then(then),
                     offered: false,
                     boxes: Vec::new(),
+                    links: Vec::new(),
                     reads: false,
                     wake: None,
                 },
@@ -2255,6 +2292,21 @@ impl<T: Transport> Core<T> {
             Answer::Netns(counts) => Ok(counts),
             Answer::Refused(r) => Err(r),
             other => Err(unexpected("netns", &other)),
+        }
+    }
+
+    /// The node's links over QUIC: each peer connected to its endpoint, with the suite and group the node's own TLS
+    /// negotiated (docs/design/hex-quic.md Q12), gathered from as many parts as the node sends. A node without a QUIC
+    /// listener refuses (`Refusal::Invalid` naming `links`); a report whose parts carry more links than the node's
+    /// hello said it holds connections is refused `Refusal::Exhausted`.
+    pub fn links(&self) -> Result<Vec<wire::Link>, Refusal> {
+        match self
+            .call(&Request::Call(Call::Links), |_| Ok(NONE), None)?
+            .1
+        {
+            Answer::Links { links, .. } => Ok(links),
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("links", &other)),
         }
     }
 
@@ -2688,6 +2740,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Capacity(_) => "a runtime capacity",
         Answer::PhysicalReport(_) => "a native physical report",
         Answer::BackingOffer(_) => "a native backing receipt",
+        Answer::Links { .. } => "the node's links",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -2955,6 +3008,42 @@ impl<T: Transport> Runtime for Core<T> {
                 ..Stdio::null()
             },
         )
+    }
+
+    // Joint plan step 14: a box's room, rate and host use are told and read in the node's own process, by its charge
+    // learner and by a runtime made in its caller's process; the node's wire carries none of them yet.
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        let _ = room;
+        Err(Refusal::Invalid {
+            what: "room",
+            why: format!(
+                "box {id}: the node's wire carries no room call yet; a box's room is told in the node's own process"
+            ),
+        })
+    }
+
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(Refusal::Invalid {
+            what: "rate",
+            why: format!(
+                "box {id}: the node's wire carries no rate call yet; a box's rate is told in the node's own process"
+            ),
+        })
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        Err(Refusal::Invalid {
+            what: "host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet; a box's host use is read in the node's own \
+                 process"
+            ),
+        })
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
