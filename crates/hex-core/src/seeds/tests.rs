@@ -962,14 +962,14 @@ fn original_a_seed_past_the_hang_bound_is_followed_by_its_life_to_its_answer() {
 }
 
 /// HEX-SEEDS-3, the plan's first case, under decision 9 (the person's ruling of 2026-11-13: W* is a bound only while
-/// answers come within it; past it a create follows its party, the busy seeds, by their life alone for now, the seeds
-/// freed too coarse a progress to judge a stall at W*'s scale): with every seed busy, a create waits in line; past the
-/// line's W* its run-out is told and it waits on while its seeds live, however long none frees, until a seed freed goes
-/// to it. With the line full, a create is refused by type at once. Do: two seeds busy, the line's W* 10 ms; creates
-/// wait from 1 ms and 5 ms, and a third finds the line full; claim the first at 10 ms, 11 ms, 22 ms and 1,000 s, no
-/// seed freed; a seed done at 1,000 s; the second claims then. Expect: told to wait on to 11 ms; at 11 ms the run-out
-/// told and to wait on for the shell's wake alone; so at 22 ms, a whole window past W* with none freed, and at 1,000 s;
-/// handed the seed done, its 999.999 s the line's W*; the second, past its W* too, waiting on; none refused in line.
+/// answers come within it; past it a create follows its party, the busy seeds, by their life alone, as at every local
+/// site): with every seed busy, a create waits in line; past the line's W* its run-out is told and it waits on while
+/// its seeds live, however long none frees, until a seed freed goes to it. With the line full, a create is refused by
+/// type at once. Do: two seeds busy, the line's W* 10 ms; creates wait from 1 ms and 5 ms, and a third finds the line
+/// full; claim the first at 10 ms, 11 ms, 22 ms and 1,000 s, no seed freed; a seed done at 1,000 s; the second claims
+/// then. Expect: told to wait on to 11 ms; at 11 ms the run-out told and to wait on for the shell's wake alone; so at
+/// 22 ms, a whole window past W* with none freed, and at 1,000 s; handed the seed done, its 999.999 s the line's W*;
+/// the second, past its W* too, waiting on; none refused in line.
 #[test]
 fn a_create_past_the_lines_w_star_waits_on_while_its_seeds_live_however_long_none_frees() {
     let mut pool = seeds(2, 2, 10, 1_000);

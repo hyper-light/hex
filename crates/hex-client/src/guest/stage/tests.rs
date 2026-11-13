@@ -348,12 +348,12 @@ fn original_a_stage_whose_relay_answers_past_w_star_is_followed_to_its_answer() 
     );
 }
 
-/// Decision 9 (original; the person's ruling of 2026-11-13, and past W* a connection followed by its relay's life alone
-/// for now, the bytes it takes too coarse a progress to judge a stall at W*'s scale): a staging connection's write timed
-/// out at W* and the stage was refused, though its relay went on to read it. Do: a wait whose W* is 1 ms; a relay that
-/// answers the opening at once, but reads the stream only once the stage's wait has run out (told) and a hundred
-/// windows of W* have passed, or the stage has ended; an item larger than a connection holds unread (16 MiB). Expect:
-/// the stage not ended while its relay holds, then staged, its writes followed past W* by the relay's life.
+/// Decision 9 (original; the person's ruling of 2026-11-13, and past W* a connection followed by its relay's life
+/// alone, as at every local site): a staging connection's write timed out at W* and the stage was refused, though its
+/// relay went on to read it. Do: a wait whose W* is 1 ms; a relay that answers the opening at once, but reads the
+/// stream only once the stage's wait has run out (told) and a hundred windows of W* have passed, or the stage has
+/// ended; an item larger than a connection holds unread (16 MiB). Expect: the stage not ended while its relay holds,
+/// then staged, its writes followed past W* by the relay's life.
 #[cfg(unix)]
 #[test]
 fn original_a_stage_its_relay_reads_past_w_star_is_followed_while_it_reads() {

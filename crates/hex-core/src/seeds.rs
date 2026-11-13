@@ -23,13 +23,13 @@
 //! - **Learned waits** (decision 9; Ada's rules of 2026-11-06 and 2026-11-13, no picked constant and no record): the
 //!   line's wait and the hang bound are each the slowest answer this pool has seen on `now`'s clock
 //!   ([`crate::patience`]), and only rise. Each is a bound only while answers come within it: a wait past it is a
-//!   run-out, told to the census and no sample (Karn's point), and goes on, following its party by its life alone for
-//!   now (the person's rule of 2026-11-13: a stall of its measured progress is the typed refusal, and the seeds freed
-//!   and a seed's CPU time are too coarse to judge one at W*'s scale): the line's, the busy seeds, until one is handed
-//!   to it or none can come; the hang bound's, the seed serving the create, until it answers or dies, its death the
-//!   pool's [`Seeds::died`]. Before each's first answer, and from a run-out to the next, it follows its party from its
-//!   start. A create handed a seed after waiting, however long, is a sample of the line's wait, a seed done with its
-//!   create one of the hang bound's; a create refused in line, and a seed that died, is none.
+//!   run-out, told to the census and no sample (Karn's point), and goes on, following its party by its life alone, as
+//!   at every local site (docs/research/runtime/learned-waits.md: a stall judged at the slowest gap seen refuses
+//!   healthy parties): the line's, the busy seeds, until one is handed to it or none can come; the hang bound's, the
+//!   seed serving the create, until it answers or dies, its death the pool's [`Seeds::died`]. Before each's first
+//!   answer, and from a run-out to the next, it follows its party from its start. A create handed a seed after
+//!   waiting, however long, is a sample of the line's wait, a seed done with its create one of the hang bound's; a
+//!   create refused in line, and a seed that died, is none.
 //! - **Restarts are bounded**: a start that fails, or a seed that dies before it serves a create, stops the starting
 //!   until the next create, so a node whose seeds can't start tries each slot once a create, never in a loop
 //!   (CLAUDE.md §2). With the starting stopped and no seed up or starting, none can come for the creates in line, and

@@ -137,8 +137,8 @@ impl SeedPool {
     /// wait. The wait, as decision 9 waits (the person's ruling of 2026-11-13):
     /// - **within W***, the slowest hold seen, a seed freed ends it;
     /// - **past W*** its run-out is told to the census, once and with no sample, and it follows the busy seeds by their
-    ///   life alone for now (the seeds freed are too coarse a progress to judge a stall at W*'s scale): a seed freed,
-    ///   or a slot let go by a seed's end ([`SeedPool::discard`]), ends it, however long that takes;
+    ///   life alone, as at every local site (docs/research/runtime/learned-waits.md): a seed freed, or a slot let go by
+    ///   a seed's end ([`SeedPool::discard`]), ends it, however long that takes;
     /// - **with no W*** (before the first hold, and from a run-out to the next hold) it follows them from its start.
     fn acquire(&self) -> Result<Seed, Refusal> {
         let mut inner = self.lock()?;
@@ -383,11 +383,11 @@ mod tests {
     }
 
     /// Decision 9 (the person's ruling of 2026-11-13: W* is a bound only while answers come within it; past it the wait
-    /// follows its party, the busy seeds, by their life alone for now, the seeds freed too coarse a progress to judge a
-    /// stall at W*'s scale): an exec past W* was refused once a whole window passed with no seed freed, though its seed
-    /// still served. Do: a pool of one seed out with an exec, W* 1 ms; an exec waits; once its run-out is told, the seed
-    /// stays out for a hundred windows of W*, or until the exec is answered; then it is freed. Expect: the exec not
-    /// answered while the seed is out, then handed the seed freed.
+    /// follows its party, the busy seeds, by their life alone, as at every local site): an exec past W* was refused
+    /// once a whole window passed with no seed freed, though its seed still served. Do: a pool of one seed out with an
+    /// exec, W* 1 ms; an exec waits; once its run-out is told, the seed stays out for a hundred windows of W*, or until
+    /// the exec is answered; then it is freed. Expect: the exec not answered while the seed is out, then handed the
+    /// seed freed.
     #[test]
     fn an_exec_past_w_star_waits_on_while_its_seed_serves_however_long_none_frees() {
         let learned = Duration::from_millis(1);

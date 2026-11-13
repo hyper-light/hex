@@ -28,10 +28,9 @@ static STAGING: Patience = Patience::measuring("guest.stage");
 
 /// A staging connection, its waits on the relay as decision 9 waits them (the person's ruling of 2026-11-13): each read
 /// and each write within W* ([`STAGING`], or a test's own). Past it the run-out is told to the census, once and with no
-/// sample, and the connection is followed by its relay's life alone for now, its timeouts let go: only the
-/// connection's end or reset ends a read or a write then. Neither what the relay takes nor what it gives is a progress
-/// to judge a stall by at W*'s scale: it takes bytes as its file system writes them, and gives nothing until its
-/// answer.
+/// sample, and the connection is followed by its relay's life alone, as at every local site
+/// (docs/research/runtime/learned-waits.md), its timeouts let go: only the connection's end or reset ends a read or a
+/// write then.
 ///
 /// With no W* each waits for the relay alone. The answer, however long it took, is the sample W* rises to, and the
 /// connection's next waits are bounded again, by the W* it rose to ([`Staging::answered`]). Its timeouts are set at its
