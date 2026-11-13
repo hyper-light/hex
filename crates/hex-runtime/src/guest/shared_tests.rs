@@ -571,9 +571,10 @@ fn shared_charge_survives_controller_only_exit_and_failed_native_finalization() 
 /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13, by decision 9's rule: a census row is evidence only): a shared
 /// backing its node recorded under a census cost is retired at the node's start, never leaked. Do prepare and grant a
 /// shared backing under a cost whose census measured both overheads, with one box on it; then start a node whose
-/// profile is the census-free one, prepare its backing, and call the box. Expect the box's every call but delete refused
-/// as retired, typed, its record kept, ready, its end unknown, until its owner's delete removes it; the old backing's
-/// scope stopped and released, no VM process left; and neither its pool record nor its receipt kept.
+/// profile is the census-free one, prepare its backing, and call the box. Expect its inspect to say why (goal 12's
+/// `BoxInfo::ended`, the cause's words) with its end unknown, its every other call but delete refused as retired, typed,
+/// its record kept, ready, until its owner's delete removes it; the old backing's scope stopped and released, no VM
+/// process left; and neither its pool record nor its receipt kept.
 #[test]
 fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     let dir = socket_fixture();
@@ -598,8 +599,14 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     let restarted = configured_census_free(dir.path(), &owner);
     let fresh = restarted.prepare_backing().unwrap();
     assert_ne!(fresh.key, offer.key);
+    let info = restarted.inspect(&id).unwrap();
     assert_eq!(
-        restarted.inspect(&id),
+        info.ended.as_deref(),
+        Some("its backing's identity changed with decision 9's census-free cost")
+    );
+    assert_eq!(info.exit, Some(hex_api::Exit::Unknown));
+    assert_eq!(
+        restarted.usage(&id),
         Err(Refusal::Backing {
             key: offer.key,
             cause: LifecycleCause::Retired,
@@ -607,6 +614,7 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     );
     let kept = Transaction::read(owner.as_ref(), &id).unwrap().unwrap();
     assert!(kept.retired);
+    assert_eq!(kept.ended, info.ended);
     assert_eq!(kept.phase, hex_core::record::Phase::Ready);
     assert_eq!(kept.exit, Some(hex_api::Exit::Unknown));
     assert!(
