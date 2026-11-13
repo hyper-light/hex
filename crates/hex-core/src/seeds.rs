@@ -599,9 +599,9 @@ impl Seeds {
         }
     }
 
-    /// The line's wait and the hang bound, as learned now (`None` before each's calibration): what the node's
-    /// metrics read.
-    pub fn deadlines(&self) -> (Option<Duration>, Option<Duration>) {
+    /// The line's wait and the hang bound, as learned now (`None` before each's calibration): what the tests read.
+    #[cfg(test)]
+    pub(crate) fn deadlines(&self) -> (Option<Duration>, Option<Duration>) {
         (self.wait.deadline(), self.hang.deadline())
     }
 
