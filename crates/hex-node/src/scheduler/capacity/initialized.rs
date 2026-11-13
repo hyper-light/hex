@@ -747,7 +747,11 @@ mod tests {
             None,
             &[hex_api::BackendUnavailable::from_refusal(
                 hex_api::Class::Shards,
-                Refusal::Backing { key: cold, cause, why: None },
+                Refusal::Backing {
+                    key: cold,
+                    cause,
+                    why: None,
+                },
             )
             .unwrap()],
         )

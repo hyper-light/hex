@@ -783,7 +783,11 @@ impl Node {
     /// Dispatch from the retained configuration/generation before entering its method/native turn.
     /// A current offer cannot replace a recovered grant or choose a different VM implementation.
     pub(super) fn pool_backend(&self, key: &BackingKey) -> Result<&dyn Runtime, Refusal> {
-        let refused = |cause| Refusal::Backing { key: *key, cause, why: None };
+        let refused = |cause| Refusal::Backing {
+            key: *key,
+            cause,
+            why: None,
+        };
         let record = self
             .store
             .read_pool(&key.pool)?

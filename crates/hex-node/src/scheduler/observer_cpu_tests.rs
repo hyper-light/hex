@@ -640,7 +640,11 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
         LifecycleCause::Busy,
         LifecycleCause::Uncertain,
     ] {
-        let why = Refusal::Backing { key, cause, why: None };
+        let why = Refusal::Backing {
+            key,
+            cause,
+            why: None,
+        };
         assert_eq!(drain_failure(key, why.clone()).unwrap(), why);
         let text = cleanup_report(&why).unwrap();
         assert!(text.contains(&"ff".repeat(key.pool.len())));

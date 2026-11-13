@@ -776,7 +776,11 @@ impl Transaction<'_> {
                     Err(error) => error,
                 }
             }
-            TransactionOwner::Pool(key) => Refusal::Backing { key: *key, cause, why: None },
+            TransactionOwner::Pool(key) => Refusal::Backing {
+                key: *key,
+                cause,
+                why: None,
+            },
         }
     }
     fn box_id(&self) -> Result<&BoxId, Refusal> {
