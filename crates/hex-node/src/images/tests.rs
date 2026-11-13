@@ -1,7 +1,7 @@
 //! The image class alone as a runtime (joint plan step 12's item B), over a model of Shards' image boot whose runs hold
 //! until their stop: what its boxes' records are, where they are kept, and what a restart of its caller finds.
 
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use hex_api::{Allocation, Bounds, BoxState, ClassSpec, ShardsImage};
 use shards_api::image::{
@@ -11,10 +11,21 @@ use shards_api::image::{
 
 use super::*;
 
-/// Shards' image boot in the model: each boot answered at once with a run that holds until its stop.
+/// Shards' image boot in the model: each boot answered at once with a run that holds until its stop, but while the
+/// test holds the model's boots, when each waits until it lets them go.
 #[derive(Default)]
 struct Model {
     asked: Mutex<Vec<ImageSpec>>,
+    held: Mutex<bool>,
+    let_go: Condvar,
+}
+
+impl Model {
+    /// Holds each boot from now on (`true`), or lets every one held go (`false`).
+    fn hold(&self, held: bool) {
+        *self.held.lock().unwrap() = held;
+        self.let_go.notify_all();
+    }
 }
 
 impl Images for Model {
@@ -24,6 +35,11 @@ impl Images for Model {
 
     fn boot(&self, spec: &ImageSpec, _: Duration) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
+        drop(
+            self.let_go
+                .wait_while(self.held.lock().unwrap(), |held| *held)
+                .unwrap(),
+        );
         Ok(Box::new(Held::default()))
     }
 }
@@ -170,7 +186,10 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
     images.start(&id).unwrap();
     assert_eq!(images.inspect(&id).unwrap().state, BoxState::Running);
     let gone = images.create(image_box("kiln-z7-1")).unwrap().id;
+    // Its boot slower than the first's answer, as the push gate's load made one (ROOT's run at 312f4e98).
+    model.hold(true);
     images.start(&gone).unwrap();
+    model.hold(false);
     assert_eq!(model.asked.lock().unwrap().len(), 2);
     images.delete(&gone).unwrap();
     assert!(matches!(images.inspect(&gone), Err(Refusal::NoSuchBox(_))));
