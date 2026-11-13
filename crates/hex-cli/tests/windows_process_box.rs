@@ -268,8 +268,10 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
     let config = GuestConfig {
         // A simulated guest boots nothing real: no binary, kernel or initramfs is read.
         binary: root.path().join("no-shards.exe"),
-        kernel: root.path().join("no-kernel"),
-        initrd: root.path().join("no-initrd"),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: root.path().join("no-kernel"),
+            initrd: root.path().join("no-initrd"),
+        },
         // The simulated guest reads neither: Shards' own minimums, the smallest guest it boots (Shards
         // a0cced87 crates/vmm/src/vm/runtime.rs:1061 "at least one vCPU is required",
         // crates/vmm/src/vm/x86_64.rs:28 MIN_MEMORY_MIB = 128, an even number of MiB).

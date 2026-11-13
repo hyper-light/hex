@@ -253,8 +253,10 @@ mod tests {
                 })),
                 GuestConfig {
                     binary: "/model/shards".into(),
-                    kernel: "/model/kernel".into(),
-                    initrd: "/model/initrd".into(),
+                    boot: Boot::Kernel {
+                        kernel: "/model/kernel".into(),
+                        initrd: "/model/initrd".into(),
+                    },
                     vcpus: 1,
                     memory_mib: 256,
                     gpu: false,
@@ -1390,7 +1392,7 @@ impl GuestRuntime {
     }
 
     fn receipt_spec(&self, receipt: &Record) -> Result<shards_api::GuestSpec, Refusal> {
-        let mut spec = self.config.spec();
+        let mut spec = self.config.spec()?;
         spec.gpu = !receipt.devices.is_empty();
         spec.vcpus = receipt.vcpus;
         spec.memory_mib = receipt.memory_mib;

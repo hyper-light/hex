@@ -407,8 +407,10 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
     use shards_api::Guests;
     let config = hex_runtime::guest::GuestConfig {
         binary: binary.to_path_buf(),
-        kernel: kernel.to_path_buf(),
-        initrd: initrd.to_path_buf(),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: kernel.to_path_buf(),
+            initrd: initrd.to_path_buf(),
+        },
         vcpus: 1,
         gpu: false,
         memory_mib,
@@ -416,7 +418,7 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };
     let guest: std::sync::Arc<dyn shards_api::Guest> = shards_api::Shards::new()
-        .boot(&config.spec())
+        .boot(&config.spec().unwrap())
         .unwrap()
         .into();
     let link = hex_client::guest::own_link(hex_client::guest::shards::ShardsLink::new(

@@ -74,8 +74,8 @@ pub use cost::{
 pub struct GuestConfig {
     /// The `shards` binary that boots it (on macOS the signed build, run where it is installed).
     pub binary: PathBuf,
-    pub kernel: PathBuf,
-    pub initrd: PathBuf,
+    /// Which form of the guest it boots: the one, never both.
+    pub boot: Boot,
     pub vcpus: u32,
     pub memory_mib: u64,
     /// Enable Shards' existing shared Venus GPU; physical reservations still require mapping.
@@ -83,6 +83,18 @@ pub struct GuestConfig {
     pub shares: Vec<Share>,
     /// Where the guest's relay stages each box's root: [`stage::STAGED`], the guest's tmpfs.
     pub staged: String,
+}
+
+/// How a node boots its guest, one form or the other (docs/design/node-under-shards-init.md §4), so that both can't
+/// be configured at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Boot {
+    /// Shards' direct boot of Hex's own kernel and initramfs, whose `/init` is `hex`, the guest's PID 1
+    /// (`HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`).
+    Kernel { kernel: PathBuf, initrd: PathBuf },
+    /// Hex's node image, pinned by digest, booted through Shards' image boot under shards-init with its nesting grant
+    /// (`HEX_GUEST_IMAGE`).
+    Image(String),
 }
 
 /// The environment variables a node reads its guest from.
@@ -158,8 +170,10 @@ impl GuestConfig {
         let path = |name: &str| PathBuf::from(var(name).unwrap_or_default());
         Ok(Self {
             binary: path(ENV_SHARDS_BIN),
-            kernel: path(ENV_KERNEL),
-            initrd: path(ENV_INITRD),
+            boot: Boot::Kernel {
+                kernel: path(ENV_KERNEL),
+                initrd: path(ENV_INITRD),
+            },
             vcpus: number(&var, ENV_CPUS)?,
             memory_mib: number(&var, ENV_MEMORY_MIB)?,
             gpu: match var(ENV_GPU) {
@@ -182,11 +196,12 @@ impl GuestConfig {
     /// whatever words the kernel passes it (HEX-GUEST-12); its command line the serial console, a panic
     /// resetting the guest so the host sees it end, and `hex.shares=` naming each share's mode in tag
     /// order, none when there are none (HEX-GUEST-11). The guest is reached on the channel's three
-    /// ports alone.
-    pub fn spec(&self) -> shards_api::GuestSpec {
-        shards_api::GuestSpec {
-            kernel: self.kernel.clone(),
-            init: shards_api::Init::Initrd(self.initrd.clone()),
+    /// ports alone. An image's boot has none: it boots through Shards' image boot ([`hosted`]).
+    pub fn spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let (kernel, initrd) = self.direct()?;
+        Ok(shards_api::GuestSpec {
+            kernel: kernel.to_path_buf(),
+            init: shards_api::Init::Initrd(initrd.to_path_buf()),
             cmdline: self.cmdline(),
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -203,6 +218,19 @@ impl GuestConfig {
                     read_only: s.read_only,
                 })
                 .collect(),
+        })
+    }
+
+    /// The direct boot's kernel and initramfs; refused for an image, which has neither.
+    pub fn direct(&self) -> Result<(&std::path::Path, &std::path::Path), Refusal> {
+        match &self.boot {
+            Boot::Kernel { kernel, initrd } => Ok((kernel, initrd)),
+            Boot::Image(_) => Err(Refusal::Invalid {
+                what: "the oci class's guest",
+                why: "an image under shards-init boots through Shards' image boot, not its direct boot of a kernel and \
+                      initramfs"
+                    .to_owned(),
+            }),
         }
     }
 }
@@ -278,9 +306,10 @@ impl GuestConfig {
             .try_reserve_exact(allowed.len())
             .map_err(|_| exhausted(allowed.len()))?;
         ports.extend_from_slice(&allowed);
+        let (kernel, initrd) = self.direct()?;
         Ok(shards_api::GuestSpec {
-            kernel: path(&self.kernel)?,
-            init: shards_api::Init::Initrd(path(&self.initrd)?),
+            kernel: path(kernel)?,
+            init: shards_api::Init::Initrd(path(initrd)?),
             cmdline,
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -574,10 +603,10 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
-    fn cpu_spec(&self) -> shards_api::GuestSpec {
-        let mut spec = self.config.spec();
+    fn cpu_spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let mut spec = self.config.spec()?;
         spec.gpu = false;
-        spec
+        Ok(spec)
     }
     /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
     /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
@@ -644,7 +673,7 @@ impl GuestRuntime {
             return Ok(());
         };
         let guest: Arc<dyn shards_api::Guest> =
-            match self.guests.attach(&identity, &self.cpu_spec()) {
+            match self.guests.attach(&identity, &self.cpu_spec()?) {
                 Ok(guest) => guest.into(),
                 Err(
                     shards_api::Refusal::Gone { .. }
@@ -818,7 +847,7 @@ impl GuestRuntime {
         least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
         least.shares.clear();
         least.gpu = false;
-        let mut spec = least.spec();
+        let mut spec = least.spec()?;
         let guests = Arc::clone(&self.guests);
         let bound = self.first_dial_bound()?;
         tell_ready(&mut spec.cmdline, bound)?;
@@ -896,7 +925,7 @@ impl GuestRuntime {
                 why: format!("{bound:?} from now is past a monotonic deadline"),
             })?;
             // AC-T7.4.1: the guest is told what is left of it, which its relay's hello to its node takes.
-            let mut spec = self.cpu_spec();
+            let mut spec = self.cpu_spec()?;
             tell_ready(
                 &mut spec.cmdline,
                 ready_by.saturating_duration_since(Instant::now()),

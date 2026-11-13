@@ -1060,8 +1060,10 @@ fn held_holds_no_other(socket: &std::path::Path, gate: &Gate, here: &BoxId) {
 fn config() -> GuestConfig {
     GuestConfig {
         binary: PathBuf::from("/shards"),
-        kernel: PathBuf::from("/k"),
-        initrd: PathBuf::from("/i"),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: PathBuf::from("/k"),
+            initrd: PathBuf::from("/i"),
+        },
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         gpu: false,
