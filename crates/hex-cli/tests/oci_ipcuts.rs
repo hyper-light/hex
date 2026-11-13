@@ -25,7 +25,6 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
 use hex_core::patience::Patience;
@@ -33,8 +32,6 @@ use hex_node::{Node, OCI_BOXES};
 use hex_testkit::waits::until;
 
 const TEST: &str = "a_root_nodes_boxes_join_ipc_and_uts_namespaces_made_ahead";
-/// The conformance suite's patience for a program's end (Ada's 2026-11-06 rule).
-const PATIENCE: Duration = hex_api::conformance::PATIENCE;
 /// The ipc and uts pool's refill thread's makes, which no recorded operation makes and no census row times yet: measuring,
 /// for the fact alone, each answer recorded for the census to come (hex_testkit::waits; the lead's rule of 2026-11-08).
 static PAIRS: Patience = Patience::measuring("test.oci_ipcuts.pairs");
@@ -366,8 +363,8 @@ fn run_in(node: &Node, id: &BoxId, args: &[&str]) -> String {
     let mut text = String::new();
     out.read_to_string(&mut text).unwrap();
     assert_eq!(
-        proc.wait_for(PATIENCE).unwrap(),
-        Some(Exit::Code(0)),
+        hex_api::conformance::end_of(&mut proc).unwrap(),
+        Exit::Code(0),
         "{args:?} in {id}: {text}"
     );
     text

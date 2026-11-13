@@ -35,7 +35,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use hex_api::{
     Bounds, BoxId, BoxSpec, ClassSpec, Exit, Mount, Network, OciSpec, Program, Rootfs, Runtime,
@@ -45,10 +44,6 @@ use hex_core::bundle::{Owner, Place, render};
 use hex_node::{Node, OCI_BOXES};
 
 const TEST: &str = "a_rootless_host_network_box_cannot_change_another_boxs_cgroup";
-/// Bounded wait for the box's program that reads its mount table: one that never ends fails rather
-/// than hangs (CLAUDE.md §4). The conformance suite's patience for a program's end, not one of its own
-/// (Ada's 2026-11-06 rule).
-const PATIENCE: Duration = hex_api::conformance::PATIENCE;
 
 #[test]
 fn a_rootless_host_network_box_cannot_change_another_boxs_cgroup() {
@@ -183,12 +178,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     reader
         .env
         .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
-    let ended = node
-        .exec(&plain, reader, Stdio::null())
-        .expect("exec the mount table's reader")
-        .wait_for(PATIENCE)
-        .expect("wait for the reader")
-        .expect("the reader ended within its patience");
+    let ended = hex_api::conformance::end_of(
+        &mut node
+            .exec(&plain, reader, Stdio::null())
+            .expect("exec the mount table's reader"),
+    )
+    .expect("wait for the reader");
     assert_eq!(ended, Exit::Code(0), "the reader failed");
     let mountinfo = std::fs::read_to_string(out.join("mountinfo")).expect("the box's mount table");
 
@@ -226,12 +221,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     unmount
         .env
         .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
-    let ended = node
-        .exec(&plain, unmount, Stdio::null())
-        .expect("exec the unmount")
-        .wait_for(PATIENCE)
-        .expect("wait for the unmount")
-        .expect("the unmount ended within its patience");
+    let ended = hex_api::conformance::end_of(
+        &mut node
+            .exec(&plain, unmount, Stdio::null())
+            .expect("exec the unmount"),
+    )
+    .expect("wait for the unmount");
     assert_eq!(ended, Exit::Code(0), "the unmount's script failed");
     let rc = std::fs::read_to_string(out.join("umount.rc")).unwrap();
     assert_ne!(
@@ -309,12 +304,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     probe
         .env
         .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
-    let ended = node
-        .exec(&prober, probe, Stdio::null())
-        .expect("exec the probe")
-        .wait_for(PATIENCE)
-        .expect("wait for the probe")
-        .expect("the probe ended within its patience");
+    let ended = hex_api::conformance::end_of(
+        &mut node
+            .exec(&prober, probe, Stdio::null())
+            .expect("exec the probe"),
+    )
+    .expect("wait for the probe");
     assert_eq!(ended, Exit::Code(0), "the probe's script failed");
     let seen = |file: &str| std::fs::read_to_string(out.join(file)).unwrap_or_default();
     let (sys, cg) = (seen("probe-sys.ls"), seen("probe-cg.ls"));

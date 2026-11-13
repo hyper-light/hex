@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{Act, PATIENCE};
+use hex_api::conformance::{Act, end_of};
 use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_core::netns_reuse::Refused as NetRefused;
 use hex_core::patience::Patience;
@@ -471,8 +471,8 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     );
     assert!(!cg.exists(), "the box's cgroup is gone");
     assert_eq!(
-        program.wait_for(PATIENCE).unwrap(),
-        Some(Exit::Signal(9)),
+        end_of(&mut program).unwrap(),
+        Exit::Signal(9),
         "the exec'd program ended with its namespace"
     );
     assert!(
@@ -550,7 +550,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
         Some(false),
         "the delete wrote no cgroup.kill for the process box"
     );
-    assert_eq!(program.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
+    assert_eq!(end_of(&mut program).unwrap(), Exit::Signal(9));
     eprintln!("test 1, process box: ended by cgroup.kill, counted");
 
     // The fourth: an oci box whose init ended on its own and was reaped before the delete, its exit read.

@@ -131,6 +131,7 @@ fn guest_node(root: &Path) -> (Arc<Recorded<WithGuest<SimRuntime>>>, Arc<AtomicU
     .with_images(
         hex_runtime::guest::host_images(),
         Ok(hex_runtime::guest::ImageWaits::new()),
+        root.join("image-diagnostics"),
     )
     .with_runtime_cost(cost)
     .unwrap();
