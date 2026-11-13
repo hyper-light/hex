@@ -977,21 +977,24 @@ fn check_completed_metadata(
             {
                 continue;
             }
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(current.uncertain("its helper's completed receipt names another native scope, though it is past its preparation"));
         }
         if !entry.key.matches(current, completed.helper)?
             || current
                 .init()
                 .is_some_and(|init| Some(init) != entry.controller)
         {
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(
+                current.uncertain("its helper's completed receipt names another key or controller")
+            );
         }
         let exit = match current {
             NativeRecord::Box(record) => record.exit,
             NativeRecord::Pool(record) => record.exit,
         };
         if exit.is_some_and(|exit| exit != entry.status) {
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(current
+                .uncertain("its helper's completed receipt names another end than its record's"));
         }
     }
     Ok(())
@@ -1034,18 +1037,20 @@ fn check_restart(
                 )
             {
                 if current.class()? == hex_api::Class::Shards && current.scope().is_none() {
-                    return Err(current.refusal(LifecycleCause::Uncertain));
+                    return Err(current.uncertain("it holds no native scope yet, though its helper's completed receipt names one"));
                 }
                 continue;
             }
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(current.uncertain(
+                "its helper's completed receipt names another native scope as its node restarts",
+            ));
         }
         if !entry.key.matches(current, completed.helper)?
             || current
                 .init()
                 .is_some_and(|init| Some(init) != entry.controller)
         {
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(current.uncertain("its helper's completed receipt names another key or controller as its node restarts"));
         }
         if current.stage() != hex_core::record::NativeStage::Released {
             return Err(current.refusal(LifecycleCause::Busy));
@@ -1053,7 +1058,7 @@ fn check_restart(
         if let NativeRecord::Pool(record) = current
             && record.exit != Some(entry.status)
         {
-            return Err(current.refusal(LifecycleCause::Uncertain));
+            return Err(current.uncertain("its helper's completed receipt names another end than its record's as its node restarts"));
         }
     }
     Ok(())
@@ -1404,7 +1409,7 @@ pub(super) fn launch(
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     let crate::devices::ManagedLaunch::Shards(plan) = launch else {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its launch isn't a Shards launch"));
     };
     match record {
         NativeRecord::Box(record) => record.spec.check()?,
@@ -1415,12 +1420,12 @@ pub(super) fn launch(
         || record.stage() != hex_core::record::NativeStage::Creating
         || record.init().is_some()
     {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("it isn't a fresh creation as it is launched"));
     }
     let until = Instant::now()
         .checked_add(patience)
         .filter(|_| patience != Duration::MAX && !patience.is_zero())
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its launch's patience isn't a finite time"))?;
     let request = plan.gpu_report_request();
     if request.is_some() != io.gpu_report.is_some()
         || request.is_some() != !record.devices().is_empty()
@@ -1428,13 +1433,13 @@ pub(super) fn launch(
             record.scope().map(|scope| *scope.bytes()) != Some(request.scope())
         })
     {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its launch's report scope isn't its record's"));
     }
     let until = request.map_or(until, |request| until.min(request.deadline()));
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to launch it"))?;
     let launch = make_launch(record, plan, helper.cpu)?;
     let (process, startup) = helper.identity(
         true,
@@ -1481,16 +1486,18 @@ pub(super) fn launch(
     let identity = proxy
         .identity
         .get()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its launched controller published no identity"))?;
     if identity.vsock != plan.vsock() || until <= Instant::now() {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain(
+            "its launched controller's vsock isn't its plan's, or its deadline passed",
+        ));
     }
     publish(identity)?;
     let (answer, _) = proxy
         .control(protocol::Action::Resume, Some(until))
         .map_err(CallFailure::refusal)?;
     if !matches!(answer, protocol::Answer::Done { .. }) {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its helper answered its resume with another reply"));
     }
     Ok(shards_api::managed_receipt(proxy))
 }
@@ -1503,7 +1510,7 @@ pub(super) fn attach(
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to attach it"))?;
     if let Some(snapshot) = receipt::read(helper)?
         && snapshot.completed.is_some()
     {
@@ -1525,12 +1532,12 @@ pub(super) fn attach(
                         vsock: PathBuf::from(std::ffi::OsString::from_vec(copy_raw(&entry.vsock)?)),
                     };
                     if expected.is_some_and(|expected| expected != &identity) {
-                        return Err(record.refusal(LifecycleCause::Uncertain));
+                        return Err(record.uncertain("its helper's completed controller isn't the one it expected"));
                     }
                     proxy
                         .identity
                         .set(identity)
-                        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+                        .map_err(|_| record.uncertain("its completed controller's identity was published before"))?;
                 }
                 entry.status
             }
@@ -1543,7 +1550,7 @@ pub(super) fn attach(
             {
                 Exit::Unknown
             }
-            _ => return Err(record.refusal(LifecycleCause::Uncertain)),
+            _ => return Err(record.uncertain("its helper's completed receipt doesn't name it, though it is past its creation, as it is attached")),
         };
         proxy
             .completed
@@ -1551,7 +1558,7 @@ pub(super) fn attach(
                 status: super::status(status),
                 scope: TerminalScope::Released,
             })
-            .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+            .map_err(|_| record.uncertain("its completed end was published before"))?;
         return Ok(proxy);
     }
     let (process, _) = helper.identity(false, helper.until(None)?, None)?;
@@ -1564,7 +1571,7 @@ pub(super) fn attach(
         .map_err(CallFailure::refusal)?;
     proxy.attached(answer, notification)?;
     if expected.is_some_and(|expected| proxy.identity.get() != Some(expected)) {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its attached controller isn't the one it expected"));
     }
     Ok(proxy)
 }
@@ -1578,7 +1585,7 @@ pub(super) fn set_rate(
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to set its rate"))?;
     let (process, _) = helper.identity(false, helper.until(None)?, None)?;
     let key = protocol::Key::from_record(record, process)?;
     helper.set_rate(key, rate).map_err(CallFailure::refusal)
@@ -1590,7 +1597,7 @@ pub(super) fn stop(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<(),
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to stop it"))?;
     let (process, _) = helper.identity(false, helper.until(None)?, None)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
@@ -1606,7 +1613,7 @@ pub(super) fn stop(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<(),
         .map_err(CallFailure::refusal)?;
     match answer {
         protocol::Answer::Done { .. } => Ok(()),
-        _ => Err(record.refusal(LifecycleCause::Uncertain)),
+        _ => Err(record.uncertain("its helper answered its stop with another reply")),
     }
 }
 
@@ -1614,7 +1621,7 @@ pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Us
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to read its usage"))?;
     let (process, _) = helper.identity(false, helper.until(None)?, None)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
@@ -1630,7 +1637,7 @@ pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Us
         .map_err(CallFailure::refusal)?;
     match answer {
         protocol::Answer::Usage { usage, .. } => Ok(usage),
-        _ => Err(record.refusal(LifecycleCause::Uncertain)),
+        _ => Err(record.uncertain("its helper answered its usage with another reply")),
     }
 }
 pub(super) fn finalize(
@@ -1641,7 +1648,7 @@ pub(super) fn finalize(
     let helper = runtime
         .managed_helper
         .as_ref()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its node runs no managed helper to finalize it"))?;
     let until = helper.until(None)?;
     let controller = identity
         .map(|identity| ProcId {
@@ -1663,7 +1670,7 @@ pub(super) fn finalize(
                         | hex_core::record::NativeStage::Deleting
                 ))
         {
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(record.uncertain("its helper's completed receipt doesn't name it, though it is past its creation, as it is finalized"));
         }
         helper.finish_helper(snapshot.process, until)?;
         return Ok(()); // Receipt retained until canonical Released/remove; new launch fences it.
@@ -1683,15 +1690,15 @@ pub(super) fn finalize(
         && snapshot.completed.is_some()
         && snapshot.process == process
     {
-        snapshot
-            .completion(&key, controller)?
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        snapshot.completion(&key, controller)?.ok_or_else(|| {
+            record.uncertain("its helper's completed receipt doesn't name it after its finalize")
+        })?;
         helper.finish_helper(process, until)?;
         return Ok(());
     }
     match result.map_err(CallFailure::refusal)?.0 {
         protocol::Answer::Done { .. } => Ok(()),
-        _ => Err(record.refusal(LifecycleCause::Uncertain)),
+        _ => Err(record.uncertain("its helper answered its finalize with another reply")),
     }
 }
 
@@ -1702,10 +1709,9 @@ pub(in crate::macos) fn preflight_unsubmitted(
     record: &hex_core::record::BoxRecord,
 ) -> Result<(), Refusal> {
     let native = NativeRecord::Box(record);
-    let helper = runtime
-        .managed_helper
-        .as_ref()
-        .ok_or_else(|| native.refusal(LifecycleCause::Uncertain))?;
+    let helper = runtime.managed_helper.as_ref().ok_or_else(|| {
+        native.uncertain("its node runs no managed helper to prove it unsubmitted")
+    })?;
     if let Some(snapshot) = receipt::read(helper)?
         && let Some(completed) = &snapshot.completed
     {
@@ -1714,7 +1720,9 @@ pub(in crate::macos) fn preflight_unsubmitted(
             .iter()
             .any(|entry| entry.key.owner.as_ref() == native.owner())
         {
-            return Err(native.refusal(LifecycleCause::Uncertain));
+            return Err(
+                native.uncertain("its helper's completed receipt names it, so it was submitted")
+            );
         }
         return Ok(()); // Positive completed cohort is still not permission to release this Box.
     }
@@ -1735,7 +1743,7 @@ pub(in crate::macos) fn preflight_unsubmitted(
     ) {
         Err(CallFailure::Native(protocol::Failure::UnknownOwner)) => Ok(()),
         Err(error) => Err(error.refusal()),
-        Ok(_) => Err(native.refusal(LifecycleCause::Uncertain)),
+        Ok(_) => Err(native.uncertain("its helper still holds it, so it was submitted")),
     }
 }
 
@@ -1743,17 +1751,20 @@ pub(in crate::macos) fn preflight(
     runtime: &MacRuntime,
     record: NativeRecord<'_>,
 ) -> Result<(), Refusal> {
-    let bad = || record.refusal(LifecycleCause::Uncertain);
+    let bad = |why: &str| record.uncertain(why);
     let cost = match record {
         NativeRecord::Box(record) => record
             .spec
             .allocation
             .map(|allocation| allocation.cost)
-            .ok_or_else(bad)?,
+            .ok_or_else(|| bad("its box record holds no allocation to check its cost by"))?,
         NativeRecord::Pool(record) => record.cost,
     };
     runtime.check_vm_cost(&cost)?;
-    let helper = runtime.managed_helper.as_ref().ok_or_else(bad)?;
+    let helper = runtime
+        .managed_helper
+        .as_ref()
+        .ok_or_else(|| bad("its node runs no managed helper to check it with"))?;
     if let Some(snapshot) = receipt::read(helper)?
         && snapshot.completed.is_some()
     {
@@ -1770,7 +1781,9 @@ pub(in crate::macos) fn preflight(
             ) {
             Ok(())
         } else {
-            Err(bad())
+            Err(bad(
+                "its helper's completed receipt doesn't name it, though it is past its creation",
+            ))
         };
     }
     let Some(census) = helper.census_if_present()? else {
@@ -1780,7 +1793,7 @@ pub(in crate::macos) fn preflight(
         ) {
             Ok(())
         } else {
-            Err(bad())
+            Err(bad("its helper is gone, though it is past its preparation"))
         };
     };
     let key = protocol::Key::from_record(record, census.helper)?;
@@ -1792,7 +1805,9 @@ pub(in crate::macos) fn preflight(
         ) {
             Ok(())
         } else {
-            Err(bad())
+            Err(bad(
+                "its helper doesn't hold it, though it is past its preparation",
+            ))
         };
     }
     let (answer, _) = helper
@@ -1807,10 +1822,10 @@ pub(in crate::macos) fn preflight(
         )
         .map_err(CallFailure::refusal)?;
     let protocol::Answer::Metadata { controller, .. } = answer else {
-        return Err(bad());
+        return Err(bad("its helper answered its inspection with another reply"));
     };
     if record.init().is_some() && record.init() != controller {
-        return Err(bad());
+        return Err(bad("its helper's controller isn't its record's"));
     }
     Ok(())
 }
@@ -1853,7 +1868,7 @@ pub(in crate::macos) fn preflight_retained(
             }
         };
         if !key.matches(record, census.helper)? {
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(record.uncertain("its helper's census names another key for it"));
         }
     }
     Ok(())
@@ -1866,7 +1881,7 @@ fn make_launch(
 ) -> Result<protocol::Launch, Refusal> {
     let paths = plan
         .runtime_paths()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its launch plan has no runtime paths"))?;
     let record_bytes = encode_native(record)?;
     let mut arguments = Vec::new();
     arguments
@@ -1900,7 +1915,7 @@ fn make_launch(
     };
     launch
         .check()
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its native launch isn't valid"))?;
     Ok(launch)
 }
 
@@ -1937,7 +1952,8 @@ fn encode_native(record: NativeRecord<'_>) -> Result<Vec<u8>, Refusal> {
         bytes: Vec::new(),
         size: 0,
     };
-    write(&mut count).map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+    write(&mut count)
+        .map_err(|_| record.uncertain("its native launch couldn't be measured as JSON"))?;
     let size = count
         .size
         .checked_add(1)
@@ -1948,9 +1964,10 @@ fn encode_native(record: NativeRecord<'_>) -> Result<Vec<u8>, Refusal> {
         .try_reserve_exact(size)
         .map_err(|_| native_allocation(size))?;
     let mut output = Json { bytes, size: 0 };
-    write(&mut output).map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+    write(&mut output)
+        .map_err(|_| record.uncertain("its native launch couldn't be written as JSON"))?;
     if output.size != count.size {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its native launch's JSON wasn't the size it was measured at"));
     }
     output.bytes.push(b'\n');
     Ok(output.bytes)
