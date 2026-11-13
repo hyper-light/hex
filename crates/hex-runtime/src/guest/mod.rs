@@ -463,6 +463,9 @@ pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
     booted: Mutex<Option<triomphe::Arc<Booted>>>,
+    /// The shared backing's guest overhead as its capacity answers measured it, by its generation (joint plan step 14,
+    /// C7): none before the first.
+    guest_overhead: Mutex<Option<(hex_api::BackingKey, hex_api::LearnedOverhead)>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
@@ -582,6 +585,7 @@ impl GuestRuntime {
             guests,
             config,
             booted: Mutex::new(None),
+            guest_overhead: Mutex::new(None),
             slowest: Mutex::new(Duration::ZERO),
             retired: AtomicU64::new(0),
             digests: Mutex::new(Digests::default()),
