@@ -315,13 +315,24 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
     where it reaches the run's own command;
   - a publish to a member the image doesn't run stops the VM.
 - Conformance `HEX-IMG-7`, which the simulator passes.
-- **Owed to Hex's lead, real VMs** (`crates/hex-cli/tests/image_grants_real.rs`, its probe image's recipe beside it):
+- `crates/hex-cli/tests/image_grants_real.rs`, without a VM, on Linux, macOS and Windows: the grants probe
+  (`image_grants_probe/probe.rs`) answers a connection with its targets' outcomes, typed (connected, refused,
+  unresolved), and its report and arguments read back as written, each malformed one refused.
+- **Owed to Hex's lead, real VMs**: `image_grants_real`'s ignored test, on a node booting the probe image, a harness
+  whose program tries its egress targets and reports each typed on every connection to its ports
+  (`scripts/grants-probe/build.sh` makes its context on each host: the probe built static for the guest's arch,
+  `<arch>-unknown-linux-musl`, by rust-lld). On Linux KVM, macOS HVF and Windows WHP, once the image class boots
+  there (goal 12):
+  - a destination by name or the host's service is refused `Awaits(MemberDestinations)`, nothing made;
   - a harness image booted with no grants: no NIC in the guest (`/sys/class/net` holds `lo` alone), and no DNS
     answer or packet for any name (`T-T7.7.1`);
-  - a `Publish` grant: the host connects at the reported socket, the image's other port coming in is bound nowhere,
-    and the receiver inspect names is the probe;
-  - the probe's own reach with destinations dropped: its provider and an ungranted name, the host's service and a
-    port egress, none connected;
+  - a `Publish` grant: the probe answers at the reported socket, which inspect shows reaching the probe at its port;
+    its own reach with destinations dropped (its provider and an ungranted name, the host's service and a port
+    egress) connected nowhere, and the host's service took nothing;
+  - a publish reaching the run's own command: the start refused, the VM stopped;
+  - on Linux alone, from /proc, the run's host side: no network process with no grant, its one published socket the
+    only one it listens on, no flow past the host's loopback, and no run host left. macOS and Windows keep no /proc,
+    so those readings are owed there (the run says `GRANTS-OWED`);
   - once Shards gives N4's piece: the provider and kiln reach of the acceptance, and each N2 enforcer case.
 
 ## Sources
