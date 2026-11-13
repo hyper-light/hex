@@ -755,6 +755,7 @@ impl Learner {
                             span,
                             mem_bytes: read.memory_bytes,
                             disk_bytes: None,
+                            cap_milli: Some(vm.rate),
                         },
                     )
                     .map_err(refused)?;
@@ -933,11 +934,12 @@ impl Learner {
     }
 }
 
-/// What a capacity answer for `class` carries of `node` (C2, C5, C8), shared by every OS's learner: the priors of
-/// `costs`, a cold class's its admission (at most one per profile and ceiling, none booked whole), so a VM is booked
-/// below its whole receipt only where a learner learns its VMs' use; the class's learned use and each of its `vms`'
-/// holdings (by lifetime, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
-/// class's `ended` VMs.
+/// What a capacity answer for `class` carries of `node` (C1, C2, C5, C8), shared by every OS's learner: the priors of
+/// `costs`, each within its receipt, a cold class's its admission (at most one per profile and ceiling, none booked
+/// whole), so a VM is booked below its whole receipt only where a learner learns its VMs' use; each profile's ceiling,
+/// its envelope and the VMM overhead its VMs' windows have shown past it, each dimension cold, typed, until one has; the
+/// class's learned use and each of its `vms`' holdings (by lifetime, box and receipt), those most past their receipts
+/// first (memory, then CPU, then disk), and the class's `ended` VMs.
 pub(crate) fn learned(
     node: &charge::Node<Lifetime>,
     class: Class,
@@ -946,10 +948,19 @@ pub(crate) fn learned(
     ended: Vec<hex_api::LearnedEnd>,
 ) -> Result<Learned, Refusal> {
     let mut priors: Vec<hex_api::LearnedPrior> = Vec::new();
+    let mut ceilings: Vec<hex_api::LearnedCeiling> = Vec::new();
     for cost in costs {
         let receipt = cost.allocate(CapacityResources::default())?;
+        let key = ClassKey::of(class, receipt)?;
+        // A prior books within its receipt, as a receipt's booking is (`Allocation::check`): what a VM's VMM takes past
+        // its envelope reaches the scheduler through its holding (C8), never its prior.
         let ceiling = receipt.resources;
-        let booking = node.prior(&ClassKey::of(class, receipt)?);
+        let prior = node.prior(&key);
+        let booking = CapacityResources {
+            cpu_milli: prior.cpu_milli.min(ceiling.cpu_milli),
+            mem_bytes: prior.mem_bytes.min(ceiling.mem_bytes),
+            disk_bytes: prior.disk_bytes.min(ceiling.disk_bytes),
+        };
         let known = priors
             .iter()
             .any(|prior| prior.profile == cost.id && prior.ceiling == ceiling);
@@ -958,6 +969,22 @@ pub(crate) fn learned(
                 profile: cost.id,
                 ceiling,
                 booking,
+            });
+        }
+        let envelope = key.admission();
+        let said = ceilings
+            .iter()
+            .any(|said| said.profile == cost.id && said.envelope == envelope);
+        if !said && ceilings.len() < hex_api::MAX_LEARNED_PRIORS {
+            let [cpu_milli, mem_bytes, disk_bytes] = node.overhead(&key);
+            ceilings.push(hex_api::LearnedCeiling {
+                profile: cost.id,
+                envelope,
+                overhead: hex_api::LearnedOverhead {
+                    cpu_milli,
+                    mem_bytes,
+                    disk_bytes,
+                },
             });
         }
     }
@@ -1001,7 +1028,7 @@ pub(crate) fn learned(
         used,
         holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
         ended,
-        ceilings: Vec::new(),
+        ceilings,
     })
 }
 

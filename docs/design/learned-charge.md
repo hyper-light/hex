@@ -28,7 +28,7 @@ contention rule and the predictors; they do not hold the step up.
   (`hex_sim::lb::Runner`, `hex_sim::peer`) books it from admission to deletion; recovery books it again from the
   record. Shards gives a run's microVM every host CPU (D191), so one default VM fills a host's CPU.
 
-## C1. A VM's charge is learned from its windows; its allocation is the ceiling
+## C1. A VM's charge is learned from its windows; its ceiling is its envelope and the VMM overhead its windows show
 
 **The choice.**
 - **The window** is the period the node enforces a VM's CPU over, guest_cost's: on Linux `cpu.max`'s period
@@ -54,8 +54,13 @@ contention rule and the predictors; they do not hold the step up.
   RAM included; disk is its folders' bytes.
 - **The charge**, each of CPU, memory and disk: the nearest-rank p99.9 of its last SEEDABLE windows (of CPU, and of
   memory's and disk's high-water marks), the second largest of 1,000.
-- **Ceiling**: each at most its allocation (envelope and VMM overhead). Learning never raises authority (R03). The
-  census's VMM overhead is the ceiling's alone, evidence, never booked (ROOT, 2026-11-13; C2).
+- **Ceiling**: its envelope, what its workload is admitted at, and the VMM overhead its class's VMs' windows have shown
+  past it (ROOT, 2026-11-13, by decision 9's rule: a census row is evidence only, never a starting number, so no
+  census overhead is a ceiling). The overhead is the most seen in each dimension, only rising, as the slowest answer
+  seen is: the split's own CPU where the host reads one (an image VM's), else the whole CPU past the envelope; the
+  memory and the read disk past it. A window that reached its CPU cap is no CPU sample (Karn's point): the cap cut
+  its use. Before its class's first window a VM's ceiling is the envelope alone, and its class's capacity answer says
+  so, typed (`hex_api::LearnedCeiling`, each dimension of its `LearnedOverhead` none while cold, never a zero).
 - **Cold**: until it has SEEDABLE windows its charge is no less than its booking (C2), as its p99.9 is not yet an
   observed sample.
 - Use that grows past the charge is the contention rule's (C4, C5), not a margin's.
@@ -75,18 +80,21 @@ there, the history becomes the VM's life.
 
 ## C2. A new VM is booked at its class's learned prior
 
-**The choice.** A VM's class is its runtime class, its cost profile's id and its ceiling: VMs of one Agentfile
-image and size. A new VM is booked at its class's prior: by the same sample rule, the nearest-rank p99.9 of the
-class's last SEEDABLE windows of its warmed VMs (each warmed VM's window a sample, as its own charge's is), each
-dimension at most the allocation. It falls when the evidence does: an outlier's windows leave the sample as newer
-ones come. With no warmed VM of the class on record, a node that learns its VMs books a new one at what its workload
-is admitted at, its receipt's guest envelope (`Allocation::guest`; `charge::ClassKey`'s admission), as ROOT took it
-on 2026-11-13: its VMM's own is learned from its windows (D241's `Stats::microvm` for an image VM, its cgroup or
-native owner for a managed one) and an image VM's guest is told its room (C7), so the census's overhead stays
-evidence, the ceiling's alone. A node that learns none of its VMs carries no prior, and its VMs are booked whole, as
-nothing reads what their VMMs take (f60 A). Priors are a class's, not a kind's: a Shards image VM and a managed Shards
-VM of one profile and size share one, and a node learning one kind but not the other books the other whole off its
-fleet's budget (C4, `recorded::charges::sort`) while the scheduler books it at the prior.
+**The choice.** A VM's class is its runtime class, its cost profile's id and its envelope: VMs of one Agentfile
+image and size (`charge::ClassKey`; its ceiling, learned, is no part of it, or it would split the class as it rose).
+A new VM is booked at its class's prior: by the same sample rule, the nearest-rank p99.9 of the class's last SEEDABLE
+windows of its warmed VMs (each warmed VM's window a sample, as its own charge's is), each dimension at most the
+class's ceiling (C1), and on the capacity answer at most the receipt, as a receipt's booking is
+(`Allocation::check`): what a VMM takes past its envelope reaches the scheduler through its VM's holding (C8). It
+falls when the evidence does: an outlier's windows leave the sample as newer ones come. With no warmed VM of the class
+on record, a node that learns its VMs books a new one at what its workload is admitted at, its receipt's guest
+envelope (`Allocation::guest`; `charge::ClassKey`'s admission), as ROOT took it on 2026-11-13: its VMM's own is
+learned from its windows (D241's `Stats::microvm` for an image VM, its cgroup or native owner for a managed one) and
+an image VM's guest is told its room (C7), so the census's overhead stays evidence. A node that learns none of its
+VMs carries no prior, and its VMs are booked whole, as nothing reads what their VMMs take (f60 A). Priors are a
+class's, not a kind's: a Shards image VM and a managed Shards VM of one profile and size share one, and a node
+learning one kind but not the other books the other whole off its fleet's budget (C4, `recorded::charges::sort`)
+while the scheduler books it at the prior.
 
 **Sources.** Resource Central predicts a new VM from its class, as a subscription's VMs behave alike, 81% accurate
 for average CPU (f62 A), and counts a VM it can't predict as using all it was allocated (f29 A); an empirical-Bayes
@@ -345,7 +353,7 @@ reaches the view settled with goal 13 the same day:
 | A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
-| The ceiling | the allocation | (b) | guest_cost's census of the class | `charge::tests` |
+| The ceiling | the envelope and the VMM overhead its class's windows show past it; the envelope alone while cold | (a) learned | the most seen past the envelope in each dimension, a window at the CPU cap no sample (decision 9) | `charge::tests`, `recorded::charges::tests` |
 | The cold booking | the class's prior; with none warmed, the workload's admission where a node learns, else the allocation | (a) | p99.9 of the class's last SEEDABLE warmed windows; the receipt's guest envelope | `charge::tests`, `recorded::charges::tests` |
 | `cpu.weight`'s range | 1 to 10,000 | (c) | cgroup-v2.rst | `charge::tests` |
 | The fleet's weight | `ceil(10,000 × budget / machine CPU)`, at least 1 | derived | its budget's share of the machine on the kernel's range | `charge::tests` (exact and property) |

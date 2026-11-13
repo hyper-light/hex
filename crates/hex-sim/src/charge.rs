@@ -99,6 +99,9 @@ pub struct Sample {
     /// The bytes its own folders hold, where the host reads them: unread, it is read as its booking, so no evidence
     /// below the booking is made up.
     pub disk_bytes: Option<u64>,
+    /// The CPU cap it ran under over the span, in milli-CPU, where its platform held one: a window that reached it is
+    /// no sample of its VMM's own CPU, which the cap cut (Karn's point, decision 9).
+    pub cap_milli: Option<u64>,
 }
 
 fn dims(a: Amounts) -> [u64; 3] {
@@ -260,43 +263,57 @@ impl Tail {
     }
 }
 
-/// A VM's class (C2): VMs of one runtime class, cost profile and ceiling, one Agentfile image and size.
+/// A VM's class (C2): VMs of one runtime class and cost profile, admitted at one envelope: one Agentfile image and
+/// size. Its ceiling is no part of it: learned from its VMs' windows (C1), it would split the class as it rose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassKey {
     class: Class,
     profile: [u8; 32],
-    ceiling: [u64; 3],
-    /// What its VMs' workload is admitted at, their guest envelope: a cold class's prior. Its ceiling less the VMM's
-    /// census allowance, which is evidence for the ceiling alone (ROOT, 2026-11-13).
+    /// What its VMs' workload is admitted at, their guest envelope: a cold class's prior, and its ceiling until its
+    /// VMs' windows show their VMM's own past it (C1; ROOT, 2026-11-13: no census number is a ceiling).
     admission: [u64; 3],
 }
 
 impl ClassKey {
-    /// The class of VMs of `class` and cost `profile`, their receipt `ceiling`, each admitted at `admission`, at most
-    /// the ceiling in each dimension, as a prior is.
-    pub fn new(class: Class, profile: [u8; 32], ceiling: Amounts, admission: Amounts) -> Self {
+    /// The class of VMs of `class` and cost `profile`, each admitted at `admission`.
+    pub fn new(class: Class, profile: [u8; 32], admission: Amounts) -> Self {
         Self {
             class,
             profile,
-            ceiling: dims(ceiling),
-            admission: each(dims(admission), dims(ceiling), u64::min),
+            admission: dims(admission),
         }
     }
 
-    /// The class of the VMs `allocation` admits for `class`: its cost profile, its whole receipt the ceiling, and its
-    /// guest envelope ([`hex_api::Allocation::guest`]) the admission. Refused where the receipt holds no envelope.
+    /// The class of the VMs `allocation` admits for `class`: its cost profile, and its guest envelope
+    /// ([`hex_api::Allocation::guest`]) the admission. Refused where the receipt holds no envelope.
     pub fn of(class: Class, allocation: hex_api::Allocation) -> Result<Self, hex_api::Refusal> {
-        Ok(Self::new(
-            class,
-            allocation.cost.id,
-            allocation.resources,
-            allocation.guest()?,
-        ))
+        Ok(Self::new(class, allocation.cost.id, allocation.guest()?))
     }
 
-    pub fn ceiling(&self) -> Amounts {
-        amounts(self.ceiling)
+    /// What its VMs are admitted at.
+    pub fn admission(&self) -> Amounts {
+        amounts(self.admission)
     }
+}
+
+/// A VM of `class`'s ceiling (C1): its admission and what its class's VMs have shown of their VMM's own past it, the
+/// admission alone in a dimension none has shown yet (the cold start).
+fn ceiling_of(classes: &BTreeMap<ClassKey, Record>, class: &ClassKey) -> [u64; 3] {
+    let [o0, o1, o2] = classes
+        .get(class)
+        .map_or([None; 3], |record| record.overhead);
+    let [a0, a1, a2] = class.admission;
+    let past = |admitted: u64, own: Option<u64>| admitted.saturating_add(own.unwrap_or(0));
+    [past(a0, o0), past(a1, o1), past(a2, o2)]
+}
+
+/// `cpu` over `over` nanoseconds, in milli-CPU, rounded up.
+fn milli_of(cpu: Duration, over: u128) -> Result<u64, ChargeError> {
+    cpu.as_nanos()
+        .checked_mul(1000)
+        .map(|n| n.div_ceil(over))
+        .and_then(|m| u64::try_from(m).ok())
+        .ok_or(ChargeError::Overflow("a VM's CPU rate"))
 }
 
 /// What a node holds of one VM.
@@ -313,16 +330,12 @@ struct Vm {
 
 impl Vm {
     /// Its charge (C1): the p99.9 of its last SEEDABLE windows, no less than its booking while it is cold, each at
-    /// most its allocation.
-    fn charge(&self) -> [u64; 3] {
+    /// most `ceiling`, its class's now ([`ceiling_of`]).
+    fn charge(&self, ceiling: [u64; 3]) -> [u64; 3] {
         let cold = !self.tail.full();
         let observed = self.tail.p999().unwrap_or([0; 3]);
         let floor = if cold { self.booking } else { [0; 3] };
-        each(
-            each(observed, floor, u64::max),
-            self.class.ceiling,
-            u64::min,
-        )
+        each(each(observed, floor, u64::max), ceiling, u64::min)
     }
 }
 
@@ -337,11 +350,14 @@ enum Evidence {
     One([u64; 3]),
 }
 
-/// A class's record: the last SEEDABLE windows of its warmed VMs, and when it last took one.
+/// A class's record: the last SEEDABLE windows of its warmed VMs, when it last took one, and the most its VMs' windows
+/// have shown of their VMM's own past their admission (C1), each dimension none until one has: the class's cold start,
+/// typed, never a zero. Only rising, as the slowest answer seen is (decision 9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Record {
     tail: Tail,
     touched: u64,
+    overhead: [Option<u64>; 3],
 }
 
 /// The most a node's records hold: VMs (its runner population's ceiling) and classes it remembers.
@@ -483,16 +499,31 @@ impl<K: Ord + Copy> Node<K> {
         amounts(self.budget)
     }
 
-    /// What a new VM of `class` would be booked at (C2): its class's prior; with no VM of it warmed, what its workload
-    /// is admitted at, its VMM's own learned from its windows.
+    /// What a new VM of `class` would be booked at (C2): its class's prior, within its ceiling; with no VM of it
+    /// warmed, what its workload is admitted at, its VMM's own learned from its windows.
     pub fn prior(&self, class: &ClassKey) -> Amounts {
+        let ceiling = ceiling_of(&self.classes, class);
         let prior = self
             .classes
             .get(class)
             .filter(|record| record.tail.full())
             .and_then(|record| record.tail.p999())
-            .map_or(class.admission, |p| each(p, class.ceiling, u64::min));
+            .map_or(class.admission, |p| each(p, ceiling, u64::min));
         amounts(prior)
+    }
+
+    /// A VM of `class`'s ceiling (C1): its admission and what its VMs' windows have shown of their VMM's own past it,
+    /// the admission alone in a dimension none has shown yet.
+    pub fn ceiling(&self, class: &ClassKey) -> Amounts {
+        amounts(ceiling_of(&self.classes, class))
+    }
+
+    /// What `class`'s VMs' windows have shown of their VMM's own past their admission (C1), each dimension none while
+    /// cold, or with the class forgotten.
+    pub fn overhead(&self, class: &ClassKey) -> [Option<u64>; 3] {
+        self.classes
+            .get(class)
+            .map_or([None; 3], |record| record.overhead)
     }
 
     /// Books a new VM `id` of `class` at its prior if that fits the room (C2, C6); refused with the room if not.
@@ -558,13 +589,14 @@ impl<K: Ord + Copy> Node<K> {
             });
         }
         self.remember(class)?;
+        let ceiling = ceiling_of(&self.classes, &class);
         self.vms.insert(
             id,
             Vm {
                 class,
                 band,
                 vcpus,
-                booking: each(dims(booking), class.ceiling, u64::min),
+                booking: each(dims(booking), ceiling, u64::min),
                 held: [0; 3],
                 tail: Tail::new()?,
             },
@@ -611,6 +643,7 @@ impl<K: Ord + Copy> Node<K> {
             Record {
                 tail: Tail::new()?,
                 touched: self.clock,
+                overhead: [None; 3],
             },
         );
         Ok(())
@@ -622,12 +655,20 @@ impl<K: Ord + Copy> Node<K> {
         let vm = self.vms.get_mut(&id).ok_or(ChargeError::Unknown)?;
         let cpu = sample.cpu.total(vm.vcpus)?;
         let over = sample.span.max(window).as_nanos();
-        let milli = cpu
-            .as_nanos()
-            .checked_mul(1000)
-            .map(|n| n.div_ceil(over))
-            .and_then(|m| u64::try_from(m).ok())
-            .ok_or(ChargeError::Overflow("a VM's CPU rate"))?;
+        let milli = milli_of(cpu, over)?;
+        // What the window shows of its VMM's own past its admission (C1): its split's own CPU, else its whole CPU past
+        // the envelope; its memory and its read disk past it. A window that reached its CPU cap is no CPU sample.
+        let [cpu_in, mem_in, disk_in] = vm.class.admission;
+        let own_cpu = match &sample.cpu {
+            _ if sample.cap_milli.is_some_and(|cap| milli >= cap) => None,
+            Cpu::Split { own, .. } => Some(milli_of(*own, over)?),
+            Cpu::Whole(_) => Some(milli.saturating_sub(cpu_in)),
+        };
+        let shown = [
+            own_cpu,
+            Some(sample.mem_bytes.saturating_sub(mem_in)),
+            sample.disk_bytes.map(|disk| disk.saturating_sub(disk_in)),
+        ];
         let [_, _, booked_disk] = vm.booking;
         let reading = [
             milli,
@@ -648,6 +689,18 @@ impl<K: Ord + Copy> Node<K> {
         self.grew = self
             .grew
             .saturating_add(sample.mem_bytes.saturating_sub(before));
+        // A held VM's class is never forgotten (`remember`), so its record is there.
+        let record = self.classes.get_mut(&class).ok_or(ChargeError::Invalid {
+            what: "a class's record",
+            why: "a held VM's class was forgotten",
+        })?;
+        let [r0, r1, r2] = record.overhead;
+        let [s0, s1, s2] = shown;
+        let most = |was: Option<u64>, now: Option<u64>| match (was, now) {
+            (Some(was), Some(now)) => Some(was.max(now)),
+            (was, now) => was.or(now),
+        };
+        record.overhead = [most(r0, s0), most(r1, s1), most(r2, s2)];
         if evidence == Evidence::None {
             return Ok(());
         }
@@ -678,7 +731,11 @@ impl<K: Ord + Copy> Node<K> {
         self.growth = self.growth.max(self.grew);
         self.grew = 0;
         for vm in self.vms.values_mut() {
-            vm.booking = each(vm.booking, vm.charge(), u64::min);
+            vm.booking = each(
+                vm.booking,
+                vm.charge(ceiling_of(&self.classes, &vm.class)),
+                u64::min,
+            );
         }
         let mut booked = [0u64; 3];
         let mut held = [0u64; 3];
@@ -694,7 +751,7 @@ impl<K: Ord + Copy> Node<K> {
             let Some(vm) = self.vms.get_mut(&id) else {
                 continue;
             };
-            let charge = vm.charge();
+            let charge = vm.charge(ceiling_of(&self.classes, &vm.class));
             let before = physical(vm);
             #[cfg(test)]
             if planted(Mutant::BookPastRoom) {
@@ -756,7 +813,9 @@ impl<K: Ord + Copy> Node<K> {
     }
 
     pub fn charge(&self, id: &K) -> Option<Amounts> {
-        self.vms.get(id).map(|vm| amounts(vm.charge()))
+        self.vms
+            .get(id)
+            .map(|vm| amounts(vm.charge(ceiling_of(&self.classes, &vm.class))))
     }
 
     pub fn booking(&self, id: &K) -> Option<Amounts> {
@@ -773,7 +832,8 @@ impl<K: Ord + Copy> Node<K> {
         self.vms
             .iter()
             .filter_map(|(id, vm)| {
-                let excess = each(vm.charge(), vm.booking, u64::saturating_sub);
+                let charge = vm.charge(ceiling_of(&self.classes, &vm.class));
+                let excess = each(charge, vm.booking, u64::saturating_sub);
                 (excess != [0; 3]).then(|| (*id, amounts(excess)))
             })
             .collect()
@@ -801,7 +861,7 @@ impl<K: Ord + Copy> Node<K> {
             })?;
         let mut booked = 0u64;
         for (id, vm) in &self.vms {
-            let [ceiling, _, _] = vm.class.ceiling;
+            let [ceiling, _, _] = ceiling_of(&self.classes, &vm.class);
             let [booking, _, _] = vm.booking;
             let asked = match used.get(id) {
                 Some((used, cap)) if used < cap => *used,
@@ -842,7 +902,7 @@ impl<K: Ord + Copy> Node<K> {
             })?;
         for (id, demand) in demands {
             let vm = self.vms.get(id).ok_or(ChargeError::Unknown)?;
-            let [ceiling, _, _] = vm.class.ceiling;
+            let [ceiling, _, _] = ceiling_of(&self.classes, &vm.class);
             let [booking, _, _] = vm.booking;
             let need = (*demand).min(ceiling);
             let weight = booking.max(1);
@@ -964,7 +1024,7 @@ impl<K: Ord + Copy> Node<K> {
             })?;
         let each = self.vms.iter().zip(self.weights()?).zip(self.budgets()?);
         for (((id, vm), (_, weight)), (_, budget)) in each {
-            let [cpu, mem, _] = vm.class.ceiling;
+            let [cpu, mem, _] = ceiling_of(&self.classes, &vm.class);
             vms.push((
                 *id,
                 hex_api::Bounds {

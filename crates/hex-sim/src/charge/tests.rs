@@ -15,9 +15,9 @@ fn res(cpu_milli: u64, mem_bytes: u64, disk_bytes: u64) -> Amounts {
     }
 }
 
-/// Class `n` of VMs of `cpu` and `mem`, admitted at their ceiling (no VMM allowance).
+/// Class `n` of VMs admitted at `cpu` and `mem`.
 fn class_of(n: u8, cpu: u64, mem: u64) -> ClassKey {
-    ClassKey::new(Class::Shards, [n; 32], res(cpu, mem, 0), res(cpu, mem, 0))
+    ClassKey::new(Class::Shards, [n; 32], res(cpu, mem, 0))
 }
 
 fn node(budget: Amounts) -> Node<u32> {
@@ -47,6 +47,7 @@ fn sample(cpu_milli: u64, mem: u64) -> Sample {
         span: WINDOW,
         mem_bytes: mem,
         disk_bytes: Some(0),
+        cap_milli: None,
     }
 }
 
@@ -197,29 +198,45 @@ proptest! {
 fn w14_a_cold_vm_is_charged_its_booking_until_its_tail_is_full() {
     let mut n = node(res(4_000, 8 * GIB, 0));
     let class = class_of(1, 4_000, 4 * GIB);
-    assert_eq!(n.admit(1, class, 0, 4).unwrap(), class.ceiling());
+    assert_eq!(n.admit(1, class, 0, 4).unwrap(), class.admission());
     for _ in 0..SEEDABLE - 1 {
         window(&mut n, &[(1, 100, GIB)]);
     }
     assert_eq!(n.warmed(&1), Some(false));
-    assert_eq!(n.charge(&1).unwrap(), class.ceiling());
+    assert_eq!(n.charge(&1).unwrap(), class.admission());
     window(&mut n, &[(1, 100, GIB)]);
     assert_eq!(n.warmed(&1), Some(true));
     assert_eq!(n.charge(&1).unwrap(), res(100, GIB, 0));
     assert_eq!(n.booking(&1).unwrap(), res(100, GIB, 0));
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C1's ceiling (R03, learning never raises authority): do read a warmed VM past its
-/// allocation in CPU and memory; expect its charge to stop at the allocation.
+/// Joint plan step 14 (AC-T7.4.1), C1's ceiling (decision 9; ROOT, 2026-11-13: no census number is a ceiling): a
+/// class's ceiling is its admission until its VMs' windows show their VMM's own past it, then its admission and the
+/// most they have shown; a window at its CPU cap is no sample. Do ask a cold class's ceiling; then read a VM of it
+/// admitted at 2 CPUs and 4 GiB, its every window at its 2-CPU cap and at 9 GiB. Expect the ceiling the admission, its
+/// overhead none, typed; then the VM charged its 2 CPUs, the cap's windows no CPU sample, and its 9 GiB, its memory
+/// past the envelope learned.
 #[test]
-fn w14_the_charge_never_passes_the_allocation() {
+fn w14_the_ceiling_is_the_admission_and_the_vmm_overhead_its_windows_show() {
     let mut n = node(res(16_000, 64 * GIB, 0));
     let class = class_of(1, 2_000, 4 * GIB);
+    assert_eq!(n.ceiling(&class), class.admission());
+    assert_eq!(n.overhead(&class), [None; 3]);
     n.admit(1, class, 0, 2).unwrap();
     for _ in 0..SEEDABLE {
-        window(&mut n, &[(1, 5_000, 9 * GIB)]);
+        n.observe(
+            1,
+            &Sample {
+                cap_milli: Some(2_000),
+                ..sample(2_000, 9 * GIB)
+            },
+        )
+        .unwrap();
+        n.settle().unwrap();
     }
-    assert_eq!(n.charge(&1).unwrap(), class.ceiling());
+    assert_eq!(n.overhead(&class), [None, Some(5 * GIB), Some(0)]);
+    assert_eq!(n.ceiling(&class), res(2_000, 9 * GIB, 0));
+    assert_eq!(n.charge(&1).unwrap(), res(2_000, 9 * GIB, 0));
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C1's window: do read CPU over twice the window and over half of it; expect the
@@ -236,6 +253,7 @@ fn w14_a_reading_is_charged_over_its_span_never_less_than_the_window() {
                 span,
                 mem_bytes: 0,
                 disk_bytes: Some(0),
+                cap_milli: None,
             },
         )
         .unwrap();
@@ -266,6 +284,7 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
         span: WINDOW,
         mem_bytes: 0,
         disk_bytes: Some(0),
+        cap_milli: None,
     };
     assert!(matches!(
         n.observe(1, &split(vec![WINDOW])),
@@ -279,21 +298,16 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
     );
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C2: do admit a VM of a class no VM has warmed, its 8-CPU, 8 GiB envelope below its
-/// ceiling by a census allowance of half a CPU and 256 MiB; expect it booked at the envelope, what its workload is
-/// admitted at (ROOT, 2026-11-13: the census is evidence only). Do warm one whose windows are low but for two high;
-/// expect the class's prior the high one (the p99.9 of its last SEEDABLE warmed windows) and a second VM booked at it.
-/// Do read SEEDABLE more low windows; expect the prior to fall to the low, as the outlier's windows leave the sample.
+/// Joint plan step 14 (AC-T7.4.1), C2: do admit a VM of a class no VM has warmed, admitted at an 8-CPU, 8 GiB
+/// envelope; expect it booked at the envelope, what its workload is admitted at (ROOT, 2026-11-13: the census is
+/// evidence only). Do warm one whose windows are low but for two high; expect the class's prior the high one (the
+/// p99.9 of its last SEEDABLE warmed windows) and a second VM booked at it. Do read SEEDABLE more low windows; expect
+/// the prior to fall to the low, as the outlier's windows leave the sample.
 #[test]
 fn w14_the_prior_is_the_p999_of_the_class_last_warmed_windows_and_falls() {
     let mut n = node(res(16_000, 64 * GIB, 0));
     let envelope = res(8_000, 8 * GIB, 0);
-    let class = ClassKey::new(
-        Class::Shards,
-        [1; 32],
-        res(8_500, 8 * GIB + (256 << 20), 0),
-        envelope,
-    );
+    let class = ClassKey::new(Class::Shards, [1; 32], envelope);
     assert_eq!(n.prior(&class), envelope);
     assert_eq!(n.admit(1, class, 0, 8).unwrap(), envelope);
     for t in 0..SEEDABLE {
@@ -320,7 +334,7 @@ fn w14_admission_refuses_with_the_room_and_counts_memory_held_past_bookings() {
     assert_eq!(
         n.admit(2, class, 0, 4),
         Err(ChargeError::NoRoom {
-            booking: class.ceiling(),
+            booking: class.admission(),
             room: res(0, 12 * GIB, 0),
         })
     );
@@ -524,7 +538,7 @@ fn w14_classes_past_their_bound_forget_the_oldest_without_a_live_vm() {
     assert!(matches!(n.admit(3, c, 0, 1), Err(ChargeError::Full { .. })));
     n.end(&1).unwrap();
     n.admit(3, c, 0, 1).unwrap();
-    assert_eq!(n.prior(&a), a.ceiling());
+    assert_eq!(n.prior(&a), a.admission());
     assert_eq!(n.prior(&b), res(10, GIB / 2, 0));
 }
 

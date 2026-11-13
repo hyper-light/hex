@@ -147,6 +147,9 @@ struct Vm {
     last: (u64, Instant),
     /// What its cgroup holds as the learner last wrote it, or as its create wrote it.
     written: Vec<Write>,
+    /// The CPU cap its cgroup holds it at, in milli-CPU (`cpu.max`), as last written: a window that reaches it is no
+    /// sample of its VMM's own CPU (C1).
+    cap: Option<u64>,
 }
 
 /// The node's learner (module docs).
@@ -423,6 +426,7 @@ impl Learner {
                             span: now.saturating_duration_since(at),
                             mem_bytes: usage.memory_bytes,
                             disk_bytes: None,
+                            cap_milli: vm.cap,
                         },
                     )
                     .map_err(refused)?;
@@ -471,6 +475,7 @@ impl Learner {
                     cgroup,
                     last: (usage.cpu_usec, now),
                     written: hex_core::cgroup::writes(&created, &[])?,
+                    cap: created.cpu_max_milli.map(u64::from),
                 },
             );
             self.last.met(class, scope, intent)?;
@@ -541,6 +546,7 @@ impl Learner {
         for (lifetime, bounds) in &placed.vms {
             if let Some(vm) = self.vms.get_mut(&lifetime.scope) {
                 rewrite(io, &vm.cgroup, bounds, &mut vm.written)?;
+                vm.cap = bounds.cpu_max_milli.map(u64::from);
             }
         }
         rewrite(io, &self.fleet.0, &placed.fleet, &mut self.fleet.1)?;
