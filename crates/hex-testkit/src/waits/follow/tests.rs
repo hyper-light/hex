@@ -146,8 +146,9 @@ fn a_call_is_sliced_at_w_star_and_at_each_window_past_it() {
 }
 
 /// A thread as a party: alive with its CPU time while it sleeps, ended once it has gone. Do: a thread that names
-/// itself, then sleeps on a channel; read it until it reads asleep, twice, then wake it to its end and join it.
-/// Expect: asleep, its count the same both times; ended once joined.
+/// itself, then sleeps on a channel; read it until it reads asleep, twice, then wake it to its end, join it, and read
+/// it until it reads ended (a joined thread's task can show for a moment as it exits: run r435 read it asleep once).
+/// Expect: asleep, its count the same both times; then ended.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_thread_reads_alive_while_it_sleeps_and_ended_once_gone() {
@@ -173,5 +174,13 @@ fn a_thread_reads_alive_while_it_sleeps_and_ended_once_gone() {
     assert_eq!(thread.party(), Party::Alive { progress: asleep });
     wake.send(()).unwrap();
     sleeper.join().unwrap();
-    assert_eq!(thread.party(), Party::Ended);
+    let joined = Instant::now();
+    while thread.party() != Party::Ended {
+        assert!(
+            joined.elapsed() < PATIENCE,
+            "{thread:?} still reads {:?} after its join",
+            thread.party()
+        );
+        std::thread::yield_now();
+    }
 }

@@ -181,9 +181,9 @@ impl Thread {
         sys::current().map(Self)
     }
 
-    /// The thread as a party: ended once it has gone; [`Party::Live`] while it runs or waits for a core to run on, so
-    /// a loaded host's queue is never taken for a stall; else alive, its count its CPU time, which stands while it
-    /// sleeps. Linux reads `/proc/self/task/<tid>/stat` and `schedstat`; macOS `proc_pidinfo`'s
+    /// The thread as a party: ended once it has gone, which comes a moment after its join, as its task exits;
+    /// [`Party::Live`] while it runs or waits for a core to run on, so a loaded host's queue is never taken for a stall;
+    /// else alive, its count its CPU time, which stands while it sleeps. Linux reads `/proc/self/task/<tid>/stat` and `schedstat`; macOS `proc_pidinfo`'s
     /// `PROC_PIDTHREADID64INFO`.
     pub fn party(&self) -> Party {
         sys::party(self.0)
