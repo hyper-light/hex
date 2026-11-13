@@ -32,8 +32,8 @@ use hex_api::{
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::image::{
-    Channel, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, MemberEnd, MemberName,
-    MemberSpec, RunEnd, Secret, Stats, StatsScope,
+    BootStop, Channel, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, MemberEnd,
+    MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -175,8 +175,9 @@ type Booted = Result<Box<dyn ImageGuest>, ImageRefusal>;
 
 /// A run of this process.
 enum Run {
-    /// Its boot, on a thread of its own, answers here.
-    Booting(Arc<Slot<Booted>>),
+    /// Its boot, on a thread of its own, answers here; its stop (D231's `BootStop`) ends it mid-boot, as a delete
+    /// asks it.
+    Booting(Arc<Slot<Booted>>, Arc<BootStop>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
     Running(Arc<dyn ImageGuest>, Instant),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
@@ -854,10 +855,25 @@ impl Runs {
         Ok(())
     }
 
+    /// Asks `key`'s boot under way to stop (D231's `BootStop`: its run host killed mid-boot, the boot answering
+    /// `Ended(Stopped)` once that host is gone), where it is booting; a boot that answered already is no longer its
+    /// stop's.
+    fn stop_boot<'k>(&self, key: impl Into<Key<'k>>) -> Result<(), Refusal> {
+        let stop = match self.lock()?.get(key.into()) {
+            Some(Run::Booting(_, stop)) => Some(Arc::clone(stop)),
+            _ => None,
+        };
+        // Asked with the runs' lock let go: BootStop::stop kills the run host and returns at once.
+        if let Some(stop) = stop {
+            stop.stop();
+        }
+        Ok(())
+    }
+
     /// `key`'s boot under way, where it is booting.
     fn booting<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Arc<Slot<Booted>>>, Refusal> {
         Ok(match self.lock()?.get(key.into()) {
-            Some(Run::Booting(slot)) => Some(Arc::clone(slot)),
+            Some(Run::Booting(slot, _)) => Some(Arc::clone(slot)),
             _ => None,
         })
     }
@@ -874,7 +890,7 @@ impl Runs {
             return Ok(Settled::None);
         };
         Ok(match run {
-            Run::Booting(slot) => match slot.take()? {
+            Run::Booting(slot, _) => match slot.take()? {
                 None => Settled::Booting,
                 Some((Ok(guest), took)) => {
                     if let Some(waits) = waits {
@@ -885,6 +901,13 @@ impl Runs {
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
                     *run = Run::Running(Arc::clone(&guest), at);
                     Settled::Started(guest)
+                }
+                // Its stop ended it mid-boot, as its delete asked (D231's `BootStop`): its run never started, and the
+                // time to its stop is no boot's answer, so no sample.
+                Some((Err(ImageRefusal::Ended(RunEnd::Stopped)), _)) => {
+                    let end = End::of(&RunEnd::Stopped);
+                    *run = Run::Ended(end.clone());
+                    Settled::Ends(end)
                 }
                 // The run host refused or ended the run before it started: its own answer, in its words.
                 Some((Err(why), took)) => {
@@ -922,7 +945,7 @@ impl Runs {
     ) -> Result<Result<(), ImageRefusal>, Refusal> {
         let mut runs = self.lock()?;
         Ok(match runs.get_mut(key.into()) {
-            Some(run @ Run::Booting(_)) => match slot.take()? {
+            Some(run @ Run::Booting(..)) => match slot.take()? {
                 Some((Ok(guest), took)) => {
                     waits.boot.answered(took);
                     // Its run started as its boot answered.
@@ -1021,22 +1044,26 @@ impl ImageBoot {
 }
 
 /// Boots `spec` on a thread of its own, its answer `slot`'s: Shards waits for the run's start or its host's end alone
-/// (`Duration::MAX`), and a booted run's host keeps its diagnostics in `kept` from then on, after what it kept until
-/// then; a run whose host can't is dropped, which ends it, and its boot is refused in those words.
+/// (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps its diagnostics in
+/// `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends it, and its boot
+/// is refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
     kept: std::fs::File,
     slot: Arc<Slot<Booted>>,
+    stop: Arc<BootStop>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("hex-image-boot".to_owned())
         .spawn(move || {
             let party = Party(slot);
-            let booted = images.boot(&spec, Duration::MAX).and_then(|guest| {
-                guest.keep_diagnostics(kept)?;
-                Ok(guest)
-            });
+            let booted = images
+                .boot_stoppable(&spec, Duration::MAX, &stop)
+                .and_then(|guest| {
+                    guest.keep_diagnostics(kept)?;
+                    Ok(guest)
+                });
             party.0.put(booted);
         })
         .map(drop)
@@ -1269,6 +1296,8 @@ impl ImageClass {
             control: None,
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
+            // No sign-in grant (Shards' D242 step 8, image channel v24): its pass-through is goal 13's.
+            sign_ins: Vec::new(),
         })
     }
 
@@ -1510,13 +1539,16 @@ impl ImageClass {
             }
         };
         let slot = Arc::new(Slot::new());
-        image.runs.insert(&id, Run::Booting(Arc::clone(&slot)))?;
+        let stop = Arc::new(BootStop::new());
+        image
+            .runs
+            .insert(&id, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
         // Shards waits for the run's start or its host's end alone (`Duration::MAX`): the boot's learned W* is where
         // the start answers Pending and tells the census, never where a boot ends (decision 9, the person's ruling of
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot)) {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
@@ -1846,13 +1878,13 @@ impl ImageClass {
         self.delete_run(record, false).map(|_| ())
     }
 
-    /// Box `id`'s boot followed to its answer, for its delete (kiln's choice (b)) or a `started` call (kiln's HexVms
-    /// adapter): D231's boot gives no stop for a boot under way (`Images::boot` blocks until its run starts or its host
-    /// ends, its host the caller's only then), so `follower` waits for the boot, as decision 9 has a wait follow its
-    /// party, by a wait of its own (`delete_boot`, `started`), from its ask. Past that wait's W*, its run-out is told
-    /// under its name, the boot it follows still under way, and it waits on, refused only where the boot's thread ends
-    /// with no answer: a boot that neither starts nor ends holds its follower with it. The boot's answer is taken as any
-    /// later call takes it, its time the boot's own sample.
+    /// Box `id`'s boot followed to its answer, for its delete (kiln's choice (b)), which has stopped it first (D231's
+    /// `BootStop`, so its answer is its run's start, where that came first, or `Ended(Stopped)` once its run host is
+    /// gone), or for a `started` call (kiln's HexVms adapter): `follower` waits for the boot, as decision 9 has a wait
+    /// follow its party, by a wait of its own (`delete_boot`, `started`), from its ask. Past that wait's W*, its run-out
+    /// is told under its name, the boot it follows still under way, and it waits on, refused only where the boot's
+    /// thread ends with no answer. The boot's answer is taken as any later call takes it, its time the boot's own sample
+    /// (but a stopped boot's, which is none).
     fn follow_boot(&self, id: &BoxId, follower: Follower) -> Result<State, Refusal> {
         let image = self.image()?;
         let wait = follower.wait(image.waits()?);
@@ -1907,6 +1939,9 @@ impl ImageClass {
                     t.put(&current)
                 })?;
                 if matches!(state, State::Booting) {
+                    // Its boot stopped mid-boot (D231's `BootStop`: its run host killed), then followed to its end,
+                    // `Ended(Stopped)`; a boot that answered first is a run, stopped below.
+                    self.image()?.runs.stop_boot(&id)?;
                     state = self.follow_boot(&id, Follower::Delete)?;
                 }
                 match state {

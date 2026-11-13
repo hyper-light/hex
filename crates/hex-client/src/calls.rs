@@ -3014,7 +3014,7 @@ impl<T: Transport> Runtime for Core<T> {
             _ => Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
-                why: None,
+                why: Some("its node answered its initialization with another reply".to_owned()),
             }),
         }
     }
@@ -3029,7 +3029,7 @@ impl<T: Transport> Runtime for Core<T> {
             _ => Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
-                why: None,
+                why: Some("its node answered its release with another reply".to_owned()),
             }),
         }
     }

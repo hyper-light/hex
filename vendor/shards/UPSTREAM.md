@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `db4168345a683e46d4f517b78e99a198931f1167` (main).
+Revision: `3114e082f116b5251029dc9aeaaa88dfd66e75b8` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -17,7 +17,7 @@ This revision holds what Hex's node speaks to: the direct boot (D215), its guest
 host, Windows' among them (b4548fcf); launches through a client's native owner (D233); GPU selection
 by exact identity (D232), a VM process's refusal of its selection typed in place of a receipt
 (`GpuProbeError::Refused`, `Unreported`; 18f59d497); and an image booted under shards-init for an
-orchestrator (D231, `shards_api::image`, image channel version 23), with its nesting grant (D234)
+orchestrator (D231, `shards_api::image`, image channel version 24), with its nesting grant (D234)
 and, under it, the run's GPUs by identity (`ImageSpec::gpu_devices`, `gpus=`, version 16, e46299c07;
 its workload's cgroup sized by its microVM's CPUs, a853a8138), plugs (D235), destinations by name
 and the receivers a published port reaches (D236), a member's stdin, the room its orchestrator's
@@ -34,7 +34,12 @@ yet), its credential grants' values leased by the orchestrator's lessor (D242, `
 version 20), the setup keys a run's spec may name (D257), a run's end saying why and its run host's
 diagnostics kept whole in a file its orchestrator names (D258, `ImageGuest::keep_diagnostics`), the
 run's microVM saved whole for its owner (D259, `ImageGuest::save`, version 23, 8a9fa413d; Hex asks
-none yet), its
+none yet), a stop for a boot under way (D231, `BootStop` and `Images::boot_stoppable`, ed1136305: the
+run host killed with its process group, or on Windows its job, and the boot answering
+`Ended(Stopped)` once that host is reaped and every holder of its stderr has closed it), the sign-ins
+an orchestrator's injector captures and refreshes for a run (D242's step 8 slice 2b, version 24,
+`ImageSpec::sign_ins`, the lessor's `capture`, `refresh` and `revoked`, defaulted; Hex grants none
+yet, its pass-through goal 13's), its
 run host started holding its three standard streams alone through `shards_ipc`'s spawn (D248), a run
 whose own command never started ending failed in its VM's words (D249), a run that keeps nothing
 past the microVM keeping the network its image links its members to, nothing let past (D250), a lane
@@ -47,7 +52,9 @@ port (D254, 6f786c91c); a guest's size held to `check`'s rule from one source,
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
 parent's start tick (743c5b32) and its read test holding its wait from below alone (308895ef4);
 shards-remote's handshake judged as a send is, a closed port's refusal read from a send too
-(233c715f0, D180), so its loopback test of a closed port no longer waits on a refusal it never reads; and
+(233c715f0, D180), so its loopback test of a closed port no longer waits on a refusal it never reads;
+the host endpoint resetting a cut lane (D251 amended, 8754b451f) and the guest legs' cure (shards-init's
+relay, the vsock muxer's host writes, Windows' warm pass; 275b4e178); and
 an AF_UNIX read on Windows that waits in WSAPoll, which sees a peer's end that a waiting recv can
 sleep through (shards-afunix, 7ea3ce27, D140, PM M536). shards-api depends on `crates/ipc` (the run
 host's spawn), `crates/dns` (a credential grant's host names, checked as DNS names, D242) and

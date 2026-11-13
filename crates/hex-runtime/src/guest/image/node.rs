@@ -11,8 +11,8 @@ use hex_api::{Allocation, Exit, HostUse, NodeRun, Refusal};
 use hex_core::patience::Patience;
 use hex_core::record::{NodeVmPhase, NodeVmRecord, RECORD_VERSION};
 use shards_api::image::{
-    ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep, Narrowing, Ready,
-    SocketGrant, StatsScope,
+    BootStop, ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep,
+    Narrowing, Ready, SocketGrant, StatsScope,
 };
 
 use super::{
@@ -94,8 +94,11 @@ impl ImageClass {
             }
         };
         let slot = Arc::new(Slot::new());
-        image.runs.insert(vm.run, Run::Booting(Arc::clone(&slot)))?;
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot)) {
+        let stop = Arc::new(BootStop::new());
+        image
+            .runs
+            .insert(vm.run, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
+        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
             image.runs.insert(vm.run, Run::Ended(End::unknown(None)))?;
             image.runs.forget(vm.run)?;
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
@@ -293,6 +296,8 @@ impl ImageClass {
                 }),
             }),
             gpu_devices: Vec::new(),
+            // No sign-in grant (Shards' D242 step 8): a node VM signs in to nothing.
+            sign_ins: Vec::new(),
         })
     }
 }
