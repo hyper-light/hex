@@ -171,12 +171,30 @@ on hardware (ROOT's fairness run).
   window asks the rule again. Where it would move the VM rather than end it, the move is refused typed: a Shards VM's
   awaits D176 (`Awaits(LiveMove)`, the end's `unmoved`), a Firecracker VM's would be Hex's own, through Firecracker's
   snapshot, which Hex doesn't drive yet. The why is on the box itself, where the person looks (ROOT, 2026-11-12): the node
-  writes it into the VM's record after the window (`BoxRecord::last_resort`, through the box's record turn and only
-  into the record of that VM's lifetime, a write that fails kept for the next window), and the VM's inspect and list
-  carry it (`BoxInfo::last_resort`, last on the node's wire), across the node's restarts. A node that crashes between the
-  kill and that write loses the why, not the end: the VM's exit still says `SIGKILL`. Each class's capacity answer carries
+  writes it into the VM's record before it ends the VM (`BoxRecord::last_resort`, through the box's record turn and only
+  into the record of that VM's lifetime), and the VM's inspect and list carry it (`BoxInfo::last_resort`, last on the
+  node's wire), across the node's restarts. Each class's capacity answer carries
   the VMs of the class it ended too, latest first (`Learned::ended`, fitted after the holdings), of the at most the
   machine's VM population it keeps, the oldest forgotten first.
+- **Intent first** (ROOT, 2026-11-12: "if the model allows it"; decided so). The learner writes why it ends a VM into
+  the VM's record before it ends it (`recorded::charges::LastResort` through `Reach::intend`), so a node that crashes
+  between the end and the window's writes still says why on the box. The model allows it on three conditions, each
+  held: (1) the end waits on nothing unbounded: the write waits at most the store's record turn, held only by another
+  write of that record and bounded by its learned patience (`store.turns`, twice the slowest record change, 3.136 ms
+  seeded for a release build: `crates/hex-node/src/store.rs`), and one durable write, within the window whose growth
+  the rule's margin covers (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
+  write that fails: where the intent isn't written (its turn refused, its write failed, the record not that VM's
+  lifetime), the VM is ended all the same and why is written after the window, as before, a write that fails kept for
+  the next; (3) no record says a VM was ended when it wasn't: an end refused withdraws its intent (written after the
+  window, the latest write of a VM replacing any kept before it), and a node that restarts and meets an intent on a VM
+  that still runs carries that end out first, as it was decided, before asking the rule again (`LastResort::met`,
+  `due`), as a delete marked before a crash is finished by recovery. The VMM may still be dying when the restarted node
+  looks, which ending it again only confirms; carrying the end out after a restart acts on the evidence of the window
+  that decided it, which is why the rule decides nothing anew for it. The one case where a refused end is carried out
+  after a restart is a crash before its withdrawal is written. The cost is one record write before each end, on a path
+  that ends at most one VM a window. Not taken: ending first and writing after, as before, which loses the why to a crash
+  between the two; writing the intent somewhere of its own (a journal of the learner's), a second record the box's
+  inspect would have to read, which the box's own record already is.
 - **Bands.** A VM's band is its spec's (`BoxSpec::band`, as its submitter gives it, 0 the lowest; a spec without one
   is band 0, its record and native commitment unchanged), carried whole from the submission to the node's record:
   the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks each
@@ -275,8 +293,8 @@ reaches the view settled with goal 13 the same day:
   learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers and the
   box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS the native
   helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the node holds, as
-  its receipt's stop terminates it. Its end is then observed as any other, why goes into the VM's record after the
-  window, and its inspect says it (`Books::counted`), as Linux's does.
+  its receipt's stop terminates it. Why goes into the VM's record before its end (intent first, C5), its end is then
+  observed as any other, and its inspect says it (`Books::counted`), as Linux's does.
 
 ## Every number
 

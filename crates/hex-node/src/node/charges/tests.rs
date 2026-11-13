@@ -124,7 +124,7 @@ impl Cgroups for Record {
     fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         self.events.borrow_mut().push(format!("intend {id}"));
         match self.records.borrow().as_ref() {
-            Some(store) => record_last_resort(store, id, scope, end),
+            Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
         }
     }
@@ -858,7 +858,7 @@ fn w14_a_restarted_node_carries_out_the_end_its_intent_names() {
         fleet_budget: 16 * GIB,
         unmoved: Some(Upstream::LiveMove),
     };
-    assert!(record_last_resort(&store, &vms[1].0, vms[1].1, &intent).unwrap());
+    assert!(record_last_resort(&store, &vms[1].0, vms[1].1, Some(&intent)).unwrap());
     let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
         let recorded = store.get(id).unwrap().unwrap().unwrap();
         Ok(Some(Met {
@@ -888,6 +888,53 @@ fn w14_a_restarted_node_carries_out_the_end_its_intent_names() {
         .window(&io, vms, record, &[], fleet_budget, start + WINDOW)
         .unwrap();
     assert_eq!(io.kills.borrow().len(), 1, "one end is never two");
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 intent first: an end refused withdraws its intent, so no record says a VM the node
+/// couldn't end was ended. Do record three Shards VMs in a node's store, refuse their cgroups' kills, run the learner's
+/// windows past their fleet's 16 GiB memory budget, vm-2 holding 12 GiB, then make the window's writes as the node does
+/// after it. Expect vm-2's intent asked and its kill refused, the state that refusal, typed, and vm-2's record naming
+/// no end.
+#[test]
+fn w14_a_refused_end_withdraws_its_intent() {
+    use crate::store::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    let vms = recorded_three(&store);
+    let io = Record::default();
+    *io.records.borrow_mut() = Some(store.clone());
+    io.refuse_kills.set(true);
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, vms.clone(), booked_at_four, &[], fleet_budget, start)
+        .unwrap();
+    for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(name), 0, held);
+    }
+    learner
+        .window(
+            &io,
+            vms.clone(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(*io.events.borrow(), ["intend vm-2"]);
+    assert_eq!(
+        learner.resort(),
+        &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
+    );
+    let (left, failed) = write_ends(&store, learner.unrecorded());
+    assert!(left.is_empty() && failed.is_none(), "{left:?} {failed:?}");
+    let record = store.get(&vms[1].0).unwrap().unwrap().unwrap();
+    assert_eq!(record.last_resort, None, "its intent withdrawn");
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5 on the box itself (ROOT, 2026-11-12): a last-resort end shows in inspect and
@@ -942,7 +989,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
     let mut ends = learner.unrecorded();
     assert_eq!(ends.len(), 1);
-    ends.retain(|(id, scope, end)| !record_last_resort(&store, id, *scope, end).unwrap());
+    ends.retain(|(id, scope, end)| !record_last_resort(&store, id, *scope, end.as_ref()).unwrap());
     assert!(ends.is_empty(), "every end written");
     assert!(learner.unrecorded().is_empty(), "taken once");
     drop(store);
@@ -993,5 +1040,5 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     assert_eq!(read, answer);
 
     let made_again = [7; 16];
-    assert!(!record_last_resort(&store, &vms[1].0, made_again, &end).unwrap());
+    assert!(!record_last_resort(&store, &vms[1].0, made_again, Some(&end)).unwrap());
 }

@@ -115,7 +115,7 @@ impl Managed for Record {
     fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         self.events.borrow_mut().push(format!("intend {id}"));
         match self.records.borrow().as_ref() {
-            Some(store) => record_last_resort(store, id, scope, end),
+            Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
         }
     }
@@ -463,9 +463,10 @@ fn recorded_three(store: &Store) -> Vec<BoxRecord> {
 
 /// Joint plan step 14 (AC-T7.4.1), C5 intent first on macOS and Windows: why survives a node that crashes after a
 /// VM's end and before the window's writes. Do record three Shards VMs in a node's store as its create does, run the
-/// learner's windows past their fleet's 16 GiB memory budget, vm-2 holding 7 GiB, until it stops vm-2, then crash:
-/// leave unmade the writes the window keeps for after it, and reopen the store as the restarted node does. Expect
-/// vm-2's record to say why it was ended, its intent written before its stop, and vm-1's and vm-3's records nothing.
+/// learner's windows past their fleet's 16 GiB memory budget, vm-2 holding 12 GiB and the others 2 GiB (so the VM past
+/// its budget is vm-2 whatever order the store's fresh lifetimes put them in), until it stops vm-2, then crash: leave
+/// unmade the writes the window keeps for after it, and reopen the store as the restarted node does. Expect vm-2's
+/// record to say why it was ended, its intent written before its stop, and vm-1's and vm-3's records nothing.
 #[test]
 fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
     let dir = tempfile::tempdir().unwrap();
@@ -481,7 +482,7 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
     let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
-    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+    for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(name, 0, held);
     }
     learner.window(&io, &vms, budget, start + WINDOW).unwrap();
@@ -499,7 +500,7 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
         .unwrap()
         .last_resort;
     let end = end.expect("vm-2's why, written before its end");
-    assert_eq!((end.id.as_str(), end.held), ("vm-2", 7 * GIB));
+    assert_eq!((end.id.as_str(), end.held), ("vm-2", 12 * GIB));
     for other in [&vms[0], &vms[2]] {
         let record = store.get(&other.spec.id).unwrap().unwrap().unwrap();
         assert_eq!(record.last_resort, None);
@@ -528,7 +529,7 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
         fleet_budget: 16 * GIB,
         unmoved: Some(hex_api::Upstream::LiveMove),
     };
-    assert!(record_last_resort(&store, &made[1].spec.id, scope, &intent).unwrap());
+    assert!(record_last_resort(&store, &made[1].spec.id, scope, Some(&intent)).unwrap());
     let vms: Vec<BoxRecord> = made
         .iter()
         .map(|record| store.get(&record.spec.id).unwrap().unwrap().unwrap())

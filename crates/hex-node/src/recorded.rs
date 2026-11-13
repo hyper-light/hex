@@ -1998,7 +1998,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         scope: charges::Scope,
         end: &hex_api::LearnedEnd,
     ) -> Result<bool, Refusal> {
-        charges::record_last_resort(self.store, id, scope, end)
+        charges::record_last_resort(self.store, id, scope, Some(end))
     }
 }
 

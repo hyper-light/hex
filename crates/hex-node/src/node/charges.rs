@@ -11,7 +11,7 @@
 //! VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
 //! D230) (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
-use crate::recorded::charges::{LastResort, Scope, record_last_resort, write_ends};
+use crate::recorded::charges::{LastResort, Reach, Scope, Writes, record_last_resort, write_ends};
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
 pub(super) const WINDOW: Duration = Duration::from_micros(CPU_PERIOD_US);
@@ -88,7 +88,26 @@ impl Cgroups for Kernel<'_> {
     }
 
     fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
-        record_last_resort(self.store, id, scope, end)
+        record_last_resort(self.store, id, scope, Some(end))
+    }
+}
+
+/// The last resort's reach on Linux: a VM's record through the node's records, its end through its cgroup's kill.
+struct Kills<'a, C> {
+    io: &'a C,
+    vms: &'a BTreeMap<Scope, Vm>,
+}
+
+impl<C: Cgroups> Reach for Kills<'_, C> {
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        self.io.intend(id, scope, end)
+    }
+
+    fn end(&self, scope: &Scope) -> Result<(), Refusal> {
+        let vm = self.vms.get(scope).ok_or_else(|| {
+            Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
+        })?;
+        self.io.kill(&vm.cgroup)
     }
 }
 
@@ -401,6 +420,7 @@ impl Learner {
             self.node.end(&scope).map_err(refused)?;
             self.vms.remove(&scope);
             self.rooms.remove(&scope);
+            self.last.gone(&scope);
         }
         for (id, scope, cgroup) in running {
             // A VM ending between the listing and its read is read no more; the next listing ends it.
@@ -429,7 +449,7 @@ impl Learner {
                 class,
                 allocation,
                 band,
-                intent: _,
+                intent,
             }) = record(&id)?
             else {
                 continue;
@@ -466,6 +486,7 @@ impl Learner {
                     written: hex_core::cgroup::writes(&created, &[])?,
                 },
             );
+            self.last.met(class, scope, intent)?;
         }
         // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget, and its CPU
         // is at most what the units the boxes leave carry.
@@ -500,29 +521,24 @@ impl Learner {
         Ok(())
     }
 
-    /// The last resort (C5), once the placement holds what it can: the VM the core's verdict chooses ended by killing
-    /// its cgroup, as `LastResort` holds one end at a time.
+    /// The last resort (C5), once the placement holds what it can: the VM it chooses, why written into its record
+    /// first, ended by killing its cgroup, as `LastResort` holds one end at a time.
     fn last_resort(&mut self, io: &impl Cgroups) -> Result<(), Refusal> {
         let vms = &self.vms;
         self.last.window(
             &self.node,
             |scope| vms.get(scope).map(|vm| (vm.class, &vm.id)),
-            |scope| {
-                let vm = vms.get(scope).ok_or_else(|| {
-                    Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
-                })?;
-                io.kill(&vm.cgroup)
-            },
+            &Kills { io, vms },
         )
     }
 
-    /// Takes the ends not yet in their boxes' records, oldest first (C5).
-    pub(super) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, hex_api::LearnedEnd)> {
+    /// Takes the writes into VMs' records not yet made, oldest first (C5).
+    pub(super) fn unrecorded(&mut self) -> Writes {
         self.last.unrecorded()
     }
 
-    /// Keeps `left`, ends whose record writes failed, for the next window (C5).
-    pub(super) fn keep_unrecorded(&mut self, left: VecDeque<(BoxId, Scope, hex_api::LearnedEnd)>) {
+    /// Keeps `left`, writes that failed, for the next window (C5).
+    pub(super) fn keep_unrecorded(&mut self, left: Writes) {
         self.last.keep_unrecorded(left);
     }
 
