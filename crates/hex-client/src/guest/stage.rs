@@ -26,14 +26,15 @@ use super::{Duplex, DuplexOwner, Link};
 /// evidence.
 static STAGING: Patience = Patience::measuring("guest.stage");
 
-/// Reads the relay's answer to what was sent at `sent`, the time it took taught to [`STAGING`].
+/// Reads the relay's answer to what was sent at `sent`, the time it took taught to `wait` ([`STAGING`]).
 fn relay_answer(
     conn: &mut dyn Duplex,
     deframer: &mut Deframer,
     sent: std::time::Instant,
+    wait: &Patience,
 ) -> Result<Vec<u8>, Refusal> {
     let got = message(conn, deframer)?;
-    STAGING.answered(sent.elapsed());
+    wait.answered(sent.elapsed());
     Ok(got)
 }
 
@@ -180,6 +181,17 @@ pub fn stage(
     items: &[Item],
     limits: &Limits,
 ) -> Result<Staged, Refusal> {
+    stage_with(link, id, items, limits, &STAGING)
+}
+
+/// [`stage`], its waits on the relay as `wait` has learned them.
+fn stage_with(
+    link: &dyn Link,
+    id: &BoxId,
+    items: &[Item],
+    limits: &Limits,
+    wait: &Patience,
+) -> Result<Staged, Refusal> {
     // The root's layers, by digest: the store's names for them (§4a). A stage stages one root.
     let layers: Vec<&Layer> = items
         .iter()
@@ -190,13 +202,13 @@ pub fn stage(
         .flatten()
         .collect();
     let digests: Vec<Option<files::Digest>> = layers.iter().map(|l| l.digest).collect();
-    let mut conn = dial(link)?;
+    let mut conn = dial(link, wait)?;
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
     conn.write_all(&files::open_stage(id.as_str(), &digests).map_err(refused)?)
         .map_err(|e| Refusal::os("sending staged files", e))?;
     // The relay answers the opening with the stage's budget, what its file system has free and which of
     // the layers it already holds, or refuses.
-    let first = relay_answer(&mut *conn, &mut deframer, std::time::Instant::now())?;
+    let first = relay_answer(&mut *conn, &mut deframer, std::time::Instant::now(), wait)?;
     let Some(budget) = files::read_budget(&first) else {
         return Err(answer_of(&first).err().unwrap_or_else(|| {
             Refusal::Broken("the relay answered a stage's opening with no budget".to_owned())
@@ -239,7 +251,7 @@ pub fn stage(
     // The answer is read first, so the relay has removed a partial copy before this returns. Its
     // answer names a stream cut short when the packer refused part way; the packer's own refusal names
     // the entry, and is the one returned, unless it was only the connection failing.
-    let answered = relay_answer(&mut *conn, &mut deframer, ended).and_then(|m| answer_of(&m));
+    let answered = relay_answer(&mut *conn, &mut deframer, ended, wait).and_then(|m| answer_of(&m));
     match (answered, sent) {
         (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
             Err(why)
@@ -254,19 +266,20 @@ pub fn stage(
 
 /// Removes `id`'s staged copy through `link`. A copy that isn't there is [`Refusal::NoSuchBox`].
 pub fn unstage(link: &dyn Link, id: &BoxId) -> Result<(), Refusal> {
-    let mut conn = dial(link)?;
+    let wait = &STAGING;
+    let mut conn = dial(link, wait)?;
     let open = files::open(Op::Remove, id.as_str()).map_err(refused)?;
     conn.write_all(&open)
         .map_err(|e| Refusal::os("asking for a staged copy's removal", e))?;
     // A removal ends at its opening, where the relay answers: read with the connection whole, as a stage's is.
     let sent = std::time::Instant::now();
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    relay_answer(&mut *conn, &mut deframer, sent).and_then(|m| answer_of(&m))
+    relay_answer(&mut *conn, &mut deframer, sent, wait).and_then(|m| answer_of(&m))
 }
 
-fn dial(link: &dyn Link) -> Result<DuplexOwner, Refusal> {
+fn dial(link: &dyn Link, wait: &Patience) -> Result<DuplexOwner, Refusal> {
     let conn = link.dial(files::FILES_PORT)?;
-    let patience = STAGING.deadline();
+    let patience = wait.deadline();
     conn.set_write_timeout(patience)
         .and_then(|()| conn.set_read_timeout(patience))
         .map_err(|e| Refusal::os("bounding a staging connection", e))?;
