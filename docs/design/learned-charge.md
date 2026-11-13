@@ -17,6 +17,16 @@ being GitHub's main (`025aae6d`):
   managed stop's own wait (`788dda27`).
 - Built: the learner's window from each image VM's rate period (`f95ed62b`).
 - Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
+  On Shards (ROOT asked through g121): a managed guest's per-vCPU guest time (a `ManagedGuest` stats call), so the
+  learner holds a managed VM's VMM CPU apart and its governor takes its rate less the VMM's own; until then Windows'
+  job binds first (`RateHeld::GovernorUnderJob`, D255); Shards 097ec0047 (D260, `ManagedGuest::host_use`) gives it,
+  for goal 12 to vendor. On Hex: 2c-4b, the node's call for its macOS helper's slowest response
+  (`MacRuntime::charge_window` from it, the managed control's row requirement dropped), which the platform's window
+  needs only for a managed VM whose process takes no rate (D255). Windows' own window: `charge_window` is refused there
+  because a job's hard CPU cap holds over a scheduling interval Windows doesn't document
+  (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so nothing of Hex's derives the period it holds over; a measured
+  interval (the job's cap observed holding a spinning member, as macOS's control's response is probed) would give it
+  one. Until then a managed VM there is learned only over its governor's period (D255).
 
 Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>` with kiln's grade; raw texts in
 `~/.cache/hex-lead/research/hexres-c14`); Linux `Documentation/admin-guide/cgroup-v2.rst` at `1590cf03`; Shards
@@ -51,8 +61,15 @@ contention rule and the predictors; they do not hold the step up.
   D191's governor over its run's period, on every OS. Its run host says that period as the run starts
   (`ImageGuest::rate_period`, image channel version 17, Shards 1acbf2cb9), so the learner reads each held image VM's
   own each window (`Recover::image_rate_period`, `GuestRuntime::rate_period`) and copies no number (ROOT,
-  2026-11-13). A learner's window is the longest of its platform's, where it caps managed VMs, and the periods of the
-  image VMs it holds, re-read each window; with neither (Windows holding no image VM) it waits for a box to begin
+  2026-11-13). A managed VM's governor holds its rate likewise, over its VM process's own period (D255), which its
+  process says with each rate's answer (`ManagedGuest::rate_period`, read each window through
+  `Recover::managed_rate_period`): none until its first answer, and none where its platform's cap holds it. A
+  learner's window is the longest of its platform's, where it caps managed VMs, and the periods of the image and
+  managed VMs it holds, re-read each window. Where the platform has no window (Windows today) the learner's first
+  sight of a managed VM asks its governor at the VM's ceiling, which holds nothing below its vCPUs (`Learner::govern`):
+  one whose governor answers a period is learned over it (`Learner::learns`); one whose process takes no rate, or
+  whose ask fails, stays booked whole, told (`RateHeld::Platform`), the failed asked again next window. With neither
+  (Windows holding no image or governed VM) it waits for a box to begin
   (`recorded::charges::wait`), each create and start telling it. A managed VM on a platform with no window is booked
   whole off the fleet's budget (`recorded::charges::sort`). A reading is charged over at least the window in force
   when it was read (`Node::set_window`), and the fastest growth on record (C5) is kept with the window it was seen
@@ -373,12 +390,23 @@ reaches the view settled with goal 13 the same day:
   VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
 - On macOS and Windows the learner is `hex_node::recorded::charges`, started by `Recorded::start_charges` (hex-cli
   on both): a thread that waits on the node's end beside the window, and once a window reads each running VM it learns
-  (`recorded::charges::sort`: a managed VM where its platform has a window, and every image VM), learns as Linux's
-  does, and caps each VM at its water-filled share. A VM whose use or period it can't read counts whole, at its
-  receipt, against the fleet's budget until it reads, the failure told (`0e401dbe`). A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
-  (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's whole key and its
-  rate) sets its control's rate, its debt kept and what came before charged at the old rate; on Windows the job's hard
-  cap, at least the machine's least. A Shards image VM, its lifetime its place in its node's start order
+  (`recorded::charges::sort`: a managed VM where its platform has a window or its governor has answered a period,
+  and every image VM), learns as Linux's does, and caps each VM at its water-filled share. A VM whose use or period
+  it can't read counts whole, at its receipt, against the fleet's budget until it reads, the failure told
+  (`0e401dbe`). A managed VM is read through its
+  native owner (`Recover::managed_usage`) and capped through its own governor (D255; ROOT, 2026-11-13): the node asks
+  the guest it boots the VM in (`Recover::managed_rate`, `GuestRuntime::managed_rate`, Shards' `ManagedGuest::rate`
+  on its VM process's socket), a measured wait of its own (`managed.rate`, decision 9: Shards follows the VM with no
+  bound of Hex's; past the slowest answer seen a watcher tells the run-out while the ask goes on, refused only at the
+  VM's end). A refusal is Hex's in its process's words, and the VM's end is its end. Where its process takes no rate
+  its platform's cap holds it (`Recover::set_managed_rate`), told: on macOS a native-helper `rate` request (kind
+  0x0014, the scope's whole key and its rate) sets its control's rate, its debt kept and what came before charged at
+  the old rate; on Windows the job's hard cap, at least the machine's least. On Windows the job's CPU rate is set at
+  the same rate beside the governor, the hard ceiling; on macOS the control stays at the VM's ceiling, a backstop.
+  What holds each VM's rate is told on its class's capacity answer (`Learned::rates`, `RateHeld`: its governor, its
+  governor under its job, or its platform and why), those its governor doesn't hold alone first. The job covers the
+  VMM's own CPU too, so on Windows it binds first: the learner holds no VMM CPU apart for a managed VM (its usage reads
+  the whole process), a known limit owed on Shards. A Shards image VM, its lifetime its place in its node's start order
   (`recorded::charges::Scope::Started`), is read through its run host (`Runtime::host_use`), capped through its rate
   (`Runtime::rate`) and its guest told its room (`Runtime::room`); every VM of a kind it doesn't learn, and every
   native box, is booked off the fleet's budget, whole or at its caps (`recorded::charges::sort`). Its capacity
