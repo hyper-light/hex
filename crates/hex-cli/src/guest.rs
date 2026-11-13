@@ -477,11 +477,12 @@ fn node_tmpfs() -> [Mount; 2] {
 /// (init/main.c, `ramdisk_execute_command` and `run_init_process`).
 const KERNEL_INIT: &str = "/init";
 
-/// Whether `hex` runs as the guest's init: PID 1, and the kernel's first process, whatever other words it
-/// is given. PID 1 alone isn't enough: a container's first program is PID 1 of its own PID namespace, and
-/// `/hex selftest-box` or the runtime's `__oci-init` there must run as themselves, so its `argv[0]` tells them
-/// apart. A container that names its own program `/init` and is `hex` fails init's first privileged step
-/// or stays inside its namespaces: it reaches nothing a container can't.
+/// Whether `hex` runs as the guest's init: PID 1, named `/init`, whatever other words it is given. That is the
+/// kernel's first process, or under shards-init the run's own command, which Hex's node image names `/init`
+/// (docs/design/node-under-shards-init.md §4). PID 1 alone isn't enough: a container's first program is PID 1 of
+/// its own PID namespace, and `/hex selftest-box` or the runtime's `__oci-init` there must run as themselves, so
+/// its `argv[0]` tells them apart. A container that names its own program `/init` and is `hex` fails init's first
+/// privileged step or stays inside its namespaces: it reaches nothing a container can't.
 pub fn runs_as_init(pid: u32, argv0: Option<&std::ffi::OsStr>) -> bool {
     pid == 1 && argv0 == Some(std::ffi::OsStr::new(KERNEL_INIT))
 }
