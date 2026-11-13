@@ -541,7 +541,7 @@ fn subset_handoff_keeps_full_pool_holder_and_one_consumer_until_scope_released()
     sibling.id = BoxId::new("disjoint-consumer").unwrap();
     sibling.devices = vec![p[1]];
     assert!(
-        matches!(catalog.prepare(&sibling, &records, std::slice::from_ref(&source)), Err(Refusal::Backing {key:got,cause:LifecycleCause::Busy}) if got==key)
+        matches!(catalog.prepare(&sibling, &records, std::slice::from_ref(&source)), Err(Refusal::Backing { key:got,cause:LifecycleCause::Busy, why: None }) if got==key)
     );
     records
         .get_mut(&selected.id)
@@ -676,7 +676,7 @@ fn deterministic_family_complement_respects_current_claims_references_and_group_
     pending.native_scope = Some(hex_core::record::NativeScope::from_bytes([11; 16]));
     records.insert(pending.spec.id.clone(), Ok(pending));
     assert!(
-        matches!(catalog.unheld_subset(&full, Some(key), &records, &pools), Err(Refusal::Backing { key: actual, cause: LifecycleCause::Busy }) if actual == key)
+        matches!(catalog.unheld_subset(&full, Some(key), &records, &pools), Err(Refusal::Backing { key: actual, cause: LifecycleCause::Busy, why: None }) if actual == key)
     );
     records.clear();
     pools[0] = pool(BackingPhase::Released);

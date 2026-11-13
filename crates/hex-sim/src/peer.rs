@@ -1044,9 +1044,12 @@ pub struct Node {
     pick: Pick,
     owned: BTreeMap<Key, Owned>,
     ran: BTreeMap<Key, Ran>,
-    /// What each box it runs holds now, where its shell said so ([`Node::rebook`]): its learned booking and
-    /// the memory and disk it holds past it (joint plan steps 13 and 14). A box not said holds its receipt.
-    holds: BTreeMap<Key, Resources>,
+    /// What each holder holds now, where its shell said so ([`Node::rebook`]): a box's or a node VM's learned
+    /// booking and the memory and disk it holds past it (joint plan steps 13, 14 and 39). One not said holds its
+    /// receipt.
+    holds: BTreeMap<Holder, Resources>,
+    /// Each node VM it runs for itself, by its run, at its receipt: its admitted size ([`Node::book_node`]).
+    nodes: BTreeMap<hex_api::NodeRun, Resources>,
     /// For the shell: what the node told its clients and its runtime.
     pub told: Vec<Told>,
 }
@@ -1356,6 +1359,7 @@ impl Node {
             owned,
             ran: recovered,
             holds: BTreeMap::new(),
+            nodes: BTreeMap::new(),
             told: Vec::new(),
         })
     }
@@ -2328,7 +2332,8 @@ impl Node {
     }
 
     /// What this node's own admissions book of its room, each box at its receipt: in each dimension the
-    /// larger of what its ledger admitted and what its admission index holds, which charges backings too.
+    /// larger of what its ledger admitted and what its admission index holds, which charges backings too; and
+    /// beside them each node VM it runs for itself at its receipt ([`Node::book_node`]).
     pub fn booked(&self) -> Result<lb::Amounts, Stop> {
         let index = self
             .admission
@@ -2339,19 +2344,37 @@ impl Node {
         for (b, i) in booked.iter_mut().zip(index) {
             *b = (*b).max(i);
         }
+        for receipt in self.nodes.values() {
+            for (b, r) in booked.iter_mut().zip(amounts(receipt)) {
+                *b = b
+                    .checked_add(r)
+                    .ok_or_else(|| damaged("a node VM's receipt past what is booked"))?;
+            }
+        }
         Ok(booked)
     }
 
     /// What this node's own admissions hold of its room now, for the machine's capacity view (joint plan
     /// step 13, `docs/design/capacity-view.md` CV2; step 14's C8): what they book ([`Node::booked`]), each
-    /// box its shell rebooked held at what it said instead of its receipt. GPUs stay their receipts'.
+    /// holder its shell rebooked (a box, a node VM) held at what it said instead of its receipt. GPUs stay their
+    /// receipts'.
     pub fn held(&self) -> Result<lb::Amounts, Stop> {
         let mut held = self.booked()?;
-        for (key, holds) in &self.holds {
-            let Some(r) = self.ran.get(key).filter(|r| !r.ended) else {
-                continue;
+        for (holder, holds) in &self.holds {
+            let receipt = match holder {
+                Holder::Box(key) => {
+                    let Some(r) = self.ran.get(key).filter(|r| !r.ended) else {
+                        continue;
+                    };
+                    amounts(&assignment(&r.demand, r.allocation, r.route)?)
+                }
+                Holder::Node(run) => {
+                    let Some(receipt) = self.nodes.get(run) else {
+                        continue;
+                    };
+                    amounts(receipt)
+                }
             };
-            let receipt = amounts(&assignment(&r.demand, r.allocation, r.route)?);
             let holds = amounts(&Resources { gpus: 0, ..*holds });
             for ((h, receipt), holds) in held.iter_mut().zip(receipt).zip(holds).take(3) {
                 *h = h
@@ -2363,18 +2386,35 @@ impl Node {
         Ok(held)
     }
 
-    /// What each box this node runs holds now, as its shell learned it (joint plan step 14, C8): its learned
-    /// booking, and the memory and disk it holds past it. Replaces what was said before; a box not named
-    /// holds its receipt again, and one that no longer runs here holds nothing, so it is not kept. Returns
-    /// how many it kept.
-    pub fn rebook(&mut self, holds: impl IntoIterator<Item = (Key, Resources)>) -> usize {
+    /// What each holder this node runs holds now, as its shell learned it (joint plan steps 14 and 39, C8): a box's
+    /// or a node VM's learned booking, and the memory and disk it holds past it. Replaces what was said before; one
+    /// not named holds its receipt again, and a box that no longer runs here, or a node VM no longer booked, holds
+    /// nothing, so it is not kept. Returns how many it kept.
+    pub fn rebook(&mut self, holds: impl IntoIterator<Item = (Holder, Resources)>) -> usize {
         self.holds.clear();
-        for (key, holding) in holds {
-            if self.ran.get(&key).is_some_and(|r| !r.ended) {
-                self.holds.insert(key, holding);
+        for (holder, holding) in holds {
+            let runs = match holder {
+                Holder::Box(key) => self.ran.get(&key).is_some_and(|r| !r.ended),
+                Holder::Node(run) => self.nodes.contains_key(&run),
+            };
+            if runs {
+                self.holds.insert(holder, holding);
             }
         }
         self.holds.len()
+    }
+
+    /// Books node VM `run`, which the node runs for itself, at `receipt`, its admitted size (joint plan step 39):
+    /// a holder of its own beside the boxes, never one of them, so no box path ([`Node::owned`],
+    /// [`Node::records`]) counts it. Booked again, its receipt is the later one.
+    pub fn book_node(&mut self, run: hex_api::NodeRun, receipt: Resources) {
+        self.nodes.insert(run, receipt);
+    }
+
+    /// Releases node VM `run`'s receipt and what it was said to hold, saying whether it was booked.
+    pub fn release_node(&mut self, run: hex_api::NodeRun) -> bool {
+        self.holds.remove(&Holder::Node(run));
+        self.nodes.remove(&run).is_some()
     }
 
     /// The boxes this node owns that wait for room, run, or have ended unforgotten.
@@ -2386,6 +2426,14 @@ impl Node {
     pub fn records(&self) -> usize {
         self.ran.len()
     }
+}
+
+/// Who holds room in a node's ledger (joint plan step 39, ROOT's ruling of 2026-11-13; goal 13's ledger): a box it
+/// runs, by its placement key, or a node VM it runs for itself, by its run, a holder of its own beside the boxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Holder {
+    Box(Key),
+    Node(hex_api::NodeRun),
 }
 
 fn own_text(
@@ -3901,6 +3949,64 @@ mod tests {
         assert_eq!(out, vec![(NodeId(0), Msg::Refused { key })]);
         assert!(node.told.is_empty());
         assert_eq!(node.admitted(), [0; lb::DIMS]);
+    }
+
+    /// Joint plan step 39 (ROOT's ledger ruling of 2026-11-13; goal 13's ledger): a node VM the node runs for itself,
+    /// never a box, is a holder of its own beside its boxes. Do: book one at an admitted size, say what it holds, then
+    /// release it. Expect: booked carries its receipt; held its holding in the receipt's place; the box paths (owned,
+    /// records) count no box; rebook keeps it while it is booked and nothing of it once released.
+    #[test]
+    fn a_node_vm_is_a_holder_booked_at_its_receipt_and_held_at_what_it_holds() {
+        let mut rows = Memory::default();
+        let mut node = boot_test(&[NodeSpec::new(NodeId(0), CAP)], &[], &mut rows);
+        let before = node.booked().unwrap();
+        let run = hex_api::NodeRun::from_bytes([7; 16]);
+        let receipt = Resources {
+            cpu_milli: 2_000,
+            mem_bytes: 1 << 30,
+            ..Resources::default()
+        };
+        node.book_node(run, receipt);
+        let more = |after: lb::Amounts| [after[0] - before[0], after[1] - before[1]];
+        assert_eq!(
+            more(node.booked().unwrap()),
+            [2_000, 1 << 30],
+            "booked at its receipt"
+        );
+        assert_eq!(
+            more(node.held().unwrap()),
+            [2_000, 1 << 30],
+            "held at its receipt, none said"
+        );
+        assert_eq!(
+            (node.owned(), node.records()),
+            (0, 0),
+            "the box paths count no box"
+        );
+        let holding = Resources {
+            cpu_milli: 500,
+            mem_bytes: 1 << 29,
+            ..Resources::default()
+        };
+        assert_eq!(node.rebook([(Holder::Node(run), holding)]), 1);
+        assert_eq!(
+            more(node.held().unwrap()),
+            [500, 1 << 29],
+            "held at what it holds"
+        );
+        assert_eq!(
+            more(node.booked().unwrap()),
+            [2_000, 1 << 30],
+            "still booked at its receipt"
+        );
+        assert!(node.release_node(run));
+        assert_eq!(node.booked().unwrap(), before);
+        assert_eq!(
+            node.rebook([(Holder::Node(run), holding)]),
+            0,
+            "a released run holds nothing"
+        );
+        assert_eq!(node.held().unwrap(), before);
     }
 
     fn boot_test(specs: &[NodeSpec], models: &[String], records: &mut Memory) -> Node {

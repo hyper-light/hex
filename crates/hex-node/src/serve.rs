@@ -2265,6 +2265,7 @@ impl<O: Os> Shared<O> {
                 let grant = triomphe::Arc::try_unwrap(grant).map_err(|grant| Refusal::Backing {
                     key: grant.key,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 });
                 grant
                     .and_then(|grant| host.initialize_backing(grant))
