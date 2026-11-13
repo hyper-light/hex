@@ -596,11 +596,14 @@ Hex's tests of the channel, each citing its ID:
   the one read (`hex guest`).
 - HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
   pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
-- HEX-GUEST-33: every dial to a booted guest carries one finite absolute deadline, within which Shards' client asks
-  again while the guest doesn't listen there yet: a boot's first dial the boot's own (HEX-GUEST-34), any other its
-  caller's or, with none, the learned bound on a boot to ready from the dial's start; never a relative patience, as
-  Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
-  (`hex_client::guest::shards::ShardsLink`).
+- HEX-GUEST-33: every attempt of a dial to a booted guest carries one finite absolute deadline, within which Shards'
+  client asks again while the guest doesn't listen there yet: a boot's first dial the boot's own (HEX-GUEST-34), any
+  other its caller's or, with none, the learned bound on a boot to ready from the attempt's start; never a relative
+  patience, as Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
+  (`hex_client::guest::shards::ShardsLink`). A dial with no caller deadline waits as decision 9 waits, the bound its
+  W*: past it, the run-out told, the dial is made again while the guest lives, refused at its end, never at a bound
+  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as long as the
+  link's transport takes, the connection's end refusing it.
 - HEX-GUEST-34: a boot's first dial is bounded, never unbounded: the slowest boot to ready on record before any
   boot is seen (bench/native/guest/boot-ready/RECORD.md), then the slowest of the record's and the node's own, only
   rising, with no margin (decision 9 of runtime-architecture.md, 2026-11-13); a guest alive and not ready within it is
