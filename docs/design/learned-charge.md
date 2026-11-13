@@ -311,7 +311,7 @@ reaches the view settled with goal 13 the same day:
 
 | Number | Value | Kind | Derivation | Pinned by |
 |---|---|---|---|---|
-| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests` |
+| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes) |
 | A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
@@ -325,7 +325,10 @@ reaches the view settled with goal 13 the same day:
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |
-| The ends a node keeps | its machine's VM population, at most a node's boxes | derived | a machine never holds more VMs at once | `node::charges::tests` |
+| A node's VMs | its machine's population: the machine over Hex's least bounds (`MIN_CPU_MILLI`, `MIN_MEMORY`) | derived | the most boxes placement places on the machine (`placement::budget`'s runner count); one past it refused, typed (`recorded::charges::bounds`) | `node::charges::tests`, `recorded::charges::tests` |
+| The classes a node remembers | as many as its VMs | derived | the least bound at which no VM's class is refused: that many classes may run at once, and while fewer run, one no VM holds is there to forget | `node::charges::tests`, `recorded::charges::tests` |
+| The ends a node keeps | its machine's VM population, at most a node's boxes | derived | a machine never holds more VMs at once | `recorded::charges::tests` |
+| The ends due and the writes kept | the ends a node keeps | derived | one end due a VM met, one write a VM lifetime; past it, the due refused, typed, the oldest write forgotten | `recorded::charges::tests` |
 
 ## Alternatives not taken
 
