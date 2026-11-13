@@ -71,7 +71,8 @@ use std::sync::mpsc;
 
 use hex_api::{
     Allocation, Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Destination, Exit, Grant,
-    ImageMember, Member, MemberKind, Ports, Proto, Receiver, Refusal, Runtime, ShardsImage, Signal,
+    ImageMember, LifecycleCause, Member, MemberKind, Ports, Proto, Receiver, Refusal, Runtime,
+    ShardsImage, Signal,
 };
 use hex_client::Client;
 use hex_core::patience::Patience;
@@ -589,11 +590,30 @@ fn a_destination_its_image_grants_not_refuses_the_boot(
     client.delete(&id).unwrap();
 }
 
-/// The probe's report, asked on its stdin, as its caller drives it (`ShardsImage::members`): one line written, its
-/// answer read from its stdout up to the empty line that ends it. The read waits for the probe's answer with no
-/// deadline of its own; a probe that ends first ends its stdout, which refuses the read.
+/// What `ask` hands over (`Runtime::member` of box `id`), as its answer gives it, `shown` reading the box's state and
+/// end. Says it and how many asks it took.
+fn handed_over<P>(
+    id: &BoxId,
+    mut ask: impl FnMut() -> Result<P, Refusal>,
+    _shown: impl FnMut() -> Result<(BoxState, Option<Exit>), Refusal>,
+) -> Result<(P, u64), String> {
+    ask()
+        .map(|given| (given, 1))
+        .map_err(|why| format!("{id}'s member: {why:?}"))
+}
+
+/// The probe's report, asked on its stdin, as its caller drives it (`ShardsImage::members`): the probe handed over
+/// ([`handed_over`]), one line written, its answer read from its stdout up to the empty line that ends it. The read
+/// waits for the probe's answer with no deadline of its own; a probe that ends first ends its stdout, which refuses
+/// the read.
 fn asked_on_stdin(client: &Client, id: &BoxId, probe: &Probe) -> Report {
-    let mut member = client.member(id, &probe.member).unwrap();
+    let (mut member, asks) = handed_over(
+        id,
+        || client.member(id, &probe.member),
+        || client.inspect(id).map(|shown| (shown.state, shown.exit)),
+    )
+    .unwrap();
+    eprintln!("GRANTS-CHECK-2 {id}: its probe handed over at ask {asks}");
     let given = member.streams().unwrap();
     let mut stdin = hex_api::OwnedStream::from(given.stdin.unwrap());
     let stdout = hex_api::OwnedStream::from(given.stdout.unwrap());
@@ -980,6 +1000,49 @@ fn the_probe_answers_each_connection_with_its_targets_outcomes() {
     );
     // Its servers run on for the VM's life; this test's end ends them.
     drop(started.servers);
+}
+
+/// Joint plan step 15 (the hand-over, no VM; R03): do ask a hand-over of a fake that answers `Lifecycle { Pending }`
+/// twice, its box running, as a box settling does, then hands its member over. Expect it handed over at the third ask.
+/// Do ask one that answers Pending while its box has ended; expect the wait refused naming the box's end. Do ask one
+/// that refuses otherwise; expect that refusal, at the first ask.
+#[test]
+fn a_members_hand_over_is_asked_again_while_its_box_settles() {
+    let id = BoxId::new("grants-handover").unwrap();
+    let pending = || Refusal::Lifecycle {
+        id: id.clone(),
+        cause: LifecycleCause::Pending,
+    };
+    let mut answers = vec![Err(pending()), Err(pending()), Ok("the probe")].into_iter();
+    let handed = handed_over(
+        &id,
+        || answers.next().unwrap(),
+        || Ok((BoxState::Running, None)),
+    );
+    assert_eq!(handed, Ok(("the probe", 3)));
+    let ended = handed_over(
+        &id,
+        || Err::<(), _>(pending()),
+        || Ok((BoxState::Empty, Some(Exit::Code(1)))),
+    );
+    assert!(
+        matches!(&ended, Err(why) if why.contains("ended") && why.contains("Code(1)")),
+        "{ended:?}"
+    );
+    let mut asked = 0;
+    let other = handed_over(
+        &id,
+        || {
+            asked += 1;
+            Err::<(), _>(Refusal::NotRunning(id.clone(), "member"))
+        },
+        || Ok((BoxState::Running, None)),
+    );
+    assert!(
+        matches!(&other, Err(why) if why.contains("NotRunning")),
+        "{other:?}"
+    );
+    assert_eq!(asked, 1);
 }
 
 /// Joint plan step 15, T-T7.7.1 (the probe, no VM): do ask the probe on its stdin, as its harness is asked where its
