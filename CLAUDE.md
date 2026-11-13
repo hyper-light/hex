@@ -220,7 +220,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   handles (`CloseHandle`), and reads the machine's processor count
   (`GetActiveProcessorCount`), the measured worker stack extent (`GetCurrentThreadStackLimits`),
   the enclosing job's process ceiling (`IsProcessInJob` and `QueryInformationJobObject`), and, for the node's facts (`hex-node`'s `facts`), its memory
-  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
+  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). It reads the host's boot sequence where the kernel maps
+  `KUSER_SHARED_DATA` into every process (its `BootId`, read through a pointer to `MM_SHARED_USER_DATA_VA`; no call
+  binds it), so each record names the boot it was written in (T-T7.1.2). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
   Where its boxes outlive the node (the keeper, `super::keeper`; decision
@@ -338,8 +340,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `NtAssociateWaitCompletionPacket`, `NtCancelWaitCompletionPacket`; undocumented in the SDK, used by the
   Windows thread pool and Go's runtime, and chosen over `RegisterWaitForSingleObject` by measurement) and watches a host's own connection, a socket it borrows, by the network events
   Winsock records on an event of its own (`WSAEventSelect`; the event made and reset by `CreateEventW` and
-  `ResetEvent`), whose signal such a packet queues to the port. `windows-sys` binds these as `unsafe` foreign
-  functions, but for the ntdll calls,
+  `ResetEvent`), whose signal such a packet queues to the port, and reads and clears whether a socket's handle
+  passes to a process this one starts (`GetHandleInformation`, `SetHandleInformation`, `HANDLE_FLAG_INHERIT`): a
+  socket Winsock duplicates for this process comes back inheritable, and a process another thread starts with every
+  inheritable handle (std's `Command`) would hold the client's connection past its owner. `windows-sys` binds these
+  as `unsafe` foreign functions, but for the ntdll calls,
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 - `crates/hex-wait/src/macos/sys.rs`: the kqueue a thread waits on in Hex's condition variable on macOS
@@ -353,9 +358,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   critical. No event names a descriptor or carries a pointer. Rust can express none of these foreign calls safely.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
-no Hex change but those `vendor/patches` records, each offered upstream (`vendor/MANIFEST.toml`): shards-gpu's
-Windows arm64 packaging, and shards-api's start of D231's run host holding only its stdio (posix_spawn and
-CreateProcessW, `image/spawn.rs`). Its `unsafe` follows Shards' rules, not this list.
+no Hex change (`vendor/MANIFEST.toml`): every change Hex carried is upstream. Its `unsafe` follows Shards'
+rules, not this list.
 
 ## 13. Lean code
 
