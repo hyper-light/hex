@@ -611,7 +611,7 @@ impl Store {
         self.flush_pool_directory(directory)
     }
 
-    fn flush_pool_directory(&self, directory: &Path) -> Result<(), Refusal> {
+    pub(super) fn flush_pool_directory(&self, directory: &Path) -> Result<(), Refusal> {
         #[cfg(windows)]
         {
             let _ = directory;
