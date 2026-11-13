@@ -2066,3 +2066,92 @@ mod token_end {
         }
     }
 }
+
+/// An output stream's own half (joint plan step 4: ROOT's decision of 2026-11-12, 1-2).
+mod output_end {
+    use hex_core::patience::Patience;
+    use hex_testkit::waits::until;
+
+    use super::*;
+
+    /// An output connection's End after its name, at the agent's end.
+    static ENDED: Patience = Patience::measuring("test.hex_client.guest.output_ended");
+
+    /// AC-T7.4.1 (joint plan step 4, 2(b) and the End-then-Reset item; ROOT's decision of 2026-11-12): exec a program
+    /// whose stdout is the caller's own pipe and whose stderr it asks for, through a stand-in agent that, once the exec
+    /// has started, writes a line on each. Expect each output stream's connection ended on the client's side once
+    /// named: the asked stderr's end takes no write, and the agent reads each connection's name, then its End. Then
+    /// each line reaches the caller and the program's end comes back. A peer's End then closes the connection whole,
+    /// over QUIC's bridge too, so a reader can't sleep through it (Shards M236) and the node's copier leaves no half
+    /// open behind it to reset.
+    #[test]
+    fn an_output_streams_own_half_ends_once_named() {
+        let (control, stdio, link) = listeners();
+        let (checked, check) = std::sync::mpsc::channel::<()>();
+        let agent = std::thread::spawn(move || {
+            let (mut conn, _) = control.accept().unwrap();
+            hello(&mut conn);
+            let (h, request) = next_request(&mut conn);
+            let Request::Call(Call::Exec { streams, .. }) = request else {
+                panic!("expected an exec, got {request:?}");
+            };
+            assert!(!streams.stdin && streams.stdout && streams.stderr);
+            let mut named = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = stdio.accept().unwrap();
+                let mut name = [0u8; stream::NAME_BYTES];
+                s.read_exact(&mut name).unwrap();
+                named.push((stream::read_name(&name).unwrap().stream, s));
+            }
+            send_answer(&mut conn, h.id, &Answer::Started { pid: 9 });
+            check.recv().unwrap();
+            for (which, s) in &mut named {
+                s.set_nonblocking(true).unwrap();
+                until(&ENDED, "an output connection's End after its name", || {
+                    matches!(s.read(&mut [0u8; 1]), Ok(0))
+                })
+                .unwrap();
+                s.set_nonblocking(false).unwrap();
+                s.write_all(format!("{which:?}\n").as_bytes()).unwrap();
+            }
+            drop(named);
+            send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
+            // Held open until the client has its end, as an agent's connection is.
+            let _ = next_request(&mut conn);
+        });
+        let client = Client::connect(link).unwrap();
+        let (mut out_r, out_w) = std::io::pipe().unwrap();
+        let mut proc = client
+            .exec(
+                &BoxId::new("b").unwrap(),
+                Program::of(&["p"]),
+                Stdio {
+                    stdout: Some(out_w),
+                    ask: hex_api::Ask {
+                        stdin: false,
+                        stdout: false,
+                        stderr: true,
+                    },
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let given = proc.streams().unwrap();
+        let mut err = hex_api::OwnedStream::from(given.stderr.unwrap());
+        assert!(
+            err.write(b"x").is_err(),
+            "the asked stderr's end took a write: the client's half of an output stream is still open"
+        );
+        checked.send(()).unwrap();
+        let mut out = String::new();
+        out_r.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "Out\n");
+        let mut errors = String::new();
+        err.read_to_string(&mut errors).unwrap();
+        assert_eq!(errors, "Err\n");
+        assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+        drop(proc);
+        let _ = client.inspect(&BoxId::new("b").unwrap());
+        agent.join().unwrap();
+    }
+}
