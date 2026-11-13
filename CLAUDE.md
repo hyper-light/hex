@@ -359,6 +359,13 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   triggers it (`NOTE_TRIGGER`) and, as the thread waits, arms a one-shot timer to its deadline (`EVFILT_TIMER`,
   `EV_ONESHOT`, `NOTE_NSECONDS | NOTE_CRITICAL`), which rustix's own `kevent`, itself `unsafe`, can't mark
   critical. No event names a descriptor or carries a pointer. Rust can express none of these foreign calls safely.
+- `crates/hex-wait/src/macos/tests.rs`, in its tests alone: libproc reads back what a deadline wait armed, as
+  `lskq(1)` reads a kqueue, so a test holds the mechanism rather than a clock. `proc_pidinfo(PROC_PIDLISTFDS)` lists
+  the process's kqueues and `proc_pidfdinfo(PROC_PIDFDKQUEUE_EXTINFO)` reads each one's knotes (xnu's
+  `struct kevent_extinfo` and `struct kevent_qos_s`, `bsd/sys/event_private.h`, and the flavor's number,
+  `bsd/sys/proc_info_private.h`: the SDK ships none of them, so Hex declares them); `proc_pidinfo`'s
+  `PROC_PIDTHREADID64INFO` reads whether the waiting thread has blocked, by `pthread_threadid_np`'s id; and
+  `mach_timebase_info` converts the timer's Mach ticks. Rust can express none of these foreign calls safely.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
 no Hex change (`vendor/MANIFEST.toml`): every change Hex carried is upstream. Its `unsafe` follows Shards'

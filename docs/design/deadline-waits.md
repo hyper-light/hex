@@ -161,23 +161,28 @@ The second step, std's channel receives and timed parks:
 
 ## The test
 
-- `hex_client::calls::budget_tests::ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline` (macOS) expects a queued
-  delete's refusal no later than its absolute deadline and twice `hex_testkit::waits::OVERSHOOT`. That record is
-  2.743 ms, the `NOTE_CRITICAL` timer's slowest of the 1,000 waits on the two Macs. The test was red on std's
-  `Condvar` (70.07 ms late) and is green on hex-wait's.
-- `ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline` (macOS) holds the reader's turn as another
-  call's would be, so a delete with an absolute deadline waits for its answer on its mailbox. It expects the same
-  bound, and was red on std's mpsc (44.00 ms late at 36864a83 on 75694786).
-- **The bound under load.** Twice `OVERSHOOT` alone is an idle machine's bound. Under load a refusal also carries its
-  thread's wait for a core. ROOT saw 5 of 15 runs come 6.23 to 9.00 ms late at load 18.5 on 18 cores at af9131d4. Here
-  one of 15 whole-binary runs did, 8.68 and 7.92 ms late, at load 33.8 to 39.5 beside 18 spinners at nice 0. So each
-  test now makes three refusals between 24 precise waits on its own thread: poll(2) to the same deadline, which is
-  none of hex-wait's and takes the kernel's own leeway whatever the QoS. Each precise wait teaches a Patience seeded
-  from `OVERSHOOT`, and every refusal is held to that Patience's deadline, twice the slowest precise wait recorded or
-  seen (`hex_core::patience`). The precise waits also go to the waits census, as `test.hex_client.budget.precise_late`.
-  - Under the same load both tests passed 15 of 15, at load 36.4 to 42.5.
-  - With std's condition variable and channel back in their places (a mutation), both failed 15 of 15, 24 to 150 ms
-    late against bounds of 5.5 to 8.6 ms, at load 32.6 to 35.0.
+- **The mechanism.** hex-wait's `macos::tests::ac_t7_4_1_a_deadline_wait_arms_a_critical_one_shot_timer_at_its_deadline`
+  reads back from the kernel what a deadline wait armed while it waits (libproc's `PROC_PIDFDKQUEUE_EXTINFO`, as
+  `lskq(1)` reads a kqueue): one `EVFILT_TIMER`, `EV_ONESHOT`, its saved flags `NOTE_NSECONDS | NOTE_CRITICAL`,
+  armed for what was left of the wait. std's condition variable arms none: the test was red against it, and holds it
+  so beside hex-wait's.
+- **The client's deadline tests** (macOS): `ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline` queues a delete
+  behind the held sender, and `ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline` holds the
+  reader's turn as another call's would be, so a delete waits for its answer on its mailbox. Each expects its refusal
+  the absolute deadline's, while the sender or the turn is still held, so the deadline is its one cause, and never
+  before the deadline.
+- **No bound on lateness** (the waits audit, ROOT's ruling of 2026-11-13). Each refusal's lateness, and a poll(2)
+  wait's beside it on the same thread (none of hex-wait's, the kernel's own leeway whatever the QoS), go to the waits
+  census as `test.hex_client.budget.queued_delete_late`, `mailbox_late` and `precise_late`, held to nothing. Under
+  load a refusal carries its thread's wait for a core, which no bound tells from the wait's own: ROOT saw 5 of 15 runs
+  come 6.23 to 9.00 ms late at load 18.5 on 18 cores at af9131d4. Until 2026-11-13 the tests held each refusal to
+  twice the slowest precise wait recorded or seen, seeded from the timer's idle record of 2.743 ms: a chosen multiple
+  and a record seed, which failed a healthy run whenever a refusal came later than every precise wait beside it
+  (6.34 ms against 4.57 ms at 902c90a2 on the Mac Studio, goal 12's r298).
+- What shows hex-wait's waits come on time is the probe's record above, and the client tests' refusals measured on
+  std's: its `Condvar`'s 70.07 ms late and its mpsc's 44.00 ms late (at 36864a83 on 75694786), and with std's
+  condition variable and channel back in their places (a mutation) 24 to 150 ms late at load 32.6 to 35.0, where
+  hex-wait's came at most 8.68 ms late at load 33.8 to 39.5 beside 18 spinners at nice 0.
 - hex-wait's own tests hold its semantics on every platform: the condition variable's, the channel's (order,
   fullness, a timeout, disconnection, a rendezvous, what a gone receiver left) and the rest's.
 
@@ -185,8 +190,8 @@ The second step, std's channel receives and timed parks:
 
 - A macOS whose std condition variable waits come within the platform's timer precision at utility QoS: the
   probe's `cond_rel` rows would say so, and hex-wait's macOS path would be std's again.
-- A `NOTE_CRITICAL` timer that is coalesced: the probe's `ktimer` rows would show it, and the queued-sender test
-  would go red on hex-wait.
+- A `NOTE_CRITICAL` timer that is coalesced: the probe's `ktimer` rows would show it, and the census's rows of the
+  client's deadline tests would show their refusals later than the precise waits beside them.
 - A kqueue that costs as much to make as a wake takes (now 0.5 to 0.7 µs against 8 to 12 µs).
 
 ## Open
@@ -204,9 +209,8 @@ The second step, std's channel receives and timed parks:
      resolution before and after.
   2. Run it as the kiln runner's command on jupiter (x86_64), as on the Macs, and on an arm64 Windows host if there
      is one.
-  3. If std's waits come within the high-resolution timer's precision, record Windows's `OVERSHOOT` (std's slowest
-     wait) in `hex_testkit::waits`, and turn both client tests on for Windows. If they come late by the system
-     timer's resolution, choose a Windows wait by this record's method before moving Windows's sites, including the
-     three left above.
+  3. If std's waits come within the high-resolution timer's precision, turn both client tests on for Windows. If
+     they come late by the system timer's resolution, choose a Windows wait by this record's method before moving
+     Windows's sites, including the three left above.
 - **hex-runtime's macOS `Kqueue`** arms the same timer, so one could be built on the other.
 - **QoS tiers other than utility** were read from XNU's source, not measured: the probe ran as the runner's command.

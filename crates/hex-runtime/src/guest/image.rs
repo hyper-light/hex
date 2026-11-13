@@ -88,11 +88,15 @@ pub(super) struct ImageBoot {
     /// The directory each box's run host's diagnostics are kept in, whole, one file each (D258's
     /// `ImageGuest::keep_diagnostics`), under the node's state.
     diagnostics: PathBuf,
-    /// One for each box with a boot, run or stop of this process; at most a box's every own, so bounded
-    /// by the node's boxes ([`crate::MAX_BOXES`]).
-    runs: Mutex<BTreeMap<BoxId, Run>>,
+    /// This process's runs ([`Runs`]).
+    runs: Runs,
     session: OnceLock<Option<BootSession>>,
 }
+
+/// This process's runs: one for each box with a boot, run or stop of this process; at most a box's every own, so
+/// bounded by the node's boxes ([`crate::MAX_BOXES`]). A run moves on under their lock alone, which no Shards call is
+/// made under: a call takes the answer its boot's or stop's thread gave ([`Runs::settle`]), or marks its stop.
+struct Runs(Mutex<BTreeMap<BoxId, Run>>);
 
 /// The Shards class on Agentfile images, whole (joint plan step 12's item B): Shards' image boot or why its node
 /// serves none ([`ImageClass::with_boot`]), the record authority its boxes' records are kept by, bound once
@@ -109,10 +113,13 @@ pub struct ImageClass {
     pub(super) lessors: Option<Arc<dyn hex_api::lease::Lessors>>,
 }
 
+/// A boot's answer: its run's guest, or Shards' refusal.
+type Booted = Result<Box<dyn ImageGuest>, ImageRefusal>;
+
 /// A run of this process.
 enum Run {
     /// Its boot, on a thread of its own, answers here.
-    Booting(Arc<Slot<Result<Box<dyn ImageGuest>, ImageRefusal>>>),
+    Booting(Arc<Slot<Booted>>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
     Running(Arc<dyn ImageGuest>, Instant),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
@@ -285,6 +292,22 @@ impl Follower {
              nor its run host's end is known{record}"
         ))
     }
+}
+
+/// A run as its runs' lock found it, the answer its boot's or stop's thread gave taken ([`Runs::settle`]).
+enum Settled {
+    /// No run of this process.
+    None,
+    /// Its boot, its answer not yet given.
+    Booting,
+    /// Its boot's answer, taken here: its run has started.
+    Started(Arc<dyn ImageGuest>),
+    /// Its run, started before.
+    Running(Arc<dyn ImageGuest>),
+    /// Its stop, its answer not yet given.
+    Stopping(Arc<Slot<RunEnd>>, Stop),
+    /// Its end, known: its boot refused, its stop's answer taken, or found so before.
+    Ends(End),
 }
 
 /// A Shards image box, as its record and this process's run say.
@@ -704,31 +727,27 @@ fn held() -> Refusal {
     }
 }
 
-impl ImageBoot {
-    fn images(&self) -> Result<&Arc<dyn Images>, Refusal> {
-        self.images.as_ref().map_err(Clone::clone)
+impl Runs {
+    fn new() -> Self {
+        Self(Mutex::new(BTreeMap::new()))
     }
 
-    fn waits(&self) -> Result<&ImageWaits, Refusal> {
-        self.waits.as_ref().map_err(Clone::clone)
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Run>>, Refusal> {
+        self.0.lock().map_err(poisoned)
     }
 
-    fn runs(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Run>>, Refusal> {
-        self.runs.lock().map_err(poisoned)
-    }
-
-    /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
-    /// D231 stops a run it drops and that stop would wait on this lock's holder.
     /// When box `id`'s run started, as its boot answered, where it runs in this process.
     fn started(&self, id: &BoxId) -> Result<Option<Instant>, Refusal> {
-        Ok(match self.runs()?.get(id) {
+        Ok(match self.lock()?.get(id) {
             Some(Run::Running(_, at)) => Some(*at),
             _ => None,
         })
     }
 
+    /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
+    /// D231 stops a run it drops and that stop would wait on this lock's holder.
     fn forget(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut runs = self.runs()?;
+        let mut runs = self.lock()?;
         if matches!(runs.get(id), Some(Run::Ended(_))) {
             runs.remove(id);
         }
@@ -736,12 +755,128 @@ impl ImageBoot {
     }
 
     fn insert(&self, id: &BoxId, run: Run) -> Result<(), Refusal> {
-        let mut runs = self.runs()?;
+        let mut runs = self.lock()?;
         if !runs.contains_key(id) && runs.len() >= crate::MAX_BOXES {
             return Err(Refusal::Full(crate::MAX_BOXES));
         }
         runs.insert(id.try_clone()?, run);
         Ok(())
+    }
+
+    /// Box `id`'s boot under way, where it is booting.
+    fn booting(&self, id: &BoxId) -> Result<Option<Arc<Slot<Booted>>>, Refusal> {
+        Ok(match self.lock()?.get(id) {
+            Some(Run::Booting(slot)) => Some(Arc::clone(slot)),
+            _ => None,
+        })
+    }
+
+    /// Box `id`'s run as its lock finds it, an answer its boot's or stop's thread gave taken and its time told to
+    /// `waits` (`None` where the node has none): the sample W* rises to, of an answer past W*, its call refused Pending.
+    fn settle(&self, id: &BoxId, waits: Option<&ImageWaits>) -> Result<Settled, Refusal> {
+        let mut runs = self.lock()?;
+        let Some(run) = runs.get_mut(id) else {
+            return Ok(Settled::None);
+        };
+        Ok(match run {
+            Run::Booting(slot) => match slot.take()? {
+                None => Settled::Booting,
+                Some((Ok(guest), took)) => {
+                    if let Some(waits) = waits {
+                        waits.boot.answered(took);
+                    }
+                    // Its run started as its boot answered.
+                    let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
+                    let guest: Arc<dyn ImageGuest> = Arc::from(guest);
+                    *run = Run::Running(Arc::clone(&guest), at);
+                    Settled::Started(guest)
+                }
+                // The run host refused or ended the run before it started: its own answer, in its words.
+                Some((Err(why), took)) => {
+                    if let Some(waits) = waits {
+                        waits.boot.refused(took);
+                    }
+                    let end = End::unknown(Some(why.to_string()));
+                    *run = Run::Ended(end.clone());
+                    Settled::Ends(end)
+                }
+            },
+            Run::Running(guest, _) => Settled::Running(Arc::clone(guest)),
+            Run::Stopping(slot, stop) => match slot.take()? {
+                None => Settled::Stopping(Arc::clone(slot), stop.clone()),
+                Some((end, took)) => {
+                    if let Some(waits) = waits {
+                        waits.stop.answered(took);
+                    }
+                    let end = End::of(&end);
+                    *run = Run::Ended(end.clone());
+                    Settled::Ends(end)
+                }
+            },
+            Run::Ended(end) => Settled::Ends(end.clone()),
+        })
+    }
+
+    /// Box `id`'s boot answer, `slot`'s, taken by the start that asked it, unless another call took it first: its run
+    /// started, or its boot refused, the refusal given back in Shards' words. Its time is told to `waits`.
+    fn booted(
+        &self,
+        id: &BoxId,
+        slot: &Slot<Booted>,
+        waits: &ImageWaits,
+    ) -> Result<Result<(), ImageRefusal>, Refusal> {
+        let mut runs = self.lock()?;
+        Ok(match runs.get_mut(id) {
+            Some(run @ Run::Booting(_)) => match slot.take()? {
+                Some((Ok(guest), took)) => {
+                    waits.boot.answered(took);
+                    // Its run started as its boot answered.
+                    let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
+                    let guest: Arc<dyn ImageGuest> = Arc::from(guest);
+                    *run = Run::Running(guest, at);
+                    Ok(())
+                }
+                Some((Err(why), took)) => {
+                    waits.boot.refused(took);
+                    *run = Run::Ended(End::unknown(Some(why.to_string())));
+                    Err(why)
+                }
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        })
+    }
+
+    /// Box `id`'s stop, its owner's, under way in `slot`, whatever its run was doing.
+    fn stop_asked(&self, id: &BoxId, slot: &Arc<Slot<RunEnd>>) -> Result<(), Refusal> {
+        if let Some(run) = self.lock()?.get_mut(id) {
+            *run = Run::Stopping(Arc::clone(slot), Stop::Asked);
+        }
+        Ok(())
+    }
+
+    /// Box `id`'s stop under way in `slot`, its run having ended on its own (`reached`), where it still runs: another
+    /// call may have moved it on first, and then its stop is that call's.
+    fn stop_reached(
+        &self,
+        id: &BoxId,
+        slot: &Arc<Slot<RunEnd>>,
+        reached: Stop,
+    ) -> Result<(), Refusal> {
+        if let Some(run @ Run::Running(..)) = self.lock()?.get_mut(id) {
+            *run = Run::Stopping(Arc::clone(slot), reached);
+        }
+        Ok(())
+    }
+}
+
+impl ImageBoot {
+    fn images(&self) -> Result<&Arc<dyn Images>, Refusal> {
+        self.images.as_ref().map_err(Clone::clone)
+    }
+
+    fn waits(&self) -> Result<&ImageWaits, Refusal> {
+        self.waits.as_ref().map_err(Clone::clone)
     }
 
     /// Whether a record the host's boot session `record` names was written in an earlier boot of the
@@ -890,7 +1025,7 @@ impl ImageClass {
             images,
             waits,
             diagnostics,
-            runs: Mutex::new(BTreeMap::new()),
+            runs: Runs::new(),
             session: OnceLock::new(),
         });
     }
@@ -1099,15 +1234,6 @@ impl ImageClass {
     /// boot or a stop taken, an end its run reached written, and a reboot of the host taken as the end
     /// of a run of an earlier boot (T-T7.1.2). Decided under the runs' lock, acted on after it.
     fn settle(&self, record: &BoxRecord) -> Result<State, Refusal> {
-        /// What the runs' lock found.
-        enum Next {
-            Is(State),
-            /// Its boot's answer, taken here: its run has started.
-            Started(Arc<dyn ImageGuest>),
-            Running(Arc<dyn ImageGuest>),
-            Ends(End),
-            NoRun,
-        }
         let id = &record.spec.id;
         let recorded = |exit| End {
             exit,
@@ -1121,77 +1247,34 @@ impl ImageClass {
             });
         };
         if let Some(exit) = record.exit {
-            image.forget(id)?;
+            image.runs.forget(id)?;
             return Ok(State::Ended(recorded(exit)));
         }
         if record.phase == Phase::Creating {
             return Ok(State::Created);
         }
-        let next = {
-            let mut runs = image.runs()?;
-            match runs.get_mut(id) {
-                None => Next::NoRun,
-                Some(run) => match run {
-                    // An answer past W*, its call refused Pending: the sample its wait rises to, taken here.
-                    Run::Booting(slot) => match slot.take()? {
-                        None => Next::Is(State::Booting),
-                        Some((Ok(guest), took)) => {
-                            if let Ok(waits) = image.waits() {
-                                waits.boot.answered(took);
-                            }
-                            // Its run started as its boot answered.
-                            let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
-                            let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                            *run = Run::Running(Arc::clone(&guest), at);
-                            Next::Started(guest)
-                        }
-                        // The run host refused or ended the run before it started: its own answer, in its words.
-                        Some((Err(why), took)) => {
-                            if let Ok(waits) = image.waits() {
-                                waits.boot.refused(took);
-                            }
-                            let end = End::unknown(Some(why.to_string()));
-                            *run = Run::Ended(end.clone());
-                            Next::Ends(end)
-                        }
-                    },
-                    Run::Running(guest, _) => Next::Running(Arc::clone(guest)),
-                    Run::Stopping(slot, stop) => match slot.take()? {
-                        None => Next::Is(State::Stopping(Arc::clone(slot), stop.clone())),
-                        Some((end, took)) => {
-                            if let Ok(waits) = image.waits() {
-                                waits.stop.answered(took);
-                            }
-                            let end = End::of(&end);
-                            *run = Run::Ended(end.clone());
-                            Next::Ends(end)
-                        }
-                    },
-                    Run::Ended(end) => Next::Ends(end.clone()),
-                },
-            }
-        };
-        match next {
-            Next::Is(state) => Ok(state),
+        match image.runs.settle(id, image.waits.as_ref().ok())? {
+            Settled::Booting => Ok(State::Booting),
+            Settled::Stopping(slot, stop) => Ok(State::Stopping(slot, stop)),
             // How its microVM started kept in its record (D253), whichever call took its boot's answer: this one, or
             // its start, which settles it next.
-            Next::Started(guest) => {
+            Settled::Started(guest) => {
                 self.keep_started(record, guest.as_ref())?;
                 Ok(State::Running(guest))
             }
-            Next::Running(guest) => {
+            Settled::Running(guest) => {
                 self.keep_started(record, guest.as_ref())?;
                 self.settle_running(image, id, guest)
             }
-            Next::Ends(end) => {
+            Settled::Ends(end) => {
                 let end = self.record_end(id, &end)?;
-                image.forget(id)?;
+                image.runs.forget(id)?;
                 Ok(State::Ended(end))
             }
-            Next::NoRun if image.earlier_boot(record) => {
+            Settled::None if image.earlier_boot(record) => {
                 Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
             }
-            Next::NoRun => Ok(State::Held),
+            Settled::None => Ok(State::Held),
         }
     }
 
@@ -1211,12 +1294,9 @@ impl ImageClass {
         };
         let reached = Stop::Ended(End::of(&ended));
         let slot = image.stop(guest, Some(ended))?;
-        let mut runs = image.runs()?;
-        // Another call may have moved it on first: then its stop is that call's, and this one's thread
-        // returns with the same end.
-        if let Some(run @ Run::Running(..)) = runs.get_mut(id) {
-            *run = Run::Stopping(Arc::clone(&slot), reached.clone());
-        }
+        // Where another call moved it on first, its stop is that call's, and this one's thread returns with the same
+        // end.
+        image.runs.stop_reached(id, &slot, reached.clone())?;
         Ok(State::Stopping(slot, reached))
     }
 
@@ -1296,14 +1376,14 @@ impl ImageClass {
             Err(why) => {
                 // No boot began: the box ends, its intent's record kept with its end, in the words why.
                 let end = End::unknown(Some(why.to_string()));
-                image.insert(&id, Run::Ended(end.clone()))?;
+                image.runs.insert(&id, Run::Ended(end.clone()))?;
                 self.record_end(&id, &end)?;
-                image.forget(&id)?;
+                image.runs.forget(&id)?;
                 return Err(why);
             }
         };
         let slot = Arc::new(Slot::new());
-        image.insert(&id, Run::Booting(Arc::clone(&slot)))?;
+        image.runs.insert(&id, Run::Booting(Arc::clone(&slot)))?;
         let answer = Arc::clone(&slot);
         // Shards waits for the run's start or its host's end alone (`Duration::MAX`): the boot's learned W* is where
         // the start answers Pending and tells the census, never where a boot ends (decision 9, the person's ruling of
@@ -1324,9 +1404,9 @@ impl ImageClass {
             });
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
-            image.insert(&id, Run::Ended(End::unknown(None)))?;
+            image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
-            image.forget(&id)?;
+            image.runs.forget(&id)?;
             return Err(Refusal::os("starting a Shards image VM's boot", why));
         }
         if !slot.came_within(bound)? {
@@ -1336,29 +1416,7 @@ impl ImageClass {
             return Err(pending(&id)?);
         }
         // The answer, taken here unless another call took it first, and its time the sample.
-        let answer = {
-            let mut runs = image.runs()?;
-            match runs.get_mut(&id) {
-                Some(run @ Run::Booting(_)) => match slot.take()? {
-                    Some((Ok(guest), took)) => {
-                        waits.boot.answered(took);
-                        // Its run started as its boot answered.
-                        let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
-                        let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                        *run = Run::Running(guest, at);
-                        Ok(())
-                    }
-                    Some((Err(why), took)) => {
-                        waits.boot.refused(took);
-                        *run = Run::Ended(End::unknown(Some(why.to_string())));
-                        Err(why)
-                    }
-                    None => Ok(()),
-                },
-                _ => Ok(()),
-            }
-        };
-        match answer {
+        match image.runs.booted(&id, &slot, waits)? {
             Ok(()) => {
                 match self.settle(&record_now(self, &id)?)? {
                     // What the run published is held to the box's grants (joint plan step 15, N6): a run
@@ -1398,7 +1456,7 @@ impl ImageClass {
             }
             Err(why) => {
                 self.record_end(&id, &End::unknown(Some(why.to_string())))?;
-                image.forget(&id)?;
+                image.runs.forget(&id)?;
                 Err(refused(&id, "booting a Shards image VM", why))
             }
         }
@@ -1413,10 +1471,7 @@ impl ImageClass {
         let slot = match state {
             State::Running(guest) => {
                 let slot = image.stop(guest, None)?;
-                let mut runs = image.runs()?;
-                if let Some(run) = runs.get_mut(id) {
-                    *run = Run::Stopping(Arc::clone(&slot), Stop::Asked);
-                }
+                image.runs.stop_asked(id, &slot)?;
                 slot
             }
             State::Stopping(slot, _) => slot,
@@ -1585,6 +1640,7 @@ impl ImageClass {
         // Its window from its run's start to this read; a run gone since its stats were read has none.
         let window = self
             .image()?
+            .runs
             .started(id)?
             .map(|at| at.elapsed())
             .ok_or(Refusal::NotRunning(id.try_clone()?, "host_use"))?;
@@ -1676,7 +1732,7 @@ impl ImageClass {
             t.put(&current)
         })?;
         if let Some(image) = &self.image {
-            image.forget(&id)?;
+            image.runs.forget(&id)?;
         }
         Ok(())
     }
@@ -1697,11 +1753,7 @@ impl ImageClass {
     fn follow_boot(&self, id: &BoxId, follower: Follower) -> Result<State, Refusal> {
         let image = self.image()?;
         let wait = follower.wait(image.waits()?);
-        let booting = match image.runs()?.get(id) {
-            Some(Run::Booting(slot)) => Some(Arc::clone(slot)),
-            _ => None,
-        };
-        if let Some(slot) = booting {
+        if let Some(slot) = image.runs.booting(id)? {
             let asked = Instant::now();
             let bound = wait.deadline();
             let mut told = slot.told_within(bound)?;
@@ -1787,7 +1839,7 @@ impl ImageClass {
             t.remove(&id)
         })?;
         if let Some(image) = &self.image {
-            image.forget(&id)?;
+            image.runs.forget(&id)?;
         }
         Ok(last)
     }
