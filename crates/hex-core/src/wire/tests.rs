@@ -1064,21 +1064,24 @@ fn answers() -> Vec<(u64, Answer)> {
             },
         ),
     ];
-    out.push((
-        16,
-        Answer::Offered(StreamOffer {
-            pid: 42,
-            started: u64::MAX,
-            vsock: PathBuf::from("guest/vsock"),
-            token: 7,
-            exec: 19,
-            streams: Streams {
-                stdin: true,
-                stdout: true,
-                stderr: false,
-            },
-        }),
-    ));
+    for setup in [None, Some(std::time::Duration::from_nanos(u64::MAX))] {
+        out.push((
+            16,
+            Answer::Offered(StreamOffer {
+                pid: 42,
+                started: u64::MAX,
+                vsock: PathBuf::from("guest/vsock"),
+                token: 7,
+                exec: 19,
+                streams: Streams {
+                    stdin: true,
+                    stdout: true,
+                    stderr: false,
+                },
+                setup,
+            }),
+        ));
+    }
     out.extend(refusals().into_iter().map(|r| (11, Answer::Refused(r))));
     for exit in [
         Exit::Code(0),
