@@ -10,61 +10,18 @@
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
-use std::time::Duration;
 
 use hex_client::Cut;
-use hex_client::guest::{Duplex, DuplexOwner, Handle, own_duplex};
+pub use hex_client::guest::bridge::Local;
+use hex_client::guest::bridge::{Bridged, end, pair};
 use hex_core::lanes::{DATA_BOUND, Why};
 
 use crate::Conn;
 
-/// The owner's end: a Unix socket pair's on Unix; a loopback TCP pair's on Windows, whose std has no socket pair.
-#[cfg(unix)]
-pub type Local = std::os::unix::net::UnixStream;
-#[cfg(windows)]
-pub type Local = std::net::TcpStream;
-
-#[cfg(unix)]
-fn pair() -> io::Result<(Local, Local)> {
-    Local::pair()
-}
-
-/// A loopback TCP pair: a listener on an ephemeral port, connected to and accepted from; only the connection whose
-/// address is the connecting socket's own is taken, so another local process that connects first is closed. The
-/// kernel queues at most the listener's backlog before ours, std's own bound on `listen`.
-#[cfg(windows)]
-fn pair() -> io::Result<(Local, Local)> {
-    /// std's `TcpListener::bind` backlog (library/std/src/sys/net/connection/socket.rs, `listen(128)`).
-    const BACKLOG: usize = 128;
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-    let ours = Local::connect(listener.local_addr()?)?;
-    let want = ours.local_addr()?;
-    for _ in 0..=BACKLOG {
-        let (theirs, from) = listener.accept()?;
-        if from == want {
-            ours.set_nodelay(true)?;
-            theirs.set_nodelay(true)?;
-            return Ok((ours, theirs));
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::ConnectionRefused,
-        "loopback connections other than ours filled the pair's listener",
-    ))
-}
-
 /// `conn` as a local stream socket: the owner's end, its bytes the connection's. Its reads end cleanly whatever ended
 /// the connection; [`bridged`]'s tell a cut.
 pub fn socket(conn: Conn) -> io::Result<Local> {
-    bridged(conn).map(|bridged| bridged.sock)
-}
-
-/// The owner's end of a bridged connection, read as the connection is: the bytes that came, then its End, or the
-/// error that cut it short (a reset, the link's end: what its connection's read ended with before the peer's End,
-/// recorded as the bridge ends the owner's socket), which the socket pair alone would read as an End.
-pub(crate) struct Bridged {
-    sock: Local,
-    cut: Cut,
+    bridged(conn).map(Bridged::into_socket)
 }
 
 /// `conn` as the owner's end of a bridge that tells a cut.
@@ -80,65 +37,7 @@ pub(crate) fn bridged(conn: Conn) -> io::Result<Bridged> {
     std::thread::Builder::new()
         .name("hex-quic-down".to_owned())
         .spawn(move || downward(&conn, ours, &recorded))?;
-    Ok(Bridged { sock: owner, cut })
-}
-
-impl Read for Bridged {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.sock.read(buf)?;
-        if n == 0
-            && !buf.is_empty()
-            && let Some(cut) = self.cut.error()
-        {
-            return Err(cut);
-        }
-        Ok(n)
-    }
-}
-
-impl Write for Bridged {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.sock.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.sock.flush()
-    }
-}
-
-impl Duplex for Bridged {
-    fn try_clone(&self) -> io::Result<DuplexOwner> {
-        own_duplex(Bridged {
-            sock: Local::try_clone(&self.sock)?,
-            cut: self.cut.clone(),
-        })
-        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
-    }
-
-    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        Local::shutdown(&self.sock, how)
-    }
-
-    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        Local::set_write_timeout(&self.sock, timeout)
-    }
-
-    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        Local::set_read_timeout(&self.sock, timeout)
-    }
-
-    fn handle(&self) -> Handle<'_> {
-        Duplex::handle(&self.sock)
-    }
-
-    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
-        Local::set_nonblocking(&self.sock, on)
-    }
-
-    /// The cut the bridge records: its owner's caller reads the socket itself, whose pair can't report it.
-    fn cut(&self) -> Option<Cut> {
-        Some(self.cut.clone())
-    }
+    Ok(Bridged::new(owner, cut))
 }
 
 /// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
@@ -202,14 +101,6 @@ fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
             }
         }
     }
-}
-
-/// Ends the pair's other end one way at a time, writing first, so the owner reads its end whichever side half-closed
-/// first: macOS refuses `SHUT_RDWR` on a socket whose reading has ended (ENOTCONN) and shuts nothing (Shards M236,
-/// D175).
-fn end(to: &Local) {
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = to.shutdown(Shutdown::Read);
 }
 
 #[cfg(all(test, unix))]

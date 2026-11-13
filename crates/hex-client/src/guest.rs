@@ -555,21 +555,15 @@ fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
 /// for the exec as the guest's own stdio dial names it, the caller's end handed off as its own.
 ///
 /// AC-T7.4.1: Shards' borrowed CONNECT waits for its OK only within a finite deadline (zero patience reads it
-/// without waiting, so a guest that hasn't answered yet is refused), so the call's deadline bounds every
-/// stream's CONNECT and name, and a call with none is refused by type before any is made.
+/// without waiting, so a guest that hasn't answered yet is refused). The call's deadline, where it has one, bounds
+/// every stream's CONNECT and name. A call with none follows the guest ([`connect_following`]) and names each
+/// stream as long as the guest takes to read it, as the link's own named dial does with no deadline.
 // Windows calls it; elsewhere only its test does, which needs Linux's /proc for a stand-in VM's identity.
 #[cfg(any(windows, all(test, target_os = "linux")))]
 pub(crate) fn open_offered(
     offer: &wire::StreamOffer,
     deadline: Option<ReplyDeadline>,
 ) -> Result<hex_api::Given, Refusal> {
-    let deadline = deadline.ok_or_else(|| Refusal::Invalid {
-        what: "offered guest streams",
-        why:
-            "a borrowed guest's CONNECT waits for its OK only within a deadline, and this call has \
-              none: give the client a reply budget or call with a deadline"
-                .to_owned(),
-    })?;
     let identity = shards_api::Identity {
         pid: offer.pid,
         started: offer.started,
@@ -584,14 +578,29 @@ pub(crate) fn open_offered(
             return Ok(None);
         }
         const OP: &str = "opening an offered guest stream";
-        // One CONNECT to the already-listening guest, waiting for its OK within what is left of the
-        // call's deadline; one that completes past it is refused.
-        let conn =
-            shards_api::connect_borrowed(&identity, stream::STDIO_PORT, deadline.remaining(OP)?)
+        let named = Named { exec, stream };
+        let conn = match deadline {
+            Some(deadline) => {
+                // One CONNECT to the already-listening guest, waiting for its OK within what is left of the
+                // call's deadline; one that completes past it is refused.
+                let conn = shards_api::connect_borrowed(
+                    &identity,
+                    stream::STDIO_PORT,
+                    deadline.remaining(OP)?,
+                )
                 .map_err(|why| shards::refusal(OP, &why))?;
-        deadline.remaining(OP)?;
-        let mut conn = shards::ShardsStream(conn);
-        name_before(&mut conn, Named { exec, stream }, deadline)?;
+                deadline.remaining(OP)?;
+                let mut conn = shards::ShardsStream(conn);
+                name_before(&mut conn, named, deadline)?;
+                conn
+            }
+            None => {
+                let mut conn = shards::ShardsStream(connect_following(&identity, offer.setup)?);
+                conn.write_all(&stream::name(named))
+                    .map_err(os("naming a stdio connection"))?;
+                conn
+            }
+        };
         caller_end(&conn).map(Some)
     };
     Ok(hex_api::Given {
@@ -599,6 +608,78 @@ pub(crate) fn open_offered(
         stdout: open(offer.streams.stdout, stream::Stdio::Out)?,
         stderr: open(offer.streams.stderr, stream::Stdio::Err)?,
     })
+}
+
+/// HEX-RT-17's offered CONNECTs for calls with no deadline, as the waits census keeps them (decision 9): each OK,
+/// timed from its wait's start, and each wait's run-out past its guest link's setup bound ([`connect_following`]).
+#[cfg(any(windows, all(test, target_os = "linux")))]
+static OFFERED: Patience = Patience::measuring("client.guest.offered.connect");
+
+/// An offered stream's CONNECT for a call with no deadline, as decision 9 waits (the person's ruling of 2026-11-13).
+/// Its W* is the guest link's own setup bound, which the offer carries: the slowest boot to ready its node has seen,
+/// whose ready includes a whole CONNECT/OK exchange, and the one finite deadline Shards' borrowed connector waits in.
+/// - **Within it** the OK is the answer.
+/// - **Past it** the run-out is told, once, and the wait follows the VM the offer names by its life: the next CONNECT
+///   is made, waiting the bound again, as each passes, refused at the VM's end (the connector holds the VM's process
+///   before and after each CONNECT) or by any failure that isn't a deadline's passing, never at a bound.
+///
+/// No CONNECT is given up sooner: one given up is closed unnamed and made again, a connection the guest takes for
+/// nothing (the guest's relay drops it, `hex_node::relay`). The OK, however long it took, is told to the census
+/// ([`OFFERED`]). An offer whose link has no positive bound is refused by type before any CONNECT: nothing then says
+/// how long one may wait.
+#[cfg(any(windows, all(test, target_os = "linux")))]
+fn connect_following(
+    identity: &shards_api::Identity,
+    setup: Option<Duration>,
+) -> Result<Box<dyn shards_api::Stream>, Refusal> {
+    const OP: &str = "opening an offered guest stream";
+    let bound = setup
+        .filter(|setup| !setup.is_zero())
+        .ok_or_else(|| Refusal::Invalid {
+            what: "offered guest streams",
+            why: "a borrowed guest's CONNECT waits for its OK only within a finite deadline, and neither this \
+                  call nor its guest's link has one: give the client a reply budget or call with a deadline"
+                .to_owned(),
+        })?;
+    let began = Instant::now();
+    let mut told = false;
+    loop {
+        match shards_api::connect_borrowed(identity, stream::STDIO_PORT, bound) {
+            Ok(conn) => {
+                OFFERED.answered(began.elapsed());
+                return Ok(conn);
+            }
+            Err(why) if !deadline_passed(&why) => return Err(shards::refusal(OP, &why)),
+            Err(_) => {
+                if !told {
+                    // No sample (Karn's point): the census is told, and the wait goes on.
+                    OFFERED.ran_out(bound);
+                    told = true;
+                }
+            }
+        }
+    }
+}
+
+/// Whether Shards' borrowed CONNECT ended at its deadline alone: its handshake's deadline passed, or a socket's
+/// timeout set to it did, or its OK came at or after it.
+#[cfg(any(windows, all(test, target_os = "linux")))]
+fn deadline_passed(why: &shards_api::Refusal) -> bool {
+    use shards_api::{BorrowFailure, HandshakeError};
+    let shards_api::Refusal::Borrowed { failure, .. } = why else {
+        return false;
+    };
+    matches!(
+        failure,
+        BorrowFailure::Expired
+            | BorrowFailure::Channel(
+                HandshakeError::Expired { .. }
+                    | HandshakeError::Io {
+                        kind: io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock,
+                        ..
+                    }
+            )
+    )
 }
 
 impl<W: Waits> Transport for Stream<W> {
@@ -618,6 +699,7 @@ impl<W: Waits> Transport for Stream<W> {
             token: self.token,
             exec,
             streams,
+            setup: self.link.setup_bound(),
         })
     }
 
@@ -1140,6 +1222,8 @@ impl<W: Waits> Stream<W> {
     }
 }
 
+pub mod bridge;
+pub mod lanes;
 pub mod shards;
 pub mod stage;
 

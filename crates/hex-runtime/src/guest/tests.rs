@@ -417,8 +417,10 @@ impl shards_api::Guests for NoGuest {
 pub(super) fn config() -> GuestConfig {
     GuestConfig {
         binary: PathBuf::from("/shards"),
-        kernel: PathBuf::from("/k"),
-        initrd: PathBuf::from("/i"),
+        boot: crate::guest::Boot::Kernel {
+            kernel: PathBuf::from("/k"),
+            initrd: PathBuf::from("/i"),
+        },
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
@@ -485,13 +487,13 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
 /// command line naming the shares, the channel's three ports alone, and each share as configured.
 #[test]
 fn the_guests_spec_names_its_init_ports_and_shares() {
-    let spec = config().spec();
+    let spec = config().spec().unwrap();
     assert_eq!(spec.cmdline, "console=ttyS0 panic=-1 hex.shares=rw");
     let none = GuestConfig {
         shares: Vec::new(),
         ..config()
     };
-    assert_eq!(none.spec().cmdline, "console=ttyS0 panic=-1");
+    assert_eq!(none.spec().unwrap().cmdline, "console=ttyS0 panic=-1");
     assert_eq!(
         spec.ports,
         [stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT]
@@ -503,7 +505,8 @@ fn the_guests_spec_names_its_init_ports_and_shares() {
         gpu: true,
         ..config()
     }
-    .spec();
+    .spec()
+    .unwrap();
     assert!(gpu.gpu);
     assert_eq!(gpu.cmdline, spec.cmdline);
     assert_eq!(gpu.ports, spec.ports);
@@ -553,15 +556,18 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     ]);
     let config = read(&all).unwrap();
     assert_eq!((config.vcpus, config.memory_mib), (2, 1024));
-    assert_eq!(config.spec().binary, Some(PathBuf::from("/opt/shards")));
+    assert_eq!(
+        config.spec().unwrap().binary,
+        Some(PathBuf::from("/opt/shards"))
+    );
     assert_eq!(config.shares.len(), 1);
     assert!(!config.gpu);
     for (value, enabled) in [("false", false), ("true", true)] {
         let mut vars = all.clone();
         vars.push((ENV_GPU, value));
         let selected = read(&vars).unwrap();
-        assert_eq!(selected.spec().gpu, enabled);
-        assert_eq!(selected.spec().ports, config.spec().ports);
+        assert_eq!(selected.spec().unwrap().gpu, enabled);
+        assert_eq!(selected.spec().unwrap().ports, config.spec().unwrap().ports);
     }
     for value in ["", "TRUE", "1", "yes"] {
         let mut vars = all.clone();

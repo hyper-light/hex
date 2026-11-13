@@ -253,8 +253,10 @@ mod tests {
                 })),
                 GuestConfig {
                     binary: "/model/shards".into(),
-                    kernel: "/model/kernel".into(),
-                    initrd: "/model/initrd".into(),
+                    boot: Boot::Kernel {
+                        kernel: "/model/kernel".into(),
+                        initrd: "/model/initrd".into(),
+                    },
                     vcpus: 1,
                     memory_mib: 256,
                     gpu: false,
@@ -1168,7 +1170,11 @@ impl GuestRuntime {
             // recovery/create installs the native route before accepting forwards.
             self.cached_selected(id)
         } else if self.managed_shared() {
-            let record = snapshot.ok_or(super::books::uncertain(id)?)?;
+            // A box its guest keeps no record of is no box of its guest's: a macOS or Windows node forwards a call
+            // on an id its host doesn't hold here, which then answers NoSuchBox (HVF image_real's HEX-IMG-1, 6 and 7).
+            let Some(record) = snapshot else {
+                return Ok(None);
+            };
             self.shared_for_record(record)
         } else {
             self.running()
@@ -1386,7 +1392,7 @@ impl GuestRuntime {
     }
 
     fn receipt_spec(&self, receipt: &Record) -> Result<shards_api::GuestSpec, Refusal> {
-        let mut spec = self.config.spec();
+        let mut spec = self.config.spec()?;
         spec.gpu = !receipt.devices.is_empty();
         spec.vcpus = receipt.vcpus;
         spec.memory_mib = receipt.memory_mib;
