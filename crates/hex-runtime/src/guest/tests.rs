@@ -1534,7 +1534,8 @@ fn a_recorded_guest_shards_saw_end_is_forgotten_and_another_booted() {
         let kept = Kept::new(true);
         *kept.ended.lock().unwrap() = Some(failure.clone());
         let node = kept_node(&kept, &record);
-        node.boot().unwrap_or_else(|why| panic!("{failure:?}: {why}"));
+        node.boot()
+            .unwrap_or_else(|why| panic!("{failure:?}: {why}"));
         assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
         assert_eq!(kept.boots.load(Ordering::SeqCst), 1, "{failure:?}");
         assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
@@ -1549,7 +1550,11 @@ fn a_recorded_guest_shards_saw_end_is_forgotten_and_another_booted() {
     });
     let node = kept_node(&kept, &record);
     assert!(node.boot().is_err(), "an unread guest taken as ended");
-    assert_eq!(kept.boots.load(Ordering::SeqCst), 0, "a guest booted beside one that may run");
+    assert_eq!(
+        kept.boots.load(Ordering::SeqCst),
+        0,
+        "a guest booted beside one that may run"
+    );
     assert_eq!(held::read(&record).unwrap(), Some(kept_identity(7)));
 }
 
