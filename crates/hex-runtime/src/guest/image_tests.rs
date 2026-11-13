@@ -734,6 +734,52 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan steps 12, 15 and 17 (ROOT's grants-none on KVM and HVF at c8b4ce6b, 2026-11-13: a probe of what Hex asks
+/// Shards, beside image_real's runs, which ran): do boot a VM of its members alone granted nothing, once with none of its
+/// members driven, as image_real's cases boot, and once with its harness driven by its caller (`ShardsImage::members`),
+/// as image_grants_real's check 2 boots. Expect the two boots asked alike in all but `members`: nothing kept past the
+/// microVM and every member held to reaching nothing (D246's `Some([])`), with no publish, in both; the second's
+/// `members` its harness alone, its stdin asked. So of what check 2 sends, its driven member alone is not image_real's.
+#[test]
+fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    // Each boot on a runtime of its own, so neither waits at a bound the other's answer taught (decision 9).
+    let asked_of = |members: Vec<ImageMember>| {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut spec = spec("image-probe", None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.members = members;
+        }
+        let id = runtime.create(spec).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        boot.clone()
+    };
+    let first = asked_of(Vec::new());
+    let second = asked_of(vec![ImageMember::new(Member {
+        kind: MemberKind::Harness,
+        name: "probe".to_owned(),
+    })]);
+    assert_eq!(first.egress.egress, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.mcp, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.destinations, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.members, Some(Vec::new()));
+    assert!(!first.egress.dns && first.publish.is_empty() && first.members.is_empty());
+    let [member] = second.members.as_slice() else {
+        panic!("the driven boot's members: {:?}", second.members);
+    };
+    assert_eq!(member.member, MemberName::harness("probe"));
+    assert!(member.stdin && !member.terminal);
+    let mut alike = second.clone();
+    alike.members.clone_from(&first.members);
+    alike.ready_by = first.ready_by;
+    assert_eq!(alike, first);
+}
+
 /// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
 /// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
 /// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
