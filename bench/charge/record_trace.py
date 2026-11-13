@@ -163,8 +163,9 @@ def interrupts():
     return stop
 
 
-def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_until=sleep_until_ns):
-    """Records the session running in `cgroup` into `out` (module docs), passively, until the cgroup empties."""
+def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_until=sleep_until_ns, proc="/proc"):
+    """Records the session running in `cgroup` into `out` (module docs), passively, until the cgroup empties. Original
+    (red): `proc` is read for nothing, and a cgroup whose parent gives it no memory controller is refused."""
     if not os.path.exists(os.path.join(cgroup, "cgroup.events")):
         raise SystemExit(f"{cgroup} is no cgroup: it has no cgroup.events")
     if not populated(cgroup):
