@@ -1504,14 +1504,15 @@ fn list_parts(sock: &Sock) -> usize {
 
 /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a
 /// client reading a list slower than any client before it had its connection closed at W*, the slowest read seen,
-/// though it was there to read. Do: a server whose reads have learned a W* of 200 ms; a client with no room asks for a
+/// though it was there to read. Do: a server whose reads have learned a W* of 1 s; a client with no room asks for a
 /// list of three parts or more, and makes room only once the next part's wait has run out (told, the wait following)
 /// or its connection has closed. Expect: the connection standing past W*; once the client reads, every part, and W*
-/// risen to the read that passed it.
+/// risen to the read that passed it. The client is to read within a window of W* of the run-out, so W* is long
+/// against a loaded host's late wake-ups (a 200 ms timed wait woke 130 ms late on adacachy2 under load, run r362).
 #[test]
 fn original_a_client_reading_a_list_slower_than_any_before_is_followed_past_w_star() {
     static READS: Patience = Patience::measuring("test.serve.reads.followed");
-    let learned = Duration::from_millis(200);
+    let learned = Duration::from_secs(1);
     READS.answered(learned);
     let (lab, parts) = listing(&READS);
     let sock = lab.os.connect(true, 0);
