@@ -448,9 +448,9 @@ the socket's own and its connections, the program places' streams, the programs 
 (below) and what it held at its start. Linux's node fits them with its pools' (`netns::fit`); macOS and Windows nodes
 fit them alone (`serve::fit`), the program places the bound they cut, which the connections and lanes follow (ROOT's
 one accounting of 2026-11-13: before it a macOS or Windows node's connections were its raw descriptor limit, counting
-nothing beside them, so a busy node could pass it). Windows' at-start term waits on Ada's word for its
-`GetProcessHandleCount` (CLAUDE.md §12). What else holds the platform's room past that, the kernel refuses as the node
-takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
+nothing beside them, so a busy node could pass it). What the process held at its start is Linux's `/proc/self/fd`,
+macOS's `/dev/fd` and Windows' `GetProcessHandleCount`. What else holds the platform's room past that, the kernel
+refuses as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
 
 A hosted VM, a node VM under shards-init (`node-under-shards-init.md` §5), is reached by Shards' socket lanes, each a
 local socket pair on the node's side; its run admits as many as its guest client may hold open at once at the node's
