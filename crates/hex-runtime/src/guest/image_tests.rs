@@ -178,6 +178,9 @@ impl Books for Owner {
 #[derive(Default)]
 struct ModelRun {
     end: Mutex<Option<RunEnd>>,
+    /// What its run host said last where it exited without its run's end, as the test sets it: shards-api then reads
+    /// the run's end as `Failed` in those words, and a stop of it as `Stopped` (`Session::wait_for`, `Session::stop`).
+    gone: Mutex<Option<String>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
     /// The patience each stats ask was given, in order (decision 9).
@@ -341,7 +344,12 @@ impl ImageGuest for ModelGuest {
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.run.end.lock().unwrap().clone())
+        let end = self.run.end.lock().unwrap().clone();
+        Ok(end.or_else(|| {
+            self.run.gone.lock().unwrap().as_ref().map(|said| {
+                RunEnd::Failed(format!("the run host exited without its run's end: {said}"))
+            })
+        }))
     }
 }
 
@@ -618,6 +626,9 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
 /// makes either, so each measures, for its fact alone (hex_testkit::waits).
 static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
 static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
+/// A run whose host exited without its run's end, reaped through its stop and shown Empty: a fact of its own, measuring
+/// alike.
+static HOST_GONE_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_host_gone_shown");
 
 /// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
@@ -723,6 +734,32 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
     let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
     assert_eq!(info.exit, Some(Exit::Code(3)));
     assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Code(3)));
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
+/// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
+/// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
+/// Empty with an unknown exit and those words, by inspect and in its record, never a KILL Hex never sent.
+#[test]
+fn a_run_whose_host_exited_without_its_end_ends_in_its_hosts_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-host-gone", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let said = "init: the microVM's last words";
+    *images.run.gone.lock().unwrap() = Some(said.to_owned());
+    let info = shown(&runtime, &id, BoxState::Empty, &HOST_GONE_SHOWN);
+    let words = format!("the run host exited without its run's end: {said}");
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words.as_str()))
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words.as_str()))
+    );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 

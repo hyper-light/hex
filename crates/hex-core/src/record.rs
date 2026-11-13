@@ -181,6 +181,51 @@ pub struct ProcId {
 }
 
 impl BoxRecord {
+    /// Marks the box retired with its backing (joint plan step 14, `hex_api::LifecycleCause::Retired`): kept, ready, its
+    /// end unknown where none was read, and why in its `ended`, the cause's own words, until its owner's delete.
+    pub fn retire(&mut self) {
+        self.phase = Phase::Ready;
+        self.exit.get_or_insert(Exit::Unknown);
+        self.retired = true;
+        self.ended = Some(hex_api::LifecycleCause::Retired.to_string());
+    }
+
+    /// What every call on a retired box but its inspect and its delete answers: its backing's refusal, `Retired`.
+    pub fn retired_refusal(&self) -> Result<Refusal, Refusal> {
+        Ok(match self.spec.route.and_then(|route| route.backing) {
+            Some(key) => Refusal::Backing {
+                key,
+                cause: hex_api::LifecycleCause::Retired,
+            },
+            None => Refusal::Lifecycle {
+                id: self.spec.id.try_clone()?,
+                cause: hex_api::LifecycleCause::Retired,
+            },
+        })
+    }
+
+    /// What a retired box's inspect shows, from its record alone, with no backing left to ask: nothing running, its
+    /// end, and why in its `ended`.
+    pub fn retired_info(&self) -> Result<hex_api::BoxInfo, Refusal> {
+        let spec = &self.spec;
+        Ok(hex_api::BoxInfo {
+            id: spec.id.try_clone()?,
+            class: spec.class.class(),
+            state: hex_api::BoxState::Empty,
+            bounds: spec.bounds.clone(),
+            allocation: spec.allocation,
+            adopted: false,
+            membership: None,
+            exit: self.exit,
+            abandoned: self.abandoned,
+            route: spec.route,
+            grants: Vec::new(),
+            published: Vec::new(),
+            last_resort: None,
+            ended: self.ended.clone(),
+        })
+    }
+
     /// The native keeper commits to the immutable scope and original workload/admission receipt.
     /// Mutable lifecycle/accounting fields do not change that cleanup identity.
     pub fn native_commitment(&self) -> Result<[u8; 32], Refusal> {
