@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
-use hex_core::record::{BoxRecord, NativeRecord, NativeStage, PoolRecord};
+use hex_core::record::{BoxRecord, NativeRecord, NativeStage, NodeVmRecord, PoolRecord};
 
 /// One metadata callback's bounded route-count scratch, never stored as inventory or grants.
 /// Retained tuples are real identities; introduced keys describe ONE new lifetime only after
@@ -592,6 +592,27 @@ pub trait Books: Send + Sync {
         full_conflicts: &[DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal>;
+    /// Node VM `run`'s record (joint plan step 39), which lies apart from every box's and pool's, so no box call reads
+    /// it. An owner that keeps no node VM refuses, naming it.
+    fn node_vm(&self, run: &hex_api::NodeRun) -> Result<Option<NodeVmRecord>, Refusal> {
+        let _ = run;
+        Err(no_node_vms())
+    }
+    /// Writes node VM `record.run`'s record whole, replacing what it held, durable before it returns.
+    fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
+        let _ = record;
+        Err(no_node_vms())
+    }
+    /// Lets node VM `run`'s record go, once its run has ended.
+    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
+        let _ = run;
+        Err(no_node_vms())
+    }
+}
+
+/// An owner's answer for the node VM records it doesn't keep: one of a test's, or of a runtime that runs none.
+fn no_node_vms() -> Refusal {
+    Refusal::Broken("this record owner keeps no node VM's record".to_owned())
 }
 
 pub trait Transaction {

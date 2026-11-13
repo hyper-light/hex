@@ -39,6 +39,9 @@ use shards_api::image::{
 use super::{GuestRuntime, poisoned};
 use crate::devices::{self, Books};
 
+mod node;
+pub use node::{NodeBooted, NodeVm};
+
 /// The waits an image box's calls make, each learned (decision 9): Shards' boot of an image to its members' start, a
 /// stats answer, a stop to its run host's exit, and a delete's following of a boot it ends to the boot's answer. Each
 /// is the slowest answer this process has seen, a bound only while answers come within it; before its first, and from
