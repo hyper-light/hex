@@ -641,17 +641,35 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
     );
 }
 
-/// AC-T7.4.1: with no caller's deadline a call's learned wait is still its bound, its hang detection. Do: say hello with
-/// no caller deadline to the late agent, which no census tells its wait ran out here, so it never answers. Expect:
-/// refused at the slowest answer to a call of its kind, its 1 ms bound.
+/// AC-T7.4.1, decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it):
+/// a call with no caller's deadline was refused at its kind's learned wait, "none came in 1ms, the slowest answer to a
+/// call of its kind", so a fresh process's second call was refused whenever it was slower than its first. Do: say hello
+/// with no caller deadline to an agent that answers only once the hello's learned wait (1 ms) has run out. Expect: the
+/// hello answered, the call following its agent past W*; its run-out told to the census once, at the learned bound; its
+/// answer told too, later than that bound.
 #[test]
-fn with_no_callers_deadline_the_learned_wait_still_refuses() {
+fn original_with_no_callers_deadline_a_call_follows_its_agent_past_the_learned_wait() {
+    if !in_late_census_child(
+        "calls::budget_tests::original_with_no_callers_deadline_a_call_follows_its_agent_past_the_learned_wait",
+    ) {
+        return;
+    }
     let shared = Shared::try_new(late_hello::<false>()).unwrap();
     let result = Core::hello_before(shared, None).map(drop);
-    eprintln!("client_late_answer under=none result={result:?}");
+    let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
+    let answered = LATE_ANSWERED.lock().unwrap().clone();
+    eprintln!(
+        "client_late_answer under=none result={result:?} ran_out={ran_out:?} answered={answered:?}"
+    );
     assert!(
-        matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 1ms") && why.contains(LEARNED)),
-        "{result:?}"
+        result.is_ok(),
+        "a call with no caller's deadline was refused at its learned wait: {result:?}"
+    );
+    let bound = Duration::from_millis(1);
+    assert_eq!(ran_out, [("test.client_budget.late.alone", bound)]);
+    assert!(
+        matches!(answered.as_slice(), [("test.client_budget.late.alone", took)] if *took > bound),
+        "{answered:?}"
     );
 }
 
@@ -1741,9 +1759,10 @@ fn ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline() {
     assert!(client.conn.shared.state().unwrap().calls.is_empty());
 }
 
-/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport bound may shorten
+/// AC-T7.4.1, decision 9: supplied instants survive unchanged; an earlier transport bound may shorten
 /// authority, no later/default bound can enlarge it, and a learned wait never replaces it:
-/// ending first it is a run-out to record, a tie the caller's; with no caller it is the bound.
+/// ending first it is a run-out to record, a tie the caller's; with no caller it bounds nothing,
+/// still the run-out to record as it passes (the person's ruling of 2026-11-13).
 #[test]
 fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let began = Instant::now();
@@ -1776,11 +1795,12 @@ fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(LONG_CAP));
     assert_eq!(bound.unwrap().at(), at);
     assert!(learned.is_none(), "a tie belongs to caller authority");
+    // With no caller's deadline nothing bounds the call: its learned wait is the run-out it tells as it passes.
     let (bound, learned) = ReplyDeadline::combine(None, began, Some(CAP));
-    let bound = bound.unwrap();
-    assert_eq!(bound.at(), earlier);
-    assert!(matches!(bound.source, ReplyBound::Learned(_)));
-    assert!(learned.is_none());
+    assert!(bound.is_none(), "{bound:?}");
+    let learned = learned.unwrap();
+    assert_eq!(learned.at(), earlier);
+    assert!(matches!(learned.source, ReplyBound::Learned(_)));
 }
 
 /// Shared observations of each actual port and its original optional dial deadline.

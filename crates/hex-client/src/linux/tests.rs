@@ -1256,48 +1256,48 @@ fn container_box(id: &str, class: Class) -> hex_api::BoxSpec {
     }
 }
 
-/// AC-T7.4.1: a box's class times its create, each (kind, class) a learned wait of its own; a class with no record
-/// yet measures, never borrowing another's. Do: through the node agent's socket, create an `oci` box the stand-in
-/// agent never answers, so the create runs out at the `oci` create's bound `b`; then create a `firecracker` box, which
-/// the agent answers only 4`b` after it reads it, a microVM's boot being slower than any OCI create recorded. Expect:
-/// the `oci` create refused at its slowest (decision 9); the `firecracker` create answered.
+/// AC-T7.4.1, decision 9: a box's class times its create, each (kind, class) a learned wait of its own, and none of
+/// them refuses a call by itself (the person's ruling of 2026-11-13: W* is a bound only while answers come within it). Do:
+/// through the node agent's socket, create an `oci` box the stand-in agent answers at once, teaching the `oci` create's
+/// wait its answer `b`; then create a `firecracker` box, which the agent answers only 4`b` after it reads it, a microVM's
+/// boot being slower than any OCI create. Expect: both answered, the `firecracker` create waited for past the `oci`
+/// create's answer, never refused by it.
 #[test]
-fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
+fn a_vm_create_slower_than_the_oci_creates_is_answered() {
     let (_dir, path, listener) = agent_socket();
-    let (measured, oci_bound) = std::sync::mpsc::channel::<Duration>();
+    let (measured, oci_answer) = std::sync::mpsc::channel::<Duration>();
     let agent = std::thread::spawn(move || {
         let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
         hello(&conn, 1);
-        let (_, request) = next_request(&conn);
-        assert!(
-            matches!(request, Request::Call(Call::Create(_))),
-            "{request:?}"
-        );
-        let b = oci_bound.recv().unwrap();
-        let (h, request) = next_request(&conn);
-        let Request::Call(Call::Create(spec)) = request else {
-            panic!("a create, not {request:?}")
-        };
-        // Held 4b, a span the client sends nothing in: the poll ends at its timeout, or at the client's end.
-        let mut quiet = [PollFd::new(&conn, PollFlags::IN)];
-        let _ = rustix::event::poll(&mut quiet, Some(&Timespec::try_from(b * 4).unwrap()));
-        let info = hex_api::BoxInfo {
-            published: Vec::new(),
-            grants: Vec::new(),
-            id: spec.id,
-            class: Class::Firecracker,
-            state: hex_api::BoxState::Created,
-            bounds: spec.bounds,
-            allocation: None,
-            adopted: false,
-            membership: None,
-            exit: None,
-            abandoned: 0,
-            route: None,
-            last_resort: None,
-        };
-        let bytes = wire::answer(h.id, &Answer::Info(info), wire::MAX_MESSAGE).unwrap();
-        let _ = rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL);
+        for class in [Class::Oci, Class::Firecracker] {
+            let (h, request) = next_request(&conn);
+            let Request::Call(Call::Create(spec)) = request else {
+                panic!("a create, not {request:?}")
+            };
+            if class == Class::Firecracker {
+                let b = oci_answer.recv().unwrap();
+                // Held 4b, a span the client sends nothing in: the poll ends at its timeout, or at the client's end.
+                let mut quiet = [PollFd::new(&conn, PollFlags::IN)];
+                let _ = rustix::event::poll(&mut quiet, Some(&Timespec::try_from(b * 4).unwrap()));
+            }
+            let info = hex_api::BoxInfo {
+                published: Vec::new(),
+                grants: Vec::new(),
+                id: spec.id,
+                class,
+                state: hex_api::BoxState::Created,
+                bounds: spec.bounds,
+                allocation: None,
+                adopted: false,
+                membership: None,
+                exit: None,
+                abandoned: 0,
+                route: None,
+                last_resort: None,
+            };
+            let bytes = wire::answer(h.id, &Answer::Info(info), wire::MAX_MESSAGE).unwrap();
+            let _ = rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL);
+        }
         conn
     });
     let client = Client::connect(&path).unwrap();
@@ -1307,7 +1307,7 @@ fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
     let vm = client.create(container_box("v", Class::Firecracker));
     eprintln!("client_class_waits oci={oci:?} vm={vm:?}");
     assert!(
-        matches!(&oci, Err(Refusal::Os { why, .. }) if why.contains("the slowest answer to a call of its kind")),
+        matches!(&oci, Ok(info) if info.class == Class::Oci),
         "{oci:?}"
     );
     assert!(
