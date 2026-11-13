@@ -873,6 +873,63 @@ fn requests() -> Vec<(u64, Request, usize)> {
             },
             0,
         ),
+        // docs/design/credential-grants.md C8: a connection's answers to the node's sign-in asks.
+        (
+            216,
+            Request::Captured {
+                run: 206,
+                answer: Ok(hex_api::Captured {
+                    access: "kiln/sign-ins/claude/access".to_owned(),
+                    access_placeholder: "kiln-placeholder-61".to_owned(),
+                    refresh_placeholder: Some("kiln-placeholder-62".to_owned()),
+                }),
+            },
+            0,
+        ),
+        (
+            217,
+            Request::Captured {
+                run: 206,
+                answer: Err(SignInRefused::Denied("no such sign-in".to_owned())),
+            },
+            0,
+        ),
+        (
+            218,
+            Request::Refreshed {
+                run: 206,
+                answer: Ok(Value::new(
+                    b"{\"access_token\":\"kiln-placeholder-61\"}".to_vec(),
+                )),
+            },
+            0,
+        ),
+        (
+            219,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unanswered),
+            },
+            0,
+        ),
+        (
+            220,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unavailable(
+                    "its provider is away".to_owned(),
+                )),
+            },
+            0,
+        ),
+        (
+            221,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Ended),
+            },
+            0,
+        ),
     ]
 }
 
@@ -1235,6 +1292,53 @@ fn answers() -> Vec<(u64, Answer)> {
     ));
     out.push((206, Answer::LeaseGiven("lease-1".to_owned())));
     out.push((206, Answer::LessorEnded));
+    // docs/design/credential-grants.md C8: the node's sign-in asks.
+    out.push((
+        209,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"sk-ant-oat01-access".to_vec()),
+                refresh: Some(Value::new(b"sk-ant-ort01-refresh".to_vec())),
+                expires_in: Some(28_800),
+                id_token: None,
+                scope: Some("user:inference".to_owned()),
+            },
+            key: Some([3; 32]),
+        },
+    ));
+    out.push((
+        210,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "openai/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"at".to_vec()),
+                refresh: None,
+                expires_in: None,
+                id_token: Some(Value::new(b"eyJhbGciOiJub25lIn0.e30.".to_vec())),
+                scope: None,
+            },
+            key: None,
+        },
+    ));
+    out.push((
+        211,
+        Answer::RefreshAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: None,
+        },
+    ));
+    out.push((
+        206,
+        Answer::SignInRevoked {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: Some([3; 32]),
+        },
+    ));
     out
 }
 
@@ -2002,7 +2106,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x001c, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x001e, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -5620,15 +5724,20 @@ fn s33_a_leases_value_crosses_marked_and_never_printed() {
     for (n, other, _) in requests() {
         if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
             let other = request(n, &other, MAX_MESSAGE).unwrap();
+            let kind = other.get(12..14).map(|k| u16::from_le_bytes([k[0], k[1]]));
             assert_eq!(
                 carries_secret(&other),
-                other.get(12..14) == Some(&0x001b_u16.to_le_bytes()[..]),
-                "only a leased message says it carries a value"
+                matches!(kind, Some(0x001b..=0x001d)),
+                "only a leased, captured or refreshed message says it carries a value"
             );
         }
     }
     for (n, other) in answers() {
-        assert!(!carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()));
+        assert_eq!(
+            carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()),
+            matches!(other, Answer::CaptureAsk { .. }),
+            "only a capture's ask carries tokens among the node's messages"
+        );
     }
     let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
     assert_eq!(back, leased);
