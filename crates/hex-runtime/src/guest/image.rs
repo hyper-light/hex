@@ -98,7 +98,7 @@ enum Run {
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone.
     Stopping(Arc<Slot<RunEnd>>),
     /// Its end, known, until its record says it.
-    Ended(Exit),
+    Ended(End),
 }
 
 /// One answer a thread of its own gives: a boot's or a stop's.
@@ -165,8 +165,37 @@ enum State {
     Booting,
     Running(Arc<dyn ImageGuest>),
     Stopping(Arc<Slot<RunEnd>>),
-    Ended(Exit),
+    Ended(End),
     Held,
+}
+
+/// How a box's run ended: its exit, and where the run failed, why, in its runtime's words ([`BoxInfo::ended`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct End {
+    exit: Exit,
+    why: Option<String>,
+}
+
+impl End {
+    /// A run's end as Shards' run host tells it ([`exit_of`]), with its words where it failed: its VM, its host or its
+    /// guest failed, or its own command never started (D249).
+    fn of(end: &RunEnd) -> Self {
+        Self {
+            exit: exit_of(end),
+            why: match end {
+                RunEnd::Failed(why) => Some(why.clone()),
+                RunEnd::Exited(_) | RunEnd::Stopped => None,
+            },
+        }
+    }
+
+    /// An end Hex can't read the exit of, with why where its runtime said it.
+    fn unknown(why: Option<String>) -> Self {
+        Self {
+            exit: Exit::Unknown,
+            why,
+        }
+    }
 }
 
 /// A run's end as the box's exit: `docker run`'s status as Shards reports it (128 and a signal's number
@@ -367,6 +396,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
             _ => Vec::new(),
         },
         last_resort: None,
+        ended: None,
     })
 }
 
@@ -670,8 +700,8 @@ impl GuestRuntime {
         })
     }
 
-    /// Writes the box's end, once, where its record lacks it.
-    fn record_end(&self, id: &BoxId, exit: Exit) -> Result<(), Refusal> {
+    /// Writes the box's end, its exit and why where its run failed, once, where its record lacks it.
+    fn record_end(&self, id: &BoxId, end: &End) -> Result<(), Refusal> {
         devices::with_transaction(self.image_books()?, id, &[], |transaction| {
             let mut record = transaction
                 .read(id)?
@@ -679,7 +709,8 @@ impl GuestRuntime {
             if record.exit.is_some() {
                 return Ok(());
             }
-            record.exit = Some(exit);
+            record.exit = Some(end.exit);
+            record.ended.clone_from(&end.why);
             transaction.put(&record)
         })
     }
@@ -692,20 +723,24 @@ impl GuestRuntime {
         enum Next {
             Is(State),
             Running(Arc<dyn ImageGuest>),
-            Ends(Exit),
+            Ends(End),
             NoRun,
         }
         let id = &record.spec.id;
+        let recorded = |exit| End {
+            exit,
+            why: record.ended.clone(),
+        };
         let Some(image) = &self.image else {
             return Ok(match (record.exit, record.phase) {
-                (Some(exit), _) => State::Ended(exit),
+                (Some(exit), _) => State::Ended(recorded(exit)),
                 (None, Phase::Creating) => State::Created,
                 (None, _) => State::Held,
             });
         };
         if let Some(exit) = record.exit {
             image.forget(id)?;
-            return Ok(State::Ended(exit));
+            return Ok(State::Ended(recorded(exit)));
         }
         if record.phase == Phase::Creating {
             return Ok(State::Created);
@@ -722,36 +757,38 @@ impl GuestRuntime {
                             *run = Run::Running(Arc::clone(&guest));
                             Next::Is(State::Running(guest))
                         }
-                        // The run host refused or ended the run before it started: its own answer.
-                        Some(Err(_)) => {
-                            *run = Run::Ended(Exit::Unknown);
-                            Next::Ends(Exit::Unknown)
+                        // The run host refused or ended the run before it started: its own answer, in its words.
+                        Some(Err(why)) => {
+                            let end = End::unknown(Some(why.to_string()));
+                            *run = Run::Ended(end.clone());
+                            Next::Ends(end)
                         }
                     },
                     Run::Running(guest) => Next::Running(Arc::clone(guest)),
                     Run::Stopping(slot) => match slot.take()? {
                         None => Next::Is(State::Stopping(Arc::clone(slot))),
                         Some(end) => {
-                            let exit = exit_of(&end);
-                            *run = Run::Ended(exit);
-                            Next::Ends(exit)
+                            let end = End::of(&end);
+                            *run = Run::Ended(end.clone());
+                            Next::Ends(end)
                         }
                     },
-                    Run::Ended(exit) => Next::Ends(*exit),
+                    Run::Ended(end) => Next::Ends(end.clone()),
                 },
             }
         };
         match next {
             Next::Is(state) => Ok(state),
             Next::Running(guest) => self.settle_running(image, id, guest),
-            Next::Ends(exit) => {
-                self.record_end(id, exit)?;
+            Next::Ends(end) => {
+                self.record_end(id, &end)?;
                 image.forget(id)?;
-                Ok(State::Ended(exit))
+                Ok(State::Ended(end))
             }
             Next::NoRun if image.earlier_boot(record) => {
-                self.record_end(id, Exit::Unknown)?;
-                Ok(State::Ended(Exit::Unknown))
+                let end = End::unknown(None);
+                self.record_end(id, &end)?;
+                Ok(State::Ended(end))
             }
             Next::NoRun => Ok(State::Held),
         }
@@ -856,8 +893,8 @@ impl GuestRuntime {
             .spawn(move || answer.put(images.boot(&spec, patience)));
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
-            image.insert(&id, Run::Ended(Exit::Unknown))?;
-            self.record_end(&id, Exit::Unknown)?;
+            image.insert(&id, Run::Ended(End::unknown(None)))?;
+            self.record_end(&id, &End::unknown(None))?;
             image.forget(&id)?;
             return Err(Refusal::os("starting a Shards image VM's boot", why));
         }
@@ -879,7 +916,7 @@ impl GuestRuntime {
                         Ok(())
                     }
                     Some(Err(why)) => {
-                        *run = Run::Ended(Exit::Unknown);
+                        *run = Run::Ended(End::unknown(Some(why.to_string())));
                         Err(why)
                     }
                     None => Ok(()),
@@ -917,7 +954,7 @@ impl GuestRuntime {
             }
             Err(why) => {
                 waits.boot.refused(took);
-                self.record_end(&id, Exit::Unknown)?;
+                self.record_end(&id, &End::unknown(Some(why.to_string())))?;
                 image.forget(&id)?;
                 Err(refused(&id, "booting a Shards image VM", why))
             }
@@ -939,7 +976,7 @@ impl GuestRuntime {
                 slot
             }
             State::Stopping(slot) => slot,
-            State::Ended(exit) => return Ok(exit),
+            State::Ended(end) => return Ok(end.exit),
             State::Booting => return Err(pending(id)?),
             State::Held => return Err(held()),
             State::Created => return Err(Refusal::NotRunning(id.try_clone()?, "stop")),
@@ -954,7 +991,7 @@ impl GuestRuntime {
         }
         waits.stop.answered(asked.elapsed());
         match self.settle(&record_now(self, id)?)? {
-            State::Ended(exit) => Ok(exit),
+            State::Ended(end) => Ok(end.exit),
             _ => Err(super::books::uncertain(id)?),
         }
     }
@@ -995,7 +1032,11 @@ impl GuestRuntime {
                 Ok(shown)
             }
             State::Stopping(_) => info(&record.spec, BoxState::Running, None),
-            State::Ended(exit) => info(&record.spec, BoxState::Empty, Some(exit)),
+            State::Ended(end) => {
+                let mut shown = info(&record.spec, BoxState::Empty, Some(end.exit))?;
+                shown.ended = end.why;
+                Ok(shown)
+            }
             State::Held => Err(held()),
         }
     }
