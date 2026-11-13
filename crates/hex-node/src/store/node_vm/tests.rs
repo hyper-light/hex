@@ -1,6 +1,8 @@
 //! Node VM rows (joint plan step 39): kept apart from box and pool rows, read back as written, replaced whole, and
 //! let go.
 
+use std::path::Path;
+
 use super::*;
 use hex_api::{Allocation, Exit, NodeVmPhase};
 use hex_core::record::RECORD_VERSION;
@@ -114,4 +116,248 @@ fn every_node_vms_row_is_listed_in_its_runs_order() {
     );
     std::fs::write(store.node_vm_directory().join("a-box.json"), b"{}\n").unwrap();
     assert!(matches!(store.all_node_vms(), Err(Refusal::Invalid { .. })));
+}
+
+/// Each wait of these cases on a fact of another process's: its word, its end, a row let go.
+static FACT: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.node_vm_rows");
+
+/// The run of these cases' rows, `n` in each byte.
+fn run(n: u8) -> NodeRun {
+    NodeRun::from_bytes([n; 16])
+}
+
+/// Where a row of run `n` keeps its run host's diagnostics, in the test's directory, written as a run host would.
+fn diagnosed(dir: &Path, n: u8, phase: NodeVmPhase) -> NodeVmRecord {
+    let mut row = record(n, phase);
+    let diagnostics = dir.join(format!("node-{n}.log"));
+    std::fs::write(&diagnostics, b"its run host's words\n").unwrap();
+    row.diagnostics = Some(diagnostics);
+    row
+}
+
+fn store_in(dir: &Path) -> Store {
+    Store::open(&dir.join("state"), &dir.join("run")).unwrap()
+}
+
+/// This test binary run as one of these cases' other processes, `role` naming it, in `dir`.
+fn role(role: &str, dir: &Path) -> std::process::Command {
+    let full = concat!(module_path!(), "::", "node_vm_role");
+    let test = full.split_once("::").map_or(full, |(_, test)| test);
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env("HEX_NODE_VM_ROLE", role)
+        .env("HEX_NODE_VM_DIR", dir);
+    command
+}
+
+/// These cases' other processes, run alone where `HEX_NODE_VM_ROLE` names one (an ordinary run passes at once):
+/// - `owner`, a node that runs node VM 7: it writes its row Booting, so it holds its lock, then ends;
+/// - `holding owner`, the same, then starts a child of its own that outlives it, which on Unix holds a descriptor of
+///   its lock file's open file description, as a child forked without an exec would; then reads its row back, as a
+///   node does, says so, and ends when its stdin ends;
+/// - `child`: the owner's child, which goes once its test's directory holds `done`, or no longer is, saying so
+///   (`bye`).
+#[test]
+fn node_vm_role() {
+    use std::io::{BufRead, Write};
+    let (Some(role), Some(dir)) = (
+        std::env::var_os("HEX_NODE_VM_ROLE"),
+        std::env::var_os("HEX_NODE_VM_DIR"),
+    ) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    if role == "child" {
+        // Its pid, for a run that kills its test to stop it by.
+        std::fs::write(dir.join("child.pid"), std::process::id().to_string()).unwrap();
+        hex_testkit::waits::until(&FACT, "its test's word to go", || {
+            dir.join("done").exists() || !dir.exists()
+        })
+        .unwrap();
+        let _ = std::fs::write(dir.join("bye"), b"");
+        return;
+    }
+    let store = store_in(&dir);
+    let row = diagnosed(&dir, 7, NodeVmPhase::Booting);
+    store.put_node_vm(&row).unwrap();
+    if role == "owner" {
+        return;
+    }
+    let mut child = role_child(&dir);
+    #[cfg(unix)]
+    if let Some(lock) = store.node_vm_lock(&row.run) {
+        child.stdin(lock);
+    }
+    #[cfg(not(unix))]
+    child.stdin(std::process::Stdio::null());
+    #[expect(
+        clippy::zombie_processes,
+        reason = "it outlives this process, as the case asks: it is never waited for here"
+    )]
+    let _outlives = child.spawn().unwrap();
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
+    assert_eq!(store.all_node_vms().unwrap(), [row]);
+    let mut out = std::io::stdout().lock();
+    out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
+    out.flush().unwrap();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+}
+
+/// The owner's child, its stdio none but what its caller gives its stdin.
+fn role_child(dir: &Path) -> std::process::Command {
+    let mut child = role("child", dir);
+    child
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    child
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a row from an earlier boot is ended at start): do write node VM 7's row
+/// Ready as a node of an earlier boot of the host left it, its lock held by no process, beside its diagnostics, then
+/// start a node. Expect the row let go, its owner ended, and its diagnostics with it.
+#[test]
+fn w39_a_node_vm_row_of_an_earlier_boot_is_let_go_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let row = diagnosed(dir.path(), 7, NodeVmPhase::Ready);
+    std::fs::create_dir_all(store.node_vm_directory()).unwrap();
+    std::fs::write(
+        store
+            .node_vm_directory()
+            .join(format!("{}.json", name(&row.run).unwrap())),
+        row.encode().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
+    assert_eq!(
+        store.settle_node_vms().unwrap(),
+        [(row.run, NodeVmSettled::OwnerEnded)]
+    );
+    assert_eq!(store.node_vm(&row.run).unwrap(), None);
+    assert!(!row.diagnostics.unwrap().exists());
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a row from an earlier process whose run is gone is ended at start): do run a
+/// node that writes node VM 7's row Booting and ends, then start another. Expect the row let go, its owner ended (D231:
+/// no microVM outlives its owner), with its lock file and its diagnostics.
+#[test]
+fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let ended = role("owner", dir.path()).status().unwrap();
+    assert!(ended.success(), "{ended}");
+    let store = store_in(dir.path());
+    assert_eq!(
+        store.node_vm(&run(7)).unwrap().map(|row| row.phase),
+        Some(NodeVmPhase::Booting)
+    );
+    assert_eq!(
+        store.settle_node_vms().unwrap(),
+        [(run(7), NodeVmSettled::OwnerEnded)]
+    );
+    assert_eq!(store.node_vm(&run(7)).unwrap(), None);
+    assert_eq!(
+        std::fs::read_dir(store.node_vm_directory())
+            .unwrap()
+            .count(),
+        0,
+        "its lock file let go with its row"
+    );
+    assert!(!dir.path().join("node-7.log").exists());
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a row whose run still lives is followed; the lock is its owner's alone, never
+/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it (on Unix
+/// sharing its lock file's open file description, as a child forked without an exec would), and reads its row back;
+/// start another node while it runs; then end the first. Expect the row followed, its receipt still Booting while its
+/// owner runs, its lock outliving the owner's reads of its row; then, the owner ended and its child still running, the
+/// row let go with its lock file and its diagnostics.
+#[test]
+fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_lock() {
+    use std::io::{BufRead, Write};
+    let dir = tempfile::tempdir().unwrap();
+    eprintln!("node VM rows test directory: {}", dir.path().display());
+    let mut owner = role("holding owner", dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = std::io::BufReader::new(owner.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            said.read_line(&mut line).unwrap(),
+            0,
+            "the owner ended unready"
+        );
+        if line.ends_with("HEX_NODE_VM_OWNER_READY\n") {
+            break;
+        }
+    }
+    let store = store_in(dir.path());
+    assert_eq!(
+        store.settle_node_vms().unwrap(),
+        [(run(7), NodeVmSettled::Followed)]
+    );
+    assert_eq!(
+        store.node_vm(&run(7)).unwrap().map(|row| row.phase),
+        Some(NodeVmPhase::Booting),
+        "booked while its owner runs"
+    );
+    let mut ends = owner.stdin.take().unwrap();
+    ends.write_all(b"end\n").unwrap();
+    drop(ends);
+    assert!(owner.wait().unwrap().success());
+    hex_testkit::waits::until(&FACT, "the row let go", || {
+        store.node_vm(&run(7)).unwrap().is_none()
+    })
+    .unwrap();
+    assert!(
+        !dir.path().join("bye").exists(),
+        "the owner's child still runs, its lock file's description open where it shares it"
+    );
+    assert_eq!(
+        std::fs::read_dir(store.node_vm_directory())
+            .unwrap()
+            .count(),
+        0,
+        "its lock file let go with its row"
+    );
+    assert!(!dir.path().join("node-7.log").exists());
+    std::fs::write(dir.path().join("done"), b"").unwrap();
+    hex_testkit::waits::until(&FACT, "the owner's child gone", || {
+        dir.path().join("bye").exists()
+    })
+    .unwrap();
+}
+
+/// Joint plan step 39: do write node VM 7's row Ended, its end kept, then start a node. Expect the row let go, with its
+/// diagnostics.
+#[test]
+fn w39_an_ended_node_vm_row_is_let_go_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let row = diagnosed(dir.path(), 7, NodeVmPhase::Ended);
+    store.put_node_vm(&row).unwrap();
+    assert_eq!(
+        store.settle_node_vms().unwrap(),
+        [(row.run, NodeVmSettled::Ended)]
+    );
+    assert_eq!(store.node_vm(&row.run).unwrap(), None);
+    assert!(!row.diagnostics.unwrap().exists());
+}
+
+/// Joint plan step 39: a node's start settles no row of its own. Do write node VM 7's row Booting in this node, read it
+/// back, then settle the rows as a start does. Expect nothing settled, the row kept as written.
+#[test]
+fn w39_a_nodes_own_node_vm_row_is_never_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let row = diagnosed(dir.path(), 7, NodeVmPhase::Booting);
+    store.put_node_vm(&row).unwrap();
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
+    assert_eq!(store.settle_node_vms().unwrap(), []);
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row));
 }

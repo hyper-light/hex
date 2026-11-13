@@ -608,11 +608,6 @@ pub trait Books: Send + Sync {
         let _ = record;
         Err(no_node_vms())
     }
-    /// Lets node VM `run`'s record go, once its run has ended.
-    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
-        let _ = run;
-        Err(no_node_vms())
-    }
     /// A run for a node VM about to be booked: named by no record it keeps.
     fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
         Err(no_node_vms())
