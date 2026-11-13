@@ -79,10 +79,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
   SHARDS_INIT aren't a pair serves none.
   The members a box's caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and
-  `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process (unit-tested over
-  a model of D231 and the simulator; the node's wire carries no member call yet). Closes with: the class's wait
-  records and its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts at Shards `1389dc0b` or
-  later), and a member's streams over the node's wire.
+  `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
+  wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
+  of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts at Shards `1389dc0b` or later).
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

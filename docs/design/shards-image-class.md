@@ -122,8 +122,13 @@ harness member's):
   (`on_this_host` false, no pid: D231 names none), and its own kill awaits the endpoint (`MemberSignal`); the box's
   KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
-  and the simulator as its echo program; the node's wire carries no member call yet (`hex-client` refuses it, typed),
-  as a member's pipes live in the process that holds the run.
+  and the simulator as its echo program, and the node's wire carries it to a caller elsewhere: `Call::Member` (kind
+  `0x0017`), sent by `hex-client`'s `Runtime::member` as an exec asking for its streams is. On a local socket the
+  node gives the member's own ends with its answer (`Answer::Given`, descriptors); a QUIC client makes its streams
+  itself, so it carries them (lanes) and the node joins each to the member's own, a copy on a thread of its own to the
+  source's end (`serve.rs` `joined`). The member has no pid here for an OS watch, so a thread of the node's waits
+  for its end and tells it as a remote program's (`MemberEnd`); its release under the same lock clears an end told
+  before its start was registered, and its own kill is refused `Awaits(MemberSignal)` as in process.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -261,9 +266,6 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   command's end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own:
   it runs in the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run
   host per box, nor read its use on the host (§4).
-- **A member's streams over the node's wire** (joint plan step 17's remote callers): a wire call that carries the
-  three ends as the exec's asked streams are carried (descriptors on the local socket, stream lanes over QUIC). Until
-  then `Runtime::member` is served in process alone, and a caller over the wire is refused, typed.
 
 ## 9. What would falsify it
 
