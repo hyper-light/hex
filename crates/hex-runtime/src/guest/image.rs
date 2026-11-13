@@ -418,6 +418,7 @@ fn host_use_of(stats: &Stats, vcpus: u32) -> Result<HostUse, Refusal> {
         footprint_bytes: host.footprint_bytes,
         resident_bytes: host.resident_bytes,
         guest_ns: per_vcpu(stats, vcpus)?,
+        window: Duration::ZERO,
     })
 }
 

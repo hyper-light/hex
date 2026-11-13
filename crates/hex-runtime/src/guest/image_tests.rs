@@ -1429,6 +1429,46 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     ));
 }
 
+/// Joint plan step 12's item B (goal 54's change 3; ROOT and g121, 2026-11-13): kiln learns what a VM costs its host
+/// over its window, and charges a deleted VM its final use, read with its end, never a use made up. Do read a running
+/// image VM's host use twice, then delete it answering its final use; delete it again; then delete a VM whose run ended
+/// on its own before its delete. Expect each read's window to run from its run's start and grow; the delete to answer the
+/// VM's final use, its window the whole run and no less than the last read's, its counters its run host's; the second
+/// delete refused NoSuchBox; and the delete of the ended run to answer none, nothing read at its end.
+#[test]
+fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-final-use", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let first = runtime.host_use(&id).unwrap();
+    let second = runtime.host_use(&id).unwrap();
+    assert!(first.window > Duration::ZERO, "{first:?}");
+    assert!(second.window >= first.window, "{first:?} then {second:?}");
+    let last = runtime.delete_with_host_use(&id).unwrap().unwrap();
+    assert!(last.window >= second.window, "{second:?} then {last:?}");
+    assert_eq!(
+        (last.cpu_ns, last.footprint_bytes, last.guest_ns.len()),
+        (9_000_000, 1 << 20, usize::try_from(vcpus).unwrap())
+    );
+    assert!(matches!(
+        runtime.delete_with_host_use(&id),
+        Err(Refusal::NoSuchBox(_))
+    ));
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-ended-use", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
+    shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(runtime.delete_with_host_use(&id).unwrap(), None);
+}
+
 /// Joint plan step 12 (D253, image channel v19 and v21): a box says how its VM's microVM came up, as its run host said it
 /// as the run started, in its usage and in its record. Do boot an image VM whose run host says it restored its image's
 /// template, its start taking the boot's answer; then one whose run host says it was a warm host's, its start Pending
@@ -1538,13 +1578,15 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
     assert_eq!(runtime.rate(&id, rate).unwrap(), rate);
     assert_eq!(runtime.rate(&id, None).unwrap(), None);
     assert_eq!(*images.run.rates.lock().unwrap(), [rate, None]);
+    let read = runtime.host_use(&id).unwrap();
     assert_eq!(
-        runtime.host_use(&id).unwrap(),
+        read,
         hex_api::HostUse {
             cpu_ns: 9_000_000,
             footprint_bytes: 1 << 20,
             resident_bytes: 1 << 20,
             guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
+            window: read.window,
         }
     );
     *images.run.stats.lock().unwrap() = Stats {
