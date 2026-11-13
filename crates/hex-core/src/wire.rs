@@ -2326,8 +2326,9 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
-/// its variables and an option of its working directory (joint plan step 17). Fields a later step adds go after
-/// the members (append-only).
+/// its variables, an option of its working directory (joint plan step 17) and its run-time arguments (D256, after
+/// the working directory), then its shares (kiln's step 18), each its host directory, where its guest sees it and
+/// whether read-only, as a mount's. Fields a later step adds go after the shares (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
@@ -2340,7 +2341,14 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
             w.string(k)?;
             w.string(v)
         })?;
-        w.option_with(m.workdir.as_deref(), Writer::string)
+        w.option_with(m.workdir.as_deref(), Writer::string)?;
+        w.list(&m.args, |w, arg| w.string(arg))
+    })?;
+    w.list(&image.shares, |w, m| {
+        w.path(&m.source)?;
+        w.string(&m.destination)?;
+        w.bool(m.read_only);
+        Ok(())
     })
 }
 
@@ -2354,6 +2362,14 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 member: member(r)?,
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
+                args: r.list(|r| r.string("member argument"))?,
+            })
+        })?,
+        shares: r.list(|r| {
+            Ok(Mount {
+                source: r.path()?,
+                destination: r.string("share destination")?,
+                read_only: r.bool("read_only")?,
             })
         })?,
     })

@@ -4903,8 +4903,9 @@ fn unknown_grant_tags_are_refused_by_name() {
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create a Shards image VM whose spec names the members its caller drives, one
-/// with variables and a working directory and one with neither; expect it read back whole, its members after its
-/// grants.
+/// with variables, a working directory and run-time arguments (D256, kiln's step 17; an empty one among them) and one
+/// with none of them; expect it read back whole, its members after its grants, each member's arguments after its
+/// working directory.
 #[test]
 fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
     let members = vec![
@@ -4915,6 +4916,13 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
             },
             env: vec![("LANG".to_owned(), "C.UTF-8".to_owned())],
             workdir: Some("/home/me/project".to_owned()),
+            args: vec![
+                "--resume".to_owned(),
+                "s-1".to_owned(),
+                String::new(),
+                "--model".to_owned(),
+                "claude-opus-4".to_owned(),
+            ],
         },
         hex_api::ImageMember::new(Member {
             kind: MemberKind::Agent,
@@ -4935,6 +4943,46 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
         band: 0,
     })));
     let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+}
+
+/// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): do create a Shards image VM sharing two host directories, one
+/// read-write and one read-only, beside a member its caller drives. Expect it read back whole, its shares after its
+/// members, each its host directory, where its guest sees it and whether read-only.
+#[test]
+fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-shares"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            members: vec![hex_api::ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            })],
+            shares: vec![
+                Mount {
+                    source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+                    destination: "/home/agent/.claude".to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    source: PathBuf::from("/srv/projects/hex"),
+                    destination: "/work/hex".to_owned(),
+                    read_only: true,
+                },
+            ],
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    })));
+    let bytes = request(94, &create, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         create

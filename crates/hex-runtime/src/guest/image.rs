@@ -31,8 +31,8 @@ use hex_api::{
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::image::{
-    Channel, ImageGuest, ImageRefusal, ImageSpec, Images, MemberEnd, MemberName, MemberSpec,
-    RunEnd, Secret, Stats, StatsScope,
+    Channel, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, MemberEnd, MemberName,
+    MemberSpec, RunEnd, Secret, Stats, StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -475,8 +475,9 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
 }
 
 /// What Shards' image boot gives a member its caller drives (joint plan step 17): its stdin a pipe the caller
-/// writes (`MemberSpec::stdin`), its variables and working directory as the box's spec says them, no file and no
-/// terminal. Its stdout and stderr are D231's pipes for every member that runs.
+/// writes (`MemberSpec::stdin`), its variables, working directory and run-time arguments as the box's spec says them
+/// (the arguments after its image's command, D256), no file and no terminal. Its stdout and stderr are D231's pipes
+/// for every member that runs.
 fn member_spec(m: &ImageMember) -> MemberSpec {
     MemberSpec {
         member: member_name(&m.member),
@@ -489,8 +490,7 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
         workdir: m.workdir.clone(),
         stdin: true,
         terminal: false,
-        // No run-time argument (D256): its image's command alone.
-        args: Vec::new(),
+        args: m.args.clone(),
     }
 }
 
@@ -774,7 +774,17 @@ impl GuestRuntime {
             members: image.members.iter().map(member_spec).collect(),
             publish: network.publish,
             egress: network.egress,
-            shares: Vec::new(),
+            // The host directories its caller names, and only those (default deny), as Shards takes each: a share
+            // Shards refuses refuses the start, in its words.
+            shares: image
+                .shares
+                .iter()
+                .map(|m| ImageShare {
+                    host: m.source.clone(),
+                    at: m.destination.clone(),
+                    read_only: m.read_only,
+                })
+                .collect(),
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
