@@ -1815,6 +1815,17 @@ fn push_offer(
     Ok(())
 }
 
+/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7). Original (red): none is
+/// measured; it stays as `kept`.
+fn guest_seen(
+    kept: hex_api::LearnedOverhead,
+    guest: &hex_api::Capacity,
+    boxes_memory: u64,
+) -> hex_api::LearnedOverhead {
+    let _ = (guest, boxes_memory);
+    kept
+}
+
 #[cfg(test)]
 #[path = "shared_tests.rs"]
 mod tests;

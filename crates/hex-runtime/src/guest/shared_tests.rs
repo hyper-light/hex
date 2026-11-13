@@ -1230,3 +1230,49 @@ fn shared_prepared_cancel_and_ack_recheck_native_absence_without_a_scope_end() {
     assert!(!owner.native.released.load(Ordering::SeqCst));
     assert!(owner.boxes.lock().unwrap().is_empty());
 }
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's guest's own overhead is what its agent says it uses past
+/// what its boxes hold, the most seen, only rising; its CPU and disk unread, so none. Do measure a guest of 8 GiB with
+/// 5 GiB free whose boxes hold 2 GiB, from cold; then one with 6 GiB free and 1.5 GiB in its boxes; then one whose
+/// boxes hold more than it says it uses. Expect 1 GiB, then still 1 GiB (0.5 GiB less is no fall), and 1 GiB again.
+#[test]
+fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
+    let gib = 1u64 << 30;
+    let guest = |free: u64| {
+        let mut capacity = hex_api::Capacity {
+            id: "guest".into(),
+            total: CapacityResources {
+                cpu_milli: 2_000,
+                mem_bytes: 8 * gib,
+                disk_bytes: 0,
+            },
+            free: CapacityResources {
+                cpu_milli: 2_000,
+                mem_bytes: free,
+                disk_bytes: 0,
+            },
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            unavailable: Vec::new(),
+            learned: None,
+        };
+        capacity.free.mem_bytes = free;
+        capacity
+    };
+    let first = super::guest_seen(hex_api::LearnedOverhead::default(), &guest(5 * gib), 2 * gib);
+    assert_eq!(
+        first,
+        hex_api::LearnedOverhead {
+            cpu_milli: None,
+            mem_bytes: Some(gib),
+            disk_bytes: None,
+        }
+    );
+    let second = super::guest_seen(first, &guest(6 * gib), 3 * gib / 2);
+    assert_eq!(second.mem_bytes, Some(gib));
+    let third = super::guest_seen(second, &guest(5 * gib), 4 * gib);
+    assert_eq!(third.mem_bytes, Some(gib));
+}
