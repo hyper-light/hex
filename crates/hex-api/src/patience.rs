@@ -107,9 +107,9 @@ impl Patience {
         }
     }
 
-    /// For tests alone (cfg(test), or the `test-seeds` feature, which only hex-testkit's dependency turns on and which
-    /// is a dev-dependency everywhere): the wait `name` as it would be once it had seen an answer of `slowest`. No
-    /// production wait is seeded (decision 9).
+    /// For tests alone (cfg(test), or the `test-seeds` feature, which only dev-dependencies turn on: hex-core's own
+    /// tests', and hex-testkit's through hex-core's, hex-testkit a dev-dependency everywhere): the wait `name` as it
+    /// would be once it had seen an answer of `slowest`. No production wait is seeded (decision 9).
     #[cfg(any(test, feature = "test-seeds"))]
     pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
         Self {
