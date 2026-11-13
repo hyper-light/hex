@@ -18,6 +18,14 @@
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
 //!
+//! Under shards-init (docs/design/node-under-shards-init.md), the same init is a Shards run's own command under
+//! Shards' nesting grant (D234): PID 1 of the workload's own PID namespace, which it knows by `NOTIFY_SOCKET`. There
+//! shards-init has made the root and its mounts, the run's shares and its descriptor limit. So init mounts a tmpfs for
+//! its node's state and staged roots, takes the deadline shards-init gives (`SHARDS_READY_BY`), and starts the node and
+//! the relay, which listens on AF_UNIX sockets in `/run/hex/channel` (its `--unix`). It then says READY=1 on
+//! shards-init's socket (sd_notify(3)) and reaps as PID 1 of its namespace. When the node or the relay ends, it exits,
+//! and its namespace and its run end with it.
+//!
 //! With `--vsock` it listens on the guest's vsock ports ([`hex_core::stream::CONTROL_PORT`],
 //! [`hex_core::stream::STDIO_PORT`] and [`hex_core::stream::files::FILES_PORT`], any CID); with `--unix` on
 //! `control.sock`, `stdio.sock` and `files.sock` in `<dir>`, which tests dial as the host would. It stages
@@ -417,21 +425,52 @@ enum End {
     Exit,
 }
 
-/// What init does under `host`, in order (docs/design/node-under-shards-init.md §2).
-fn duties(_host: &Host) -> Vec<Duty> {
-    vec![
-        Duty::LeaveInitramfs,
-        Duty::Mount(mounts().to_vec()),
-        Duty::Dirs(&[RUN, STATE, BOX_ROOT]),
-        Duty::KernelShares,
-        Duty::Deadline(Deadline::Kernel),
-        Duty::Controllers,
-        Duty::GpuAuthority,
-        Duty::Descriptors,
-        Duty::Start(On::Vsock),
-        Duty::TellFirecracker,
-        Duty::Serve(End::PowerOff),
-    ]
+/// What init does under `host`, in order (docs/design/node-under-shards-init.md §2). As the VM's init, everything its
+/// node needs of a Linux machine. Under a service manager, what shards-init leaves it: shards-init has made the root,
+/// mounted `/proc`, `/sys`, the delegated cgroup hierarchy and `/dev`, mounted the run's shares, set `fs.nr_open` and
+/// the run's descriptor limit, and holds no GPU authority it could pass on (D234's `gpus=` isn't built).
+fn duties(host: &Host) -> Vec<Duty> {
+    match host {
+        Host::Kernel => vec![
+            Duty::LeaveInitramfs,
+            Duty::Mount(mounts().to_vec()),
+            Duty::Dirs(&[RUN, STATE, BOX_ROOT]),
+            Duty::KernelShares,
+            Duty::Deadline(Deadline::Kernel),
+            Duty::Controllers,
+            Duty::GpuAuthority,
+            Duty::Descriptors,
+            Duty::Start(On::Vsock),
+            Duty::TellFirecracker,
+            Duty::Serve(End::PowerOff),
+        ],
+        Host::Manager { notify, ready_by } => vec![
+            Duty::Mount(node_tmpfs().to_vec()),
+            Duty::Dirs(&[CHANNEL, BOX_ROOT]),
+            Duty::Deadline(Deadline::Told(*ready_by)),
+            Duty::Controllers,
+            Duty::Start(On::Unix(PathBuf::from(CHANNEL))),
+            Duty::Notify(notify.clone()),
+            Duty::Serve(End::Exit),
+        ],
+    }
+}
+
+/// The tmpfs init mounts for its node under a service manager: on the node's state and on the relay's staged roots,
+/// the two directories its boxes' overlays take their layers and upper directories from. The run's root is itself an
+/// overlay, which overlayfs refuses as an upper directory (`ovl_mount_dir_check`, fs/overlayfs/params.c: "not supported
+/// as upperdir"). Each is root's alone to write, 0755, as each is when made under the VM's own init's tmpfs `/run`
+/// (tmpfs(5) would make its root 01777). shards-init's `/run/shards` and the shares beside them stay as it mounted them.
+fn node_tmpfs() -> [Mount; 2] {
+    let tmpfs = |target| Mount {
+        source: "tmpfs",
+        target,
+        fs: "tmpfs",
+        flags: rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+        data: Some(c"mode=0755"),
+        expedite: false,
+    };
+    [tmpfs(STATE), tmpfs(STAGED)]
 }
 
 /// How the kernel names the initramfs's first process: `rdinit`'s default, passed as its `argv[0]`
@@ -542,10 +581,19 @@ impl Boot {
                     .map_err(|e| format!("notifying Firecracker that the guest is ready: {e}")),
                 None => Ok(()),
             },
-            Duty::Notify(socket) => Err(format!(
-                "telling {} the guest is ready: no service manager is spoken to",
-                socket.display()
-            )),
+            Duty::Notify(socket) => {
+                let by = self
+                    .ready_by
+                    .map(|at| {
+                        deadline_at(at, Instant::now(), boottime_ns()).ok_or_else(|| {
+                            format!("the boot's deadline, {at} ns on the guest's clock, is past a monotonic instant")
+                        })
+                    })
+                    .transpose()?;
+                notify_ready(&socket, by).map_err(|e| {
+                    format!("telling {} the guest is ready: {e}", socket.display())
+                })
+            }
             Duty::Serve(end) => self.serve(end),
         }
     }
@@ -955,6 +1003,30 @@ fn notify_firecracker_ready(budget: Duration) -> io::Result<()> {
         return Err(expired());
     }
     Ok(())
+}
+
+/// sd_notify(3)'s word that "service startup is finished".
+const READY: &[u8] = b"READY=1";
+
+/// Tells the service manager listening on `socket` that the guest is ready (docs/design/node-under-shards-init.md §2):
+/// [`READY`] in one datagram, as sd_notify(3) sends it ("a single datagram with the state string as payload"), from a
+/// socket of init's own, unbound. Within what is left of the boot's deadline where init has one, timed out at once
+/// where the boot has spent it, as Firecracker's notice is ([`notify_firecracker_ready`]). With none it waits on the
+/// manager, the VM's init, whose end is the VM's. A datagram is sent whole or not at all (unix(7)), so a short send
+/// is refused.
+fn notify_ready(socket: &Path, by: Option<Instant>) -> io::Result<()> {
+    let sender = std::os::unix::net::UnixDatagram::unbound()?;
+    if let Some(by) = by {
+        let left = by
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+        sender.set_write_timeout(Some(left))?;
+    }
+    match sender.send_to(READY, socket)? {
+        sent if sent == READY.len() => Ok(()),
+        _ => Err(io::ErrorKind::WriteZero.into()),
+    }
 }
 
 /// The shares the kernel's command line names, in tag order. Only the kernel's own parameters count:
@@ -1560,6 +1632,38 @@ mod tests {
                 Duty::Notify(PathBuf::from("/run/shards/notify")),
                 Duty::Serve(End::Exit),
             ]
+        );
+    }
+
+    /// AC-T7.4.1 (docs/design/node-under-shards-init.md §2; sd_notify(3)): init tells its service manager it is ready
+    /// with one datagram, READY=1, on the socket the manager named, within what is left of the boot's deadline. Do:
+    /// bind a datagram socket as shards-init binds its own, tell it ready with no deadline and with the latest the
+    /// guest's clock names, then with one passed. Expect: READY=1 read whole each time, and past the deadline a
+    /// refusal as timed out, with nothing sent.
+    #[test]
+    fn init_tells_its_manager_it_is_ready_in_one_datagram_within_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("notify");
+        let manager = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+        // A local datagram is on the manager's queue once its send returns (unix(7)), so nothing is waited for.
+        manager.set_nonblocking(true).unwrap();
+        let latest = deadline_at(u128::from(u64::MAX), Instant::now(), boottime_ns());
+        assert!(latest.is_some());
+        for by in [None, latest] {
+            notify_ready(&socket, by).unwrap();
+            let mut got = [0u8; 64];
+            let n = manager.recv(&mut got).unwrap();
+            assert_eq!(&got[..n], READY, "{by:?}");
+        }
+        let passed = notify_ready(&socket, Some(Instant::now()));
+        assert!(
+            matches!(&passed, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{passed:?}"
+        );
+        let mut got = [0u8; 64];
+        assert_eq!(
+            manager.recv(&mut got).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
         );
     }
 
