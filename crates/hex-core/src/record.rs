@@ -99,8 +99,8 @@ pub struct BoxRecord {
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
-/// `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`. The core takes the kernel's text;
-/// the shell reads it.
+/// `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`, Windows' boot sequence (`KUSER_SHARED_DATA`'s
+/// `BootId`, in decimal). The core takes the kernel's text; the shell reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BootSession(String);
