@@ -1232,6 +1232,8 @@ impl Runtime for GuestRuntime {
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match self.routed(id)? {
             books::Routed::Image(record) => self.inspect_image(record),
+            // A box whose backing was retired says why from its record, with no backing to ask (joint plan step 14).
+            books::Routed::Other(Some(record)) if record.retired => Self::retired_info(&record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, false, || {
@@ -1333,6 +1335,10 @@ impl GuestRuntime {
         snapshot: Option<&hex_core::record::BoxRecord>,
         id: &BoxId,
     ) -> Result<(), Refusal> {
+        // A box whose backing was retired is gone with it: its delete is its owner's, the record's alone to remove.
+        if snapshot.is_some_and(|record| record.retired) {
+            return Ok(());
+        }
         let Some(b) = self.booted_for_record(snapshot, id)? else {
             return if self.managed_shared() {
                 Ok(())

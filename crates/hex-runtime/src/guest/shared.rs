@@ -534,11 +534,13 @@ impl GuestRuntime {
 
     /// Called after registration of the SAME Books owner, before capacity/recovery.
     /// Store persists Prepared/scope before Index may issue the grant. No VM starts.
+    /// A shared backing recorded under its profile's census cost is retired first ([`Self::retire_census_backings`]).
     pub fn prepare_backing(&self) -> Result<BackingOffer, Refusal> {
         let authority = self.authority()?;
         if let Some(key) = self.shared_key()? {
             return self.pool_record(key)?.offer();
         }
+        self.retire_census_backings()?;
         let path = self.pool_path()?;
         if let Some(receipt) = pool::read(path)? {
             let key = receipt.original.key;
@@ -596,7 +598,9 @@ impl GuestRuntime {
                     Ok(boxed) => boxed,
                     Err(_) => return Err(super::books::uncertain(id)?),
                 };
-                if boxed.spec.route_execution() == Some(Execution::ShardsShared)
+                // A retired box's backing went with its retirement: it names no backing to agree with.
+                if !boxed.retired
+                    && boxed.spec.route_execution() == Some(Execution::ShardsShared)
                     && boxed.spec.route.and_then(|route| route.backing)
                         != current.map(|row| row.key)
                 {
@@ -676,6 +680,79 @@ impl GuestRuntime {
             part(&[u8::from(share.read_only)])?;
         }
         Ok(hash.finalize().into())
+    }
+
+    /// Retires each shared backing its node recorded under its profile's census cost (joint plan step 14; ROOT,
+    /// 2026-11-13, by decision 9's rule: a census row is evidence alone, so the profile's identity changed with its
+    /// census-free cost, `RuntimeCost::census_free`), never leaking it: in its pool turn, each box on it is kept, ready,
+    /// its end unknown and marked retired, so every call but its owner's delete is refused `Retired`; its scope is stopped
+    /// and released through its receipt as a release's is; and its record is removed. A backing of another profile is
+    /// none of this one's, left to the checks that refuse it.
+    fn retire_census_backings(&self) -> Result<(), Refusal> {
+        let Some(cost) = self.runtime_cost else {
+            return Ok(());
+        };
+        for record in self.authority()?.pool_records()? {
+            if record.execution != Execution::ShardsShared
+                || record.cost == cost
+                || record.cost.census_free() != cost
+            {
+                continue;
+            }
+            let key = record.key;
+            let books = self
+                .books
+                .get()
+                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            devices::with_pool_transaction(books, &key, &[], |transaction| {
+                let mut record = transaction
+                    .read_pool(&key)?
+                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                for boxed in transaction.records()?.into_values() {
+                    let mut boxed = boxed.map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                    if boxed.retired
+                        || boxed.spec.route.and_then(|route| route.backing) != Some(key)
+                    {
+                        continue;
+                    }
+                    boxed.phase = hex_core::record::Phase::Ready;
+                    boxed.exit.get_or_insert(hex_api::Exit::Unknown);
+                    boxed.retired = true;
+                    // Its end in words its inspect shows (goal 12's `BoxInfo::ended`): the cause's own.
+                    boxed.ended = Some(LifecycleCause::Retired.to_string());
+                    transaction.put(&boxed)?;
+                }
+                if record.phase != BackingPhase::Released {
+                    self.stop_and_release(transaction, &mut record, &|_| Ok(()))?;
+                }
+                transaction.remove_pool(&key)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// What a retired box's inspect shows (joint plan step 14): its record's, nothing running, its end unknown and why
+    /// in its `ended`, with no backing left to ask.
+    pub(super) fn retired_info(
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<hex_api::BoxInfo, Refusal> {
+        let spec = &record.spec;
+        Ok(hex_api::BoxInfo {
+            id: spec.id.try_clone()?,
+            class: spec.class.class(),
+            state: hex_api::BoxState::Empty,
+            bounds: spec.bounds.clone(),
+            allocation: spec.allocation,
+            adopted: false,
+            membership: None,
+            exit: record.exit,
+            abandoned: record.abandoned,
+            route: spec.route,
+            grants: Vec::new(),
+            published: Vec::new(),
+            last_resort: None,
+            ended: record.ended.clone(),
+        })
     }
 
     pub(super) fn pool_record(&self, key: BackingKey) -> Result<PoolRecord, Refusal> {
@@ -1062,6 +1139,12 @@ impl GuestRuntime {
             .filter(|route| route.key.execution == Execution::ShardsShared)
             .and_then(|route| route.backing)
             .ok_or(super::books::uncertain(&boxed.spec.id)?)?;
+        if boxed.retired {
+            return Err(Refusal::Backing {
+                key,
+                cause: LifecycleCause::Retired,
+            });
+        }
         if self.shared_key()? != Some(key) {
             return Err(super::books::uncertain(&boxed.spec.id)?);
         }
@@ -1395,87 +1478,101 @@ impl GuestRuntime {
                     return Err(refused(key, LifecycleCause::Busy));
                 }
             }
-            let path = self.pool_path()?;
-            if record.phase == BackingPhase::Prepared {
-                if pool::read(path)?.is_some() {
-                    return Err(refused(key, LifecycleCause::Uncertain));
-                }
-                self.preflight_backing(&record)?;
-                transaction.check_unsubmitted_pool()?;
-                record.phase = BackingPhase::Released;
-                transaction.put_pool(&record)?;
-                return record.offer();
-            }
-            let mut receipt = match pool::read(path)? {
-                Some(receipt) => receipt,
-                None if record.init.is_none() => {
-                    let mut original = PoolRecord::decode(&record.encode()?)?;
-                    original.phase = BackingPhase::Granted;
-                    original.exit = None;
-                    Receipt::retained(original, Vec::new())?
-                }
-                None => return Err(refused(key, LifecycleCause::Uncertain)),
-            };
-            receipt.matches(&record)?;
-            record.phase = BackingPhase::Draining;
-            transaction.put_pool(&record)?;
-            let identity = match &receipt.phase {
-                Phase::Running(identity)
-                | Phase::Stopping(identity)
-                | Phase::Released {
-                    identity: Some(identity),
-                    ..
-                } => {
-                    managed::same_native(NativeRecord::Pool(&record), identity)?;
-                    Some(identity)
-                }
-                Phase::Intent | Phase::Released { identity: None, .. } if record.init.is_none() => {
-                    None
-                }
-                _ => return Err(refused(key, LifecycleCause::Uncertain)),
-            };
-            let terminal = match &receipt.phase {
-                Phase::Released { status, .. } => *status,
-                _ => {
-                    let identity = identity.map(copy_identity).transpose()?;
-                    if let Some(identity) = &identity {
-                        receipt.phase = Phase::Stopping(copy_identity(identity)?);
-                        pool::write(path, &receipt)?;
-                    }
-                    let terminal = managed::stop_scope(
-                        transaction,
-                        identity.as_ref(),
-                        self.first_dial_bound()?,
-                        refused(key, LifecycleCause::Uncertain),
-                    )?;
-                    receipt.phase = Phase::Released {
-                        identity,
-                        status: terminal.status,
-                    };
-                    pool::write(path, &receipt)?;
-                    terminal.status
-                }
-            };
-            let identity = match &receipt.phase {
-                Phase::Released { identity, .. } => identity.as_ref(),
-                _ => return Err(refused(key, LifecycleCause::Uncertain)),
-            };
-            transaction.finalize_managed(identity)?;
-            record.exit = Some(exit_of(terminal));
-            record.phase = BackingPhase::Released;
-            transaction.put_pool(&record)?;
-            {
-                let mut state = self.lock()?;
-                if state
-                    .as_ref()
-                    .is_some_and(|booted| booted.backing.is_some_and(|backing| backing.key == key))
-                {
-                    *state = None;
-                }
-            }
-            remove_receipt(path)?;
+            self.stop_and_release(transaction, &mut record, &|record| {
+                self.preflight_backing(record)
+            })?;
             record.offer()
         })
+    }
+
+    /// Stops and releases backing `record`'s scope through its receipt, in `transaction` (its pool turn): a Prepared
+    /// one, with no receipt, checked by `prepared` and no native submission proved, is released as it is; any other is
+    /// drained, its scope stopped where its receipt names one and not already released, its controller finalized, and
+    /// its exit recorded; and its receipt removed.
+    fn stop_and_release(
+        &self,
+        transaction: &dyn Transaction,
+        record: &mut PoolRecord,
+        prepared: &dyn Fn(&PoolRecord) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let key = record.key;
+        let path = self.pool_path()?;
+        if record.phase == BackingPhase::Prepared {
+            if pool::read(path)?.is_some() {
+                return Err(refused(key, LifecycleCause::Uncertain));
+            }
+            prepared(record)?;
+            transaction.check_unsubmitted_pool()?;
+            record.phase = BackingPhase::Released;
+            return transaction.put_pool(record);
+        }
+        let mut receipt = match pool::read(path)? {
+            Some(receipt) => receipt,
+            None if record.init.is_none() => {
+                let mut original = PoolRecord::decode(&record.encode()?)?;
+                original.phase = BackingPhase::Granted;
+                original.exit = None;
+                Receipt::retained(original, Vec::new())?
+            }
+            None => return Err(refused(key, LifecycleCause::Uncertain)),
+        };
+        receipt.matches(record)?;
+        record.phase = BackingPhase::Draining;
+        transaction.put_pool(record)?;
+        let identity = match &receipt.phase {
+            Phase::Running(identity)
+            | Phase::Stopping(identity)
+            | Phase::Released {
+                identity: Some(identity),
+                ..
+            } => {
+                managed::same_native(NativeRecord::Pool(record), identity)?;
+                Some(identity)
+            }
+            Phase::Intent | Phase::Released { identity: None, .. } if record.init.is_none() => None,
+            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+        };
+        let terminal = match &receipt.phase {
+            Phase::Released { status, .. } => *status,
+            _ => {
+                let identity = identity.map(copy_identity).transpose()?;
+                if let Some(identity) = &identity {
+                    receipt.phase = Phase::Stopping(copy_identity(identity)?);
+                    pool::write(path, &receipt)?;
+                }
+                let terminal = managed::stop_scope(
+                    transaction,
+                    identity.as_ref(),
+                    self.first_dial_bound()?,
+                    refused(key, LifecycleCause::Uncertain),
+                )?;
+                receipt.phase = Phase::Released {
+                    identity,
+                    status: terminal.status,
+                };
+                pool::write(path, &receipt)?;
+                terminal.status
+            }
+        };
+        let identity = match &receipt.phase {
+            Phase::Released { identity, .. } => identity.as_ref(),
+            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+        };
+        transaction.finalize_managed(identity)?;
+        record.exit = Some(exit_of(terminal));
+        record.phase = BackingPhase::Released;
+        transaction.put_pool(record)?;
+        {
+            let mut state = self.lock()?;
+            if state
+                .as_ref()
+                .is_some_and(|booted| booted.backing.is_some_and(|backing| backing.key == key))
+            {
+                *state = None;
+            }
+        }
+        remove_receipt(path)?;
+        Ok(())
     }
 }
 

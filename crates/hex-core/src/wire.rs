@@ -2807,6 +2807,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Pending => 0,
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
+                LifecycleCause::Retired => 3,
             });
             Ok(())
         }
@@ -2818,6 +2819,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Pending => 0,
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
+                LifecycleCause::Retired => 3,
             });
             Ok(())
         }
@@ -2933,6 +2935,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 0 => LifecycleCause::Pending,
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
+                3 => LifecycleCause::Retired,
                 t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
             },
         },
@@ -2942,6 +2945,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 0 => LifecycleCause::Pending,
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
+                3 => LifecycleCause::Retired,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
         },
