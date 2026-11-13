@@ -1,9 +1,15 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `740fa372`**, on Linux, macOS and Windows hosts, its run
-host started holding only its stdio by Shards' own spawn (D248, §1) and each vCPU's guest time in its usage (D241,
-§4); its real-VM runs and the records its waits seed from are owed (§8).
+runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
+Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
+(D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
+Merged on Hex's main at Shards `740fa372` (`8aa7c028`; `e0cc059c` before it, at `c8b4ce6b`), with a failed run's end
+in its runtime's words (`32b66a10`, `94d519d6`), the class whole and its host use read to its end (`ae7038d7`,
+`2a8bf6be`), a member's arguments and the VM's shares (`cf535152`), and `NoSuchBox` where a shared guest holds no record
+(`fac528d9`). Built: Shards `db4168345`, image channel v23 (`902c90a2`). On real VMs, HEX-IMG-1 to 7 passed on Linux
+KVM at `c8b4ce6b` and `8aa7c028`, and HEX-IMG-2 to 5 on macOS HVF at `cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF
+at `fac528d9` or later, and every case on Windows WHP.
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c` and `740fa372`) and
