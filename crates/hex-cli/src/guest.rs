@@ -1155,6 +1155,14 @@ fn mount_each(mounts: &[Mount]) -> Result<(), String> {
     Ok(())
 }
 
+/// The command init starts `exe` by: init's own deadline ([`BOOT_READY_BY`]) removed, which [`start`] gives a child
+/// itself.
+fn child(exe: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command.env_remove(BOOT_READY_BY);
+    command
+}
+
 /// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
 /// further, as nothing else is that line, and, where init has the boot's deadline `ready_by`, within what is left of
 /// it, refused past it with the child ended (AC-T7.4.1).
@@ -1181,11 +1189,10 @@ fn start(
             })
         })
         .transpose()?;
-    let mut command = std::process::Command::new(exe);
+    let mut command = child(exe);
     if let Some(stamps) = stamps {
         command.env(BOOT_STAMPS, stamps);
     }
-    command.env_remove(BOOT_READY_BY);
     if let Some(at) = ready_by {
         command.env(BOOT_READY_BY, at.to_string());
     }
@@ -1635,6 +1642,31 @@ mod tests {
             SHARDS_READY_BY => ready_by.map(Into::into),
             _ => None,
         }
+    }
+
+    /// AC-T7.4.1, joint plan step 39 (ROOT's rule from Shards' D234, 2026-11-13; sd_notify(3)'s `unset_environment`):
+    /// under shards-init, init's children (the node, the relay, and the runc or crun the node runs for an oci box)
+    /// mustn't take shards-init's words as their own: runc v1.5.2 takes an inherited `NOTIFY_SOCKET` as its own
+    /// supervisor's and waits for its box's READY=1 before its signal loop, so a foreground run never reaps its box's
+    /// init. Do: build the command init starts a child by, and read init's duties under shards-init. Expect:
+    /// shards-init's socket and deadline, and init's own deadline, each removed from the child's environment; and
+    /// init still saying READY=1 on the socket it read.
+    #[test]
+    fn w39_init_starts_its_children_without_shards_inits_words() {
+        let command = child(Path::new("/init"));
+        let removed: Vec<&std::ffi::OsStr> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key)
+            .collect();
+        for word in [NOTIFY_SOCKET, SHARDS_READY_BY, BOOT_READY_BY] {
+            assert!(
+                removed.contains(&std::ffi::OsStr::new(word)),
+                "{word} reaches init's children: {removed:?}"
+            );
+        }
+        let host = host(shards_inits(None)).unwrap();
+        assert!(duties(&host).contains(&Duty::Notify(PathBuf::from("/run/shards/notify"))));
     }
 
     /// AC-T7.4.1, joint plan step 39 (original; docs/design/node-under-shards-init.md §2, §3): under shards-init,
