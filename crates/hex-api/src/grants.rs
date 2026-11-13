@@ -412,40 +412,30 @@ fn check_name(at: usize, name: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// What Shards owes Hex before an image's boot can hold `grants` exactly (N4), if anything; none for publishes alone,
-/// on any run. The first grant Shards' destinations (D236: TCP to a host's name, an IPv4 address or the host itself)
-/// can't express at all awaits its own capability: UDP to a name ([`Upstream::MemberGrantsByName`]), to an address,
-/// or to an IPv6 address by TCP ([`Upstream::MemberGrantsByAddress`]), and the host's service by UDP
-/// ([`Upstream::MemberHostService`]). Past those, any destination awaits [`Upstream::MemberDestinations`]: D236
-/// keeps one image-wide, so Hex keeps none it can't show only its grants' members reach (ROOT's ruling, 2026-11-12).
+/// What Shards owes Hex before an image's boot can hold `grants` exactly (N4), if anything: the first grant Shards'
+/// destinations (D236: TCP to a host's name, an IPv4 address or the host itself) can't express at all awaits its own
+/// capability, UDP to a name ([`Upstream::MemberGrantsByName`]), to an address, or to an IPv6 address by TCP
+/// ([`Upstream::MemberGrantsByAddress`]), and the host's service by UDP ([`Upstream::MemberHostService`]). Every other
+/// grant is held: a destination by TCP kept for its own members alone, which the run host holds every member of the
+/// image to before the VM starts (Hex's recorded change to Shards, vendor/shards UPSTREAM.md), and a publish to the
+/// receiver Shards names (N6).
 pub fn unheld(grants: &[Grant]) -> Option<Upstream> {
-    let mut destination = false;
-    for grant in grants {
-        let beyond = match grant {
-            Grant::Publish { .. } => continue,
-            Grant::Egress {
-                to: Destination::Name(_),
-                ports,
-                ..
-            } if ports.proto == Proto::Udp => Upstream::MemberGrantsByName,
-            Grant::Egress {
-                to: Destination::Address(address),
-                ports,
-                ..
-            } if address.is_ipv6() || ports.proto == Proto::Udp => Upstream::MemberGrantsByAddress,
-            Grant::Host { ports, .. } if ports.proto == Proto::Udp => Upstream::MemberHostService,
-            Grant::Egress { .. } | Grant::Host { .. } => {
-                destination = true;
-                continue;
-            }
-        };
-        return Some(beyond);
-    }
-    if destination {
-        Some(Upstream::MemberDestinations)
-    } else {
-        None
-    }
+    grants.iter().find_map(|grant| match grant {
+        Grant::Egress {
+            to: Destination::Name(_),
+            ports,
+            ..
+        } if ports.proto == Proto::Udp => Some(Upstream::MemberGrantsByName),
+        Grant::Egress {
+            to: Destination::Address(address),
+            ports,
+            ..
+        } if address.is_ipv6() || ports.proto == Proto::Udp => {
+            Some(Upstream::MemberGrantsByAddress)
+        }
+        Grant::Host { ports, .. } if ports.proto == Proto::Udp => Some(Upstream::MemberHostService),
+        Grant::Egress { .. } | Grant::Host { .. } | Grant::Publish { .. } => None,
+    })
 }
 
 /// One member's egress to one destination, or its reach to the host, of one protocol: grants of one key whose ports

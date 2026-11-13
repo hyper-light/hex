@@ -3,10 +3,15 @@
 //! (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so `WinRuntime::charge_window` is refused, typed, until this measures it
 //! on the host.
 //!
-//! Each run starts a busy loop (one spinning thread per logical processor but one, so the sampler keeps a processor of
-//! its own) in a job of its own, its demand past every cap measured, and samples the job's CPU time
+//! Each run starts a busy loop (one spinning thread per logical processor but one, at `BELOW_NORMAL_PRIORITY_CLASS`) in a
+//! job of its own, its demand past every cap measured, and samples the job's CPU time
 //! (`JobObjectBasicAndIoAccountingInformation`'s `BasicInfo`, which is `JobObjectBasicAccountingInformation`) every
-//! 1 ms for 10 s, each sample at its own deadline and stamped when it was read. The first run is uncapped: the longest
+//! 1 ms, each sample at its own deadline (a high-resolution waitable timer's, on a sampler at
+//! `THREAD_PRIORITY_TIME_CRITICAL`, so the spinners never hold it back) and stamped when it was read, a deadline already
+//! past read at once and the next taken from the clock. A run is bounded by its own samples: it ends once they span
+//! 10 s, however long each read took. Each run says its cadence (n, p50, p99 and max of the gaps between its reads) and
+//! is refused where its longest gap isn't shorter than the step it tells the CPU time's steps by: there a gap may be
+//! the sampler's own (ROOT's r563, whose sampler at normal priority read every 41 ms behind 31 spinners). The first run is uncapped: the longest
 //! gap between two of its CPU time's steps is the accounting's own step (Windows charges CPU time as its clock ticks),
 //! so a gap longer than that in a capped run is the cap stopping the job. Then one run per cap, 10%, 20% and 50% of
 //! the machine (`JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`, 1,000, 2,000 and 5,000 of 10,000). For each it prints one
@@ -18,7 +23,8 @@
 //!   cargo test --locked -p hex-runtime --test windows_charge_window -- --ignored --nocapture --test-threads=1
 //! With `HEX_CHARGE_WINDOW_OUT` naming a directory, each run's raw samples go there too, `<cap>.csv` (`uncapped.csv`
 //! for the first): the sample's time since the run's start and the job's CPU time so far, both in 100 ns units.
-#![cfg(windows)]
+//!
+//! Its reckoning (the CPU time's steps, the cap's cycles, the sampler's cadence) is pure and checked on every OS.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,16 +34,24 @@
     clippy::disallowed_macros
 )]
 
-use std::fmt::Write as _;
+#[cfg(windows)]
+use hex_runtime::windows::sys::HighResTimer;
+#[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
+#[cfg(windows)]
 use hex_runtime::windows::sys::{self, Job, Limits, Spawn};
 
 /// How often the job's CPU time is read, and for how long each run: ROOT's probe, as step 14's brief asks it.
+#[cfg(windows)]
 const EVERY: Duration = Duration::from_millis(1);
+#[cfg(windows)]
 const FOR: Duration = Duration::from_secs(10);
 /// The caps, per `hex_core::job::RATE_SCALE` (10,000) of the machine: 10%, 20% and 50%.
+#[cfg(windows)]
 const CAPS: [u32; 3] = [1_000, 2_000, 5_000];
 /// What the child is told: how many threads to spin.
 const SPIN: &str = "HEX_TEST_SPIN_THREADS";
@@ -50,6 +64,9 @@ fn spins_when_asked() {
         return;
     };
     let threads: usize = threads.to_str().unwrap().parse().unwrap();
+    // Below the sampler, whatever its own priority: the spinners never hold its reads back.
+    #[cfg(windows)]
+    sys::below_normal().unwrap();
     // This thread is one of them.
     for _ in 1..threads {
         std::thread::spawn(spin);
@@ -65,14 +82,16 @@ fn spin() {
     }
 }
 
-/// Spins until `due`: the sampler has a processor of its own, and a timed wait on Windows ends at its timer's
-/// resolution (15.6 ms by default), not at a 1 ms sample's deadline.
-fn until(due: Instant) {
-    while Instant::now() < due {
-        std::hint::spin_loop();
+/// Waits on `timer` until `due`, at once where it has passed.
+#[cfg(windows)]
+fn until(timer: &HighResTimer, due: Instant) {
+    let now = Instant::now();
+    if due > now {
+        timer.wait(due - now).unwrap();
     }
 }
 
+#[cfg(windows)]
 fn nul() -> OwnedHandle {
     OwnedHandle::from(
         std::fs::OpenOptions::new()
@@ -84,8 +103,9 @@ fn nul() -> OwnedHandle {
 }
 
 /// One run: a job capped at `cap` (none uncapped) running `threads` spinners, its CPU time in 100 ns read every
-/// [`EVERY`] for [`FOR`], each with its time since the run's start.
-fn run(cap: Option<u32>, threads: u32) -> Vec<(Duration, u64)> {
+/// [`EVERY`] on `timer` until its reads span [`FOR`], each with its time since the run's start.
+#[cfg(windows)]
+fn run(cap: Option<u32>, threads: u32, timer: &HighResTimer) -> Vec<(Duration, u64)> {
     let job = Job::create().unwrap();
     job.configure(&Limits {
         memory: None,
@@ -117,16 +137,22 @@ fn run(cap: Option<u32>, threads: u32) -> Vec<(Duration, u64)> {
     let deadline = Instant::now() + FOR;
     while cpu() == 0 {
         assert!(Instant::now() < deadline, "the spinners were never charged");
-        until(Instant::now() + EVERY);
+        until(timer, Instant::now() + EVERY);
     }
     let count = usize::try_from(FOR.as_micros() / EVERY.as_micros()).unwrap();
     let mut samples = Vec::with_capacity(count + 1);
     let start = Instant::now();
     samples.push((Duration::ZERO, cpu()));
-    for k in 1..=count {
-        until(start + EVERY * u32::try_from(k).unwrap());
+    // Bounded by its own reads: it ends once they span FOR. A read past its deadline takes the next from the clock,
+    // so a late one leaves no run of reads behind it.
+    let mut due = start + EVERY;
+    while samples.last().is_some_and(|(at, _)| *at < FOR) && samples.len() <= count {
+        until(timer, due);
         let read = cpu();
-        samples.push((start.elapsed(), read));
+        let at = start.elapsed();
+        samples.push((at, read));
+        let past = u32::try_from(at.as_micros() / EVERY.as_micros()).unwrap();
+        due = start + EVERY * (past + 1);
     }
     job.terminate(hex_core::job::TERMINATED).unwrap();
     assert!(sys::wait(&started.process, u32::MAX).unwrap());
@@ -162,6 +188,7 @@ fn steps(samples: &[(Duration, u64)]) -> Vec<Duration> {
 }
 
 /// A capped run's runs, stops and periods: a stop is a gap between two steps longer than `step`, the accounting's own.
+#[cfg(windows)]
 fn cycles(
     samples: &[(Duration, u64)],
     step: Duration,
@@ -185,7 +212,33 @@ fn cycles(
     (runs, stops, periods)
 }
 
+/// The gaps between the reads of consecutive samples: the sampler's own cadence.
+fn gaps(samples: &[(Duration, u64)]) -> Vec<Duration> {
+    samples
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].0)
+        .collect()
+}
+
+/// The sampler's cadence over `samples` (n, p50, p99 and max of its gaps), refused where its longest gap isn't shorter
+/// than `step`, the gap the run tells the CPU time's steps by: there a gap between steps may be the sampler's own,
+/// not the accounting's or the cap's.
+fn cadence(samples: &[(Duration, u64)], step: Duration) -> Result<String, String> {
+    let mut gaps = gaps(samples);
+    let longest = gaps.iter().max().copied().unwrap_or_default();
+    let said = quantiles(&mut gaps);
+    if longest >= step {
+        return Err(format!(
+            "the sampler's longest gap, {longest:?}, isn't shorter than the step it tells the CPU time's steps by, \
+             {step:?}: its gaps {said}"
+        ));
+    }
+    Ok(said)
+}
+
+#[cfg(windows)]
 fn keep(name: &str, samples: &[(Duration, u64)]) {
+    use std::fmt::Write as _;
     let Some(dir) = std::env::var_os("HEX_CHARGE_WINDOW_OUT") else {
         return;
     };
@@ -197,12 +250,16 @@ fn keep(name: &str, samples: &[(Duration, u64)]) {
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C1 on Windows: the interval a job's CPU hard cap holds over, measured. Do run a busy
-/// loop uncapped, then capped at 10%, 20% and 50% of the machine, each sampled every 1 ms for 10 s. Expect each capped
-/// run held near its cap and stopped past the accounting's own step, its runs, stops and periods printed; the window
-/// `WinRuntime::charge_window` derives from is the period's.
+/// loop uncapped, then capped at 10%, 20% and 50% of the machine, each sampled every 1 ms until its reads span 10 s.
+/// Expect each run's cadence kept (its longest gap shorter than the accounting's step, else the run refused, naming
+/// both), each capped run held near its cap and stopped past the accounting's own step, its runs, stops and periods
+/// printed; the window `WinRuntime::charge_window` derives from is the period's.
+#[cfg(windows)]
 #[test]
 #[ignore = "ROOT's probe on a quiet Windows host (jupiter): about 40 s of every processor but one"]
 fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
+    sys::time_critical().unwrap();
+    let timer = HighResTimer::new().unwrap();
     let processors = sys::active_processors();
     let threads = processors.saturating_sub(1).max(1);
     // The CPU the job got over a run, per RATE_SCALE (10,000) of the machine: its CPU time over the run's span on
@@ -214,35 +271,84 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
         let span = ((last.0 - first.0).as_nanos() / 100).max(1);
         u128::from(last.1 - first.1) * 10_000 / (span * u128::from(processors))
     };
-    let uncapped = run(None, threads);
+    let uncapped = run(None, threads, &timer);
     keep("uncapped", &uncapped);
     let at = steps(&uncapped);
     let step = at.windows(2).map(|p| p[1] - p[0]).max().unwrap_or_default();
+    let kept = cadence(&uncapped, step);
     println!(
         "HEX-CHARGE-WINDOW processors={processors} spinners={threads} uncapped rate={}/10000 accounting_step={step:?} \
-         steps={}",
+         steps={} cadence[{}]",
         rate(&uncapped),
-        at.len()
+        at.len(),
+        kept.as_deref().unwrap_or_else(String::as_str)
     );
+    if let Err(why) = kept {
+        panic!("REFUSED, the uncapped run: {why}");
+    }
     let demand = u64::from(threads) * 10_000 / u64::from(processors);
     for cap in CAPS {
         assert!(
             demand > u64::from(cap),
             "{threads} spinners of {processors} processors ask {demand}/10000, not past the cap {cap}/10000"
         );
-        let samples = run(Some(cap), threads);
+        let samples = run(Some(cap), threads, &timer);
         keep(&cap.to_string(), &samples);
+        let kept = cadence(&samples, step);
         let (mut runs, mut stops, mut periods) = cycles(&samples, step);
         println!(
-            "HEX-CHARGE-WINDOW cap={cap}/10000 rate={}/10000 runs[{}] stops[{}] periods[{}]",
+            "HEX-CHARGE-WINDOW cap={cap}/10000 rate={}/10000 runs[{}] stops[{}] periods[{}] cadence[{}]",
             rate(&samples),
             quantiles(&mut runs),
             quantiles(&mut stops),
-            quantiles(&mut periods)
+            quantiles(&mut periods),
+            kept.as_deref().unwrap_or_else(String::as_str)
         );
+        if let Err(why) = kept {
+            panic!("REFUSED, the run capped at {cap}/10000: {why}");
+        }
         assert!(
             !periods.is_empty(),
             "a job capped at {cap}/10000 never stopped past the accounting's step of {step:?}"
         );
     }
+}
+
+/// `count` reads, the k-th at `at(k)`, the job's CPU time `cpu(t)` at each.
+fn sampled(
+    count: u64,
+    at: impl Fn(u64) -> Duration,
+    cpu: impl Fn(Duration) -> u64,
+) -> Vec<(Duration, u64)> {
+    (0..count).map(|k| (at(k), cpu(at(k)))).collect()
+}
+
+/// Joint plan step 14 (AC-T7.4.1), the probe's own check (ROOT, 2026-11-12, r563): a sampler that lost its cadence
+/// can't measure the accounting's step. Do reckon r563's uncapped run as its samples had it: a read every 41 ms (a
+/// Windows quantum behind 31 spinners of its priority), one 584 ms late, the CPU time stepping at each. Expect the
+/// accounting's step taken as 584 ms, the sampler's own gap, and the run refused, naming both.
+#[test]
+fn w14_a_sampler_slower_than_the_step_it_measures_is_refused() {
+    let at = |k: u64| Duration::from_millis(41 * k + if k >= 50 { 543 } else { 0 });
+    let samples = sampled(100, at, |t| u64::try_from(t.as_millis()).unwrap() * 310);
+    let times = steps(&samples);
+    let step = times.windows(2).map(|p| p[1] - p[0]).max().unwrap();
+    assert_eq!(step, Duration::from_millis(584));
+    let refused = cadence(&samples, step).unwrap_err();
+    assert!(refused.contains("584ms"), "{refused}");
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a sampler that keeps its deadlines measures the accounting's step. Do reckon a run
+/// read every 1 ms for 200 ms whose CPU time steps every 15 ms, the clock's tick. Expect the step 15 ms and the cadence
+/// kept, its gaps 1 ms.
+#[test]
+fn w14_a_sampler_that_keeps_its_deadlines_measures_the_step() {
+    let samples = sampled(201, Duration::from_millis, |t| {
+        u64::try_from(t.as_millis() / 15).unwrap() * 150_000
+    });
+    let times = steps(&samples);
+    let step = times.windows(2).map(|p| p[1] - p[0]).max().unwrap();
+    assert_eq!(step, Duration::from_millis(15));
+    let kept = cadence(&samples, step).unwrap();
+    assert!(kept.contains("n=200 p50=1ms p99=1ms max=1ms"), "{kept}");
 }

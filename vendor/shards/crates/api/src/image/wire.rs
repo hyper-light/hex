@@ -19,8 +19,14 @@ pub use shards_abi::run::nesting::Ready;
 /// ([`Narrowing::destinations`], D236), and to each published port in [`Started`], the
 /// members it reaches; 4, a host directory plugged into a running member and let go of
 /// (`PLUG`, `UNPLUG`, answered `PLUGGED`; D235), so that a side that has no plugs refuses
-/// the run as it is asked, before any plug is.
-pub const VERSION: u8 = 4;
+/// the run as it is asked, before any plug is; 5, each member's reach of the destinations
+/// kept ([`Narrowing::members`], D236), which its run host holds every member to. A request
+/// that names none is written as version 4, which a side of version 4 reads alike, so such a
+/// side refuses only the requests that hold members to their reach.
+pub const VERSION: u8 = 5;
+
+/// The version a request naming no member's reach is written as (see [`VERSION`]).
+const WITHOUT_REACH: u8 = 4;
 
 /// What the orchestrator's side sends.
 pub mod to_host {
@@ -184,6 +190,24 @@ pub struct Narrowing {
     pub destinations: Keep,
     /// Names past the microVM, where the image grants them.
     pub dns: bool,
+    /// What each member may reach of the destinations kept, where the orchestrator holds
+    /// members apart (version 5): every member the image declares is held to it, one named
+    /// nowhere here to none of them, or the run is refused before it starts. A member reaches
+    /// each destination kept that it reaches by name (its networks' destinations and its
+    /// remote MCP servers'), the network process keeping the whole microVM to those kept and
+    /// D236's `held` making members alike on a port they reach by name. None: no member held
+    /// apart, the destinations kept the whole microVM's.
+    pub members: Option<Vec<MemberReach>>,
+}
+
+/// One member's reach of the destinations kept ([`Narrowing::members`]): the member, by the
+/// kind and name its image's Agentfile declares, and each destination, `host:port` as
+/// [`Narrowing::destinations`] names it, that it reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberReach {
+    pub kind: MemberKind,
+    pub name: String,
+    pub destinations: Vec<String>,
 }
 
 impl Default for Narrowing {
@@ -193,6 +217,7 @@ impl Default for Narrowing {
             mcp: Keep::All,
             destinations: Keep::All,
             dns: true,
+            members: None,
         }
     }
 }
@@ -716,7 +741,11 @@ fn proto(tag: u8) -> Result<Proto, WireError> {
 impl Request {
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         let mut w = Writer(Vec::new());
-        w.u8(VERSION);
+        w.u8(if self.egress.members.is_some() {
+            VERSION
+        } else {
+            WITHOUT_REACH
+        });
         w.text(&self.image)?;
         w.u32(self.vcpus);
         w.u64(self.memory_mib);
@@ -770,13 +799,25 @@ impl Request {
             }
         }
         w.keep(&self.egress.destinations)?;
+        // Each member's reach, appended in version 5: written only where it is named.
+        if let Some(members) = &self.egress.members {
+            w.count(members.len())?;
+            for m in members {
+                w.u8(m.kind as u8);
+                w.text(&m.name)?;
+                w.count(m.destinations.len())?;
+                for d in &m.destinations {
+                    w.text(d)?;
+                }
+            }
+        }
         w.done()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Request, WireError> {
         let mut r = Reader(payload);
         let version = r.u8()?;
-        if version != VERSION {
+        if version != VERSION && version != WITHOUT_REACH {
             return Err(WireError::Version(version));
         }
         let image = r.text()?;
@@ -843,11 +884,34 @@ impl Request {
         }
         let nesting = r.flag()?;
         let ready_by = if r.flag()? { Some(r.u64()?) } else { None };
+        let destinations = r.keep()?;
+        let reach = if version == VERSION {
+            let n = r.count(1 + 4 + 4)?;
+            let mut reach = Vec::with_capacity(n);
+            for _ in 0..n {
+                let kind = member_kind(r.u8()?)?;
+                let name = r.text()?;
+                let k = r.count(4)?;
+                let mut destinations = Vec::with_capacity(k);
+                for _ in 0..k {
+                    destinations.push(r.text()?);
+                }
+                reach.push(MemberReach {
+                    kind,
+                    name,
+                    destinations,
+                });
+            }
+            Some(reach)
+        } else {
+            None
+        };
         let egress = Narrowing {
             egress,
             mcp,
-            destinations: r.keep()?,
+            destinations,
             dns,
+            members: reach,
         };
         r.end()?;
         Ok(Request {
@@ -1340,6 +1404,7 @@ mod tests {
                 mcp: Keep::All,
                 destinations: Keep::All,
                 dns: false,
+                members: None,
             },
             shares: vec![ShareAt {
                 host: "/home/u/work".into(),
@@ -1349,6 +1414,68 @@ mod tests {
             nesting: false,
             ready_by: None,
         }
+    }
+
+    /// Each member's reach of the destinations kept (D236) rides version 5 alone: a request
+    /// naming it, none, one member or several, a member reaching nothing among them, reads
+    /// back as written, its first byte 5 and the reach last; one naming none is written as
+    /// version 4, byte for byte the request a side of version 4 writes, and read back with no
+    /// reach. A reach cut short, a member of no kind, or a version 4 request carrying one is
+    /// refused, never read as another.
+    #[test]
+    fn a_members_reach_rides_version_5_alone() {
+        let reach = |kind, name: &str, destinations: &[&str]| MemberReach {
+            kind,
+            name: name.into(),
+            destinations: destinations.iter().map(|d| (*d).to_string()).collect(),
+        };
+        let held = |members: Vec<MemberReach>| Request {
+            egress: Narrowing {
+                destinations: Keep::Only(vec![
+                    "api.openai.com:443".into(),
+                    "host.docker.internal:7070".into(),
+                ]),
+                members: Some(members),
+                ..request().egress
+            },
+            ..request()
+        };
+        for members in [
+            Vec::new(),
+            vec![reach(
+                MemberKind::Harness,
+                "codex",
+                &["api.openai.com:443", "host.docker.internal:7070"],
+            )],
+            vec![
+                reach(MemberKind::Harness, "codex", &["api.openai.com:443"]),
+                reach(MemberKind::Agent, "helper", &[]),
+            ],
+        ] {
+            let asked = held(members);
+            let bytes = asked.encode().unwrap();
+            assert_eq!(bytes[0], VERSION);
+            assert_eq!(Request::decode(&bytes).unwrap(), asked);
+            for cut in 1..bytes.len() {
+                assert!(Request::decode(&bytes[..cut]).is_err(), "cut at {cut}");
+            }
+        }
+        let plain = request();
+        let bytes = plain.encode().unwrap();
+        assert_eq!(bytes[0], WITHOUT_REACH);
+        assert_eq!(Request::decode(&bytes).unwrap(), plain);
+        let mut kindless = held(vec![reach(MemberKind::Agent, "helper", &[])])
+            .encode()
+            .unwrap();
+        // The reach's count, then its one member's kind.
+        let at = kindless.len() - (1 + 4 + "helper".len() + 4);
+        kindless[at] = 2;
+        assert!(matches!(Request::decode(&kindless), Err(WireError::Tag { .. })));
+        let mut older = held(vec![reach(MemberKind::Agent, "helper", &[])])
+            .encode()
+            .unwrap();
+        older[0] = WITHOUT_REACH;
+        assert_eq!(Request::decode(&older), Err(WireError::Trailing));
     }
 
     /// Every message reads back as written, its fields at their edges.

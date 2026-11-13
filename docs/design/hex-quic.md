@@ -110,7 +110,10 @@ its bounds, workers, disconnect rule and program watches), each control connecti
 whole messages framed as the guest's are; an exec's stdio connections are gathered as the guest's relay gathers them
 (`hex_core::stream::Gather`) and become the program's pipes, copied to and from their lanes. A stdin connection ends
 as the relay's does (HEX-GUEST-41): the peer's End ends the program's pipe; the program's letting its stdin go resets
-the connection, so the peer's client lets its caller's pipe go. On Unix its copier waits in poll(2) for the pipe's
+the connection, so the peer's client lets its caller's pipe go. A stdout or stderr connection's client ends its own
+half once it has named it (shards-guest.md §3), so the copier's End at its program's end leaves the connection done
+both ways: the copier's connection goes with nothing open to reset, and the client's bridge closes its socket pair
+whole, which no reader sleeps through (Shards M236), never a half-close alone. On Unix its copier waits in poll(2) for the pipe's
 readers and for the connection, which writes to a pipe of the copier's own as it changes; Windows' pipes can't be
 waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. The log
 port carries the node's log lines, each counted where a slow reader makes it let one go.
@@ -317,9 +320,13 @@ there too.
 ends the owner's socket. The owner's end that `link::Link` dials (`bridge::Bridged`) reads the bytes that came, then
 that error (`ConnectionReset` for a reset, `ConnectionAborted` for the link's close), as a vsock socket reads a reset.
 hex-client's own reads of a bridged stream (the control connection, a carried stream's copy, staging) see the cut so.
-To follow in hex-client: the copy hands its outcome on instead of swallowing it, and the exec's `Proc` ends
-`Refusal::Broken` naming the stream that was cut, for a carried stream and for an asked one, whose socket the caller reads
-itself. `bridge::socket`, which hex-node's staging server reads, keeps a clean end.
+The program's end tells it too (`hex_client::Cut`): a carried stream's copy records the read that cut it before the
+caller's pipe ends, and an asked stream's connection hands the bridge's record to the client (`guest::Duplex::cut`),
+since the caller reads its socket itself. Once its end has come, the exec's `Proc` is refused `Refusal::Broken`, naming the
+output stream that was cut short, so a caller that reads its streams to their end and then takes its program's end learns
+what it read wasn't all. The same holds over vsock and the node's socket, whose carried streams' copies swallowed the reset
+their reads reported. A stdin connection's reset is its program letting its stdin go, its end, so it tells nothing.
+`bridge::socket`, which hex-node's staging server reads, keeps a clean end.
 
 **Alternatives.**
 - Route (a): loopback TCP pairs on Unix too (Windows' adapter), closed with `SO_LINGER` at zero on a cut, so the reset
@@ -333,4 +340,5 @@ itself. `bridge::socket`, which hex-node's staging server reads, keeps a clean e
 - A marker in the stream: the stream carries a program's bytes as they are, so no byte is free to mean "cut".
 
 **Falsified by** a stream cut short whose owner reads a clean end (`tests::ac_t7_4_1_a_stream_cut_short_reads_as_cut`),
-or, once hex-client's part lands, a program whose stream was cut short ending without `Refusal::Broken`.
+or a program whose output stream was cut short ending without `Refusal::Broken` (hex-client
+`guest::tests::cut_short`, a carried stream and an asked one).

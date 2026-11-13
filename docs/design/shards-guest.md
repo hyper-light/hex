@@ -97,8 +97,12 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   most the wire's `MAX_MESSAGE`; a longer one is a typed fault that closes the connection, never a partial read).
 - **Stdio:** each exec's stdin, stdout and stderr ride a vsock connection of their own, which the host opens and
   names in its first 24 bytes (its control connection's token, the exec's request id and which stream;
-  `hex_core::stream::name`). The relay sends each control connection its token first, as request ids are a
-  connection's own. The node takes only a
+  `hex_core::stream::name`). Once it has named an output stream, which carries nothing its way, the host ends its own
+  half where its link carries a half-close (`guest::Link::carries_half_close`: Shards' vsock, D12; QUIC's lanes), so
+  the relay's end of the stream closes the connection whole, which a reader on macOS never sleeps through (Shards
+  M236). Firecracker's vsock makes a host's half-close a full shutdown that drops what the guest sends after it
+  (below), so there the host's half stays open. The relay sends each control connection its token first, as request
+  ids are a connection's own. The node takes only a
   pipe's end as a program's stream (`crates/hex-node/src/serve.rs:1208`: "the right end of a pipe, as the
   seam's `Stdio` holds; anything else is refused by name"), so the relay makes a pipe per stream, passes its end
   to the node with the exec, and copies between the pipe and the vsock connection. On the host (native plan step

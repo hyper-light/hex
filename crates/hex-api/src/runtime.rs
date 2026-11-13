@@ -1885,10 +1885,10 @@ pub enum Upstream {
     /// (joint plan step 14, C5).
     LiveMove,
     /// A destination (D236: a host's name, an IPv4 address or the host itself, by TCP) kept for the members an
-    /// orchestrator grants it alone: per-member destinations in D231's `Narrowing`, or an image's members and the
-    /// ports each may open named before its boot. `Narrowing.destinations` keeps one image-wide, and every member
-    /// the image lets out on its port reaches it (D236's `held`), so until then Hex can't show that only the
-    /// members its grants name reach a destination it keeps (joint plan step 15, docs/design/network-grants.md N4).
+    /// orchestrator grants it alone. Given by Hex's recorded change to Shards (vendor/shards and vendor/shards-gpu,
+    /// change 0002: each member's reach in D231's narrowing, held by the run host before the VM starts), so no call
+    /// awaits it now (joint plan step 15, docs/design/network-grants.md N4). Its tag stays, the wire being
+    /// append-only.
     MemberDestinations,
 }
 
@@ -1947,8 +1947,7 @@ impl std::fmt::Display for Upstream {
             }
             Self::LiveMove => "a running Shards microVM moved to another machine (Shards' D176)",
             Self::MemberDestinations => {
-                "a Shards destination kept for the members granted it alone (per-member destinations in D231's \
-                 narrowing, or an image's members named before its boot)"
+                "a Shards destination kept for the members granted it alone (given by Hex's recorded Shards change)"
             }
         })
     }
