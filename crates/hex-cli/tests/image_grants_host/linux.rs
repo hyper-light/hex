@@ -154,8 +154,11 @@ pub fn sockets(pids: &[u32]) -> Vec<Socket> {
         for row in rows_seen_by(pid) {
             if held.contains(&row.inode) && !seen.contains(&row.inode) {
                 seen.push(row.inode);
-                let peer = (!row.remote.ip().is_unspecified() || row.remote.port() != 0)
-                    .then_some(row.remote);
+                let peer = if row.remote.ip().is_unspecified() && row.remote.port() == 0 {
+                    None
+                } else {
+                    Some(row.remote)
+                };
                 out.push(Socket {
                     tcp: row.tcp,
                     local: row.local,
