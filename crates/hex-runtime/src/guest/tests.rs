@@ -1299,13 +1299,15 @@ fn a_changed_binary_is_warmed_once_in_the_background_and_the_guest_kept() {
 
 /// Guests whose VMs outlive a lost handle, as Shards' do on macOS: each booted guest runs until stopped,
 /// named by its identity, and `attach` of one still running gives it back. Counts boots, attaches and
-/// stops; `answers` says whether a guest's relay answers a dial.
+/// stops; `answers` says whether a guest's relay answers a dial; `ended` how `attach` answers a guest that
+/// no longer runs: `Gone`, as a simulator may, or what Shards' own take-back read of its process.
 struct Kept {
     running: Mutex<std::collections::BTreeSet<u32>>,
     boots: AtomicUsize,
     attaches: AtomicUsize,
     stops: Arc<AtomicUsize>,
     answers: bool,
+    ended: Mutex<Option<shards_api::ProcessFailure>>,
 }
 
 impl Kept {
@@ -1316,6 +1318,7 @@ impl Kept {
             attaches: AtomicUsize::new(0),
             stops: Arc::new(AtomicUsize::new(0)),
             answers,
+            ended: Mutex::new(None),
         })
     }
 
@@ -1443,6 +1446,12 @@ impl shards_api::Guests for KeptGuests {
         let running = self.0.running.lock().unwrap().contains(&identity.pid);
         if running && *identity == kept_identity(identity.pid) {
             Ok(self.0.guest(identity.pid))
+        } else if let Some(failure) = self.0.ended.lock().unwrap().clone() {
+            Err(shards_api::Refusal::Process {
+                pid: identity.pid,
+                expected_started: identity.started,
+                failure,
+            })
         } else {
             Err(shards_api::Refusal::Gone {
                 pid: identity.pid,
@@ -1502,6 +1511,46 @@ fn a_recorded_guest_that_is_gone_is_forgotten_and_another_booted() {
     assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
     assert_eq!(kept.boots.load(Ordering::SeqCst), 1);
     assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+}
+
+/// Native plan step 8 (T-T7.1.2), AC-T7.4.1: Shards' take-back refuses a guest whose process ended with what it
+/// read of that process (D215: on every host, Windows' since Shards b4548fcf, where it answered `Gone`): seen to
+/// have exited, or its pid another start's. Each proves the recorded guest ended. Do: start a node whose recorded
+/// guest Shards answers so, then one whose guest's process Shards could not read. Expect: the first forgets it
+/// and boots its own, recorded in its place; the second, which proves nothing, is refused and boots none, its
+/// record kept.
+#[test]
+fn a_recorded_guest_shards_saw_end_is_forgotten_and_another_booted() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    for failure in [
+        shards_api::ProcessFailure::Exited,
+        shards_api::ProcessFailure::DifferentStart { observed: 71 },
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("@guest");
+        held::write(&record, &kept_identity(7)).unwrap();
+        let kept = Kept::new(true);
+        *kept.ended.lock().unwrap() = Some(failure.clone());
+        let node = kept_node(&kept, &record);
+        node.boot().unwrap_or_else(|why| panic!("{failure:?}: {why}"));
+        assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(kept.boots.load(Ordering::SeqCst), 1, "{failure:?}");
+        assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    held::write(&record, &kept_identity(7)).unwrap();
+    let kept = Kept::new(true);
+    *kept.ended.lock().unwrap() = Some(shards_api::ProcessFailure::Os {
+        operation: shards_api::ProcessOperation::OpenProcess,
+        code: 5,
+    });
+    let node = kept_node(&kept, &record);
+    assert!(node.boot().is_err(), "an unread guest taken as ended");
+    assert_eq!(kept.boots.load(Ordering::SeqCst), 0, "a guest booted beside one that may run");
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(7)));
 }
 
 /// Native plan step 8 (no orphan VM): a guest taken back that won't answer is stopped before the node boots
