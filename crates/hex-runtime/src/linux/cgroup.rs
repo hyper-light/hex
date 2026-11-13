@@ -2175,6 +2175,29 @@ mod tests {
         }
     }
 
+    /// Runtime goal 7 (decision 7), AC-T7.4.1: a signal holds none of its box's turns, so a removal under way (a run's
+    /// claimer, a delete) can remove the cgroup the signal found before the signal reads it. Plain files stand in for
+    /// the cgroup's, its directory pinned as a box's lookup pins it, then removed. Do: signal TERM and KILL through it.
+    /// Expect: each refused as not running, never an OS error.
+    #[test]
+    fn a_signal_whose_cgroup_was_removed_since_it_was_found_is_refused_not_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("box");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        let found = pinned_managed_cgroup(&dir);
+        fs::remove_file(dir.join("cgroup.events")).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        let id = BoxId::new("removed").unwrap();
+        for signal in [Signal::TERM, Signal::KILL] {
+            assert_eq!(
+                found.signal(&id, signal),
+                Err(Refusal::NotRunning(id.clone(), "signal")),
+                "{signal:?}"
+            );
+        }
+    }
+
     /// Goal 5 extended, step 6 (bench/competitive/probes/create_serial.md, run 12): a box's cgroup opened
     /// through its root is reached through the directory it holds, never by its path, so no file of it is a
     /// walk through `/sys` and every kernfs directory above it. Do: open a root and a slot under it, then move
