@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `377d49ca7bbd6ead2ff03188f5e974d8948aa88c` (main).
+Revision: `740fa37268c9200616f6fd543d96625953e23b81` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -29,20 +29,21 @@ reference (D242), a member's terminal (D244), each member held to its reach of t
 `MemberSpec::args`, version 18), how its microVM started, from its image's template or a warm run
 host's (D253, `ImageGuest::started_from`, versions 19 and 21; `ImagePools`, which Hex does not use
 yet), its credential grants' values leased by the orchestrator's lessor (D242, `ImageSpec::lessor`,
-version 20), the setup keys a run's spec may name (D257), its run host started holding its three
-standard streams alone through `shards_ipc`'s spawn (D248), a run whose own command never started
-ending failed in its VM's words (D249), a run that keeps nothing past the microVM keeping the
-network its image links its members to, nothing let past (D250), a lane to a socket of the run's own
-command (D251), and the run's own agent-control endpoint, bound by its run host, whose controller
-shards-api carries from shards-remote (D252; `ImageSpec::control`, `ImageGuest::control`, version
-15); a guest's size held to `check`'s rule from one source, `envelope` (672b6fb47); judged waits in
-place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no `shards_api::record`, no conformance
-patiences); shards-ipc's start test holding a child to its parent's start tick (743c5b32) and its
-read test holding its wait from below alone (308895ef4); and an AF_UNIX read on Windows that waits
-in WSAPoll, which sees a peer's end that a waiting recv can sleep through (shards-afunix, 7ea3ce27,
-D140, PM M536). shards-api depends on `crates/ipc` (the run host's spawn), `crates/dns` (a
-credential grant's host names, checked as DNS names, D242) and `crates/remote` (the endpoint's
-controller, D252), so each is taken.
+version 20), the setup keys a run's spec may name (D257), a run's end saying why and its run host's
+diagnostics kept whole in a file its orchestrator names (D258, `ImageGuest::keep_diagnostics`), its
+run host started holding its three standard streams alone through `shards_ipc`'s spawn (D248), a run
+whose own command never started ending failed in its VM's words (D249), a run that keeps nothing
+past the microVM keeping the network its image links its members to, nothing let past (D250), a lane
+to a socket of the run's own command (D251), and the run's own agent-control endpoint, bound by its
+run host, whose controller shards-api carries from shards-remote (D252; `ImageSpec::control`,
+`ImageGuest::control`, version 15); a guest's size held to `check`'s rule from one source,
+`envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
+`shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
+parent's start tick (743c5b32) and its read test holding its wait from below alone (308895ef4); and
+an AF_UNIX read on Windows that waits in WSAPoll, which sees a peer's end that a waiting recv can
+sleep through (shards-afunix, 7ea3ce27, D140, PM M536). shards-api depends on `crates/ipc` (the run
+host's spawn), `crates/dns` (a credential grant's host names, checked as DNS names, D242) and
+`crates/remote` (the endpoint's controller, D252), so each is taken.
 The take list adds `docs/research/measurements/api-flakes/spawns.rs` and `half-close.rs`, which
 the API's and shards-afunix's tests include by path at this revision (`crates/api/src/client.rs`,
 `crates/afunix/src/lib.rs`).

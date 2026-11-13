@@ -185,6 +185,9 @@ struct ModelRun {
     stats: Mutex<Stats>,
     /// The patience each stats ask was given, in order (decision 9).
     stats_asked: Mutex<Vec<Duration>>,
+    /// Each file its run host's diagnostics were told to go to (`ImageGuest::keep_diagnostics`), in order: the test
+    /// writes the host's diagnostics into the last, as the run host's do.
+    diagnostics: Mutex<Vec<std::fs::File>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -346,6 +349,10 @@ impl ImageGuest for ModelGuest {
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
+        Ok(())
+    }
+    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+        self.run.diagnostics.lock().unwrap().push(to);
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {

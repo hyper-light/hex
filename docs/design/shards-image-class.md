@@ -1,12 +1,12 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `377d49ca`**, on Linux, macOS and Windows hosts, its run
+runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `740fa372`**, on Linux, macOS and Windows hosts, its run
 host started holding only its stdio by Shards' own spawn (D248, §1) and each vCPU's guest time in its usage (D241,
 §4); its real-VM runs and the records its waits seed from are owed (§8).
 
 Sources, read at the revisions named:
-- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c` and `377d49ca`) and
+- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c` and `740fa372`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -19,12 +19,14 @@ Sources, read at the revisions named:
   in its VM's words) and D250 (a run that keeps nothing past the microVM keeps the network its image links its members
   to, its network process letting nothing past), D251 and D252 (a lane to a socket of the run's own command, and the
   run's own agent-control endpoint, `ImageSpec::control` and `ImageGuest::control`), D234's `gpus=`
-  (`ImageSpec::gpu_devices`) and D247's period (`ImageGuest::rate_period`): image channel version 17. At `377d49ca`,
+  (`ImageSpec::gpu_devices`) and D247's period (`ImageGuest::rate_period`): image channel version 17. At `740fa372`,
   versions 18 to 21: D256 (a member's run-time arguments, `MemberSpec::args`), D253 (a run's microVM restored from its
   image's template, or a warm run host's, `ImageGuest::started_from`, which a box's usage says and its record keeps;
   `ImagePools`, not used here), D242's leases (`ImageSpec::lessor`: none here, as no box grants a credential) and D257
-  (the setup keys a run's spec may name).
-- `shards_api::image` at `e0cc059c` and `377d49ca`: `crates/api/src/image.rs` (`Images`, its `boot` and patience,
+  (the setup keys a run's spec may name), and D258 (a run's end saying why: its asks' end typed, its VM's failure to
+  serve it told, its end kept once seen, and its run host's diagnostics kept whole in a file its orchestrator names,
+  `ImageGuest::keep_diagnostics`).
+- `shards_api::image` at `e0cc059c` and `740fa372`: `crates/api/src/image.rs` (`Images`, its `boot` and patience,
   `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, `shards_ipc::spawn_with`,
   `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`, `StatsScope`, `RunEnd`,
   `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it
@@ -262,7 +264,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   (§6).
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `377d49ca` or later (image channel version 21: Hex's `shards`, rebuilt on each host by
+  `740fa372` or later (image channel version 21: Hex's `shards`, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and
