@@ -2711,8 +2711,8 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    // The counters, then guest time's option byte, appended (joint plan step 12): none here.
-    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 1);
+    // The counters, then guest time's option byte and the microVM's start's, appended (joint plan step 12): none here.
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 2);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
@@ -4227,14 +4227,15 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     let per_vcpu = usage(Some(GuestTime::PerVcpuNs(vec![5, 7])));
     let bytes = answer(4, &per_vcpu, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[counters..counters + 6], &[1, 0, 2, 0, 0, 0]);
-    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>());
+    // Then the microVM's start's option byte (D253): none here.
+    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>() + 1);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         per_vcpu
     );
     let awaits = usage(Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)));
     let bytes = answer(4, &awaits, MAX_MESSAGE).unwrap();
-    assert_eq!(&bytes[counters..], &[1, 1, 0]);
+    assert_eq!(&bytes[counters..], &[1, 1, 0, 0]);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         awaits
@@ -4266,11 +4267,12 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     )
     .unwrap();
     let count = u32::try_from(GuestTime::MAX_VCPUS + 1).unwrap();
-    read_past.truncate(read_past.len() - size_of::<u32>());
+    // Its count and the start's option byte after it, written again with a count past the index space.
+    read_past.truncate(read_past.len() - size_of::<u32>() - 1);
     read_past.extend_from_slice(&count.to_le_bytes());
     read_past.extend(std::iter::repeat_n(
         0,
-        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>(),
+        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>() + 1,
     ));
     assert!(matches!(
         read_answer(&received(&read_past, 0), MAX_MESSAGE),

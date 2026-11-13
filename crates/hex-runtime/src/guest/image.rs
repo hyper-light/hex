@@ -294,9 +294,9 @@ fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
 }
 
 /// What a running VM's usage is, from its run's STATS: CPU, memory, processes and I/O from its guest's cgroup,
-/// and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). STATS has no memory peak, OOM kills or refused
-/// forks (docs/design/shards-image-class.md §4).
-fn usage_of(stats: &Stats, vcpus: u32) -> Result<Usage, Refusal> {
+/// and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]); with how its microVM started, `from` (D253). STATS has no
+/// memory peak, OOM kills or refused forks (docs/design/shards-image-class.md §4).
+fn usage_of(stats: &Stats, vcpus: u32, from: hex_api::StartedFrom) -> Result<Usage, Refusal> {
     let read = |value: Option<u64>, what: &'static str| {
         value.ok_or_else(|| Refusal::Os {
             op: "reading a Shards image VM's stats",
@@ -315,8 +315,21 @@ fn usage_of(stats: &Stats, vcpus: u32) -> Result<Usage, Refusal> {
         io_read_bytes: read(stats.read_bytes, "read")?,
         io_write_bytes: read(stats.write_bytes, "write")?,
         guest: Some(GuestTime::PerVcpuNs(per_vcpu(stats, vcpus)?)),
-        started_from: None,
+        started_from: Some(from),
     })
+}
+
+/// How a run's microVM started (D253), as its run host said it as the run started, in Hex's words: Shards' five, one
+/// for one.
+fn started_from(from: shards_api::image::StartedFrom) -> hex_api::StartedFrom {
+    use shards_api::image::StartedFrom as Said;
+    match from {
+        Said::Booted => hex_api::StartedFrom::Booted,
+        Said::Saved => hex_api::StartedFrom::Saved,
+        Said::Restored => hex_api::StartedFrom::Restored,
+        Said::Replaced => hex_api::StartedFrom::Replaced,
+        Said::Warm => hex_api::StartedFrom::Warm,
+    }
 }
 
 /// What a running VM costs its host, from its run's microVM part (D241's `Stats::microvm`): its VM process's CPU time and
@@ -733,6 +746,26 @@ impl GuestRuntime {
         })
     }
 
+    /// Keeps how the run's microVM started (D253), as its run host said it as the run started, in the box's record, where
+    /// its record lacks it: written once, so the box says how it came up across the node's restarts too.
+    fn keep_started(&self, record: &BoxRecord, guest: &dyn ImageGuest) -> Result<(), Refusal> {
+        if record.started_from.is_some() {
+            return Ok(());
+        }
+        let from = started_from(guest.started_from());
+        let id = &record.spec.id;
+        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+            let mut current = transaction
+                .read(id)?
+                .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+            if current.started_from.is_some() {
+                return Ok(());
+            }
+            current.started_from = Some(from);
+            transaction.put(&current)
+        })
+    }
+
     /// The box `record` names, as its record and this process's run say: an answer that came from a
     /// boot or a stop taken, an end its run reached written, and a reboot of the host taken as the end
     /// of a run of an earlier boot (T-T7.1.2). Decided under the runs' lock, acted on after it.
@@ -740,6 +773,8 @@ impl GuestRuntime {
         /// What the runs' lock found.
         enum Next {
             Is(State),
+            /// Its boot's answer, taken here: its run has started.
+            Started(Arc<dyn ImageGuest>),
             Running(Arc<dyn ImageGuest>),
             Ends(End),
             NoRun,
@@ -777,7 +812,7 @@ impl GuestRuntime {
                             }
                             let guest: Arc<dyn ImageGuest> = Arc::from(guest);
                             *run = Run::Running(Arc::clone(&guest));
-                            Next::Is(State::Running(guest))
+                            Next::Started(guest)
                         }
                         // The run host refused or ended the run before it started: its own answer, in its words.
                         Some((Err(why), took)) => {
@@ -807,7 +842,16 @@ impl GuestRuntime {
         };
         match next {
             Next::Is(state) => Ok(state),
-            Next::Running(guest) => self.settle_running(image, id, guest),
+            // How its microVM started kept in its record (D253), whichever call took its boot's answer: this one, or
+            // its start, which settles it next.
+            Next::Started(guest) => {
+                self.keep_started(record, guest.as_ref())?;
+                Ok(State::Running(guest))
+            }
+            Next::Running(guest) => {
+                self.keep_started(record, guest.as_ref())?;
+                self.settle_running(image, id, guest)
+            }
             Next::Ends(end) => {
                 self.record_end(id, &end)?;
                 image.forget(id)?;
@@ -1077,8 +1121,12 @@ impl GuestRuntime {
     }
 
     pub(super) fn usage_image(&self, record: BoxRecord) -> Result<Usage, Refusal> {
-        let stats = self.stats_image(&record, "usage")?;
-        usage_of(&stats, vm_size(&record.spec)?.vcpus)
+        let (guest, stats) = self.stats_image(&record, "usage")?;
+        usage_of(
+            &stats,
+            vm_size(&record.spec)?.vcpus,
+            started_from(guest.started_from()),
+        )
     }
 
     /// The guest of image box `record` running here, or why none: held, or not running, the refusal naming `call`.
@@ -1094,11 +1142,16 @@ impl GuestRuntime {
         }
     }
 
-    /// The run's stats (D231's STATS, D241's microVM part among them), for `call`. Shards waits for its run's answer or its
-    /// end alone (`Duration::MAX`): the stats wait's learned W* is where the census is told a run-out, never where the
-    /// ask ends (decision 9, the person's ruling of 2026-11-13). D231 shows no progress of an ask it holds, so the ask
-    /// is followed by its run's life alone, refused only at its end; its answer, however late, the sample W* rises to.
-    fn stats_image(&self, record: &BoxRecord, call: &'static str) -> Result<Stats, Refusal> {
+    /// The run's guest and its stats (D231's STATS, D241's microVM part among them), for `call`. Shards waits for its
+    /// run's answer or its end alone (`Duration::MAX`): the stats wait's learned W* is where the census is told a
+    /// run-out, never where the ask ends (decision 9, the person's ruling of 2026-11-13). D231 shows no progress of an
+    /// ask it holds, so the ask is followed by its run's life alone, refused only at its end; its answer, however late,
+    /// the sample W* rises to.
+    fn stats_image(
+        &self,
+        record: &BoxRecord,
+        call: &'static str,
+    ) -> Result<(Arc<dyn ImageGuest>, Stats), Refusal> {
         let id = &record.spec.id;
         let guest = self.image_guest(record, call)?;
         let waits = self.image()?.waits()?;
@@ -1112,7 +1165,7 @@ impl GuestRuntime {
         match answer {
             Ok(stats) => {
                 waits.stats.answered(took);
-                Ok(stats)
+                Ok((guest, stats))
             }
             Err(ImageRefusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, call)),
             Err(why) => Err(refused(id, "reading a Shards image VM's stats", why)),
@@ -1151,7 +1204,7 @@ impl GuestRuntime {
 
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
-        let stats = self.stats_image(&record, "host_use")?;
+        let (_, stats) = self.stats_image(&record, "host_use")?;
         host_use_of(&stats, vm_size(&record.spec)?.vcpus)
     }
 

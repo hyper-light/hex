@@ -52,7 +52,7 @@ use hex_api::{
     MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
     Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver,
     Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal,
-    Upstream, Usage, User, check_grants, check_published,
+    StartedFrom, Upstream, Usage, User, check_grants, check_published,
 };
 
 use crate::netns;
@@ -636,6 +636,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             }
             // Appended after the counters (joint plan step 12): absent, a byte 0.
             w.option_with(u.guest.as_ref(), put_guest_time)?;
+            // Appended after guest time (D253; joint plan step 12): absent, a byte 0.
+            w.option(u.started_from, put_started_from);
         }
         Answer::Boxes { infos, more } => {
             w.header(kind::BOXES, id);
@@ -1057,7 +1059,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             io_read_bytes: r.u64()?,
             io_write_bytes: r.u64()?,
             guest: r.option(guest_time)?,
-            started_from: None,
+            started_from: r.option(started_from)?,
         }),
         kind::BOXES => Answer::Boxes {
             more: r.bool("more")?,
@@ -2379,6 +2381,28 @@ fn guest_time(r: &mut Reader<'_>) -> Result<GuestTime, Fault> {
         }
         1 => Ok(GuestTime::Awaits(upstream(r)?)),
         t => Err(Fault::value("guest time", format!("variant {t}"))),
+    }
+}
+
+/// How a Shards image VM's microVM started (D253): a tag, its place in [`StartedFrom`], so append only.
+fn put_started_from(w: &mut Writer, from: StartedFrom) {
+    w.u8(match from {
+        StartedFrom::Booted => 0,
+        StartedFrom::Saved => 1,
+        StartedFrom::Restored => 2,
+        StartedFrom::Replaced => 3,
+        StartedFrom::Warm => 4,
+    });
+}
+
+fn started_from(r: &mut Reader<'_>) -> Result<StartedFrom, Fault> {
+    match r.u8()? {
+        0 => Ok(StartedFrom::Booted),
+        1 => Ok(StartedFrom::Saved),
+        2 => Ok(StartedFrom::Restored),
+        3 => Ok(StartedFrom::Replaced),
+        4 => Ok(StartedFrom::Warm),
+        t => Err(Fault::value("started from", format!("variant {t}"))),
     }
 }
 

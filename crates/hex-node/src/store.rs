@@ -435,6 +435,20 @@ impl Store {
         let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
         let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
         let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        // A run's words where it failed (D249) and how its microVM started (D253) are facts as its exit is, a Shards
+        // image VM's written through here (joint plan step 12).
+        let ended = lifecycle_fact(
+            current.ended.take(),
+            record.ended.clone(),
+            true,
+            &record.spec.id,
+        )?;
+        let started_from = lifecycle_fact(
+            current.started_from,
+            record.started_from,
+            true,
+            &record.spec.id,
+        )?;
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
@@ -448,6 +462,8 @@ impl Store {
         current.slot = slot;
         current.run = run;
         current.exit = exit;
+        current.ended = ended;
+        current.started_from = started_from;
         current.native_scope = native_scope;
         // Both writers count monotonically: publishing a backend completion cannot discard a
         // disconnect counted by the existing socket owner while native I/O was in flight.
@@ -1036,7 +1052,7 @@ fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
 }
 
 /// A stale absence preserves an observed fact; two different positive facts are uncertainty.
-fn lifecycle_fact<T: Copy + PartialEq>(
+fn lifecycle_fact<T: PartialEq>(
     current: Option<T>,
     proposed: Option<T>,
     introducing: bool,
