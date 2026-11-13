@@ -63,8 +63,8 @@ fn far() -> Duration {
     Duration::from_nanos(u64::try_from(isize::MAX).unwrap())
 }
 
-/// A condition variable whose deadline wait the read-back looks at: std's, which hex-wait replaces on macOS. Its state:
-/// whether its waiter has said it waits, and whether it has been let go.
+/// A condition variable whose deadline wait the read-back looks at: hex-wait's, or std's, which hex-wait replaces on
+/// macOS. Its state: whether its waiter has said it waits, and whether it has been let go.
 trait Waits: Default + Send + Sync + 'static {
     /// Says it waits, under its lock, then waits until let go or `dur` has passed: whether it timed out.
     fn wait(&self, dur: Duration) -> bool;
@@ -72,6 +72,30 @@ trait Waits: Default + Send + Sync + 'static {
     fn waiting(&self) -> bool;
     /// Lets its waiter go.
     fn release(&self);
+}
+
+#[derive(Default)]
+struct Hex(super::Mutex<(bool, bool)>, super::Condvar);
+
+impl Waits for Hex {
+    fn wait(&self, dur: Duration) -> bool {
+        let mut state = self.0.lock().unwrap();
+        state.0 = true;
+        let (_state, timed) = self
+            .1
+            .wait_timeout_while(state, dur, |state| !state.1)
+            .unwrap();
+        timed.timed_out()
+    }
+
+    fn waiting(&self) -> bool {
+        self.0.lock().unwrap().0
+    }
+
+    fn release(&self) {
+        self.0.lock().unwrap().1 = true;
+        self.1.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -246,12 +270,13 @@ fn armed_while_waiting<W: Waits>(dur: Duration) -> Vec<Timer> {
 }
 
 /// AC-T7.4.1 (docs/design/deadline-waits.md): do wait on a condition variable with a deadline nobody reaches, and read
-/// back from the kernel what its wait armed while it waits. Expect one timer at its deadline, one-shot, its interval
-/// in nanoseconds and marked `NOTE_CRITICAL`, which XNU fires with no leeway whatever the waiting thread's QoS. Red
-/// against std's condition variable, whose waits XNU times with that leeway: the wait hex-wait replaces on macOS.
+/// back from the kernel what its wait armed while it waits. Expect hex-wait's to hold one timer at its deadline,
+/// one-shot, its interval in nanoseconds and marked `NOTE_CRITICAL`, which XNU fires with no leeway whatever the
+/// waiting thread's QoS; and expect std's, whose waits XNU times with that leeway, to hold none, so the read-back
+/// tells the two apart.
 #[test]
 fn ac_t7_4_1_a_deadline_wait_arms_a_critical_one_shot_timer_at_its_deadline() {
-    let armed = armed_while_waiting::<Std>(far());
+    let armed = armed_while_waiting::<Hex>(far());
     assert_eq!(armed.len(), 1, "one timer at its deadline: {armed:?}");
     let timer = armed[0];
     assert_eq!(
@@ -264,4 +289,6 @@ fn ac_t7_4_1_a_deadline_wait_arms_a_critical_one_shot_timer_at_its_deadline() {
         libc::NOTE_NSECONDS | libc::NOTE_CRITICAL,
         "{timer:?}"
     );
+    let armed = armed_while_waiting::<Std>(far());
+    assert!(armed.is_empty(), "std's wait armed {armed:?}");
 }
