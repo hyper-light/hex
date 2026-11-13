@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
-    Destination, Exit, Grant, GuestTime, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime,
-    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage,
+    Exit, GuestTime, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime, RuntimeCost,
+    ShardsImage, Signal, Stdio, Upstream, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -359,24 +359,9 @@ impl Runtime for SimRuntime {
                     }
                     .fits(&SIM_EXEC_LIMIT)?
                 }
-                // Grants as the class holds them (joint plan step 15, HEX-IMG-7): publishes alone, on a run of
-                // the members alone, the rest awaiting Shards, refused before anything is made.
-                for grant in &image.grants {
-                    let needs = match grant {
-                        Grant::Egress {
-                            to: Destination::Name(_),
-                            ..
-                        } => Upstream::MemberGrantsByName,
-                        Grant::Egress {
-                            to: Destination::Address(_),
-                            ..
-                        } => Upstream::MemberGrantsByAddress,
-                        Grant::Host { .. } => Upstream::MemberHostService,
-                        Grant::Publish { .. } if image.command.is_some() => {
-                            Upstream::PublishReceiver
-                        }
-                        Grant::Publish { .. } => continue,
-                    };
+                // Grants as the class holds them (joint plan step 15, HEX-IMG-7): publishes alone, on any run,
+                // the rest awaiting Shards (N4), refused before anything is made.
+                if let Some(needs) = crate::unheld(&image.grants) {
                     return Err(Refusal::Awaits { needs });
                 }
             }

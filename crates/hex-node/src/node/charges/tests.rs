@@ -3,7 +3,9 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
-use hex_api::{LearnedPrior, LearnedUse};
+use crate::recorded::charges::{Resort, record_last_resort, with_last_resort};
+use hex_api::{LearnedEnd, LearnedPrior, LearnedUse};
+use hex_core::record::BoxRecord;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
 const GIB: u64 = 1 << 30;
@@ -211,11 +213,12 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     assert_eq!(io.take(), Vec::new(), "nothing changed, nothing written");
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be held within its room. Do run a window of a Shards
-/// VM and a Firecracker VM; expect the Shards guest's room refused as awaiting `GuestRoom`, its being told it, and
-/// `RingPinsWithinRoom`, its ring pins kept within it, the Firecracker one's neither.
+/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be told its room, though its ring pins keep within any
+/// room it is told (Shards' ring-pins-v1, D230, vendored at 66113379). Do run a window of a Shards VM and a Firecracker
+/// VM; expect the Shards guest's room refused as awaiting `GuestRoom` alone, its being told it, the Firecracker one's
+/// nothing.
 #[test]
-fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
+fn w14_a_shards_guests_room_awaits_guest_room_alone() {
     let io = Record::default();
     let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
     for (_, _, cgroup) in &vms {
@@ -234,13 +237,7 @@ fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
         .window(&io, vms, record, &[], machine(), Instant::now())
         .unwrap();
     let vm1 = BoxId::new("vm-1").unwrap();
-    assert_eq!(
-        learner.awaits(),
-        vec![
-            (&vm1, Upstream::GuestRoom),
-            (&vm1, Upstream::RingPinsWithinRoom)
-        ]
-    );
+    assert_eq!(learner.awaits(), vec![(&vm1, Upstream::GuestRoom)]);
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C2 and C8 in the node: what a capacity answer carries. Do warm one VM, booked at
@@ -712,46 +709,6 @@ fn w14_a_refused_end_is_kept_typed() {
         learner.resort(),
         &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
     );
-}
-
-/// Joint plan step 14 (AC-T7.4.1), C5's record of why, bounded (CLAUDE.md §2). Do record three ends on a learner for a
-/// 20 milli-CPU machine, whose population is two VMs, the third of another class. Expect the class's capacity answer
-/// to carry its two latest ends, latest first, and the oldest forgotten once a third came.
-#[test]
-fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
-    let mut learner = Learner::new(&fleet(), res(20, 64 * GIB)).unwrap();
-    let why = |held: u64| charge::Excess {
-        held,
-        budget: GIB,
-        band: 0,
-        fleet: charge::Pressure {
-            held: 4 * GIB,
-            growth: GIB,
-            budget: 4 * GIB,
-        },
-    };
-    for (n, class) in [
-        (1, Class::Shards),
-        (2, Class::Shards),
-        (3, Class::Firecracker),
-    ] {
-        let id = BoxId::new(&format!("vm-{n}")).unwrap();
-        learner
-            .record_end(class, &id, [u8::try_from(n).unwrap(); 16], why(n * GIB))
-            .unwrap();
-    }
-    let ids = |class| -> Vec<String> {
-        learner
-            .learned(class, &[])
-            .unwrap()
-            .unwrap()
-            .ended
-            .iter()
-            .map(|end| end.id.as_str().to_owned())
-            .collect()
-    };
-    assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
-    assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }
 
 /// A Shards VM's spec of `cost()`'s 16 CPUs and 8 GiB, as a node records it.
