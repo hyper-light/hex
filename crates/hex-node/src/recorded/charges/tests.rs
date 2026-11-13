@@ -821,6 +821,63 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     ));
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C1 with no census (ROOT, 2026-11-13; decision 9): a node whose cost carries no VMM
+/// overhead books a cold class at its envelope, says its cold start, and learns the overhead from its windows. Do
+/// answer for a Shards profile of a 16-CPU, 8 GiB envelope and no census overhead before any window; then run a window
+/// of a VM of it booked at its envelope, and one in which its VMM holds 300 MiB past the envelope and runs 1 CPU.
+/// Expect the first answer's ceiling the envelope, every dimension of its overhead cold, typed; then the VM charged its
+/// 8 GiB and 300 MiB, past the envelope, and the answer's ceiling carrying 300 MiB of memory overhead and no CPU past
+/// the envelope, its unread disk still cold.
+#[test]
+fn w14_a_census_free_class_starts_cold_and_learns_its_vmm_overhead() {
+    let mut record = vm("vm-1", 1);
+    record.spec.allocation = Some(cost().allocate(CapacityResources::default()).unwrap());
+    let records = std::slice::from_ref(&record);
+    let io = Record::default();
+    io.set("vm-1", 0, GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let envelope = res(16_000, 8 * GIB);
+    let ceilings = |learner: &Learner| {
+        learner
+            .learned(Class::Shards, &[cost()], records)
+            .unwrap()
+            .unwrap()
+            .ceilings
+    };
+    assert_eq!(
+        ceilings(&learner),
+        vec![hex_api::LearnedCeiling {
+            profile: cost().id,
+            envelope,
+            overhead: hex_api::LearnedOverhead::default(),
+        }]
+    );
+    let start = Instant::now();
+    let budget = res(24_000, 64 * GIB);
+    learner.window(&io, records, budget, start).unwrap();
+    io.set("vm-1", 300_000, 8 * GIB + (300 << 20));
+    learner
+        .window(&io, records, budget, start + WINDOW)
+        .unwrap();
+    let lifetime = learner.vms.get(&Scope::Native([1; 16])).unwrap().lifetime;
+    assert_eq!(
+        learner.node.charge(&lifetime).unwrap().mem_bytes,
+        8 * GIB + (300 << 20)
+    );
+    assert_eq!(
+        ceilings(&learner),
+        vec![hex_api::LearnedCeiling {
+            profile: cost().id,
+            envelope,
+            overhead: hex_api::LearnedOverhead {
+                cpu_milli: Some(0),
+                mem_bytes: Some(300 << 20),
+                disk_bytes: None,
+            },
+        }]
+    );
+}
+
 /// Joint plan step 14 (AC-T7.4.1), C8: a class's capacity answer carries the holding of each VM its learner learns, a
 /// Shards image VM's as a managed VM's. Do run a window of a managed VM and an image VM, then answer for the class from
 /// the node's records. Expect both VMs' holdings on the answer.

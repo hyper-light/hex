@@ -1013,6 +1013,35 @@ impl LearnedEnd {
     }
 }
 
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a profile's VMM overhead past its envelope as its node's learner has seen
+/// it, each dimension the most its VMs' windows showed past the envelope, or none yet: its cold start, typed, never a
+/// zero. A window in which a VM ran into its CPU cap is no CPU sample (Karn's point, decision 9).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedOverhead {
+    pub cpu_milli: Option<u64>,
+    pub mem_bytes: Option<u64>,
+    pub disk_bytes: Option<u64>,
+}
+
+impl LearnedOverhead {
+    /// Whether no window has shown any of it yet: its profile's cold start.
+    pub fn cold(&self) -> bool {
+        self.cpu_milli.is_none() && self.mem_bytes.is_none() && self.disk_bytes.is_none()
+    }
+}
+
+/// Joint plan step 14 (C1): one profile's ceiling on a class's capacity answer: what a VM of it is admitted at, its
+/// receipt's guest envelope ([`Allocation::guest`]), and the VMM overhead its node has learned past it. A VM's ceiling
+/// is the envelope and the overhead, the envelope alone in a dimension still cold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedCeiling {
+    pub profile: [u8; 32],
+    pub envelope: CapacityResources,
+    pub overhead: LearnedOverhead,
+}
+
 /// Joint plan step 14 (C2, C8): what a node learned of one class's microVMs, carried on its capacity answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1042,9 +1071,28 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_ends"
     )]
     pub ended: Vec<LearnedEnd>,
+    /// Each offered profile's ceiling (C1), at most one per profile and envelope. Added after the ends, so absent
+    /// means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_ceilings"
+    )]
+    pub ceilings: Vec<LearnedCeiling>,
 }
 
 impl Learned {
+    /// At most [`MAX_LEARNED_PRIORS`]: one for each profile it offers.
+    pub fn deserialize_ceilings<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedCeiling>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_PRIORS,
+            "learned ceilings exceed a class's profiles",
+        )
+    }
+
     /// At most [`MAX_LEARNED_PRIORS`].
     pub fn deserialize_priors<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -1079,8 +1127,25 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends; at most [`MAX_LEARNED_PRIORS`]
+    /// ceilings, no profile and envelope twice.
     pub fn check(&self) -> Result<(), Refusal> {
+        if self.ceilings.len() > MAX_LEARNED_PRIORS {
+            return Err(Refusal::Exhausted {
+                what: "learned ceilings",
+                bound: MAX_LEARNED_PRIORS,
+            });
+        }
+        for (at, ceiling) in self.ceilings.iter().enumerate() {
+            if self.ceilings.iter().take(at).any(|earlier| {
+                earlier.profile == ceiling.profile && earlier.envelope == ceiling.envelope
+            }) {
+                return Err(Refusal::Invalid {
+                    what: "learned ceilings",
+                    why: "a profile and envelope repeat".to_owned(),
+                });
+            }
+        }
         if self.ended.len() > MAX_LEARNED_HOLDINGS {
             return Err(Refusal::Exhausted {
                 what: "learned ends",
@@ -1152,6 +1217,7 @@ impl Learned {
             used: self.used,
             holdings,
             ended,
+            ceilings: copy_capacity_values(&self.ceilings, "learned ceilings")?,
         })
     }
 }

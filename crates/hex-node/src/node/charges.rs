@@ -147,6 +147,9 @@ struct Vm {
     last: (u64, Instant),
     /// What its cgroup holds as the learner last wrote it, or as its create wrote it.
     written: Vec<Write>,
+    /// The CPU cap its cgroup holds it at, in milli-CPU (`cpu.max`), as last written: a window that reaches it is no
+    /// sample of its VMM's own CPU (C1).
+    cap: Option<u64>,
 }
 
 /// The node's learner (module docs).
@@ -180,7 +183,8 @@ fn vcpus(allocation: Allocation) -> Result<u32, Refusal> {
     })
 }
 
-/// Writes what `bounds` holds that `written` doesn't, in the order the kernel needs, and keeps it as written.
+/// Writes what `bounds` holds that `written` doesn't, in the order the kernel needs, and keeps it as written; a file
+/// written before that `bounds` sets no more goes back to the kernel's default.
 fn rewrite(
     io: &impl Cgroups,
     cgroup: &BoxCgroup,
@@ -188,6 +192,17 @@ fn rewrite(
     written: &mut Vec<Write>,
 ) -> Result<(), Refusal> {
     let writes = hex_core::cgroup::writes(bounds, &[])?;
+    // A file written before that `bounds` sets no more goes back to the kernel's default first, before any bound is
+    // raised past it: a VM's `memory.max` its create wrote is lifted, with the `memory.swap.max` it came with (C5).
+    let defaults = hex_core::cgroup::writes_all(bounds, &[])?;
+    for before in written.iter() {
+        if writes.iter().any(|write| write.file == before.file) {
+            continue;
+        }
+        if let Some(default) = defaults.iter().find(|default| default.file == before.file) {
+            io.write(cgroup, default)?;
+        }
+    }
     for write in &writes {
         if !written.contains(write) {
             io.write(cgroup, write)?;
@@ -423,6 +438,7 @@ impl Learner {
                             span: now.saturating_duration_since(at),
                             mem_bytes: usage.memory_bytes,
                             disk_bytes: None,
+                            cap_milli: vm.cap,
                         },
                     )
                     .map_err(refused)?;
@@ -471,6 +487,7 @@ impl Learner {
                     cgroup,
                     last: (usage.cpu_usec, now),
                     written: hex_core::cgroup::writes(&created, &[])?,
+                    cap: created.cpu_max_milli.map(u64::from),
                 },
             );
             self.last.met(class, scope, intent)?;
@@ -541,6 +558,7 @@ impl Learner {
         for (lifetime, bounds) in &placed.vms {
             if let Some(vm) = self.vms.get_mut(&lifetime.scope) {
                 rewrite(io, &vm.cgroup, bounds, &mut vm.written)?;
+                vm.cap = bounds.cpu_max_milli.map(u64::from);
             }
         }
         rewrite(io, &self.fleet.0, &placed.fleet, &mut self.fleet.1)?;
