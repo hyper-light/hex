@@ -901,6 +901,35 @@ impl Learner {
         }
         learned(&self.node, class, costs, vms, self.last.ended(class)?).map(Some)
     }
+
+    /// Gives `capacity`, `class`'s capacity answer, what this learner carries (C2, C8), fitted to one message: the
+    /// priors of the profiles it offers (its own and its routes'), and the holdings of its VMs among `records`.
+    pub(crate) fn answer<'a>(
+        &self,
+        class: Class,
+        capacity: &mut hex_api::Capacity,
+        records: impl IntoIterator<Item = &'a BoxRecord>,
+    ) -> Result<(), Refusal> {
+        let mut costs = Vec::new();
+        costs
+            .try_reserve_exact(capacity.routes.len().saturating_add(1))
+            .map_err(|_| Refusal::Exhausted {
+                what: "a capacity answer's cost profiles",
+                bound: capacity.routes.len(),
+            })?;
+        costs.extend(capacity.cost);
+        costs.extend(capacity.routes.iter().filter_map(|route| route.cost));
+        let running: Vec<BoxRecord> = records
+            .into_iter()
+            .filter(|record| running(record))
+            .cloned()
+            .collect();
+        capacity.learned = self.learned(class, &costs, &running)?;
+        hex_core::wire::fit_learned(capacity).map_err(|e| Refusal::Invalid {
+            what: "a capacity answer",
+            why: e.to_string(),
+        })
+    }
 }
 
 /// What a capacity answer for `class` carries of `node` (C2, C5, C8), shared by every OS's learner: the priors of

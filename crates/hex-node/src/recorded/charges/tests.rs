@@ -820,6 +820,53 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     ));
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C8: a class's capacity answer carries the holding of each VM its learner learns, a
+/// Shards image VM's as a managed VM's. Do run a window of a managed VM and an image VM, then answer for the class from
+/// the node's records. Expect both VMs' holdings on the answer.
+#[test]
+fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
+    let io = Record::default();
+    io.set("vm-1", 0, GIB);
+    io.host.borrow_mut().insert(
+        "img-1".to_owned(),
+        HostUse {
+            cpu_ns: 0,
+            footprint_bytes: GIB,
+            resident_bytes: GIB,
+            guest_ns: vec![0; 16],
+        },
+    );
+    let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    learner
+        .window(&io, &records, res(24_000, 64 * GIB), Instant::now())
+        .unwrap();
+    let mut capacity = hex_api::Capacity {
+        id: "shards".into(),
+        total: res(32_000, 64 * GIB),
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+    };
+    learner
+        .answer(Class::Shards, &mut capacity, &records)
+        .unwrap();
+    let mut held: Vec<String> = capacity
+        .learned
+        .unwrap()
+        .holdings
+        .iter()
+        .map(|holding| holding.id.as_str().to_owned())
+        .collect();
+    held.sort();
+    assert_eq!(held, ["img-1", "vm-1"]);
+}
+
 /// Joint plan step 14 (C4; AC-T7.4.1): a window books off the fleet's budget every box it doesn't learn. Do sort a
 /// managed VM, a Shards image VM, a process box capped at 2 CPUs and 1 GiB and an ended image VM, for a learner that
 /// learns managed VMs alone, then for one that learns both. Expect, alone, the managed VM learned, the image VM booked
