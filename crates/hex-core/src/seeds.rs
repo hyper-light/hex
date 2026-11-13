@@ -10,10 +10,12 @@
 //!   pool ([`Seeds::growing`]) starts with fewer slots, the host's parallelism, and adds one for each create that
 //!   finds none free, up to the bound (Ada's rule, 2026-11-06).
 //! - **A create** is handed an idle seed that is up, never one starting, busy or gone. With none idle it waits in
-//!   line ([`Admit::Wait`]), and each seed that frees goes to the create that has waited longest. While
-//!   [`Limits::waiting`] creates wait, the next is refused at once ([`Refused::Busy`]); a create handed no seed
-//!   within the line's learned wait is refused ([`Refused::Waited`]). A waiting create claims once more when the
-//!   shell wakes it or its wait ends ([`Seeds::claim`]), and counts against the line until it does.
+//!   line ([`Admit::Wait`]), and each seed that frees goes to the create that has waited longest, however long that
+//!   is. While [`Limits::waiting`] creates wait, the next is refused at once ([`Refused::Busy`]). Past the line's
+//!   learned wait a create waits on, following the seeds freed, and is refused ([`Refused::Waited`]) only once a whole
+//!   window of that wait passes with none freed, or when no seed can come. A waiting create claims once more when the
+//!   shell wakes it or the time its claim gave it comes ([`Seeds::claim`]), and counts against the line until it
+//!   does.
 //! - **Death and hangs**: a seed the shell reports dead, or one that has served a create for its learned hang bound
 //!   (taken for hung by [`Seeds::hung`], for the shell to kill), leaves its slot, and the create it served is refused
 //!   ([`Refused::Died`], [`Refused::Hung`]). The pool asks for the slot to be started again and counts the restart.
@@ -21,11 +23,14 @@
 //!   seed's.
 //! - **Learned waits** (decision 9; Ada's rules of 2026-11-06 and 2026-11-13, no picked constant and no record): the
 //!   line's wait and the hang bound are each the slowest answer this pool has seen on `now`'s clock
-//!   ([`crate::patience`]), and only rise. Before the pool's first answer, and after a run-out, each follows its party
-//!   (`None`): a busy seed is waited on while it lives, its death the pool's [`Seeds::died`]. A create handed a seed
-//!   after waiting is a sample of the line's wait, a seed done with its create one of the hang bound's. A create
-//!   refused at its wait's end, and a seed that died or was taken for hung, is no sample (Karn's point), and the next
-//!   wait follows its party.
+//!   ([`crate::patience`]), and only rise. The line's wait, W*, is a bound only while creates are handed seeds within
+//!   it: a create past it is a run-out, told to the census and no sample (Karn's point), and waits on, following its
+//!   party, the busy seeds, by the seeds freed ([`Follow`]). Before the line's first answer, and from a run-out to the
+//!   next, a create follows them from its start. The hang bound's party is the seed serving the create: before its
+//!   first answer, and after a seed taken for hung, a busy seed is waited on while it lives, its death the pool's
+//!   [`Seeds::died`]. A create handed a seed after waiting, however long, is a sample of the line's wait, a seed done
+//!   with its create one of the hang bound's; a create refused in line, and a seed that died or was taken for hung, is
+//!   none.
 //! - **Restarts are bounded**: a start that fails, or a seed that dies before it serves a create, stops the starting
 //!   until the next create, so a node whose seeds can't start tries each slot once a create, never in a loop
 //!   (CLAUDE.md §2).
@@ -38,7 +43,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use crate::patience::Patience;
+use crate::patience::{Follow, Party, Patience};
 
 /// The line's wait's name, as the waits census records it.
 pub const WAIT: &str = "seeds.wait";
@@ -94,8 +99,9 @@ pub enum Admit {
     /// [`died`](Seeds::died).
     Seed(SeedId),
     /// No seed is idle: the create waits in line and claims with its ticket ([`Seeds::claim`]) when the shell wakes
-    /// it (a seed handed to it names it: [`Seeds::started`], [`Seeds::done`]) or at `until`, when its wait ends;
-    /// `None` while the line's wait is uncalibrated, when it waits for the shell's wake alone.
+    /// it (a seed handed to it names it: [`Seeds::started`], [`Seeds::done`]) or at `until`: the end of its wait
+    /// within the line's W*, or where it would be taken for stalled following the seeds freed. `None` while it follows
+    /// them with no window yet (before the line's first answer), when it waits for the shell's wake alone.
     Wait {
         ticket: Ticket,
         until: Option<Duration>,
@@ -109,7 +115,8 @@ pub enum Claim {
     Seed(SeedId),
     /// It waits on, until `until` (`None`: until the shell wakes it).
     Wait { until: Option<Duration> },
-    /// It waited past its bound, or the seed handed to it died or hung before it claimed it. The ticket is spent.
+    /// No seed freed over a whole window of its wait, none can come, or the seed handed to it died or hung before it
+    /// claimed it. The ticket is spent.
     Refused(Refused),
 }
 
@@ -119,8 +126,11 @@ pub enum Refused {
     /// No seed is idle and the line is full.
     #[error("no seed is free and {waiting} creates already wait for one")]
     Busy { waiting: usize },
-    /// No seed was handed to it within the wait bound.
-    #[error("no seed came free within {wait:?}")]
+    /// No seed came for it in the `wait` it waited: none freed over a whole window of its wait, or none can come (no
+    /// seed is up or starting).
+    #[error(
+        "no seed came for it in {wait:?}: none freed over a whole window of its wait, or none can come"
+    )]
     Waited { wait: Duration },
     /// The seed serving it died before it was done.
     #[error("seed {seed} died before it was done with the create")]
@@ -166,7 +176,7 @@ pub struct Counts {
     pub done: u64,
     /// Creates refused at once: no seed idle and the line full.
     pub refused_busy: u64,
-    /// Creates handed no seed within the wait bound.
+    /// Creates refused in line: no seed freed over a whole window of their wait, or none could come.
     pub refused_waited: u64,
     /// Creates whose seed died before it was done.
     pub refused_died: u64,
@@ -223,15 +233,41 @@ struct Slot {
     up_before: bool,
 }
 
+/// A create waiting in line for a seed: when it came, and how its wait goes on.
+#[derive(Debug, Clone, Copy)]
+enum Waiting {
+    /// Within the line's W* as it was when the create came: until `until`.
+    Within { since: Duration, until: Duration },
+    /// Following the seeds freed, by the seeds freed ([`Seeds::freed`]): past its W*, its run-out told, or from its
+    /// start where the line had none.
+    Following { since: Duration, follow: Follow },
+}
+
+impl Waiting {
+    fn since(self) -> Duration {
+        match self {
+            Self::Within { since, .. } | Self::Following { since, .. } => since,
+        }
+    }
+
+    /// When its shell claims again: the end of its W*, or where it would be taken for stalled; `None` with no window
+    /// yet, when its shell's wake alone does.
+    fn wakes(self) -> Option<Duration> {
+        match self {
+            Self::Within { until, .. } => Some(until),
+            Self::Following { follow, .. } => follow.stalls_after(),
+        }
+    }
+}
+
 /// The node's seeds: what each slot holds, the creates waiting, and what the pool has done. The shell keeps it behind
 /// its lock; no call waits.
 #[derive(Debug)]
 pub struct Seeds {
     limits: Limits,
     slots: Vec<Slot>,
-    /// Creates waiting for a seed, by ticket so in the order they came, each with when it came and the end of its
-    /// wait (`None` while the line's wait is uncalibrated).
-    line: BTreeMap<Ticket, (Duration, Option<Duration>)>,
+    /// Creates waiting for a seed, by ticket so in the order they came.
+    line: BTreeMap<Ticket, Waiting>,
     /// Creates out of line, handed a seed or refused, whose claim is yet to come.
     answered: BTreeMap<Ticket, Result<SeedId, Refused>>,
     /// False from a failed start, or a seed that died before it served a create, to the next create: the bound on
@@ -244,6 +280,9 @@ pub struct Seeds {
     handed: Vec<u64>,
     /// The line's wait, learned from the waits that ended in a seed.
     wait: Patience,
+    /// Seeds freed, counted: one each time a seed comes up or is done with its create. A count that rises while the
+    /// busy seeds serve, the progress a create following them goes by (decision 9).
+    freed: u64,
     /// The hang bound, learned from the creates seeds were done with.
     hang: Patience,
 }
@@ -286,6 +325,7 @@ impl Seeds {
             counts: Counts::default(),
             handed: vec![0; slots],
             wait: Patience::measuring(WAIT),
+            freed: 0,
             hang: Patience::measuring(HANG),
         }
     }
@@ -358,9 +398,9 @@ impl Seeds {
         if self.idle() > 0 || self.busy() > 0 || self.starting() > 0 || self.line.is_empty() {
             return Ok(false);
         }
-        while let Some((ticket, (since, _))) = self.line.pop_first() {
+        while let Some((ticket, waiting)) = self.line.pop_first() {
             // No seed was slow: none came, and none will. The line's wait learns nothing from it.
-            let refused = self.refused_waiting(since, now);
+            let refused = self.refused_waiting(waiting.since(), now);
             self.answered.insert(ticket, Err(refused));
         }
         Ok(true)
@@ -391,10 +431,22 @@ impl Seeds {
             (true, Some(next)) => {
                 let ticket = Ticket(self.next_ticket);
                 self.next_ticket = next;
-                let until = self.wait.deadline().map(|wait| now.saturating_add(wait));
-                self.line.insert(ticket, (now, until));
+                let waiting = match self.wait.deadline() {
+                    Some(wait) => Waiting::Within {
+                        since: now,
+                        until: now.saturating_add(wait),
+                    },
+                    None => Waiting::Following {
+                        since: now,
+                        follow: self.wait.follow().starting_at(self.freed, now),
+                    },
+                };
+                self.line.insert(ticket, waiting);
                 bump(&mut self.counts.waited);
-                Ok(Admit::Wait { ticket, until })
+                Ok(Admit::Wait {
+                    ticket,
+                    until: waiting.wakes(),
+                })
             }
             _ => {
                 bump(&mut self.counts.refused_busy);
@@ -405,8 +457,11 @@ impl Seeds {
         }
     }
 
-    /// A waiting create claims at `now`, when the shell wakes it or its wait ends: the seed handed to it, now serving
-    /// it; word to wait on; or its refusal, which spends the ticket. [`Stale::Ticket`] for a ticket no create holds.
+    /// A waiting create claims at `now`, when the shell wakes it or the time its last answer gave it comes: the seed
+    /// handed to it, now serving it; word to wait on; or its refusal, which spends the ticket. Within its W* it waits
+    /// on. Past it, its run-out is told to the census, once and with no sample, and it follows the seeds freed: it
+    /// waits on while one frees within each window of that W*, and is refused once a whole window passes with none.
+    /// [`Stale::Ticket`] for a ticket no create holds.
     pub fn claim(&mut self, ticket: Ticket, now: Duration) -> Result<Claim, Stale> {
         if let Some(answer) = self.answered.remove(&ticket) {
             return Ok(match answer {
@@ -426,12 +481,37 @@ impl Seeds {
                 Err(refused) => Claim::Refused(refused),
             });
         }
-        let (since, until) = *self.line.get(&ticket).ok_or(Stale::Ticket(ticket))?;
-        let Some(ended) = until.filter(|&u| u <= now) else {
-            return Ok(Claim::Wait { until });
+        let waiting = *self.line.get(&ticket).ok_or(Stale::Ticket(ticket))?;
+        let (since, mut follow) = match waiting {
+            Waiting::Within { until, .. } if now < until => {
+                return Ok(Claim::Wait { until: Some(until) });
+            }
+            Waiting::Within { since, until } => {
+                // Past W*: no sample (Karn's point), but the census is told, once, and the create waits on.
+                let window = until.saturating_sub(since);
+                self.wait.ran_out(window);
+                (since, Follow::past(window).starting_at(self.freed, now))
+            }
+            Waiting::Following { since, follow } => (since, follow),
         };
+        if follow
+            .look(
+                Party::Alive {
+                    progress: self.freed,
+                },
+                now,
+            )
+            .is_ok()
+        {
+            let waiting = Waiting::Following { since, follow };
+            self.line.insert(ticket, waiting);
+            return Ok(Claim::Wait {
+                until: waiting.wakes(),
+            });
+        }
+        // Stalled: no seed freed over a whole window. No sample, and nothing more for the census.
         self.line.remove(&ticket);
-        Ok(Claim::Refused(self.waited_out(since, ended)))
+        Ok(Claim::Refused(self.refused_waiting(since, now)))
     }
 
     /// Seed `seed` is done with the create it served (it started the container, or refused it and is whole): it
@@ -592,21 +672,23 @@ impl Seeds {
             .ok_or(Stale::Gone(seed))
     }
 
-    /// Seed `seed`, up and free, goes to the create that has waited longest, refusing on the way those whose wait
-    /// ended before `now`, and returns its ticket; with none left waiting, it idles. A seed freed the instant a wait
-    /// ends serves it: its wait is no longer than the slowest answer seen, which comes within the bound (decision 9;
-    /// a create served the instant it joined the line teaches the line a bound of none, which an answer as quick
-    /// still meets). Each turn takes a create out of line, so this ends within the line's length.
+    /// Seed `seed`, up and free, counted among the seeds freed, goes to the create that has waited longest, however
+    /// long that is, and returns its ticket; with none waiting, it idles. Its wait is a sample, the line's W* rising
+    /// to it (decision 9): a create past its W* that has yet to claim has its run-out told first. A seed freed the
+    /// instant a wait ends serves it within W*: its wait is no longer than the slowest answer seen (a create served
+    /// the instant it joined the line teaches the line a bound of none, which an answer as quick still meets).
     fn free(&mut self, seed: SeedId, now: Duration, served: bool) -> Option<Ticket> {
-        while let Some((ticket, (since, until))) = self.line.pop_first() {
-            if until.is_none_or(|u| now <= u) {
-                self.wait.answered(now.saturating_sub(since));
-                self.hand(seed, now, Some(ticket));
-                self.answered.insert(ticket, Ok(seed));
-                return Some(ticket);
+        bump(&mut self.freed);
+        if let Some((ticket, waiting)) = self.line.pop_first() {
+            if let Waiting::Within { since, until } = waiting
+                && until < now
+            {
+                self.wait.ran_out(until.saturating_sub(since));
             }
-            let refused = self.waited_out(since, until.unwrap_or(now));
-            self.answered.insert(ticket, Err(refused));
+            self.wait.answered(now.saturating_sub(waiting.since()));
+            self.hand(seed, now, Some(ticket));
+            self.answered.insert(ticket, Ok(seed));
+            return Some(ticket);
         }
         if let Some(slot) = self.slots.get_mut(seed.slot) {
             slot.holds = Holds::Idle { n: seed.n, served };
@@ -630,15 +712,6 @@ impl Seeds {
         }
         let busy = u64::try_from(self.busy()).unwrap_or(u64::MAX);
         self.counts.most_busy = self.counts.most_busy.max(busy);
-    }
-
-    /// A create in line since `since` whose wait ran out at its bound, `until`, with no seed: refused, and no sample
-    /// (Karn's point), but the line's next wait follows its seeds until one answers, and the census is told (busy seeds, not hung or
-    /// failed ones: a seed past its hang bound is [`Seeds::hung`]'s and one that failed to start
-    /// [`Seeds::start_failed`]'s, neither of which says anything of an answer's time).
-    fn waited_out(&mut self, since: Duration, until: Duration) -> Refused {
-        self.wait.ran_out(until.saturating_sub(since));
-        self.refused_waiting(since, until)
     }
 
     /// A create in line since `since`, refused at `until` with no seed: counted, its wait the time it waited.
