@@ -573,6 +573,45 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     }
 }
 
+/// AC-T7.4.1, joint plan step 39 (original; docs/design/node-under-shards-init.md §4, §5): a node's guest under
+/// shards-init is named by `HEX_GUEST_IMAGE`, an Agentfile image of Hex's own init. Its host reaches that guest's node
+/// only through a lane of Shards' agent-control endpoint to the node's sockets, which Shards doesn't give yet. Do:
+/// read the guest from variables naming the image, alone and then beside the direct boot's kernel and initramfs.
+/// Expect: alone, refused `Awaits(NestedChannel)` before anything boots, not as a direct boot missing its kernel;
+/// beside them, refused naming both forms, as a node boots one form of its guest.
+#[test]
+fn original_a_guest_under_shards_init_awaits_its_channel_before_anything_boots() {
+    use std::collections::BTreeMap;
+    let read = |given: &[(&str, &str)]| {
+        let vars: BTreeMap<String, OsString> = given
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+            .collect();
+        GuestConfig::from_vars(move |name| vars.get(name).cloned())
+    };
+    // Inputs to the parse, not a guest's size or an image: any values do.
+    let image = [
+        ("SHARDS_BIN", "/opt/shards"),
+        ("HEX_GUEST_IMAGE", "hex-node@sha256:0123"),
+        ("HEX_GUEST_CPUS", "2"),
+        ("HEX_GUEST_MEMORY_MIB", "1024"),
+    ];
+    assert_eq!(
+        read(&image),
+        Err(Refusal::Awaits {
+            needs: hex_api::Upstream::NestedChannel
+        })
+    );
+    let mut both = image.to_vec();
+    both.extend([("HEX_GUEST_KERNEL", "/k"), ("HEX_GUEST_INITRD", "/i")]);
+    let Err(Refusal::Invalid { why, .. }) = read(&both) else {
+        panic!("expected a refusal naming both forms");
+    };
+    for name in ["HEX_GUEST_IMAGE", "HEX_GUEST_KERNEL", "HEX_GUEST_INITRD"] {
+        assert!(why.contains(name), "{name}: {why}");
+    }
+}
+
 /// One value of a spec broken, as HEX-RT-13 breaks them.
 type Break = fn(&mut OciSpec);
 
