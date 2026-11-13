@@ -279,6 +279,9 @@ struct ModelImages {
     /// Whom each guest port its image gives coming in reaches (D231's `Bound::to`), as the test sets them: a port
     /// not named here reaches no member, so the run's own command, or is refused on a run of the members alone.
     receivers: Mutex<Vec<(u16, Vec<Receiving>)>>,
+    /// What each member the image declares reaches by name (D236), as the test sets it: the run host holds every
+    /// one to its reach of the destinations kept where a boot holds members apart (`Narrowing::members`).
+    named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
 }
 
 impl ModelImages {
@@ -292,7 +295,47 @@ impl ModelImages {
             run: Arc::new(ModelRun::default()),
             members: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
+            named: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The image's member `name` of `kind` reaches each of `reaches` by name.
+    fn names(&self, kind: shards_api::image::MemberKind, name: &str, reaches: &[&str]) {
+        self.named.lock().unwrap().push((
+            kind,
+            name.to_owned(),
+            reaches.iter().map(|r| (*r).to_owned()).collect(),
+        ));
+    }
+
+    /// The run host's hold of each member apart, as Hex's recorded Shards change makes it (`api_run`'s
+    /// `held_apart`): every member the image declares reaches exactly what the boot lets it of the destinations
+    /// kept, else the boot is refused as a widening before anything starts.
+    fn held_apart(&self, egress: &shards_api::image::Narrowing) -> Result<(), ImageRefusal> {
+        let Some(asked) = &egress.members else {
+            return Ok(());
+        };
+        let Keep::Only(kept) = &egress.destinations else {
+            return Err(ImageRefusal::Widening(
+                "the model keeps no destination wholesale".to_owned(),
+            ));
+        };
+        for (kind, name, reaches) in self.named.lock().unwrap().iter() {
+            let mut reach: Vec<&String> = reaches.iter().filter(|r| kept.contains(r)).collect();
+            reach.sort();
+            let mut lets: Vec<&String> = asked
+                .iter()
+                .find(|m| m.kind == *kind && m.name == *name)
+                .map(|m| m.destinations.iter().collect())
+                .unwrap_or_default();
+            lets.sort();
+            if reach != lets {
+                return Err(ImageRefusal::Widening(format!(
+                    "{kind:?} {name}: of the destinations kept it would reach {reach:?}, where the request lets it reach {lets:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The image gives guest port `port` coming in to each `(declared index, member's own port)` of `to`.
@@ -339,6 +382,7 @@ impl Images for ModelImages {
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
+        self.held_apart(&spec.egress)?;
         // Each port bound as asked, one the OS picks from IANA's dynamic range (RFC 6335 §6) where asked, naming whom
         // it reaches; one no member is given refused on a run of the members alone, as Shards' run host refuses it.
         let receivers = self.receivers.lock().unwrap().clone();
@@ -874,13 +918,12 @@ fn kill_before_start_ends_the_vm_without_a_boot() {
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 15 (AC-T7.7.2; N4): do create image VMs granted, in turn, a provider by name, kiln by its IPv4
-/// address and kiln on the VM's host, each by TCP, then a provider by name by UDP and kiln by an IPv6 address. Expect:
-/// the destinations refused `Awaits(MemberDestinations)` (Shards keeps one image-wide, and Hex can't name an image's
-/// members before its boot), the rest naming what Shards' destinations (D236) lack, with no record made and no
-/// boot asked. Do: create one of the members alone granted a publish on the host's loopback, and start it, its image
-/// giving that port to the harness it runs. Expect: its boot asks for exactly that publish and none of its image's
-/// grants past the VM, and its inspect shows its every grant, as its record holds them, and the publish as the host
+/// Joint plan step 15 (AC-T7.7.2; N4): do create image VMs granted a provider by name by UDP and kiln by an IPv6
+/// address. Expect each refused naming what Shards' destinations (D236) lack, with no record made and no boot asked.
+/// Do: create one of the members alone granted a provider by name and kiln on its host, each by TCP, and a publish
+/// on the host's loopback, and start it, its image's harness reaching that provider and the host by name and given
+/// the publish's port. Expect: its boot keeps exactly those two destinations, holds the harness to them, and asks for
+/// exactly that publish; and its inspect shows its every grant, as its record holds them, and the publish as the host
 /// bound it, its receiver the harness Shards names, at its own port.
 #[test]
 fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
@@ -908,29 +951,6 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
             Grant::Egress {
                 member: codex.clone(),
                 to: Destination::Name("api.openai.com".to_owned()),
-                ports: tcp(443),
-            },
-            Upstream::MemberDestinations,
-        ),
-        (
-            Grant::Egress {
-                member: codex.clone(),
-                to: Destination::Address("10.0.0.5".parse().unwrap()),
-                ports: tcp(7070),
-            },
-            Upstream::MemberDestinations,
-        ),
-        (
-            Grant::Host {
-                member: codex.clone(),
-                ports: tcp(7070),
-            },
-            Upstream::MemberDestinations,
-        ),
-        (
-            Grant::Egress {
-                member: codex.clone(),
-                to: Destination::Name("api.openai.com".to_owned()),
                 ports: Ports {
                     proto: Proto::Udp,
                     ..tcp(443)
@@ -954,6 +974,15 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
     }
     assert!(images.asked.lock().unwrap().is_empty());
+    let provider = Grant::Egress {
+        member: codex.clone(),
+        to: Destination::Name("api.openai.com".to_owned()),
+        ports: tcp(443),
+    };
+    let kiln = Grant::Host {
+        member: codex.clone(),
+        ports: tcp(7070),
+    };
     let publish = Grant::Publish {
         member: codex,
         proto: Proto::Tcp,
@@ -961,8 +990,9 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         host: "127.0.0.1".parse().unwrap(),
         host_port: None,
     };
+    let grants = vec![provider, kiln, publish];
     let id = runtime
-        .create(granted("image-published", vec![publish.clone()]))
+        .create(granted("image-published", grants.clone()))
         .unwrap()
         .id;
     *images.members.lock().unwrap() = vec![MemberInfo {
@@ -972,6 +1002,11 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         runs: true,
     }];
     images.receive(1455, &[(0, 1455)]);
+    images.names(
+        shards_api::image::MemberKind::Harness,
+        "codex",
+        &["api.openai.com:443", "host.docker.internal:7070"],
+    );
     runtime.start(&id).unwrap();
     let asked = images.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
@@ -987,18 +1022,86 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     );
     assert_eq!(boot.egress.egress, Keep::Only(Vec::new()));
     assert_eq!(boot.egress.mcp, Keep::Only(Vec::new()));
-    assert_eq!(boot.egress.destinations, Keep::Only(Vec::new()));
+    assert_eq!(
+        boot.egress.destinations,
+        Keep::Only(vec![
+            "api.openai.com:443".to_owned(),
+            "host.docker.internal:7070".to_owned()
+        ])
+    );
+    assert_eq!(
+        boot.egress.members,
+        Some(vec![shards_api::image::wire::MemberReach {
+            kind: shards_api::image::MemberKind::Harness,
+            name: "codex".to_owned(),
+            destinations: vec![
+                "api.openai.com:443".to_owned(),
+                "host.docker.internal:7070".to_owned()
+            ],
+        }])
+    );
     assert!(!boot.egress.dns);
     let shown = runtime.inspect(&id).unwrap();
-    assert_eq!(shown.grants, vec![publish]);
+    assert_eq!(shown.state, BoxState::Running);
+    assert_eq!(shown.grants, grants);
     assert_eq!(
         shown.published,
         vec![hex_api::Published {
-            grant: 0,
+            grant: 2,
             at: "127.0.0.1:49152".parse().unwrap(),
             receiver: hex_api::Receiver::Named { port: 1455 },
         }]
     );
+}
+
+/// Joint plan step 15 (AC-T7.7.2; N4): do start an image VM granted a provider for its harness alone, where its image
+/// also lets an agent reach that provider by name. Expect: the start refused Invalid, past the image's grants, the
+/// run host having refused the boot before anything started, and the box ended; so no member reaches a destination
+/// granted only to another.
+#[test]
+fn a_destination_another_member_would_reach_too_refuses_the_boot() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
+    let images = ModelImages::new();
+    images.names(
+        shards_api::image::MemberKind::Harness,
+        "codex",
+        &["api.openai.com:443"],
+    );
+    images.names(
+        shards_api::image::MemberKind::Agent,
+        "helper",
+        &["api.openai.com:443"],
+    );
+    let (runtime, owner) = model_runtime(&images, waits());
+    let mut spec = spec("image-shared-name", None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Egress {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            },
+            to: Destination::Name("api.openai.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }];
+    }
+    let id = runtime.create(spec).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Invalid { what: "shards image", why })
+            if why.contains("past the image's grants") && why.contains("helper")
+    ));
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Unknown))
+    );
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
 }
 
 /// Joint plan step 15 (N6): do create, then start, an image VM whose run has a command of its own, granted a publish

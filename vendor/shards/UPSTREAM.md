@@ -19,9 +19,14 @@ whose channel (version 4) adds each published port's receiving members (D231's
 
 ## Recorded changes
 
-None. Every change Hex carried at 33df95b0 (patches 0001-0031) is upstream: Shards'
+Every change Hex carried at 33df95b0 (patches 0001-0031) is upstream: Shards'
 hex-upstream-v1 maps each to its commit (docs/research/measurements/hex-upstream-v1/
 README.md at this revision), but 0004, 0005, 0007 and 0029, Hex's own campaign over
 the borrowed connector, which Shards classed as Hex-only. That campaign is now a test
 of Hex's on its dependency, its body unchanged: crates/hex-client/tests/
-shards_borrowed_contract.rs.
+shards_borrowed_contract.rs. Since this revision Hex carries these, each offered to
+Shards' ROOT for upstreaming:
+
+| Files | Change | Why | Patch |
+| --- | --- | --- | --- |
+| `crates/api/src/image/wire.rs` | `Narrowing::members`: each member's reach of the destinations kept (`MemberReach`), appended to the request as channel version 5, a request naming none written as version 4. Its run host's half, which holds every member of the image to it before the VM starts, is vendor/shards-gpu's change 0002, built into Hex's `shards`. | Joint plan step 15: a harness reaches exactly the providers and the host its grants name. D236 keeps a destination image-wide and every member let out on its port reaches every name kept there, so Hex names each member's reach and the run host refuses a run that would let any member reach other than that (Hex's lead, 2026-11-12; docs/design/network-grants.md N4). | `0002-image-each-member-s-reach-of-the-destinations-kept-which-its.patch` |
