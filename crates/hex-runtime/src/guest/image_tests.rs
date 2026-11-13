@@ -4,7 +4,7 @@
 //! (docs/design/shards-image-class.md; joint plan step 12, AC-T7.4.1).
 
 use std::sync::Condvar;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::devices::{Books, Records, Transaction};
@@ -224,9 +224,18 @@ struct ModelRun {
     /// session does (`session::release`).
     lessor: Mutex<Option<shards_api::image::RunLessor>>,
     given: Mutex<Vec<String>>,
+    /// Whether its stop is held, as the test says: a stop asked waits until the test lets it go.
+    stop_held: Mutex<bool>,
+    stop_let_go: Condvar,
 }
 
 impl ModelRun {
+    /// Holds each stop from now on (`true`), or lets every one held go (`false`).
+    fn hold_stops(&self, held: bool) {
+        *self.stop_held.lock().unwrap() = held;
+        self.stop_let_go.notify_all();
+    }
+
     /// The run host's ask of credential `reference` (D242), as it relays its network process's first use of it: put to
     /// the run's lessor under no key, the lease it gives kept for the run's end.
     fn ask(
@@ -396,6 +405,12 @@ impl ImageGuest for ModelGuest {
     }
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
+        drop(
+            self.run
+                .stop_let_go
+                .wait_while(self.run.stop_held.lock().unwrap(), |held| *held)
+                .unwrap(),
+        );
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         self.run.release();
         Ok(())
@@ -444,6 +459,9 @@ struct ModelImages {
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
     /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
     started_from: Mutex<StartedFrom>,
+    /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
+    /// boot whose thread failed would.
+    abandon: AtomicBool,
 }
 
 impl ModelImages {
@@ -459,6 +477,7 @@ impl ModelImages {
             receivers: Mutex::new(Vec::new()),
             named: Mutex::new(Vec::new()),
             started_from: Mutex::new(StartedFrom::Booted),
+            abandon: AtomicBool::new(false),
         })
     }
 
@@ -572,6 +591,9 @@ impl Images for ModelImages {
             )));
         }
         drop(gate);
+        if self.abandon.swap(false, Ordering::SeqCst) {
+            panic!("the model's boot thread ends with no answer, as the test asked");
+        }
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
@@ -1682,8 +1704,8 @@ fn a_refused_boot_ends_the_box_and_says_why() {
 
 /// Decision 9, joint plan step 12: do start a VM whose boot passes its learned patience before its run host
 /// has started (Shards' own patience counting from that start, after the caller's). Expect: start refused
-/// Lifecycle Pending, the box Created while its boot runs, delete Pending; then, the boot answering, the box
-/// Running with no second boot.
+/// Lifecycle Pending, the box Created while its boot runs; then, the boot answering, the box Running with no second
+/// boot. (A delete meanwhile follows the boot: kiln's choice (b), below.)
 #[test]
 fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
     let images = ModelImages::new();
@@ -1704,16 +1726,217 @@ fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
         })
     ));
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Created);
+    images.gate(Gate::Open);
+    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// Each test's delete under way, its intent written or its answer given: these tests' facts alone.
+static DELETE_FOLLOWS_UNSTARTED: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_unstarted");
+static DELETE_FOLLOWS_STARTING: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_starting");
+static DELETE_FOLLOWS_STOP: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_stop");
+static DELETE_FOLLOWS_ABANDONED: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_abandoned");
+
+/// Kiln's choice (b) (ROOT, 2026-11-13; joint plan step 12, decision 9): a delete of an image VM still booting answers
+/// once the box is gone, never Pending, so its caller needs no retry. D231's boot gives no stop for a boot under way
+/// (`Images::boot` blocks until its run starts or its host ends), so the delete follows the boot to its answer. Do:
+/// start a VM whose boot is held before its run host's start past a 1 ns W*, its start Pending; delete it with its
+/// host use as the boot is held; then let the boot end refused, its run never started. Expect: the delete's intent
+/// written as it follows the boot, never Pending; its answer no use (no run, nothing to charge); the box gone with its
+/// run host's diagnostics; one boot asked; and a delete retried then NoSuchBox.
+#[test]
+fn w12_a_delete_over_a_boot_follows_it_and_answers_no_use_where_its_run_never_started() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_unstarted",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-unstarted", None))
+        .unwrap()
+        .id;
     assert!(matches!(
-        runtime.delete(&id),
+        runtime.start(&id),
         Err(Refusal::Lifecycle {
             cause: LifecycleCause::Pending,
             ..
         })
     ));
-    images.gate(Gate::Open);
-    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    let diagnostics = record(&owner, &id).unwrap().diagnostics.unwrap();
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_UNSTARTED,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        *images.refuse.lock().unwrap() = Some(ImageRefusal::Boot(
+            "its run host ended before its run started".to_owned(),
+        ));
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    assert_eq!(answered, Ok(None));
+    assert!(record(&owner, &id).is_none());
+    assert!(!diagnostics.exists(), "{diagnostics:?} outlived its box");
     assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert!(matches!(
+        Runtime::delete_with_host_use(&runtime.images, &id),
+        Err(Refusal::NoSuchBox(_))
+    ));
+}
+
+/// Kiln's choice (b), as above: do start a VM whose boot is held past a 1 ns W*, its start Pending; delete it with its
+/// host use as the boot is held; then let its run start. Expect: the delete never Pending; the run stopped once it
+/// started, the delete's answer its final use of its host, read as it ran, before its stop; the box gone; one boot, one
+/// stop.
+#[test]
+fn w12_a_delete_over_a_boot_whose_run_then_starts_stops_it_and_answers_its_final_use() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_starting",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-starting", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_STARTING,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    let last = answered.unwrap().unwrap();
+    assert_eq!(
+        (last.cpu_ns, last.footprint_bytes, last.guest_ns.len()),
+        (9_000_000, 1 << 20, usize::try_from(vcpus).unwrap())
+    );
+    assert!(record(&owner, &id).is_none());
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Kiln's choice (b): a delete never answers Pending, so one whose stop runs past the stop's W* follows the stop to its
+/// end. Do: start a VM, its stop's W* one a 1 ns stop taught; delete it with its stop held. Expect: the delete waiting
+/// on its stop, never Pending; once the stop is let go, its answer, the box gone, one stop.
+#[test]
+fn w12_a_delete_follows_its_stop_past_the_stops_w_star() {
+    let images = ModelImages::new();
+    let slow = ImageWaits {
+        stop: Patience::seeded(
+            "test.hex_runtime.image_stop_deleted",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(slow));
+    let id = runtime
+        .create(spec("image-deleted-stopping", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    images.run.hold_stops(true);
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        hex_testkit::waits::until(&DELETE_FOLLOWS_STOP, "the delete's stop asked", || {
+            deleting.is_finished() || images.run.stops.load(Ordering::SeqCst) == 1
+        })
+        .unwrap();
+        images.run.hold_stops(false);
+        deleting.join().unwrap()
+    });
+    assert_eq!(answered, Ok(()));
+    assert!(record(&owner, &id).is_none());
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Kiln's choice (b) (ROOT, 2026-11-13: the delete's wait follows the boot until its party's end, and says so there):
+/// a delete following a boot is refused only where the boot's thread ends with no answer, so neither its run's start
+/// nor its run host's end is known. Do: start a VM whose boot is held past a 1 ns W*, its start Pending; delete it as
+/// the boot is held; then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the
+/// node's broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
+#[test]
+fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_abandoned",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-abandoned", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_ABANDONED,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        images.abandon.store(true, Ordering::SeqCst);
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    assert!(
+        matches!(&answered, Err(Refusal::Broken(why)) if why.contains("the boot it ends is still under way")),
+        "{answered:?}"
+    );
+    assert_eq!(record(&owner, &id).unwrap().phase, Phase::Deleting);
 }
 
 /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it), joint
