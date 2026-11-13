@@ -282,7 +282,7 @@ fn driver_reserves_the_exact_backing_before_unlocked_native_callback() {
         if wrong_generation {
             assert!(matches!(result, Err(Error::Runtime(Refusal::Backing {
                 key: actual, cause: LifecycleCause::Uncertain,
-                why: None,
+                why: Some(_),
             })) if actual == key));
             assert!(driver.state.lock().unwrap().admission.is_some());
         } else {
