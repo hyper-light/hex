@@ -147,6 +147,68 @@ it, and never printed.
 - An image harness that needs one host filled in with two credentials (then C2's one-credential-per-host rule waits on
   Shards' injector deciding by placeholder rather than by host).
 
+## C7. Leases over the node's wire: from the connection that created the box
+
+Joint plan step 33 (kiln #74), Hex's lead's ruling of 2026-11-13. A node reached over its wire (`hex node serve`, on its
+local socket or over QUIC) leases a box's credentials from the orchestrator that created the box, over the connection it
+created the box on. Hex's seam is still `hex_api::lease` (C3): the node's `Lessors` is the socket's
+(`hex_node::serve::WireLessors`, which `hex node serve` builds its guest runtime's image class with), and the client's
+are its caller's (`hex_client::Core::with_lessors`).
+
+- **Saying so.** A connection that leases sends `Call::Lessors` (kind `0x0019`), answered `Done`. A node whose runtime
+  leases through no connection's lessors refuses it `Unconfigured`. `with_lessors(lessors)` sends it and gives the
+  connection its caller's lessors.
+- **Default deny.** A create granting a credential on a connection that sent no `Lessors` is refused `Unconfigured`
+  before the runtime is called, so before any record: a node never leases for a box whose creator gave no lessors.
+  Each box's route is its latest create's, kept in memory before that create is answered. It goes to the creating
+  connection where the box grants a credential and the connection leases, else nowhere. A delete over the wire, or the
+  connection's end, takes it away. Nothing else of a box is kept for its leases, and nothing of a lease is written.
+- **The asks.** As a run of the box boots, the node asks the connection for the run's lessor: `Answer::LessorAsk(id)`
+  (`0x8011`), its header's id the run's from then on. The client makes the lessor through its `Lessors::lessor(id)` and
+  answers `Request::Lessor` (`0x001a`). Each `Lessor::lease` is `Answer::LeaseAsk { run, reference, key }` (`0x8012`),
+  answered `Request::Leased { run, answer }` (`0x001b`): the lease, or a refusal of Shards' kinds in its words. Each
+  give-back is `Answer::LeaseGiven(lease)` (`0x8013`), and the run's end, as the node lets its lessor go,
+  `Answer::LessorEnded` (`0x8014`), neither answered. Each kind is appended after every one before it, and the wire's
+  `IDENTITY` moves.
+- **The value.** It crosses in its `Leased` message alone (`wire::carries_secret`), read straight into a `lease::Value`,
+  wiped as it drops and never printed. The node wipes its read buffer once that message is read. The client wipes its
+  unframed copy as it frames it, and each word it owes the node once it has gone or its connection has ended. The
+  wire's writer wipes what it held of a message that fails, and reserves the message's room before the value goes in,
+  so no copy is left as it grows. The buffers of a transport below the wire (the kernel's, and TLS's in hyper-quic) are
+  not Hex's to wipe.
+- **Waits.** Every ask waits for its answer while its connection stands (decision 9): the answer, or the connection's
+  end, ends it, however long that takes, and no ask is bounded by a time of its own. From `with_lessors` on, the client
+  reads its connection with a thread of its own (the event form's loop), so the node's asks are read whatever its calls
+  are doing, and it answers each on a thread of its own, since a broker may take its time.
+- **Bounds.** A connection's lease asks waiting are held to its in-flight limit (`Limits::in_flight`), refused past it,
+  typed. The routes are held to `MAX_BOXES` boxes, refused past it at create. The words the client may owe the node grow
+  by the same in-flight limit, one answer for each ask that may wait.
+- **Ends.** When the connection ends, from either side, the node fills every ask waiting on it with the end: a lessor's
+  ask is refused `Unconfigured`, and a lease's `Unavailable`, naming the end. It drops the connection's routes and gives
+  later give-backs to no one. The client gives back every lease it handed over and wasn't given back, and lets every
+  run's lessor go. A run that holds a value past then holds it until its lease's life or its run ends, as a run of an
+  in-process orchestrator that crashed would.
+- **Not built: composing a node's in-process lessors with its connections'.** A node built in process with its
+  orchestrator's lessors (kiln's runner) leases its in-process boxes through them, and its runtime doesn't lease through
+  the socket's `WireLessors`. So a wire create granting a credential there is default-denied, since its connection
+  can't send `Lessors` to that node.
+
+Alternatives considered:
+1. **A lease connection of its own** (a second connection per orchestrator, or a QUIC port of its own). Rejected: the
+   box's creator is its connection. A second one would have to prove it speaks for the first, another identity to
+   check, and the two could end apart.
+2. **A lessor given in the create's call.** Rejected, as C3's alternative 4: the wire can't carry a trait object, and a
+   run asks for its lessor as it boots, so the ask goes back to whoever holds the lessors.
+3. **The node asking its orchestrator's broker itself** (kiln's server, over kiln's API). Rejected: kiln reaches Hex
+   through `hex-api` alone (CLAUDE.md §9), and the broker leases to the connection that proves the run's orchestrator,
+   which the node can't.
+
+What would falsify it:
+- A lease handed over a connection that neither its run nor the connection's end gave back, so its broker holds it after
+  both (`s33_a_connection_that_drops_gives_back_its_leases`).
+- A leased value in a node's files, records or answers (`s33_a_leased_value_is_kept_nowhere_on_the_node`).
+- A run of a box created on a connection that gave no lessors given any lease.
+
 ## Tests
 
 - `crates/hex-api/src/credentials/tests.rs`: a harness's credential toward its own egress hosts taken; each malformed
@@ -172,6 +234,21 @@ it, and never printed.
   an ungranted one bare, the ask answered from the simulated broker and held there, an unheld credential `Denied`, and
   the lease given back as the VM stops) and
   `w33_a_credential_no_one_here_can_lease_or_beyond_its_egress_is_refused_before_any_record`.
+- C7, `crates/hex-core/src/wire/tests.rs`: `Lessors`, a lessor's and a lease's answers of every kind, and the node's four
+  asks and words read back as written, through every truncation and bit flip of the hostile tests;
+  `s33_a_leases_value_crosses_marked_and_never_printed` (only a leased message says it carries a value, and neither
+  side prints it); `s33_a_lease_answer_of_no_defined_kind_is_refused`.
+- C7, `crates/hex-node/src/serve/leases/tests.rs`: a routed box's run leases over its creator's line and gives back there,
+  each told under the run's id; a box no leasing connection created leases from no one, as does one whose route a later
+  create or its delete took away; a lease asked of a line that ends is refused by its end.
+- C7, `crates/hex-node/src/serve/unix_tests.rs` (Linux's socket and macOS's framed stream, a live server reached through
+  `hex-client`, red at `8508ed34`):
+  `s33_a_remote_harnesss_lease_is_answered_through_the_wire_and_given_back_at_its_end`,
+  `s33_a_connection_that_drops_gives_back_its_leases`,
+  `s33_a_credential_granting_create_without_lessors_is_refused_before_any_record`, and
+  `s33_a_leased_value_is_kept_nowhere_on_the_node` (every file under a recorded node's state and run folders, and every
+  answer about the box, read after a run to its stop and delete: the value nowhere; the census holds wait names and
+  times alone, by its type).
 
 ## Owed
 
@@ -183,8 +260,9 @@ it, and never printed.
   `secrets::lessor`, built on kiln main beside its broker's per-lease give-back), given to the node it runs its
   harness microVMs on; and its sandbox's credential grants (`kiln_seams::sandbox::Launch::credentials`, SANDBOX-13)
   carried to `ShardsImage::credentials` for the launch's member.
-- **A remote orchestrator**: a node reached over its wire (`hex node`) is given no lessors and refuses credential grants
-  `Unconfigured`; a lessor carried over the node's wire is a later change.
+- **Leases over the wire (C7), beyond the light tests**: the same over QUIC and natively on Windows, and a remote
+  harness VM's real lease on KVM, HVF and WHP (ROOT's); kiln's runner calling `with_lessors` on the connections it
+  creates harness VMs over; and composing a node's in-process lessors with its connections' (not built).
 - **Shards**: the injector (step 33's step 3) that asks the first lease; until it lands, nothing in a run asks.
 - **ROOT's real runs**: a harness VM on KVM, HVF and WHP whose granted provider gets its credential filled in at egress
   and an ungranted host gets none, its lease given back at its end, no value in the VM (step 33's step 10).
