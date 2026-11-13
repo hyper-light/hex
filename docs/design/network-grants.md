@@ -3,7 +3,7 @@
 Each harness VM Hex launches reaches what its grants name and nothing else. It publishes nothing they don't
 name, and Hex's record of the VM shows every grant. This record states the grant model, who enforces it, what
 Hex can program through Shards today, and what Shards' step 9 gave it (D236, on Shards' main at `edbada623`; Hex
-vendors Shards at `2365d784`, which holds it). Decided by goal 15 with Hex's lead, 2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
+vendors Shards at `e82b9403`, which holds it). Decided by goal 15 with Hex's lead, 2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
 VMs" (joint plan kiln `01a1cd8e862e7169a074db3d5fa33f3d`, "Decided by the person" 2).
 
 Requirements served: `AC-T7.7.2` (flows allowed that no grant names: 0), `T-T7.7.1` (no DNS answer and no packet
@@ -14,7 +14,7 @@ Hex's record of the VM".
 ## N1. The grant: who, to whom, which ports, which way
 
 Default deny is Shards' rule as well as this step's: "a network flow that no directive explicitly grants does
-not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `2365d784`).
+not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `e82b9403`).
 A box's grants are a list of `hex_api::Grant` (`crates/hex-api/src/grants.rs`). The variant is the way:
 
 | Grant | Who | To whom | Ports | Way |
@@ -153,7 +153,7 @@ What would falsify N3:
 Either would make Hex refuse that grant typed until the interface is exact. Neither would make Hex build its own
 enforcer.
 
-## N4. What Hex programs today, through Shards `2365d784`'s image boot (D231)
+## N4. What Hex programs today, through Shards `e82b9403`'s image boot (D231)
 
 Hex boots harness images through `shards_api::image::ImageShards::boot`. The run host, `shards api-run`, gives
 the VM a NIC and its network process only when something passes the microVM: a published port, or narrowed
@@ -177,7 +177,7 @@ image lets out on its port, and the network process holds the whole microVM to t
 on a port, so an image whose members that union can't hold apart is refused at build and at run
 (`agentfile::held`). And each port the run host binds names whom it reaches (`Bound::to`, N6).
 
-| A box's grants | What 2365d784 can express | Hex today |
+| A box's grants | What e82b9403 can express | Hex today |
 |---|---|---|
 | none | `network none`: no NIC, no network process | programmed: `Narrowing { Only([]), Only([]), Only([]), false }`, no publish |
 | `Publish` of a member's port at a host address, on a run of the members alone (`command: None`) | `Publish { guest_port, proto, host: Some(addr), host_port }`, only for a port the image gives a member for ingress (D122); `Bound::to` names its receivers | programmed; its receiver is recorded as declared, unread from `to`, see N6 |
@@ -234,7 +234,7 @@ fault, `Invalid` naming the grant's member. A socket bound past or short of the 
 no port stays published for a member or a socket no grant names.
 
 **The receiver gap, as Hex's check still has it.** shards-api before D236 didn't say who receives a published
-port: `MemberInfo` carries no ports, and `Bound` named no member. At `2365d784` it does: `Bound::to` (D231,
+port: `MemberInfo` carries no ports, and `Bound` named no member. At `e82b9403` it does: `Bound::to` (D231,
 channel version 3) names each member the image gives the port coming in, by declared index and port, several
 where several claim it, and none where the port reaches the run's own command. Hex's check doesn't read it yet
 (owed to step 15), so what follows is still what Hex does. Shards' run host binds a publish for a port the image's
@@ -300,7 +300,7 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 
 ## Sources
 
-- Shards at `2365d784`:
+- Shards at `e82b9403`:
   - `docs/design/architecture.md`: D31, D59 parts seven, ten and eleven, D109, D122, D124, D192, D231, D236;
   - `crates/api/src/image.rs` and `image/wire.rs` (`Narrowing`, `Keep`, `Bound`, `Receiving`);
   - `crates/shards/src/api_run.rs`;

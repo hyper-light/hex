@@ -758,7 +758,7 @@ fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
 /// macOS and Windows the refusal naming a run host started holding only its stdio, since D231 starts it
 /// through std's spawn, which hands it what the node holds inheritable: on macOS every descriptor another
 /// thread holds without close-on-exec, on Windows every inheritable handle. D231's Windows run host itself
-/// is no longer owed (Shards 2365d784).
+/// is no longer owed (Shards e82b9403).
 #[test]
 fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
     let host = host_images().map(|_| ());

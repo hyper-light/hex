@@ -74,7 +74,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
   and a waits census over QUIC to seed its measuring waits.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
-  Shards `2365d784` (D231 with D234-D236 and member stdin). Linux boots image VMs; macOS and Windows refuse a
+  Shards `e82b9403` (D231 with D234-D236 and member stdin). Linux boots image VMs; macOS and Windows refuse a
   create `Awaits(RunHostStdioOnly)`, as D231 starts its run host through std's spawn, which hands it what the
   node holds inheritable. A node there passes an image VM's calls to its guest runtime. Closes with: the run
   host holding only its stdio and guest time per vCPU in the run's stats (Shards'), the class's wait records

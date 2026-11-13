@@ -10,7 +10,7 @@
 //! (`IMAGE-STEP`, each call's answer as the client saw it) and each case's verdict and time (`IMAGE-CASE`).
 //!
 //! HEX-IMG-4 awaits Shards' guest time per vCPU (`Upstream::GuestCpuTimePerVcpu`), which D231's image boot says
-//! nothing of in its stats yet (Shards 2365d784): it must fail naming that, and every other case pass. Once Shards gives it, HEX-IMG-4 passes and this test
+//! nothing of in its stats yet (Shards e82b9403): it must fail naming that, and every other case pass. Once Shards gives it, HEX-IMG-4 passes and this test
 //! says so, failing until its expectation goes.
 //!
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`, inside a

@@ -1,17 +1,17 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `2365d784`**; its real-VM runs, the records its waits seed
+runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `e82b9403`**; its real-VM runs, the records its waits seed
 from and its macOS and Windows hosts are owed (§8).
 
 Sources, read at the revisions named:
-- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `2365d784`) and its research
+- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e82b9403`) and its research
   record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`): the decision this class binds to. At
-  `2365d784` beside it: D234 (a nested runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project
+  `e82b9403` beside it: D234 (a nested runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project
   plugged into a running member, `ImageGuest::plug` and `ImageRefusal::Plug`), D236 (destinations by name,
   `Narrowing::destinations`, `Bound::to`) and the joint plan's step 5 (a member's stdin, `MemberSpec::stdin` and
   `ImageGuest::take_input`, channel version 6).
-- `shards_api::image` at `2365d784`: `crates/api/src/image.rs` (`Images`, `ImageGuest`, `ImageSpec`,
+- `shards_api::image` at `e82b9403`: `crates/api/src/image.rs` (`Images`, `ImageGuest`, `ImageSpec`,
   `ImageRefusal`), `image/session.rs` (the run host's process, `stop`, `wait_for`, `stats`) and `image/wire.rs`
   (`Stats`, `StatsScope`, `RunEnd`, `Narrowing`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
   grants).
@@ -53,7 +53,7 @@ Sources, read at the revisions named:
     inheritable handles: its own stdout and stderr, which it inherited, and each box member's stdio while
     `sys::create` starts it. Hex's own red: e14ff1b2 on jupiter (r124, 2026-11-09), a keeper std started held the
     node's stdout and stderr, so they didn't end with the node (fixed for the keeper by 6f4b8f7a).
-    D231's Windows run host itself is built at `2365d784` (D231: "on Windows the run host starts its VM as the
+    D231's Windows run host itself is built at `e82b9403` (D231: "on Windows the run host starts its VM as the
     daemon does ... the VM process confined in an AppContainer"), so `WindowsRunHost` is refused no longer.
   Every program Hex starts on macOS and Windows holds only its stdio (`crates/hex-runtime/src/macos/command.rs`,
   `windows/sys.rs` `create`; CVE-2024-21626's class), and Hex's other Shards form launches its VM through the

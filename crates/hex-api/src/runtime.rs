@@ -1754,7 +1754,7 @@ pub enum GuestTime {
 impl GuestTime {
     /// One entry for every 8-bit vCPU index: a Shards VM numbers its vCPUs by 8-bit APIC id on x86_64
     /// (its MADT, at most 255; crates/vmm/src/arch/x86_64/acpi.rs) and has fewer on arm64 (123, its
-    /// GIC redistributor region; crates/vmm/src/arch/aarch64/mod.rs), at Shards 482c5d78 and 2365d784. Bounds a
+    /// GIC redistributor region; crates/vmm/src/arch/aarch64/mod.rs), at Shards 482c5d78 and e82b9403. Bounds a
     /// report read off the wire, never a VM's admission, which is Shards' to refuse.
     pub const MAX_VCPUS: usize = 1 << u8::BITS;
 }
@@ -1836,7 +1836,7 @@ pub enum Refusal {
 pub enum Upstream {
     /// A Shards microVM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP, through what
     /// Hex boots it with: Shards reads it for its daemon's runs (6396a78b, `GUEST_TIME`), but D231's image
-    /// boot says none in its stats (Shards 2365d784).
+    /// boot says none in its stats (Shards e82b9403).
     GuestCpuTimePerVcpu,
     /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
     /// endpoint.
@@ -1848,7 +1848,7 @@ pub enum Upstream {
     /// its boxes' namespaces and DRM render nodes, granted by name.
     NestedRuntime,
     /// The Windows host of an image's run: `shards api-run` on Windows, which D231 owed and gives at
-    /// Shards 2365d784, its VM process confined in an AppContainer. No call is refused for it there; Windows
+    /// Shards e82b9403, its VM process confined in an AppContainer. No call is refused for it there; Windows
     /// awaits [`Upstream::RunHostStdioOnly`] instead.
     WindowsRunHost,
     /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
