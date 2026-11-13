@@ -257,6 +257,32 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     assert_eq!(learned.holdings.len(), 2);
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C2: a learner carries a cold class at the workload's admission, the census's VMM
+/// overhead its ceiling's alone. Do ask a learner that has learned no VM for the capacity answer of a Shards profile
+/// whose receipt is its 16-CPU, 8 GiB envelope and a census overhead of half a CPU and 256 MiB. Expect the profile's
+/// prior carried at the envelope its VMs are admitted at, its ceiling the whole receipt.
+#[test]
+fn w14_a_cold_class_is_carried_at_its_admission() {
+    let census = RuntimeCost {
+        overhead: res(500, 256 << 20),
+        ..cost()
+    };
+    let receipt = census.allocate(CapacityResources::default()).unwrap();
+    let learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[census], &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.priors,
+        vec![hex_api::LearnedPrior {
+            profile: census.id,
+            ceiling: receipt.resources,
+            booking: res(16_000, 8 * GIB),
+        }]
+    );
+}
+
 /// Joint plan step 14 (AC-T7.4.1): which records are running managed VMs. Do judge a running Shards VM's record, then
 /// the same deleting, ended, with no controller, with no lifetime, and a process box's. Expect only the first running.
 #[test]
