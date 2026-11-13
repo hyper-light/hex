@@ -320,9 +320,13 @@ there too.
 ends the owner's socket. The owner's end that `link::Link` dials (`bridge::Bridged`) reads the bytes that came, then
 that error (`ConnectionReset` for a reset, `ConnectionAborted` for the link's close), as a vsock socket reads a reset.
 hex-client's own reads of a bridged stream (the control connection, a carried stream's copy, staging) see the cut so.
-To follow in hex-client: the copy hands its outcome on instead of swallowing it, and the exec's `Proc` ends
-`Refusal::Broken` naming the stream that was cut, for a carried stream and for an asked one, whose socket the caller reads
-itself. `bridge::socket`, which hex-node's staging server reads, keeps a clean end.
+The program's end tells it too (`hex_client::Cut`): a carried stream's copy records the read that cut it before the
+caller's pipe ends, and an asked stream's connection hands the bridge's record to the client (`guest::Duplex::cut`),
+since the caller reads its socket itself. Once its end has come, the exec's `Proc` is refused `Refusal::Broken`, naming the
+output stream that was cut short, so a caller that reads its streams to their end and then takes its program's end learns
+what it read wasn't all. The same holds over vsock and the node's socket, whose carried streams' copies swallowed the reset
+their reads reported. A stdin connection's reset is its program letting its stdin go, its end, so it tells nothing.
+`bridge::socket`, which hex-node's staging server reads, keeps a clean end.
 
 **Alternatives.**
 - Route (a): loopback TCP pairs on Unix too (Windows' adapter), closed with `SO_LINGER` at zero on a cut, so the reset
@@ -336,4 +340,5 @@ itself. `bridge::socket`, which hex-node's staging server reads, keeps a clean e
 - A marker in the stream: the stream carries a program's bytes as they are, so no byte is free to mean "cut".
 
 **Falsified by** a stream cut short whose owner reads a clean end (`tests::ac_t7_4_1_a_stream_cut_short_reads_as_cut`),
-or, once hex-client's part lands, a program whose stream was cut short ending without `Refusal::Broken`.
+or a program whose output stream was cut short ending without `Refusal::Broken` (hex-client
+`guest::tests::cut_short`, a carried stream and an asked one).

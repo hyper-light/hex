@@ -2160,3 +2160,214 @@ mod output_end {
         agent.join().unwrap();
     }
 }
+
+/// A stream cut short (joint plan step 4, route (b): ROOT's decision of 2026-11-12, docs/design/hex-quic.md Q11).
+mod cut_short {
+    use std::net::Shutdown;
+
+    use super::*;
+
+    /// A loopback stdio connection that tells its cut as hex-quic's bridge tells a QUIC connection's
+    /// (`Duplex::cut`): the test records it.
+    struct Cuttable {
+        conn: TcpStream,
+        cut: crate::Cut,
+    }
+
+    impl Read for Cuttable {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.conn.read(buf)
+        }
+    }
+
+    impl Write for Cuttable {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.conn.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.conn.flush()
+        }
+    }
+
+    impl Duplex for Cuttable {
+        fn try_clone(&self) -> std::io::Result<DuplexOwner> {
+            own_duplex(Cuttable {
+                conn: self.conn.try_clone()?,
+                cut: self.cut.clone(),
+            })
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+        }
+
+        fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+            self.conn.shutdown(how)
+        }
+
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.conn.set_write_timeout(timeout)
+        }
+
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.conn.set_read_timeout(timeout)
+        }
+
+        fn handle(&self) -> super::super::Handle<'_> {
+            Duplex::handle(&self.conn)
+        }
+
+        fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+            self.conn.set_nonblocking(on)
+        }
+
+        fn cut(&self) -> Option<crate::Cut> {
+            Some(self.cut.clone())
+        }
+    }
+
+    /// The guest's ports as two loopback listeners, each stdio connection's cut kept for the test to record.
+    struct Cuttables {
+        control: SocketAddr,
+        stdio: SocketAddr,
+        cuts: Arc<std::sync::Mutex<Vec<crate::Cut>>>,
+    }
+
+    impl Link for Cuttables {
+        fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
+            if port == stream::CONTROL_PORT {
+                return own_duplex(TcpStream::connect(self.control).unwrap());
+            }
+            let cut = crate::Cut::default();
+            self.cuts.lock().unwrap().push(cut.clone());
+            own_duplex(Cuttable {
+                conn: TcpStream::connect(self.stdio).unwrap(),
+                cut,
+            })
+        }
+
+        fn carries_half_close(&self) -> bool {
+            true
+        }
+    }
+
+    /// AC-T7.4.1 (route (b)): exec a program whose stderr the caller asks for, over a link whose stdio connections tell
+    /// their cut (as QUIC's bridge does, its own test `hex_quic::tests::ac_t7_4_1_a_stream_cut_short_reads_as_cut`);
+    /// the stand-in agent writes part of a line, the connection is cut (the test records a reset as the bridge would),
+    /// and the agent says the program exited 0. Expect the caller to read the part, and the program's end refused
+    /// Broken, naming stderr: a stream the caller reads itself is told cut by its program's end.
+    #[test]
+    fn an_asked_stream_cut_short_ends_its_program_broken() {
+        let (control, stdio) = (
+            TcpListener::bind("127.0.0.1:0").unwrap(),
+            TcpListener::bind("127.0.0.1:0").unwrap(),
+        );
+        let cuts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let link = own_link(Cuttables {
+            control: control.local_addr().unwrap(),
+            stdio: stdio.local_addr().unwrap(),
+            cuts: Arc::clone(&cuts),
+        })
+        .unwrap();
+        let (was_cut, cut_done) = std::sync::mpsc::channel::<()>();
+        let agent = std::thread::spawn(move || {
+            let (mut conn, _) = control.accept().unwrap();
+            hello(&mut conn);
+            let (h, _) = next_request(&mut conn);
+            let (mut err, _) = stdio.accept().unwrap();
+            let mut name = [0u8; stream::NAME_BYTES];
+            err.read_exact(&mut name).unwrap();
+            send_answer(&mut conn, h.id, &Answer::Started { pid: 12 });
+            err.write_all(b"par").unwrap();
+            cut_done.recv().unwrap();
+            send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
+            // Held open until the client has its end, as an agent's connection is.
+            let _ = next_request(&mut conn);
+            drop(err);
+        });
+        let client = Client::connect(link).unwrap();
+        let mut proc = client
+            .exec(
+                &BoxId::new("b").unwrap(),
+                Program::of(&["p"]),
+                Stdio {
+                    ask: hex_api::Ask {
+                        stdin: false,
+                        stdout: false,
+                        stderr: true,
+                    },
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let mut err = hex_api::OwnedStream::from(proc.streams().unwrap().stderr.unwrap());
+        let mut part = [0u8; 3];
+        err.read_exact(&mut part).unwrap();
+        assert_eq!(&part, b"par");
+        let cut = cuts.lock().unwrap().first().cloned().unwrap();
+        cut.record(&io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "the connection was reset",
+        ));
+        was_cut.send(()).unwrap();
+        let ended = proc.wait_for(Duration::MAX);
+        assert!(
+            matches!(&ended, Err(Refusal::Broken(why)) if why.contains("stderr")),
+            "{ended:?}"
+        );
+        drop((proc, err));
+        let _ = client.inspect(&BoxId::new("b").unwrap());
+        agent.join().unwrap();
+    }
+
+    /// AC-T7.4.1 (route (b)): exec a program whose stdout is the caller's own pipe, through a stand-in agent that writes
+    /// part of a line on it and, once the caller has read that part, resets the connection (an abortive close, RST),
+    /// then says the program exited 0. Expect the caller's pipe to read the part, then its end, and the program's end
+    /// to be refused Broken, naming stdout: a stream cut short is told, never read as complete.
+    #[test]
+    fn a_carried_stream_cut_short_ends_its_program_broken() {
+        let (control, stdio, link) = listeners();
+        let (read_part, part_read) = std::sync::mpsc::channel::<()>();
+        let agent = std::thread::spawn(move || {
+            let (mut conn, _) = control.accept().unwrap();
+            hello(&mut conn);
+            let (h, _) = next_request(&mut conn);
+            let (mut out, _) = stdio.accept().unwrap();
+            let mut name = [0u8; stream::NAME_BYTES];
+            out.read_exact(&mut name).unwrap();
+            send_answer(&mut conn, h.id, &Answer::Started { pid: 11 });
+            out.write_all(b"par").unwrap();
+            part_read.recv().unwrap();
+            rustix::net::sockopt::set_socket_linger(&out, Some(Duration::ZERO)).unwrap();
+            drop(out);
+            send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
+            // Held open until the client has its end, as an agent's connection is.
+            let _ = next_request(&mut conn);
+        });
+        let client = Client::connect(link).unwrap();
+        let (mut out_r, out_w) = std::io::pipe().unwrap();
+        let mut proc = client
+            .exec(
+                &BoxId::new("b").unwrap(),
+                Program::of(&["p"]),
+                Stdio {
+                    stdout: Some(out_w),
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let mut part = [0u8; 3];
+        out_r.read_exact(&mut part).unwrap();
+        assert_eq!(&part, b"par");
+        read_part.send(()).unwrap();
+        let mut rest = Vec::new();
+        out_r.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "{rest:?}");
+        let ended = proc.wait_for(Duration::MAX);
+        assert!(
+            matches!(&ended, Err(Refusal::Broken(why)) if why.contains("stdout")),
+            "{ended:?}"
+        );
+        drop(proc);
+        let _ = client.inspect(&BoxId::new("b").unwrap());
+        agent.join().unwrap();
+    }
+}

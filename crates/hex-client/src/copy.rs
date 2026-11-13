@@ -4,16 +4,59 @@
 //! socket, the node gives that connection's end to the caller's client with the exec's answer.
 
 use std::io::{self, PipeReader, Read, Write};
+use std::sync::{Arc, OnceLock};
 
 use hex_api::Refusal;
 
+/// What cut a stream short, once something has: the error its reading ended with before its end, as a reset or its
+/// link's end makes it (docs/design/hex-quic.md Q11). Shared by whoever reads the stream (a carried stream's copy, a
+/// bridge) and the program it is of, whose end then says so.
+#[derive(Clone, Debug, Default)]
+pub struct Cut(Arc<OnceLock<(io::ErrorKind, String)>>);
+
+impl Cut {
+    /// Records `e` as what cut the stream, the first such alone.
+    pub fn record(&self, e: &io::Error) {
+        let _ = self.0.set((e.kind(), e.to_string()));
+    }
+
+    /// What cut the stream, once something has.
+    pub fn error(&self) -> Option<io::Error> {
+        self.0
+            .get()
+            .map(|(kind, why)| io::Error::new(*kind, why.clone()))
+    }
+}
+
+/// A program's output streams whose cut its end tells, each by its name.
+pub type Cuts = Vec<(&'static str, Cut)>;
+
+/// A stream read for a copy, its read's error recorded as its cut.
+struct Watched<R> {
+    from: R,
+    cut: Cut,
+}
+
+impl<R: Read> Read for Watched<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let read = self.from.read(bytes);
+        if let Err(e) = &read
+            && e.kind() != io::ErrorKind::Interrupted
+        {
+            self.cut.record(e);
+        }
+        read
+    }
+}
+
 /// Copies `from` into `to` on a thread of its own until either ends, then hands `to` to `ended`: a program's
 /// output, from its stream's connection into the caller's pipe. Its end is the stream's: the caller sees stdout
-/// end, as with a pipe, or the program sees its write fail once the caller's pipe has no reader; there is no one
-/// else to tell.
+/// end, as with a pipe, or the program sees its write fail once the caller's pipe has no reader. A read that fails
+/// cut the stream short: `cut` records it before the caller's pipe ends, and the program's end says so.
 pub(crate) fn copy<R, W>(
-    mut from: R,
+    from: R,
     mut to: W,
+    cut: Cut,
     ended: impl FnOnce(W) + Send + 'static,
 ) -> Result<(), Refusal>
 where
@@ -23,6 +66,7 @@ where
     std::thread::Builder::new()
         .name("hex-client-stdio".to_owned())
         .spawn(move || {
+            let mut from = Watched { from, cut };
             let _ = io::copy(&mut from, &mut to);
             ended(to);
         })
@@ -141,7 +185,8 @@ pub(crate) fn copy_in(from: PipeReader, to: impl Feed) -> Result<(), Refusal> {
 /// port.
 #[cfg(not(unix))]
 pub(crate) fn copy_in(from: PipeReader, to: impl Feed) -> Result<(), Refusal> {
-    copy(from, to, |to| to.end_sending())
+    // The caller's own pipe is read here, no stream of a program: its cut is no one's.
+    copy(from, to, Cut::default(), |to| to.end_sending())
 }
 
 /// The stdin copier's loop: waits on the caller's pipe and the connection together, copying what the pipe gives,
