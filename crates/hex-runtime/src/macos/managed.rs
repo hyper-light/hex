@@ -1081,6 +1081,27 @@ mod tests {
         scope.running(OwnerRef::Pool(&pool)).unwrap();
     }
 
+    /// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a managed pool
+    /// scope's refusal says why, in its refusing site's own words. Do mark a prepared pool scope running before it is
+    /// held. Expect it refused Uncertain with its generation's key and its reason, that it isn't held as it starts.
+    #[test]
+    fn w14_b_a_pool_scope_refusal_says_why() {
+        let scope = scope();
+        let pool = [9; 32];
+        let refused = scope.running(OwnerRef::Pool(&pool)).unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                Refusal::Backing {
+                    key,
+                    cause: LifecycleCause::Uncertain,
+                    why: Some(why),
+                } if key.pool == pool && why == "its native scope isn't held as it starts running"
+            ),
+            "{refused:?}"
+        );
+    }
+
     /// AC-T7.4.1 (restart): a scope whose attached node died (its notification reader closed) is
     /// notified: expect no failure, none retained, and the channel let go for the next attach's.
     #[test]
