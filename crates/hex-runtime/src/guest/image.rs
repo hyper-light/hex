@@ -16,7 +16,8 @@
 //! D231 stops a run it drops.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -71,10 +72,11 @@ impl ImageWaits {
     }
 }
 
-/// Shards' image boot as the guest runtime holds it: the booter, its waits or why it has none, this
-/// process's runs, and the host's boot session, which proves a run of an earlier boot ended.
+/// Shards' image boot as the guest runtime holds it: the booter or why this node has none, its waits or
+/// why it has none, this process's runs, and the host's boot session, which proves a run of an earlier
+/// boot ended.
 pub(super) struct ImageBoot {
-    images: Arc<dyn Images>,
+    images: Result<Arc<dyn Images>, Refusal>,
     waits: Result<ImageWaits, Refusal>,
     /// One for each box with a boot, run or stop of this process; at most a box's every own, so bounded
     /// by the node's boxes ([`crate::MAX_BOXES`]).
@@ -305,6 +307,10 @@ fn held() -> Refusal {
 }
 
 impl ImageBoot {
+    fn images(&self) -> Result<&Arc<dyn Images>, Refusal> {
+        self.images.as_ref().map_err(Clone::clone)
+    }
+
     fn waits(&self) -> Result<&ImageWaits, Refusal> {
         self.waits.as_ref().map_err(Clone::clone)
     }
@@ -364,19 +370,58 @@ impl ImageBoot {
     }
 }
 
-/// Shards' image boot (D231): every host runs it, its run host started holding only its stdio
-/// (docs/design/shards-image-class.md §1; vendor/patches/shards 0001).
-pub fn host_images() -> Arc<dyn Images> {
-    Arc::new(shards_api::image::ImageShards::new())
+/// Shards' image boot (D231), or why this node serves no image VM: every host runs it, its run host started
+/// holding only its stdio (vendor/patches/shards 0001) and booting the guest the node's environment names, which
+/// it inherits: `SHARDS_KERNEL` and `SHARDS_INIT`, read here once, as the node starts ([`guest_pair`];
+/// docs/design/shards-image-class.md §1).
+pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
+    guest_pair(
+        std::env::var_os("SHARDS_KERNEL").as_deref(),
+        std::env::var_os("SHARDS_INIT").as_deref(),
+    )?;
+    Ok(Arc::new(shards_api::image::ImageShards::new()))
+}
+
+/// The guest a node's run hosts would boot, from its `SHARDS_KERNEL` and `SHARDS_INIT` (`kernel`, `init`) as D231's
+/// run host reads them (Shards 66113379, api_run.rs `as_run`): each none or empty, or a UTF-8 absolute path, and both
+/// or neither, as the daemon refuses one alone ("SHARDS_KERNEL and SHARDS_INIT go together"). A value the run host
+/// would drop without a word (relative, or not UTF-8) is refused too: its VMs would boot Shards' own guest instead,
+/// or be refused as the other alone. Refused `Platform` naming both variables (ROOT, 2026-11-12).
+fn guest_pair(kernel: Option<&OsStr>, init: Option<&OsStr>) -> Result<(), Refusal> {
+    let refused = |why: String| Refusal::Platform {
+        what: "Shards image VMs",
+        platform: std::env::consts::OS,
+        why: format!(
+            "{why}: Shards' run host boots the guest SHARDS_KERNEL and SHARDS_INIT name together, each an \
+             absolute path, or its own with neither set"
+        ),
+    };
+    let given = |name: &str, value: Option<&OsStr>| match value {
+        None => Ok(false),
+        Some(value) if value.is_empty() => Ok(false),
+        Some(value) if value.to_str().is_some() && Path::new(value).is_absolute() => Ok(true),
+        Some(value) => Err(refused(format!(
+            "{name} is {value:?}, which the run host drops, as it takes only a UTF-8 absolute path"
+        ))),
+    };
+    match (given("SHARDS_KERNEL", kernel)?, given("SHARDS_INIT", init)?) {
+        (true, false) => Err(refused(
+            "SHARDS_KERNEL is set and SHARDS_INIT is not".to_owned(),
+        )),
+        (false, true) => Err(refused(
+            "SHARDS_INIT is set and SHARDS_KERNEL is not".to_owned(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 impl GuestRuntime {
-    /// Shards' image boot (D231, [`host_images`]), and the waits its calls make or why there are none:
-    /// a create is refused with that refusal, so no box exists that a wait of its own couldn't bound
-    /// (docs/design/shards-image-class.md §6).
+    /// Shards' image boot (D231) or why this node has none ([`host_images`]), and the waits its calls
+    /// make or why there are none: a create is refused with either refusal, so no box exists that this
+    /// node couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6).
     pub fn with_images(
         mut self,
-        images: Arc<dyn Images>,
+        images: Result<Arc<dyn Images>, Refusal>,
         waits: Result<ImageWaits, Refusal>,
     ) -> Self {
         self.image = Some(ImageBoot {
@@ -571,7 +616,9 @@ impl GuestRuntime {
 
     pub(super) fn create_image(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
-        self.image()?.waits()?;
+        let image = self.image()?;
+        image.images()?;
+        image.waits()?;
         vm_size(&spec)?;
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
@@ -595,7 +642,7 @@ impl GuestRuntime {
     pub(super) fn start_image(&self, record: BoxRecord) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let image = self.image()?;
-        let images = Arc::clone(&image.images);
+        let images = Arc::clone(image.images()?);
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}

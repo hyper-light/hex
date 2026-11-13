@@ -400,7 +400,7 @@ fn model_runtime(
         })),
         super::super::tests::config(),
     )
-    .with_images(Arc::clone(images) as Arc<dyn Images>, waits);
+    .with_images(Ok(Arc::clone(images) as Arc<dyn Images>), waits);
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     (runtime, owner)
@@ -822,32 +822,6 @@ fn a_create_is_refused_before_any_record_on_a_node_without_an_image_boot() {
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
 }
 
-/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too): do create an image
-/// VM on this host's own image boot, as `hex node` configures it. Expect: created and recorded on every host, Linux,
-/// macOS and Windows, its run host started holding only its stdio (vendor/patches/shards 0001: posix_spawn with
-/// POSIX_SPAWN_CLOEXEC_DEFAULT, CreateProcessW with a handle list), so nothing awaits it.
-#[test]
-fn this_hosts_image_boot_is_shards_on_every_host() {
-    let owner = Arc::new(Owner::default());
-    let runtime = GuestRuntime::new(
-        Arc::new(shards_api::sim::SimGuests::new(|_| {
-            shards_api::End::PowerOff
-        })),
-        super::super::tests::config(),
-    )
-    .with_images(host_images(), waits());
-    let books: Arc<dyn Books> = owner.clone();
-    runtime.bind_books(Arc::downgrade(&books)).unwrap();
-    let id = BoxId::new("image-here").unwrap();
-    assert_eq!(
-        runtime
-            .create(spec("image-here", None))
-            .map(|info| info.state),
-        Ok(BoxState::Created)
-    );
-    assert!(record(&owner, &id).is_some());
-}
-
 /// The variable naming the case the guest pair's check runs, in a test process of its own whose environment holds
 /// that case's SHARDS_KERNEL and SHARDS_INIT.
 const GUEST_PAIR_CASE: &str = "HEX_IMAGE_GUEST_PAIR_CASE";
@@ -861,13 +835,16 @@ fn absolute(name: &str) -> String {
     }
 }
 
-/// ROOT (2026-11-12), joint plan step 12: D231's run host boots the guest its environment names, which it inherits
-/// from the node: SHARDS_KERNEL and SHARDS_INIT, each taken only as an absolute path, both or neither (Shards
-/// 66113379: api_run.rs `as_run`, one alone refused "SHARDS_KERNEL and SHARDS_INIT go together"). A node whose pair
-/// is broken would have every image VM's start refused. Do start a node's image boot (`host_images`, which `hex node`
-/// calls once as it starts) and create an image VM, each case in a test process of its own whose environment holds
-/// the case's pair. Expect: with neither, or both absolute, created; with one alone, or one the run host would drop
-/// (a relative path), refused before any record, naming both variables.
+/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too; ROOT, 2026-11-12:
+/// the guest's pair checked as the node starts): D231's run host boots the guest its environment names, which it
+/// inherits from the node: SHARDS_KERNEL and SHARDS_INIT, each taken only as an absolute path, both or neither
+/// (Shards 66113379: api_run.rs `as_run`, one alone refused "SHARDS_KERNEL and SHARDS_INIT go together"). A node
+/// whose pair is broken would have every image VM's start refused. Do start a node's image boot (`host_images`,
+/// which `hex node` calls once as it starts) and create an image VM, each case in a test process of its own whose
+/// environment holds the case's pair. Expect: with neither, or both absolute, created and recorded on every host,
+/// Linux, macOS and Windows, its run host started holding only its stdio (vendor/patches/shards 0001), so nothing
+/// awaits it; with one alone, or one the run host would drop (a relative path), refused before any record, naming
+/// both variables.
 #[test]
 fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
     let Some(case) = std::env::var_os(GUEST_PAIR_CASE) else {
@@ -930,6 +907,7 @@ fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
         .map(|info| info.state);
     if matches!(case.to_str(), Some("neither" | "both")) {
         assert_eq!(made, Ok(BoxState::Created));
+        assert!(record(&owner, &BoxId::new("image-pair").unwrap()).is_some());
         return;
     }
     match made {
@@ -944,6 +922,41 @@ fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
         other => panic!("{case:?}: {other:?}"),
     }
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+}
+
+/// Joint plan step 12: do read each SHARDS_KERNEL and SHARDS_INIT pair a run host might inherit, as D231's run host
+/// reads it. Expect: an empty value is none; both absolute, or neither, taken; one alone, or a value the run host
+/// would drop (relative, or on Unix not UTF-8), refused naming both variables.
+#[test]
+fn the_guest_pair_is_read_as_the_run_host_reads_it() {
+    let (kernel, init) = (absolute("vmlinux"), absolute("shards-init"));
+    let (kernel, init) = (OsStr::new(&kernel), OsStr::new(&init));
+    let (empty, relative) = (OsStr::new(""), OsStr::new("vmlinux"));
+    for (k, i) in [
+        (None, None),
+        (Some(empty), Some(empty)),
+        (Some(kernel), Some(init)),
+    ] {
+        assert_eq!(guest_pair(k, i), Ok(()), "{k:?} {i:?}");
+    }
+    #[cfg(unix)]
+    let not_utf8 = <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"/shards/\xffvmlinux");
+    #[cfg(not(unix))]
+    let not_utf8 = relative;
+    for (k, i) in [
+        (Some(kernel), None),
+        (Some(kernel), Some(empty)),
+        (None, Some(init)),
+        (Some(relative), Some(init)),
+        (Some(relative), Some(relative)),
+        (Some(not_utf8), Some(init)),
+    ] {
+        let why = guest_pair(k, i).unwrap_err().to_string();
+        assert!(
+            why.contains("SHARDS_KERNEL") && why.contains("SHARDS_INIT"),
+            "{k:?} {i:?}: {why}"
+        );
+    }
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded

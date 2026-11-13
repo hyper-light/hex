@@ -69,6 +69,13 @@ Sources, read at the revisions named:
   rule), or serialize Hex's member starts behind image boots (a boot takes seconds, and every start would wait on it).
   Beside it, every descriptor the macOS runtime makes is close-on-exec as it is made
   (`every_descriptor_the_runtime_makes_is_close_on_exec`), so a spawn that does inherit holds none of the node's.
+- **The guest's kernel and init** (`guest_pair`; ROOT, 2026-11-12). D231's run host inherits the node's environment
+  and boots the guest its `SHARDS_KERNEL` and `SHARDS_INIT` name, taking each only as a UTF-8 absolute path and
+  dropping any other value without a word, both or neither: the daemon refuses one alone ("SHARDS_KERNEL and
+  SHARDS_INIT go together"; Shards 66113379, `api_run.rs` `as_run`, `engine.rs`). `host_images` reads the pair once,
+  as the node starts: one alone, or a value the run host would drop, makes the class unavailable on that node, every
+  create refused `Platform` naming both variables before any record, where otherwise every start would be refused
+  after its create was recorded (ROOT's r345), or its VMs boot Shards' own guest in place of the one named.
 - **The node on macOS and Windows** (a guest runtime beside its host runtime, `WithGuest`) sends a call on a box its
   guest holds to that guest's node, but an image VM's: its guest runs no node of Hex's, so the guest runtime here
   answers it (`hex-node` `recorded.rs` `forward_for`), as the Linux node runs an image VM's exec here
