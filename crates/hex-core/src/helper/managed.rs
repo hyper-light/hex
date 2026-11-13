@@ -6,6 +6,7 @@ pub mod census;
 pub mod completed;
 pub mod rate;
 pub mod rejected;
+pub mod response;
 pub mod timed;
 
 use crate::record::{NativeRecord, NativeScope, OwnerKey, OwnerRef, ProcId};
@@ -21,6 +22,14 @@ pub struct CpuControl {
     pub response: Duration,
 }
 impl CpuControl {
+    /// Original (joint plan step 14, 2c, red): no cold value; a control's response is the census row's.
+    pub fn cold(cost_id: [u8; 32]) -> Self {
+        Self {
+            cost_id,
+            response: Duration::ZERO,
+        }
+    }
+
     pub fn check(self) -> Result<(), Fault> {
         if self.cost_id == [0; 32]
             || self.response.is_zero()
@@ -1102,6 +1111,29 @@ mod tests {
             },
             report_scope: if report { Some([5; 16]) } else { None },
         }
+    }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): the node sends a launch's CPU control with the cold value, the least
+    /// response the field holds that a helper's check takes (a nanosecond, the wire's unit). An older helper, which reads
+    /// it as its response, then holds a scope at its credit's end with no burst to speak of, never at a census number;
+    /// a learning helper reads its own. Do encode a launch with the cold control and read it back as every helper reads
+    /// it. Expect its response a nanosecond and its check passed.
+    #[test]
+    fn w14_an_older_helper_reads_a_new_launchs_cpu_control_as_the_cold_value() {
+        let cold = Launch {
+            cpu: CpuControl::cold([17; 32]),
+            ..launch(false)
+        };
+        let request = Request::Prepare {
+            key: key(),
+            launch: cold,
+        };
+        let bytes = encode_request(VERSION, 5, &request).unwrap();
+        let (_, _, Request::Prepare { launch, .. }) = read_request(&bytes, 2).unwrap() else {
+            panic!("not a prepare");
+        };
+        assert_eq!(launch.cpu.response, Duration::from_nanos(1));
+        assert!(launch.cpu.check().is_ok());
     }
 
     /// AC-T7.4.1: option-shaped values remain opaque data; only actual prepared option positions
