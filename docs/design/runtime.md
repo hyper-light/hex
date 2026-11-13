@@ -700,8 +700,12 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     `cpu.weight` sets a box's share on Linux: a box at the default weight runs unclamped, at the QoS the
     node's own programs run at, and one whose weight is under the default runs at background QoS (darwin
     background: lowest CPU priority, I/O throttled). No clamp keeps the watcher ahead of a box (the lead,
-    2026-11-06, under Ada's 2026-11-03 rule). A box that asks for confinement gets App Sandbox's, which every
-    child inherits (§3). The class's own purpose is trusted code that must not starve
+    2026-11-06, under Ada's 2026-11-03 rule). A bound macOS can't hold of a box is refused, typed, never
+    dropped (`hex_core::watch::check`, as Windows' job refuses its own; ROOT, 2026-11-13): a CPU cap (macOS caps
+    no group of processes' CPU: its CPU monitor only reports or ends a process past a rate, and Hex's CPU control
+    holds its managed VMs alone), a memory level to throttle at, and every disk bound. A box that asks for
+    confinement gets App Sandbox's, which every child inherits (§3). The class's own purpose is trusted code
+    that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
     reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
     period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
