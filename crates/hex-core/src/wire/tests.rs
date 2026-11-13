@@ -742,6 +742,41 @@ fn requests() -> Vec<(u64, Request, usize)> {
             0,
         ),
         (203, Request::Call(Call::BackingUsage(route_wire_key())), 0),
+        // Joint plan step 17: a member handed over, its streams asked for (a local socket's), and carried (QUIC's).
+        (
+            204,
+            Request::Call(Call::Member {
+                id: id("image"),
+                member: Member {
+                    kind: MemberKind::Harness,
+                    name: "claude".to_owned(),
+                },
+                streams: Streams::default(),
+                ask: Streams {
+                    stdin: true,
+                    stdout: true,
+                    stderr: true,
+                },
+            }),
+            0,
+        ),
+        (
+            205,
+            Request::Call(Call::Member {
+                id: id("image"),
+                member: Member {
+                    kind: MemberKind::Agent,
+                    name: "helper".to_owned(),
+                },
+                streams: Streams {
+                    stdin: true,
+                    stdout: true,
+                    stderr: true,
+                },
+                ask: Streams::default(),
+            }),
+            3,
+        ),
     ]
 }
 
@@ -1755,7 +1790,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0017, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0018, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
