@@ -4,8 +4,9 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `3114e082f`, image channel v24 (`8dfe6df8`, a delete stopping a boot under way with
-`31c651fb`; `db4168345` before it, at `1d60abad`, each credential grant's placeholder with `1c4d11b3`; `740fa372` before
+Merged on Hex's main at Shards `097ec0047`, image channel v25 (`1314e5f2`, a member's MCP bridge refused by its field
+while the class asks no agent-control endpoint with `2f5d20e7`; `3114e082f` before it, at `8dfe6df8`, a delete stopping a
+boot under way with `31c651fb`; `db4168345` before that, at `1d60abad`, each credential grant's placeholder with `1c4d11b3`; `740fa372` before
 that, at `8aa7c028`; `e0cc059c` before that, at `c8b4ce6b`), with a failed run's end in its
 runtime's words (`32b66a10`, `94d519d6`), the class whole and its host use read to its end (`ae7038d7`, `2a8bf6be`), a
 member's arguments and the VM's shares (`cf535152`), and `NoSuchBox` where a shared guest holds no record (`fac528d9`).
@@ -14,7 +15,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
-  `db4168345` and `3114e082f`) and
+  `db4168345`, `3114e082f` and `097ec0047`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -37,8 +38,13 @@ Sources, read at the revisions named:
   (`ImageSpec::sign_ins`, none here, its pass-through goal 13's), and a stop for a boot under way (`BootStop`,
   `Images::boot_stoppable`, `ed1136305`), which a delete asks (§3). At `db4168345`, versions 22 and 23: each credential grant's placeholder (D242's step
   3, `credential-grants.md`) and D259 (the run's microVM saved whole for its owner, `ImageGuest::save`, which this class
-  asks none of, so a refusal of a save is `Broken` here).
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345` and `3114e082f`: `crates/api/src/image.rs` (`Images`, its `boot` and
+  asks none of, so a refusal of a save is `Broken` here). At `097ec0047`, version 25: D254's MCP bridge, a member's
+  connections paired with its controller's asks (`MemberSpec::mcp`, `af8f1ebe5`), which needs the run's agent-control
+  endpoint, so this class, asking none, refuses a member asking one by its field (§2); each credential and sign-in
+  grant's field held to the network process's wire (`shards_dns::credential::WIRE_MOST`, `17fc36ecd`), refused as a
+  spec, `Invalid` here, Hex adding no bound of its own; D231's boot stop on Windows (`9a65eb9bb`); and D260 (a managed
+  guest's use, `ManagedGuest::host_use`, `867053aa1`), which this class doesn't read.
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f` and `097ec0047`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -146,8 +152,11 @@ harness member's):
   a working directory and run-time arguments, checked as an exec's variables, as D231's absolute, plain `workdir`,
   and as no command line's argument holds a NUL; each named once). The boot gives each a `MemberSpec` with `stdin`
   (step 5's pipe the orchestrator writes), its arguments after its image's command for it (D256's `args`, kiln's
-  step 17: a harness's session flags, `--resume` and `--model`) and no terminal; the image's other members run as it
-  declares them, their stdin `/dev/null`.
+  step 17: a harness's session flags, `--resume` and `--model`), its MCP bridge as asked (D254's `mcp`) and no
+  terminal; the image's other members run as it declares them, their stdin `/dev/null`. A member asking an MCP bridge
+  is refused at create, before any record, as `Invalid` by its field (`members[N].mcp`): a bridge's connections reach
+  the run's controller over its agent-control endpoint alone, which this class asks of no run yet (`CONTROL`), and
+  Shards refuses the same.
 - `ShardsImage::shares` names the host directories the guest sees (D231's shares, `-v HOST:AT[:ro]`; kiln's step
   18: a person's home volumes and a project at its host path, D235), each a `Mount`: its host directory, checked as
   a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
@@ -308,7 +317,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `3114e082f` or later (image channel version 24: Hex's `shards`, rebuilt on each host by
+  `097ec0047` or later (image channel version 25: Hex's `shards`, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and signals
