@@ -106,8 +106,9 @@ own = ["UPSTREAM.md"]
 # Shards' public API (shards-api: the direct boot D215, launches through a client's native owner D233, GPU
 # selection by exact identity D232, and images booted under shards-init for an orchestrator D231, with their
 # ports' receivers, destinations D236, nesting D234 and plugs D235), its ABI,
-# AF_UNIX transport and test-directory crates, at a Shards main with none of Hex's changes: every patch Hex
-# carried is upstream (vendor/shards/UPSTREAM.md), and the take list holds the fixtures the API's tests include.
+# AF_UNIX transport and test-directory crates, at a Shards main that holds every patch Hex carried before it, with
+# the changes Hex has recorded since (vendor/shards/UPSTREAM.md); the take list holds the fixtures the API's tests
+# include.
 [projects.shards]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
@@ -116,13 +117,14 @@ path = "vendor/shards"
 take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs"]
 own = ["Cargo.toml", "UPSTREAM.md"]
 
-# Shards' renderer build (hyper-light): the `shards` binary whose GPU VM process renders a Shards GPU
-# guest's Venus on the host's driver (crates/hex-runtime/src/guest, SHARDS_BIN; AC-T7.4.1), at the same Shards
-# main as vendor/shards. Every change Hex carried at 0342b85d is upstream there (vendor/shards-gpu/UPSTREAM.md)
-# but one, kept as the recorded change: the GPU VM process built and carried for Windows on arm64, which
-# Shards' GPU lane holds (D232, "Held"). Hex compiles none of it: only the files that change touches are taken,
-# so `check` proves it applies to this commit, and scripts/shards-gpu/build.sh rebuilds `shards` from this
-# commit plus vendor/patches/shards-gpu. MIT, its LICENSE taken beside it.
+# Hex's `shards` build (hyper-light): the `shards` binary a node boots its Shards guests and image VMs with
+# (SHARDS_BIN; crates/hex-runtime/src/guest), at the same Shards main as vendor/shards, with Hex's recorded
+# changes to it: its GPU VM process built and carried for Windows on arm64, which Shards' GPU lane holds (D232,
+# "Held"); and the run host of an image's boot holding each member to its reach of the destinations kept (D236,
+# joint plan step 15), whose API half is vendor/shards'. Hex compiles none of it: only the files the changes touch
+# are taken, so `check` proves each applies to this commit, and scripts/shards-gpu/build.sh rebuilds `shards` from
+# this commit plus vendor/patches/shards and vendor/patches/shards-gpu, on Linux, macOS and Windows. MIT, its
+# LICENSE taken beside it.
 [projects.shards-gpu]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
@@ -130,7 +132,11 @@ commit = "66113379cc78b8464c778658e44ace5276ba5590"
 path = "vendor/shards-gpu"
 take = [
     "LICENSE",
+    "crates/agentfile/src/agentfile.rs",
+    "crates/agentfile/tests/agentfile.rs",
     "crates/shards/build.rs",
+    "crates/shards/src/agentfile.rs",
+    "crates/shards/src/api_run.rs",
     "scripts/gpu-libs",
 ]
 own = ["UPSTREAM.md"]

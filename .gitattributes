@@ -1,3 +1,10 @@
 # Recorded traces, whose exact bytes hex-sim's census counts (crates/hex-sim/tests/census.rs): never converted at
 # checkout, so git's core.autocrlf (on by default on Windows) can't add a carriage return to each line.
 bench/sched/*.trace -text
+# Vendored Shards and the changes Hex records to it, byte for byte on every host, as Shards holds its own (its
+# .gitattributes): scripts/shards-gpu/build.sh applies the changes to upstream's bytes and holds each vendored file to
+# the result, which a carriage return added at checkout (core.autocrlf) would break.
+vendor/shards/** -text
+vendor/shards-gpu/** -text
+vendor/patches/shards/** -text
+vendor/patches/shards-gpu/** -text
