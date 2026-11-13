@@ -108,18 +108,46 @@ impl Hosted {
         }
     }
 
-    /// Boots the node VM, returning once its run has started, as the image class's boot does.
+    /// Boots the node VM and follows it to READY.
+    /// - **The boot** waits on its run host: `Duration::MAX`, until the run starts or its host ends.
+    /// - **READY** is waited for to the learned deadline, and the run is given that deadline too, so Hex's init holds
+    ///   its node and relay to it inside the VM. At the cold start, or after a run-out, there is no deadline: the
+    ///   wait follows the run, and the run's end refuses it.
+    /// - **Past the deadline** with no READY is a run-out, no sample (Karn's point): the run is stopped, the boot
+    ///   refused, typed, and the next boot follows again.
+    /// - **A refusal** of Shards' is typed by what it refused.
     pub fn boot(&self) -> Result<HostedGuest, Refusal> {
+        let bound = self.ready.deadline();
         let began = Instant::now();
         let guest = self
             .images
-            .boot(&self.config.spec(None), Duration::MAX)
+            .boot(&self.config.spec(bound), Duration::MAX)
             .map_err(|why| refused("booting the node VM under shards-init", why))?;
-        Ok(HostedGuest {
-            guest,
-            ready: Ready::OnTime,
-            took: began.elapsed(),
-        })
+        let said = guest.wait_ready(None, bound.unwrap_or(Duration::MAX));
+        let took = began.elapsed();
+        match said {
+            Ok(Some(ready @ (Ready::OnTime | Ready::Late(_)))) => {
+                self.ready.answered(took);
+                Ok(HostedGuest { guest, ready, took })
+            }
+            Ok(Some(Ready::Passed(_)) | None) => {
+                if let Some(after) = bound {
+                    self.ready.ran_out(after);
+                }
+                stop(guest.as_ref());
+                Err(Refusal::Os {
+                    op: "waiting for the node VM under shards-init to say it is ready",
+                    why: format!("no READY within {bound:?}, the slowest this node has seen"),
+                })
+            }
+            Err(why) => {
+                stop(guest.as_ref());
+                Err(refused(
+                    "waiting for the node VM under shards-init to say it is ready",
+                    why,
+                ))
+            }
+        }
     }
 }
 
