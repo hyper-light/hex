@@ -31,7 +31,11 @@
 //! - `HEX_IMAGE_WORK`: a directory of this run's own, made here; `HEX_IMAGE_WAIT_MS`: the run's explicit deadline,
 //!   for the node's start and the whole suite; `HEX_WAITS_CENSUS_MAX`: the census's most lines.
 //!
-//! Run: `cargo test --release --locked -p hex-cli --test image_real -- --ignored --nocapture` with those set.
+//! Run: build it with `cargo test --release --locked -p hex-cli --test image_real --no-run`, which names the test
+//! binary it built (`target/release/deps/image_real-<hash>`), then start that binary alone in the delegated scope,
+//! with those set: `systemd-run --user --scope -p Delegate=yes --quiet -- env HEX_DELEGATED=1 <inputs> <binary>
+//! --ignored --nocapture`. Never cargo inside the scope: cargo stays in the scope's own cgroup, and the node can't
+//! hand its box root controllers from a cgroup holding processes of its own (`cgroup.subtree_control`, EBUSY).
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
