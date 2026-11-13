@@ -226,8 +226,8 @@ Each count is derived where the endpoint is made; none is picked.
 | connections, identities, pending handshakes (node) | the node's connections bound | the peers it serves as many as the connections its socket does (`serve::limits`) |
 | connections (client) | 1 | a client's endpoint dials its one node |
 | connections an identity holds | 2 | a connection and the one replacing it after its path changed |
-| lanes a peer may open (node) | its calls in flight twice (a control connection and a stdio connection each), one log connection, and its calls in flight again where it stages | every connection to a port that can do work at once for one peer (`hex_node::quic::shape`): a control connection past the calls the node runs has no call to run, a stdio connection past the threads the node may run (its calls in flight, `serve::limits`) has none to name and copy it, and a second log reader reads the same lines |
-| lanes a peer may open (client) | half its soft `RLIMIT_NOFILE` on Unix; on Windows half the dynamic port range's 16,384 (RFC 6335 §6, Windows' own since Vista) | each connection is bridged to a local socket pair, two descriptors on Unix, and on Windows a loopback TCP pair holding two ports of that range |
+| lanes a peer may open (node) | its calls in flight twice (a control connection and a stdio connection each), one log connection, and its calls in flight again where it stages (`hex_quic::limits::peer_lanes`) | every connection to a port that can do work at once for one peer (`hex_node::quic::shape`): a control connection past the calls the node runs has no call to run, a stdio connection past the threads the node may run (its calls in flight, `serve::limits`) has none to name and copy it, and a second log reader reads the same lines |
+| lanes a peer may open (client) | its node's grant (`peer_lanes` of that node's calls in flight, as the client's caller knows them), at most what it can bridge at once: half its soft `RLIMIT_NOFILE` on Unix; on Windows half the dynamic port range's 16,384 (RFC 6335 §6, Windows' own since Vista) (`hex_quic::limits::client_lanes`) | a client's connections to its node are the node's to serve, so no more of them can do work at once than the node grants: one derivation for both ends. Each is bridged to a local socket pair, two descriptors on Unix, and on Windows a loopback TCP pair holding two ports of that range. Once the node's hello comes, `link::connect` holds the client to the grant its budget says, whatever the node's connections bound (HEX-QUIC-27), so no connection is opened that the node's stream limit can't take |
 | exchanges, streams a connection | 1 | the least the endpoint accepts: Hex opens none, and a peer's head is refused at 0 bytes |
 | window ceiling | `stream_window_ceiling()` | hyper-transport's: the largest window quinn's assembler can't be made to refuse |
 | idle timeout | 3 initial probe timeouts | RFC 9000 §10.1's floor, from RFC 9002's initial RTT (333 ms, §6.2.2), its PTO (§6.2.1) and the default max_ack_delay (25 ms, RFC 9000 §18.2); QUIC raises it with the path's own PTO |
@@ -240,7 +240,16 @@ peer may open as a connection starts (quinn's `StreamsState::new` inserts every 
 connected peer costs that table, a node's per peer and a client's for its one node. The driver lays it out as the
 peer's first datagram comes and answers no peer meanwhile: counted by its programs' streams (a Windows node's
 programs are half its 2^24 handle table), jupiter's node laid out 25,330,425 lanes for 18 s of a debug build, past the
-idle timeout, and every dial to it was refused.
+idle timeout, and every dial to it was refused. Counted by its threads it lays out 82,301 there.
+
+A client shapes its endpoint before its node's hello says the node's calls in flight, so its caller says them: Hex's
+own callers know their node (a test serves its own, or learns a node it started from one hello, on an endpoint shaped
+for that hello alone). kiln's balancer learning a node's calls in flight from that node's capacity-view entry is a later
+step. The exact answer, a client laying out its
+node's grant itself, is an ask of hyper-transport, which kiln and Hex share (Q1): lanes a peer may open raised on a live
+connection (quinn's `set_max_concurrent_streams` for unidirectional streams, laying out the rows it adds), so a client
+starts with its hello's one lane and grows to the grant its hello says. Rejected here: a change Hex alone would diverge on,
+and a second handshake a connect to learn the grant first, which costs every connect its round trips.
 
 ## Q9. `hex node` over QUIC
 
