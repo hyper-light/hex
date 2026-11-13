@@ -2208,8 +2208,21 @@ impl Watcher {
             Some(super::cpu::Decision::Prepared) => return Err(self.state.uncertain()),
             Some(super::cpu::Decision::Run(wait)) => wait,
             Some(super::cpu::Decision::Hold(_)) => {
+                // Its response runs from when its credit ran out, read off the observation that held it (2c).
+                let ran_out = scope.cpu_ran_out(owner)?;
                 *held = self.state.apply(&self.order, &[], &self.last)?;
                 scope.cpu_held(owner)?;
+                // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
+                // every member it holds reads stopped, followed with no timer while they live. A member that ended or
+                // left meanwhile, or a response of no time, is no sample (Karn's point).
+                if let Some(from) = ran_out
+                    && let Some(stopped) = stopped_after(&self.order, sys::run_state)?
+                    && let Some(response) = stopped
+                        .checked_duration_since(from)
+                        .filter(|response| !response.is_zero())
+                {
+                    scope.cpu_learn(owner, response)?;
+                }
                 match scope.cpu_decision(owner)? {
                     Some(super::cpu::Decision::Hold(wait)) => Some(wait),
                     Some(super::cpu::Decision::Run(_)) => {
@@ -2628,6 +2641,61 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::SRCH) => Ok(false),
         Err(e) => Err(Refusal::os("killpg", e)),
+    }
+}
+
+/// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer
+/// while it lives, as `macos_cpu_response` reads a stop; none where one ended or left meanwhile, so its hold is no
+/// sample.
+fn stopped_after(
+    order: &[u32],
+    run_state: impl Fn(i32) -> std::io::Result<Option<sys::Run>>,
+) -> Result<Option<Instant>, Refusal> {
+    for &member in order {
+        let Ok(pid) = i32::try_from(member) else {
+            return Ok(None);
+        };
+        loop {
+            match run_state(pid)
+                .map_err(|error| Refusal::os("reading a held member's run state", error))?
+            {
+                Some(sys::Run::Stopped) => break,
+                Some(sys::Run::Live) => std::thread::yield_now(),
+                Some(sys::Run::Ended) | None => return Ok(None),
+            }
+        }
+    }
+    Ok(Some(Instant::now()))
+}
+
+#[cfg(test)]
+mod hold_response_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// Joint plan step 14 (2c): a hold's stop is followed until every member it holds reads stopped, and a member that
+    /// ended or left meanwhile makes the hold no sample. Do read members 11 and 12, the second live for two reads before
+    /// it stops; then 11 and 13, the second gone. Expect an instant after both stopped, 12 read three times; then none.
+    #[test]
+    fn w14_a_holds_stop_is_followed_until_every_member_reads_stopped() {
+        let reads = RefCell::new(BTreeMap::<i32, u32>::new());
+        let read = |pid: i32| {
+            let mut reads = reads.borrow_mut();
+            let n = reads.entry(pid).or_insert(0);
+            *n += 1;
+            Ok(match (pid, *n) {
+                (11, _) => Some(sys::Run::Stopped),
+                (12, 1 | 2) => Some(sys::Run::Live),
+                (12, _) => Some(sys::Run::Stopped),
+                _ => None,
+            })
+        };
+        let before = Instant::now();
+        let stopped = stopped_after(&[11, 12], read).unwrap().unwrap();
+        assert!(stopped >= before);
+        assert_eq!(reads.borrow().get(&12), Some(&3));
+        assert_eq!(stopped_after(&[11, 13], read).unwrap(), None);
     }
 }
 
