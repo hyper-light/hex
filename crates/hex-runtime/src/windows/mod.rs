@@ -2379,6 +2379,59 @@ mod tests {
         report.check().unwrap();
     }
 
+    /// AC-T7.4.1 (joint plan step 13, HEX-CV-L1 on Windows): do make the `oci` form's offer of a node whose
+    /// Containers are on, as `capacity(Oci)` makes it, with its HCS devices, beside the encoding bound such a
+    /// node reserves; expect every key of the bound offered and no other, its `process` route beside its `oci`
+    /// one as Linux's `devices::native_routes` offers them, and each device eligible for the `oci` route alone:
+    /// the scheduler places a `process` box on a Windows node that runs containers.
+    #[test]
+    fn a_containers_nodes_oci_form_offers_its_process_route_beside_its_oci_one() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let mut report = Capacity {
+            id: "containers-node".into(),
+            total: CapacityResources::default(),
+            free: CapacityResources::default(),
+            devices: rt.holding.report(&rt.catalog).unwrap(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            unavailable: Vec::new(),
+            learned: None,
+        };
+        native_route_offer(&mut report, Class::Oci, true).unwrap();
+        report.check().unwrap();
+        let (process, oci) =
+            crate::devices::native_route_keys(Class::Oci, native_platform()).unwrap();
+        let oci = oci.unwrap();
+        let offered: Vec<_> = report.routes.iter().map(|route| route.key).collect();
+        let mut bound = crate::devices::RouteProjection::new();
+        native_encoding_upper_bound(Some(true), Some(&BTreeSet::new()), &mut bound).unwrap();
+        let reserved = bound.count().unwrap();
+        for key in &offered {
+            bound.retain(*key, None).unwrap();
+        }
+        assert_eq!(
+            bound.count().unwrap(),
+            reserved,
+            "{offered:?} offers a key past its bound"
+        );
+        assert_eq!(
+            offered,
+            [process, oci],
+            "the oci form offers {} of the {reserved} routes its bound reserves",
+            offered.len()
+        );
+        let at = offered.iter().position(|key| *key == oci).unwrap();
+        assert!(!report.devices.is_empty());
+        assert!(
+            report.device_routes.iter().all(|mask| *mask == 1 << at),
+            "{:?}",
+            report.device_routes
+        );
+    }
+
     /// AC-T7.4.1: reserve possible fixed encoding forms without promoting a currently unavailable
     /// service into fresh OCI eligibility. Initialization unknowns refuse before collector mutation.
     #[test]
