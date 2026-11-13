@@ -221,12 +221,14 @@ impl BoxProc {
                 Some(actual) if actual.started != started => Err(ProcessFailure::DifferentStart {
                     observed: actual.started,
                 }),
-                Some(actual) if actual.ended || exiting => {
+                Some(actual) if !actual.ended && !exiting => Ok(None),
+                // Ended, or no process at its pid at all: its parent reaped it since (launchd reaps a helper whose
+                // node ended), so its end is no longer knowable here, as a Retained child reaped elsewhere
+                // (ECHILD) reads (AC-T7.4.1).
+                _ => {
                     self.exit = Some(Exit::Unknown);
                     Ok(self.exit)
                 }
-                Some(_) => Ok(None),
-                None => Err(ProcessFailure::InvalidStartRecord),
             };
         }
         let pid = Pid::from_raw(self.pid).ok_or(ProcessFailure::PidOutOfRange {
