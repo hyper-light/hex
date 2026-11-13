@@ -137,6 +137,149 @@ impl Fixture for ImageBoxes {
     }
 }
 
+/// A process as its OS lists it: its pid, its parent's pid, and when it started, which tells it from a later process
+/// given its pid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Listed {
+    pid: u32,
+    parent: u32,
+    started: String,
+}
+
+/// Every process Linux lists now: each `/proc/<pid>/stat`'s parent (field 4) and start, in clock ticks after boot (field
+/// 22), read past its command's closing parenthesis, which the command may itself hold.
+#[cfg(target_os = "linux")]
+fn listed() -> Vec<Listed> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // A process gone since the directory was read has no stat.
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(after) = stat.rsplit_once(')').map(|(_, after)| after) else {
+            continue;
+        };
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        if let (Some(parent), Some(started)) = (fields.get(1), fields.get(19)) {
+            out.push(Listed {
+                pid,
+                parent: parent.parse().unwrap(),
+                started: (*started).to_owned(),
+            });
+        }
+    }
+    out
+}
+
+/// Every process macOS lists now: `ps -A -o pid=,ppid=,lstart=`, each its pid, its parent and when it started.
+#[cfg(target_os = "macos")]
+fn listed() -> Vec<Listed> {
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,lstart="])
+        .output()
+        .unwrap();
+    assert!(ps.status.success(), "ps: {}", ps.status);
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse().ok()?;
+            let parent = words.next()?.parse().ok()?;
+            Some(Listed {
+                pid,
+                parent,
+                started: words.collect::<Vec<_>>().join(" "),
+            })
+        })
+        .collect()
+}
+
+/// Every process Windows lists now: Win32_Process's ProcessId, ParentProcessId and CreationDate (as a UTC FILETIME),
+/// through PowerShell's CIM, one line each.
+#[cfg(target_os = "windows")]
+fn listed() -> Vec<Listed> {
+    let ps = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, \
+             $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }) }",
+        ])
+        .output()
+        .unwrap();
+    assert!(ps.status.success(), "powershell: {}", ps.status);
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            Some(Listed {
+                pid: words.next()?.parse().ok()?,
+                parent: words.next()?.parse().ok()?,
+                started: words.next()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The processes descended from `root` now, its children's children among them.
+fn descendants(root: u32) -> Vec<Listed> {
+    let all = listed();
+    let mut found: Vec<Listed> = Vec::new();
+    let mut parents = vec![root];
+    while let Some(parent) = parents.pop() {
+        for p in all.iter().filter(|p| p.parent == parent && p.pid != parent) {
+            if !found.iter().any(|f| f.pid == p.pid) {
+                parents.push(p.pid);
+                found.push(p.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Goal 54's change 4 (joint plan step 12's item B; AC-T7.4.1): a VM's delete returns once its processes are gone and
+/// their memory returned, never earlier, so kiln's keeper frees no room a VM still holds. Do start an image VM of its
+/// members alone, list the node's descendants before its create and once it runs (its run host and the VM and network
+/// processes it starts, each by pid and start), then delete it. Expect every process its run added gone, by pid and
+/// start, as the delete returns: Linux reads /proc, macOS ps, Windows Win32_Process through CIM.
+fn release(client: &Client, fixture: &ImageBoxes, node: u32) -> Result<(), String> {
+    let id = BoxId::new("hex-conformance-release").map_err(|e| e.to_string())?;
+    let _ = client.delete(&id);
+    let idle = descendants(node);
+    client
+        .create(fixture.spec(id.clone(), Bounds::default()))
+        .map_err(|e| format!("create: {e}"))?;
+    client.start(&id).map_err(|e| format!("start: {e}"))?;
+    let run: Vec<Listed> = descendants(node)
+        .into_iter()
+        .filter(|p| !idle.contains(p))
+        .collect();
+    if run.is_empty() {
+        return Err("its run added no process under the node to follow".to_owned());
+    }
+    client.delete(&id).map_err(|e| format!("delete: {e}"))?;
+    let now = listed();
+    let left: Vec<&Listed> = run.iter().filter(|p| now.contains(p)).collect();
+    if left.is_empty() {
+        eprintln!(
+            "IMAGE-RELEASE {} processes gone as the delete returned",
+            run.len()
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "left once the delete returned: {left:?} of {run:?}"
+        ))
+    }
+}
+
 #[test]
 #[ignore = "native: KVM, HVF or WHP, a Shards guest configuration and an image (on Linux a delegated cgroup)"]
 fn the_shards_image_class_holds_its_contract_through_a_real_node() {
@@ -189,6 +332,7 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     ShardsImage::new(&image).check().unwrap();
     let node = Node::start(&work, boxes.as_deref());
     let socket = node.socket.clone();
+    let node_pid = node.child.id();
     let (done, verdicts) = mpsc::channel();
     std::thread::spawn(move || {
         let client = Client::connect(&socket).unwrap();
@@ -200,15 +344,16 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         let fixture = ImageBoxes { image, allocation };
         let begun = Instant::now();
         let failures = conformance::run_image(&client, &fixture);
+        let released = release(&client, &fixture, node_pid);
         eprintln!(
             "IMAGE-CASE all {} in {:?}",
             conformance::IMAGE_CASES.len(),
             begun.elapsed()
         );
         let left = client.list().unwrap();
-        let _ = done.send((failures, left));
+        let _ = done.send((failures, released, left));
     });
-    let (failures, left) = verdicts
+    let (failures, released, left) = verdicts
         .recv_timeout(wait)
         .unwrap_or_else(|e| panic!("the image cases did not end within {wait:?}: {e}"));
     drop(node);
@@ -221,7 +366,14 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         eprintln!("IMAGE-CASE {} {verdict}", case.id);
     }
     assert!(left.is_empty(), "a box is left: {left:?}");
+    eprintln!(
+        "IMAGE-CASE release {}",
+        released
+            .as_ref()
+            .map_or_else(|why| format!("failed: {why}"), |()| "passed".to_owned())
+    );
     assert!(failures.is_empty(), "the image cases failed: {failures:#?}");
+    assert!(released.is_ok(), "the release case failed: {released:?}");
 }
 
 /// Joint plan step 12 (AC-T7.4.1; ROOT's HVF run at c8b4ce6b, whose cases were refused for an image with no member): the
@@ -264,5 +416,37 @@ fn the_in_tree_harness_context_pins_its_base_and_runs_one_member() {
     assert_eq!(
         descriptor,
         serde_json::json!({"entrypoint": "/bin/sh -c", "options": ["cat"]})
+    );
+}
+
+/// HVF (a) (ROOT's HVF run of image_real at c8b4ce6b: the build in the node's home exited 1 after 285 s, its error naming
+/// only its command): a build or pull in the node's Shards home that fails says why in its own words. Do build with a
+/// `shards` that says why on its stderr and exits 1. Expect the build refused naming its command, its exit and those
+/// words.
+#[cfg(unix)]
+#[test]
+fn a_failed_build_in_the_nodes_home_says_why_in_its_own_words() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let shards = dir.path().join("shards");
+    let words = "registry-1.docker.io: resolving: nodename nor servname provided, or not known";
+    fs::write(&shards, format!("#!/bin/sh\necho '{words}' >&2\nexit 1\n")).unwrap();
+    fs::set_permissions(&shards, fs::Permissions::from_mode(0o755)).unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir_all(work.join("state")).unwrap();
+    let context = dir.path().join("context");
+    let failed =
+        std::panic::catch_unwind(|| built(&shards, &context, &work, "hex-image-real/check"));
+    let why = match failed {
+        Ok(image) => panic!("a failed build was taken as {image}"),
+        Err(why) => why
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| why.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default(),
+    };
+    assert!(
+        why.contains("build") && why.contains("exit status: 1") && why.contains(words),
+        "{why}"
     );
 }
