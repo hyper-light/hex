@@ -134,6 +134,8 @@ pub struct Scenario {
     pub rooms: bool,
     /// From window `at`, the `nth` VM to start asks for its whole ceiling; it lives the run out.
     pub riser: Option<(u64, usize)>,
+    /// Recorded traces its VMs replay (`super::trace`). Original (red): none is replayed, every VM's use drawn.
+    pub traces: Vec<super::trace::Trace>,
 }
 
 /// What a run measured.
