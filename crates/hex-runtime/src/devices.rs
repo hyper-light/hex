@@ -1670,6 +1670,7 @@ mod native_route_tests {
                 arch: hex_api::ImageArch::Arm64,
             };
             let mut capacity = hex_api::Capacity {
+                own: Default::default(),
                 id: "actual native fixture".into(),
                 total: room,
                 free: room,

@@ -46,6 +46,7 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
 
 fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
     Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -86,10 +87,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         .unwrap()
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
-    // additionally ends with four empty u32 lists and no learned use (joint plan step 14); a spec
-    // ends with one route option and its band, 0 here (joint plan step 14).
+    // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
+    // C7); a spec ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1
+        1 + 4 * size_of::<u32>() + 1 + 2
     } else {
         3
     };
@@ -205,11 +206,11 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 5..],
-        [0; 5],
-        "the empty list's count, then no learned use, ends it"
+        cut[cut.len() - 7..],
+        [0; 7],
+        "the empty list's count, then no learned use and its machine's time unread, ends it"
     );
-    cut.truncate(cut.len() - 5);
+    cut.truncate(cut.len() - 7);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -468,6 +469,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -871,6 +873,63 @@ fn requests() -> Vec<(u64, Request, usize)> {
             },
             0,
         ),
+        // docs/design/credential-grants.md C8: a connection's answers to the node's sign-in asks.
+        (
+            216,
+            Request::Captured {
+                run: 206,
+                answer: Ok(hex_api::Captured {
+                    access: "kiln/sign-ins/claude/access".to_owned(),
+                    access_placeholder: "kiln-placeholder-61".to_owned(),
+                    refresh_placeholder: Some("kiln-placeholder-62".to_owned()),
+                }),
+            },
+            0,
+        ),
+        (
+            217,
+            Request::Captured {
+                run: 206,
+                answer: Err(SignInRefused::Denied("no such sign-in".to_owned())),
+            },
+            0,
+        ),
+        (
+            218,
+            Request::Refreshed {
+                run: 206,
+                answer: Ok(Value::new(
+                    b"{\"access_token\":\"kiln-placeholder-61\"}".to_vec(),
+                )),
+            },
+            0,
+        ),
+        (
+            219,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unanswered),
+            },
+            0,
+        ),
+        (
+            220,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unavailable(
+                    "its provider is away".to_owned(),
+                )),
+            },
+            0,
+        ),
+        (
+            221,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Ended),
+            },
+            0,
+        ),
     ]
 }
 
@@ -1233,6 +1292,53 @@ fn answers() -> Vec<(u64, Answer)> {
     ));
     out.push((206, Answer::LeaseGiven("lease-1".to_owned())));
     out.push((206, Answer::LessorEnded));
+    // docs/design/credential-grants.md C8: the node's sign-in asks.
+    out.push((
+        209,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"sk-ant-oat01-access".to_vec()),
+                refresh: Some(Value::new(b"sk-ant-ort01-refresh".to_vec())),
+                expires_in: Some(28_800),
+                id_token: None,
+                scope: Some("user:inference".to_owned()),
+            },
+            key: Some([3; 32]),
+        },
+    ));
+    out.push((
+        210,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "openai/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"at".to_vec()),
+                refresh: None,
+                expires_in: None,
+                id_token: Some(Value::new(b"eyJhbGciOiJub25lIn0.e30.".to_vec())),
+                scope: None,
+            },
+            key: None,
+        },
+    ));
+    out.push((
+        211,
+        Answer::RefreshAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: None,
+        },
+    ));
+    out.push((
+        206,
+        Answer::SignInRevoked {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: Some([3; 32]),
+        },
+    ));
     out
 }
 
@@ -2000,7 +2106,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x001c, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x001e, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2750,9 +2856,9 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14) and
+    // its machine's time unread (C7), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2768,6 +2874,9 @@ fn route_wire_capacity_bytes(
         put_backing_offer(&mut w, backing).unwrap();
     }
     w.u32(0);
+    w.u8(0);
+    // Its machine's time unread (joint plan step 14, C7).
+    w.u8(0);
     w.u8(0);
     w.done().unwrap()
 }
@@ -3223,9 +3332,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14) and
+    // its machine's time unread (C7), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -5615,15 +5724,20 @@ fn s33_a_leases_value_crosses_marked_and_never_printed() {
     for (n, other, _) in requests() {
         if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
             let other = request(n, &other, MAX_MESSAGE).unwrap();
+            let kind = other.get(12..14).map(|k| u16::from_le_bytes([k[0], k[1]]));
             assert_eq!(
                 carries_secret(&other),
-                other.get(12..14) == Some(&0x001b_u16.to_le_bytes()[..]),
-                "only a leased message says it carries a value"
+                matches!(kind, Some(0x001b..=0x001d)),
+                "only a leased, captured or refreshed message says it carries a value"
             );
         }
     }
     for (n, other) in answers() {
-        assert!(!carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()));
+        assert_eq!(
+            carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()),
+            matches!(other, Answer::CaptureAsk { .. }),
+            "only a capture's ask carries tokens among the node's messages"
+        );
     }
     let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
     assert_eq!(back, leased);

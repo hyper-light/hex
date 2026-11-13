@@ -144,10 +144,21 @@ impl Transport for Socket {
                 descriptors: ends.len(),
                 descriptors_cut: false,
             };
-            take(
+            let secret = wire::carries_secret(message);
+            let taken = take(
                 &received,
                 ends.into_iter().map(hex_api::End::from).collect(),
-            )?;
+            );
+            // A sign-in's tokens cross in the message the core reads alone (docs/design/credential-grants.md C8).
+            if secret {
+                let mut payload = payload;
+                hex_api::lease::wipe(&mut payload);
+            }
+            taken?;
+        }
+        // Framed into the messages handed on: what was read here wiped.
+        if let Some(held) = reading.buf.get_mut(..n) {
+            hex_api::lease::wipe_in_place(held);
         }
         Ok(true)
     }

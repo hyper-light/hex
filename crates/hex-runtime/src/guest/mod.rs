@@ -495,7 +495,7 @@ pub struct GuestRuntime {
     booted: Mutex<Option<triomphe::Arc<Booted>>>,
     /// The shared backing's guest overhead as its capacity answers measured it, by its generation (joint plan step 14,
     /// C7): none before the first.
-    guest_overhead: Mutex<Option<(hex_api::BackingKey, hex_api::LearnedOverhead)>>,
+    guest_overhead: Mutex<Option<(hex_api::BackingKey, shared::Seen)>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.

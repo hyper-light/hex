@@ -309,12 +309,19 @@ available memory), idle slots go back as a told room shrinks, and the relay that
 once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
 
 A shared backing's guest holds its own kernel and relay inside its envelope, beside its boxes, and that overhead is
-measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `guest_overhead`). At each capacity
-answer its runtime reads its guest agent's memory in use (its total less its free) past what its boxes hold, the most
-seen, only rising, kept per backing generation (`guest::shared::guest_seen`); its CPU and disk the agent's answer
-doesn't read, so they stay none. Its offer carries it (`BackingOffer::guest`), a shared payload fits its envelope with
-it (`BackingOffer::check_inner`), its boxes' sum alone while cold, and the scheduler's rank takes its CPU
-(`hex_sim::index::routes::rank_cpu`).
+measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `guest_overhead`). Its runtime reads it
+from its guest agent's capacity answer, each dimension the most seen, only rising, kept per backing generation
+(`guest::shared::guest_seen`): its memory in use (its total less its free) past what its boxes hold; its disk in use,
+its boxes' disk no usage reads; and its CPU, its machine's CPU time past its boxes' over the uptime between two
+answers, read from `/proc/stat` and `/proc/uptime` (`hex_api::Capacity::own`, `hex_sim::facts::machine_time`). The
+first answer's CPU is read since the guest's boot, its boot's work among it, so it stands only until the first
+interval replaces it; then the most of the intervals, an interval over which its boxes changed giving none. A
+backing is cold only before it is Live: its runtime takes the first measurement before its record says Live and
+leaves it Granted without one (`GuestRuntime::initialize_pool`), so a placement never meets a cold guest. Its offer
+carries what was seen (`BackingOffer::guest`); a new box fits its envelope with it, a dimension not yet measured
+counting at the whole envelope (`BackingOffer::check_inner`), while the boxes it holds are held to the profile alone
+(`BackingOffer::check_retained`), so a guest whose overhead grows takes no more and refuses none it holds. The
+scheduler's rank takes its CPU, none while cold (`hex_sim::index::routes::rank_cpu`).
 
 **Sources.** The plan's architecture ("Hex sets budgets per fleet, and Shards' D188 tells each guest its room.
 Everything a VM holds, ring pins included, comes out of that room"); D188 (f53 B); Borg admits quota by the limit and

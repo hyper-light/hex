@@ -1993,6 +1993,7 @@ impl Runtime for WinRuntime {
             .map_err(|_| allocation(identity.len()))?;
         id.push_str(identity);
         let mut report = Capacity {
+            own: Default::default(),
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
@@ -2339,6 +2340,7 @@ mod tests {
     #[test]
     fn native_windows_route_does_not_require_a_configured_gpu() {
         let mut report = Capacity {
+            own: Default::default(),
             id: "native-control".into(),
             total: CapacityResources::default(),
             free: CapacityResources::default(),
@@ -2372,6 +2374,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let rt = device_runtime(scratch.path());
         let mut report = Capacity {
+            own: Default::default(),
             id: "containers-node".into(),
             total: CapacityResources::default(),
             free: CapacityResources::default(),
@@ -2431,6 +2434,7 @@ mod tests {
         native_encoding_upper_bound(Some(true), Some(&enabled), &mut projection).unwrap();
         assert_eq!(projection.count().unwrap(), 2); // Possible Process + OCI, not current service facts.
         let mut unavailable = Capacity {
+            own: Default::default(),
             id: "service-unavailable-control".into(),
             total: CapacityResources::default(),
             free: CapacityResources::default(),

@@ -3309,7 +3309,12 @@ mod tests {
                 offers: vec![native, shared],
                 device_routes: Vec::new(),
                 backings: vec![BackingOffer {
-                    guest: Default::default(),
+                    // Measured as it went Live (joint plan step 14, C7, pin 1): nothing of its own.
+                    guest: hex_api::LearnedOverhead {
+                        cpu_milli: Some(0),
+                        mem_bytes: Some(0),
+                        disk_bytes: Some(0),
+                    },
                     key,
                     cost: cost_fixture(),
                     phase: BackingPhase::Live,

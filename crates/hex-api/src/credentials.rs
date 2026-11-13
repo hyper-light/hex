@@ -232,3 +232,193 @@ fn invalid(why: String) -> Refusal {
 
 #[cfg(test)]
 mod tests;
+
+/// A CLI whose own sign-in a run may capture outside its microVM (Shards' D242, step 8; docs/design/credential-grants.md
+/// C8): its token endpoint's profile is Shards' network process's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInCli {
+    ClaudeCode,
+    Codex,
+}
+
+/// What a sign-in's capture gave (Shards' D242, step 8): its access token's reference in its orchestrator's store, the
+/// placeholder that stands for that token in its CLI's requests, and its refresh token's placeholder where its token
+/// response gave one. Holding a placeholder is the capability, so none prints: its `Debug` says their lengths alone.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Captured {
+    pub access: String,
+    pub access_placeholder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_placeholder: Option<String>,
+}
+
+impl std::fmt::Debug for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Captured")
+            .field("access", &self.access)
+            .field(
+                "access_placeholder",
+                &format_args!("{} bytes", self.access_placeholder.len()),
+            )
+            .field(
+                "refresh_placeholder",
+                &self
+                    .refresh_placeholder
+                    .as_ref()
+                    .map(|p| format!("{} bytes", p.len())),
+            )
+            .finish()
+    }
+}
+
+/// A sign-in grant (Shards' D242, step 8; C8): `member`'s CLI `cli` may sign in as the sign-in `sign_in` names (a name in
+/// its orchestrator's store, never a value). Its token response is taken outside the microVM and its CLI given
+/// placeholders in its tokens' places; its refreshes and revocations are answered outside; its access token is filled
+/// in toward `toward`'s hosts alone, by the rules a credential grant's hosts keep. `captured` is what an earlier capture
+/// of it gave, where there was one, so a later run's CLI holds the same placeholders. After the credential grants on
+/// every wire and record that carries them (append-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInGrant {
+    pub member: Member,
+    pub sign_in: String,
+    pub cli: SignInCli,
+    pub toward: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured: Option<Captured>,
+}
+
+/// The one check of a Shards image VM's sign-in grants (C8), run wherever they enter, beside [`check_credentials`]: each
+/// field refused by name. It refuses:
+/// - a member's name no Agentfile takes, and a sign-in's name, or a captured access token's reference, no store could
+///   hold (1 to [`REFERENCE_MAX`] of A-Z a-z 0-9 / _ + = . @ -);
+/// - a sign-in named twice, and a second sign-in of one CLI (Shards' D242: one sign-in of a CLI a run);
+/// - no host, a host named twice, or one its member's own egress grant doesn't reach by name, by TCP, as a credential
+///   grant's hosts are held (C2);
+/// - a captured placeholder that isn't a token a request carries (RFC 6750 §2.1's b64token), and a placeholder that
+///   stands for two things: a sign-in's access and refresh placeholders, two sign-ins', or a sign-in's and a credential
+///   grant's (Shards' `check_sign_ins`), so each placeholder is one token's alone.
+///
+/// Bounded by its input: one working list, reserved fallibly and sorted, and no recursion.
+pub fn check_sign_ins(
+    sign_ins: &[SignInGrant],
+    credentials: &[CredentialGrant],
+    grants: &[Grant],
+) -> Result<(), Refusal> {
+    let count = sign_ins
+        .len()
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(credentials.len()))
+        .ok_or(Refusal::Exhausted {
+            what: "sign-ins",
+            bound: usize::MAX,
+        })?;
+    let mut standing: Vec<(&str, String)> = working(count)?;
+    for (at, grant) in sign_ins.iter().enumerate() {
+        grant
+            .member
+            .check_named(&format!("sign_ins[{at}].member"))
+            .map_err(signed_in)?;
+        if !named(&grant.sign_in) {
+            return Err(signed_in(format!(
+                "sign_ins[{at}].sign_in {:?} isn't 1 to {REFERENCE_MAX} of A-Z a-z 0-9 / _ + = . @ -, a name its \
+                 orchestrator's store could hold",
+                grant.sign_in
+            )));
+        }
+        let before = sign_ins.get(..at).unwrap_or_default();
+        if before.iter().any(|b| b.sign_in == grant.sign_in) {
+            return Err(signed_in(format!(
+                "sign_ins[{at}] names sign-in {} twice: each is one grant's",
+                grant.sign_in
+            )));
+        }
+        if before.iter().any(|b| b.cli == grant.cli) {
+            return Err(signed_in(format!(
+                "sign_ins[{at}] signs {:?} in again: a run signs a CLI in as one sign-in (Shards' D242)",
+                grant.cli
+            )));
+        }
+        if grant.toward.is_empty() {
+            return Err(signed_in(format!(
+                "sign_ins[{at}] grants {} toward no host, where its access token could never be filled in",
+                grant.sign_in
+            )));
+        }
+        for (i, host) in grant.toward.iter().enumerate() {
+            if grant.toward.get(..i).unwrap_or_default().contains(host) {
+                return Err(signed_in(format!(
+                    "sign_ins[{at}].toward names {host:?} twice"
+                )));
+            }
+            if !reached(grants, &grant.member, host) {
+                return Err(signed_in(format!(
+                    "sign_ins[{at}].toward[{i}] {host:?} is no host an egress grant of {} reaches by name, by TCP: a \
+                     sign-in grants no egress, and TLS names a server by its DNS name alone (RFC 6066 §3)",
+                    grant.member
+                )));
+            }
+        }
+        let Some(captured) = &grant.captured else {
+            continue;
+        };
+        if !named(&captured.access) {
+            return Err(signed_in(format!(
+                "sign_ins[{at}].captured.access {:?} isn't a name its orchestrator's store could hold",
+                captured.access
+            )));
+        }
+        let placeholders = [
+            Some((captured.access_placeholder.as_str(), "access_placeholder")),
+            captured
+                .refresh_placeholder
+                .as_deref()
+                .map(|p| (p, "refresh_placeholder")),
+        ];
+        for (placeholder, field) in placeholders.into_iter().flatten() {
+            if !token(placeholder) {
+                return Err(signed_in(format!(
+                    "sign_ins[{at}].captured.{field} isn't a token a request carries, RFC 6750 §2.1's b64token, so its \
+                     CLI could never send it where Shards' injector looks (D242)"
+                )));
+            }
+            standing.push((placeholder, format!("sign_ins[{at}].captured.{field}")));
+        }
+    }
+    for (at, grant) in credentials.iter().enumerate() {
+        standing.push((
+            grant.placeholder.as_str(),
+            format!("credentials[{at}].placeholder"),
+        ));
+    }
+    standing.sort_unstable();
+    for pair in standing.windows(2) {
+        if let [(placeholder, first), (same, then)] = pair
+            && placeholder == same
+            && !(first.starts_with("credentials") && then.starts_with("credentials"))
+        {
+            return Err(signed_in(format!(
+                "{then} is {first} too: each placeholder stands for one token alone, or Shards' injector could not \
+                 tell which a request carrying it asks (D242)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a name its orchestrator's store could hold: 1 to [`REFERENCE_MAX`] of ASCII letters, digits and
+/// `/_+=.@-`.
+fn named(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= REFERENCE_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/_+=.@-".contains(&b))
+}
+
+fn signed_in(why: String) -> Refusal {
+    Refusal::Invalid {
+        what: "sign_ins",
+        why,
+    }
+}

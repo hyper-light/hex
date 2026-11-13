@@ -69,6 +69,7 @@ impl Runtime for GuestNode {
     }
     fn capacity(&self, class: Class) -> Result<Option<Capacity>, Refusal> {
         Ok((class == Class::Oci).then(|| Capacity {
+            own: Default::default(),
             id: "guest".to_owned(),
             total: self.room,
             free: self.room,
