@@ -48,12 +48,12 @@ use hex_api::{
     ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
-    LearnedCeiling, LearnedEnd, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse,
-    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
-    check_published,
+    LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
+    LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
+    PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User,
+    check_credentials, check_grants, check_published,
 };
 
 use crate::netns;
@@ -1770,13 +1770,15 @@ fn put_unavailable_devices(w: &mut Writer, unavailable: &[DeviceUnavailable]) ->
 const LEARNED_PRIOR_BYTES: usize = 32 + 2 * RESOURCE_BYTES;
 /// A learned use: what the receipts booked and what their VMs are learned to take.
 const LEARNED_USE_BYTES: usize = 2 * RESOURCE_BYTES;
-/// One learned holding at its least: a one-byte box id with its length, then its resources.
-const LEARNED_HOLDING_MIN_BYTES: usize = size_of::<u32>() + 1 + RESOURCE_BYTES;
+/// A holder at its least ([`put_holder`]): its tag, then a one-byte box id with its length.
+const HOLDER_MIN_BYTES: usize = 1 + size_of::<u32>() + 1;
+/// One learned holding at its least: its holder at its least, then its resources.
+const LEARNED_HOLDING_MIN_BYTES: usize = HOLDER_MIN_BYTES + RESOURCE_BYTES;
 /// One learned end past its box id, at its most: what the VM held and its budget, its band, its fleet's held, growth
 /// and budget, then its unmoved capability's option tag and that capability's tag.
 const LEARNED_END_BYTES: usize = 5 * size_of::<u64>() + 1 + 2;
-/// One learned end at its least: a one-byte box id with its length, then the rest with no unmoved capability.
-const LEARNED_END_MIN_BYTES: usize = size_of::<u32>() + 1 + LEARNED_END_BYTES - 1;
+/// One learned end at its least: its holder at its least, then the rest with no unmoved capability.
+const LEARNED_END_MIN_BYTES: usize = HOLDER_MIN_BYTES + LEARNED_END_BYTES - 1;
 
 /// One learned ceiling at its least (C1): its profile's id, its envelope, and each dimension of its overhead none.
 const LEARNED_CEILING_MIN_BYTES: usize = 32 + RESOURCE_BYTES + 3;
@@ -1806,9 +1808,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
             bound: holdings.len(),
         })?;
     for holding in holdings {
-        let bytes = size_of::<u32>()
-            .saturating_add(holding.id.as_str().len())
-            .saturating_add(RESOURCE_BYTES);
+        let bytes = holder_bytes(&holding.id).saturating_add(RESOURCE_BYTES);
         let Some(left) = room.checked_sub(bytes) else {
             break;
         };
@@ -1822,9 +1822,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
             bound: ended.len(),
         })?;
     for end in ended {
-        let bytes = size_of::<u32>()
-            .saturating_add(end.id.as_str().len())
-            .saturating_add(LEARNED_END_BYTES);
+        let bytes = holder_bytes(&end.id).saturating_add(LEARNED_END_BYTES);
         let Some(left) = room.checked_sub(bytes) else {
             break;
         };
@@ -1855,7 +1853,7 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.holdings.len(), LEARNED_HOLDING_MIN_BYTES)?;
     for holding in &learned.holdings {
-        w.string(holding.id.as_str())?;
+        put_holder(w, &holding.id)?;
         w.reserve_fixed(RESOURCE_BYTES)?;
         put_resources(w, holding.holding);
     }
@@ -1879,10 +1877,47 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     Ok(())
 }
 
-/// One learned end (C5): its box id, then what the VM held and its budget, its band, its fleet's held, growth and
+/// A holder of a node's room (joint plan step 39): its tag, 0 for a box, then its id. Kept here: a node VM's isn't
+/// carried.
+fn put_holder(w: &mut Writer, holder: &LearnedHolder) -> Result<(), Fault> {
+    match holder {
+        LearnedHolder::Box(id) => {
+            w.reserve_fixed(1)?;
+            w.u8(0);
+            w.string(id.as_str())
+        }
+        LearnedHolder::Node(_) => Err(Fault::value(
+            "a learned holder",
+            "a node VM's holder isn't carried",
+        )),
+    }
+}
+
+/// What [`put_holder`] writes of `holder`: its tag, then a box's id with its length, or a node VM's run.
+fn holder_bytes(holder: &LearnedHolder) -> usize {
+    match holder {
+        LearnedHolder::Box(id) => 1usize
+            .saturating_add(size_of::<u32>())
+            .saturating_add(id.as_str().len()),
+        LearnedHolder::Node(_) => 1 + 16,
+    }
+}
+
+/// The holder [`put_holder`] wrote.
+fn holder(r: &mut Reader<'_>) -> Result<LearnedHolder, Fault> {
+    match r.u8()? {
+        0 => Ok(LearnedHolder::Box(box_id(r)?)),
+        tag => Err(Fault::value(
+            "a learned holder",
+            format!("tag {tag} names no holder"),
+        )),
+    }
+}
+
+/// One learned end (C5): its holder, then what the VM held and its budget, its band, its fleet's held, growth and
 /// budget, and what moving it instead awaited.
 fn put_learned_end(w: &mut Writer, end: &LearnedEnd) -> Result<(), Fault> {
-    w.string(end.id.as_str())?;
+    put_holder(w, &end.id)?;
     w.reserve_fixed(LEARNED_END_BYTES)?;
     w.u64(end.held);
     w.u64(end.budget);
@@ -1895,7 +1930,7 @@ fn put_learned_end(w: &mut Writer, end: &LearnedEnd) -> Result<(), Fault> {
 
 fn learned_end(r: &mut Reader<'_>) -> Result<LearnedEnd, Fault> {
     Ok(LearnedEnd {
-        id: box_id(r)?,
+        id: holder(r)?,
         held: r.u64()?,
         budget: r.u64()?,
         band: r.u8()?,
@@ -1929,7 +1964,7 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         "learned holdings",
         |r| {
             Ok(LearnedHolding {
-                id: box_id(r)?,
+                id: holder(r)?,
                 holding: resources(r)?,
             })
         },

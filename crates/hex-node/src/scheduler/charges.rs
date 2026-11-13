@@ -78,7 +78,7 @@ pub(super) fn apply(local: &mut NodeSpec, learned: &[(Class, Learned)]) -> Resul
 pub(super) fn holds(
     learned: &[(Class, Learned)],
     ids: &BTreeMap<BoxId, Key>,
-) -> Result<Vec<(Key, CapacityResources)>, Refusal> {
+) -> Result<Vec<(hex_sim::peer::Holder, CapacityResources)>, Refusal> {
     let count = learned
         .iter()
         .map(|(_, learned)| learned.holdings.len())
@@ -90,8 +90,11 @@ pub(super) fn holds(
             bound: count,
         })?;
     for holding in learned.iter().flat_map(|(_, learned)| &learned.holdings) {
-        if let Some(key) = ids.get(&holding.id) {
-            out.push((*key, holding.holding));
+        // Kept here: a node VM's holding isn't the ledger's.
+        if let hex_api::LearnedHolder::Box(id) = &holding.id
+            && let Some(key) = ids.get(id)
+        {
+            out.push((hex_sim::peer::Holder::Box(*key), holding.holding));
         }
     }
     Ok(out)
