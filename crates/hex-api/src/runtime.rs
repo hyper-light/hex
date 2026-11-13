@@ -336,6 +336,24 @@ impl RouteKey {
     }
 }
 
+/// A node VM's run (joint plan step 39): a VM the node runs for itself, its `oci` class's guest under shards-init, never
+/// a box. Minted by the node's store as the VM is booked, it names the VM's record and its receipt among the node's
+/// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one and no
+/// wire input parses one, as hex-core's wire neither writes nor reads it, so no box API can name the node's VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeRun([u8; 16]);
+
+impl NodeRun {
+    /// The run `bytes` name, as its node's store minted it.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
 /// Pool configuration identity and the Store-generated native incarnation; neither PID nor path
 /// supplies this authority. The original profile remains in the same durable backing record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
