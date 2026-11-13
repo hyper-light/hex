@@ -2443,6 +2443,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.usage(id)
     }
 
+    fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.member(id, member)
+    }
+
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         self.runtime
             .list()?

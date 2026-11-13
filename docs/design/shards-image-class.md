@@ -104,12 +104,25 @@ split, so a box can be admitted and recorded before it is needed:
 | `delete` | `Deleting`, then `stop` if it runs, to its run's end, then the record removed. |
 
 Every member operation D231 doesn't give (a terminal, exec, signals) is refused typed, naming the capability
-(`Refusal::Awaits`), never stubbed. A member's own streams (D231's `take_output`, and step 5's `take_input`) no
-hex-api call names yet, so the class asks for no member's stdin (no `MemberSpec`: each member's stdin is
-`/dev/null`); the joint plan's step 17 asks for them (a session's stdio as its member's). What D234 to D236 add is asked
-for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness is a nested runtime, step 39's),
-the destinations a box's grants name kept and each member held to its own reach (network-grants.md N4), and a
-plug's refusal, which only a plug's call could bring and this class makes none, refused `Broken`, naming it.
+(`Refusal::Awaits`), never stubbed. A member's own streams are the joint plan's step 17 (a kiln session's stdio as its
+harness member's):
+- `ShardsImage::members` names the members the box's caller drives (each its `Member`, variables over its image's
+  and a working directory, checked as an exec's variables and as D231's absolute, plain `workdir`; each named once).
+  The boot gives each a `MemberSpec` with `stdin` (step 5's pipe the orchestrator writes) and no terminal; the
+  image's other members run as it declares them, their stdin `/dev/null`.
+- `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
+  stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
+  its end (`wait_member`; `WithRun` is the run's end, as the box's own). It is no process of this host
+  (`on_this_host` false, no pid: D231 names none), and its own kill awaits the endpoint (`MemberSignal`); the box's
+  KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
+  isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
+  and the simulator as its echo program; the node's wire carries no member call yet (`hex-client` refuses it, typed),
+  as a member's pipes live in the process that holds the run.
+
+What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
+is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
+(network-grants.md N4), and a plug's refusal, which only a plug's call could bring and this class makes none,
+refused `Broken`, naming it.
 
 `RunEnd` becomes the box's exit as Shards reports it: `Exited(status)` is `Exit::Code(status)` (`docker run`'s
 status, 128 plus a signal's number where one ended it, kept as the number it is rather than guessed back into a
@@ -233,6 +246,9 @@ This class stays: it is how every Shards VM boots, once Hex's own node boots the
   (`Images::boot`'s). The native-owner launch would also give the run host a scope of its own: it runs in the node's
   process tree today, so Hex charges the VM's envelope by admission but cannot contain the run host per box, nor read
   its use on the host (§4).
+- **A member's streams over the node's wire** (joint plan step 17's remote callers): a wire call that carries the
+  three ends as the exec's asked streams are carried (descriptors on the local socket, stream lanes over QUIC). Until
+  then `Runtime::member` is served in process alone, and a caller over the wire is refused, typed.
 
 ## 9. What would falsify it
 

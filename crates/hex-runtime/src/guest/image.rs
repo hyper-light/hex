@@ -22,12 +22,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, GuestTime, LifecycleCause, Refusal,
-    ShardsImage, Signal, Upstream, Usage, VmSize,
+    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, ImageMember,
+    LifecycleCause, Member, MemberKind, Proc, Refusal, ShardsImage, Signal, Upstream, Usage,
+    VmSize,
 };
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
-use shards_api::image::{ImageGuest, ImageRefusal, ImageSpec, Images, RunEnd, Stats, StatsScope};
+use shards_api::image::{
+    Channel, ImageGuest, ImageRefusal, ImageSpec, Images, MemberEnd, MemberName, MemberSpec,
+    RunEnd, Secret, Stats, StatsScope,
+};
 
 use super::{GuestRuntime, poisoned};
 use crate::devices;
@@ -293,6 +297,90 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
     })
 }
 
+/// What Shards' image boot gives a member its caller drives (joint plan step 17): its stdin a pipe the caller
+/// writes (`MemberSpec::stdin`), its variables and working directory as the box's spec says them, no file and no
+/// terminal. Its stdout and stderr are D231's pipes for every member that runs.
+fn member_spec(m: &ImageMember) -> MemberSpec {
+    MemberSpec {
+        member: member_name(&m.member),
+        env: m
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), Secret::from(v.as_str())))
+            .collect(),
+        files: Vec::new(),
+        workdir: m.workdir.clone(),
+        stdin: true,
+        terminal: false,
+    }
+}
+
+/// A member as Shards' image boot names it.
+fn member_name(m: &Member) -> MemberName {
+    match m.kind {
+        MemberKind::Harness => MemberName::harness(&m.name),
+        MemberKind::Agent => MemberName::agent(&m.name),
+    }
+}
+
+/// A member its caller drives, as a program (joint plan step 17): no process of this host, its end D231's
+/// `wait_member` (the run's end, where it ended with its run), and the caller's ends of its streams, given once.
+/// A signal to the member alone is the agent-control endpoint's (step 11), so its own kill awaits it; the box's
+/// stop (`signal(KILL)`, `delete`) ends it with its VM.
+struct MemberProc {
+    id: BoxId,
+    guest: Arc<dyn ImageGuest>,
+    name: MemberName,
+    given: Option<Given>,
+    ended: Option<Exit>,
+}
+
+impl Proc for MemberProc {
+    /// D231 names no member's pid in its guest: none is told.
+    fn pid(&self) -> u32 {
+        0
+    }
+
+    fn on_this_host(&self) -> bool {
+        false
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        self.wait_for(Duration::ZERO)
+    }
+
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        if let Some(exit) = self.ended {
+            return Ok(Some(exit));
+        }
+        let exit = match self.guest.wait_member(&self.name, timeout) {
+            Ok(None) => return Ok(None),
+            Ok(Some(MemberEnd::Exited(status))) => {
+                i32::try_from(status).map_or(Exit::Unknown, Exit::Code)
+            }
+            // Its run ended first, and the member with it: the run's end is its own.
+            Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
+                Ok(Some(end)) | Err(ImageRefusal::Ended(end)) => exit_of(&end),
+                Ok(None) | Err(_) => Exit::Unknown,
+            },
+            Err(ImageRefusal::Ended(end)) => exit_of(&end),
+            Err(why) => return Err(refused(&self.id, "waiting for a member's end", why)),
+        };
+        self.ended = Some(exit);
+        Ok(Some(exit))
+    }
+
+    fn kill(&mut self) -> Result<(), Refusal> {
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberSignal,
+        })
+    }
+
+    fn streams(&mut self) -> Result<Given, Refusal> {
+        Ok(self.given.take().unwrap_or_default())
+    }
+}
+
 fn pending(id: &BoxId) -> Result<Refusal, Refusal> {
     Ok(Refusal::Lifecycle {
         id: id.try_clone()?,
@@ -491,7 +579,7 @@ impl GuestRuntime {
             vcpus: size.vcpus,
             memory_mib: size.memory_mib,
             command: image.command.clone(),
-            members: Vec::new(),
+            members: image.members.iter().map(member_spec).collect(),
             publish: network.publish,
             egress: network.egress,
             shares: Vec::new(),
@@ -861,6 +949,61 @@ impl GuestRuntime {
             }
             Err(why) => Err(refused(&id, "reading a Shards image VM's stats", why)),
         }
+    }
+
+    /// Member `member` of a running image box, which its spec says its caller drives (joint plan step 17): its
+    /// stdin, stdout and stderr taken from the run (D231's `take_input`, `take_output`: each once, so a second
+    /// call is refused as Shards refuses it), with its end. Refused, typed, for a member the spec doesn't name and
+    /// as every call is for a box that isn't running here; a take refused part-way leaves the member's earlier
+    /// streams taken, named in the refusal.
+    pub(super) fn member_image(
+        &self,
+        record: BoxRecord,
+        member: &Member,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let driven = match &record.spec.class {
+            ClassSpec::ShardsImage(image) => image.members.iter().any(|m| &m.member == member),
+            _ => false,
+        };
+        if !driven {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s spec names no {member} its caller drives"),
+            });
+        }
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting | State::Stopping(_) => return Err(pending(&id)?),
+            State::Created | State::Ended(_) => return Err(Refusal::NotRunning(id, "member")),
+        };
+        let name = member_name(member);
+        let stdin = guest
+            .take_input(&name)
+            .map_err(|why| refused(&id, "taking a member's stdin", why))?;
+        let stdout = guest
+            .take_output(&name, Channel::Stdout)
+            .map_err(|why| refused(&id, "taking a member's stdout (its stdin taken)", why))?;
+        let stderr = guest.take_output(&name, Channel::Stderr).map_err(|why| {
+            refused(
+                &id,
+                "taking a member's stderr (its stdin and stdout taken)",
+                why,
+            )
+        })?;
+        let given = Given {
+            stdin: Some(stdin.into()),
+            stdout: Some(stdout.into()),
+            stderr: Some(stderr.into()),
+        };
+        Ok(Box::new(MemberProc {
+            id,
+            guest,
+            name,
+            given: Some(given),
+            ended: None,
+        }))
     }
 
     pub(super) fn delete_image(&self, record: BoxRecord) -> Result<(), Refusal> {

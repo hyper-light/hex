@@ -88,6 +88,20 @@ pub trait Runtime: Send + Sync {
 
     /// Ends every process in the box and removes it, with any writable layer it owns.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal>;
+
+    /// A member of running Shards image box `id` that its spec says its caller drives
+    /// ([`crate::ShardsImage::members`]; joint plan step 17), as a program: its end, and the caller's ends of
+    /// its stdin, stdout and stderr, given once ([`Proc::streams`]). The member is the image's, in its guest:
+    /// no process of this host. A class whose boxes have no such members refuses it, naming the class.
+    fn member(&self, id: &BoxId, member: &crate::Member) -> Result<Box<dyn Proc>, Refusal> {
+        let _ = member;
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members its caller drives"
+            ),
+        })
+    }
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.

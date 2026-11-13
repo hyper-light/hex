@@ -77,8 +77,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   Shards `e82b9403` (D231 with D234-D236 and member stdin). Linux, macOS and Windows boot image VMs, D231's run
   host started holding only its stdio (Hex's vendor/patches/shards 0001, offered upstream); a node on macOS or
   Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and SHARDS_INIT aren't a pair serves none.
-  Closes with: guest time per vCPU in the run's stats (Shards', which Hex carries as a recorded change), the
-  class's wait records and its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's).
+  The members a box's caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and
+  `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process (unit-tested over
+  a model of D231 and the simulator; the node's wire carries no member call yet). Closes with: guest time per
+  vCPU in the run's stats (Shards', which Hex carries as a recorded change), the class's wait records and its
+  real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's), and a member's streams over the node's wire.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
