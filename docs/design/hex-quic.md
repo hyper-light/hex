@@ -110,7 +110,10 @@ its bounds, workers, disconnect rule and program watches), each control connecti
 whole messages framed as the guest's are; an exec's stdio connections are gathered as the guest's relay gathers them
 (`hex_core::stream::Gather`) and become the program's pipes, copied to and from their lanes. A stdin connection ends
 as the relay's does (HEX-GUEST-41): the peer's End ends the program's pipe; the program's letting its stdin go resets
-the connection, so the peer's client lets its caller's pipe go. On Unix its copier waits in poll(2) for the pipe's
+the connection, so the peer's client lets its caller's pipe go. A stdout or stderr connection's client ends its own
+half once it has named it (shards-guest.md §3), so the copier's End at its program's end leaves the connection done
+both ways: the copier's connection goes with nothing open to reset, and the client's bridge closes its socket pair
+whole, which no reader sleeps through (Shards M236), never a half-close alone. On Unix its copier waits in poll(2) for the pipe's
 readers and for the connection, which writes to a pipe of the copier's own as it changes; Windows' pipes can't be
 waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. The log
 port carries the node's log lines, each counted where a slow reader makes it let one go.
