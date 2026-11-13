@@ -390,10 +390,14 @@ impl Os for MacOs {
             return Recv::Gone;
         };
         loop {
-            if let Some(m) = f.ready.pop_front() {
+            if let Some(mut m) = f.ready.pop_front() {
                 let n = m.bytes.len().min(buf.len());
                 if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.get(..n)) {
                     into.copy_from_slice(from);
+                }
+                // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
+                if wire::carries_secret(&m.bytes) {
+                    hex_api::lease::wipe(&mut m.bytes);
                 }
                 return Recv::Message {
                     size: m.size,
@@ -662,7 +666,8 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
     if msg.flags.contains(ReturnFlags::CTRUNC) {
         f.cut = true;
     }
-    let mut input = bytes.get(..msg.bytes).unwrap_or_default();
+    let read = msg.bytes.min(bytes.len());
+    let mut input = bytes.get(..read).unwrap_or_default();
     while !input.is_empty() {
         let at_start = !f.deframer.in_frame();
         match f.deframer.take(input) {
@@ -707,6 +712,11 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
                 return Ok(true);
             }
         }
+    }
+    // What it read is framed into the messages it holds now: its bytes here, which may carry a lease's value, wiped
+    // (docs/design/credential-grants.md C7).
+    if let Some(held) = bytes.get_mut(..read) {
+        hex_api::lease::wipe_in_place(held);
     }
     Ok(true)
 }
