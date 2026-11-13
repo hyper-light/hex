@@ -1937,11 +1937,11 @@ mod tests {
     }
 
     /// T-T7.1.2: do read the host's boot session, write a record through the store, update it, and update
-    /// one an earlier boot wrote. Expect: the session read on Linux and macOS, and each record carrying it.
+    /// one an earlier boot wrote. Expect: the session read on Linux, macOS and Windows, and each record carrying it.
     #[test]
     fn t_t7_1_2_every_record_the_store_writes_carries_this_boot() {
         let boot = host_boot().clone().unwrap();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         assert!(boot.is_some(), "the host's boot session wasn't read");
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
