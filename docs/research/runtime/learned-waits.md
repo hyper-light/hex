@@ -46,7 +46,7 @@ is wired:
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup | members gone | owed (`Duration::MAX` meanwhile) |
-| `serve.reads` | a client reading a list | its connection | bytes read | liveness; progress owed |
+| `serve.reads` | a client reading a list | its connection | messages it takes (`Out::gone`) | yes |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*`, `guest.stage` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
