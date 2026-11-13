@@ -3462,6 +3462,7 @@ fn greeting_relay(dir: &std::path::Path, pool: Option<Capacity>) -> std::thread:
 
 /// A fixed VM's cost profile for `config`'s guest: its vCPUs and memory, floor and ceiling alike, as a node's guest is
 /// charged (`GuestConfig::checked_runtime_allocation`).
+#[cfg(unix)]
 fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
     let vm = crate::guest::selected::resources(config).unwrap();
     hex_api::RuntimeCost {
@@ -3480,6 +3481,7 @@ fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
 
 /// A node's guest runtime of the image form, its node VM booted through `images`, its records `owner`'s, its node
 /// having fitted it six lanes: with the configuration it was made from.
+#[cfg(unix)]
 fn image_form(
     images: &Arc<ModelImages>,
     owner: &Arc<Owner>,
@@ -3548,8 +3550,10 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
 }
 
 /// A node's loop with no room for one more connection: it refuses every guest connection's join.
+#[cfg(unix)]
 struct FullLoop;
 
+#[cfg(unix)]
 impl crate::guest::Joins for FullLoop {
     fn reserve(&self) -> Result<(u64, crate::guest::Room), Refusal> {
         Err(Refusal::Exhausted {
@@ -3602,6 +3606,7 @@ fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stoppe
 }
 
 /// The guest node's own pool as its relay answers it: two CPUs and 4 GiB, all of them free.
+#[cfg(unix)]
 fn guest_pool() -> Capacity {
     let room = CapacityResources {
         cpu_milli: 2_000,
