@@ -777,7 +777,7 @@ impl GuestRuntime {
                 continue;
             }
             if matches!(record.spec.class, hex_api::ClassSpec::ShardsImage(_)) {
-                self.retire_image(record)?;
+                self.images.retire_image(record)?;
                 continue;
             }
             let keys = self.turn_keys(&record.spec.devices)?;

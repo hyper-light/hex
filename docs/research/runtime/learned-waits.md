@@ -166,9 +166,11 @@ Production, a W* that still ends something:
    client's program's end (`Shared::gone`) were `Exit::Unknown` at W*, a killed program's end (`Unwatched::Killed`)
    was given up at W*, and a stopping server's drain stopped at W*. Done: each follows its programs past W* by their
    lives, the run-out told (`emptying::end_of_killed`; the drain's own loop).
-2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* is taken for hung, killed, and the
-   claim falls back to a seed's clone (`Patience::expired`). Owed: the claim follows the init's life (its pidfd, its
-   sync pipe and claim socket) past W*, the run-out told.
+2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* was taken for hung, killed, and
+   the claim fell back to a seed's clone of the same request, on the same sync pipe, where a word the killed init had
+   written by then stood first: a rootless init's ask for its maps, answered with the new init's pid, the kernel
+   refusing the map ("writing uid_map failed: Operation not permitted", 2026-11-13). Done: the claim follows the init
+   past W* by its life (its sync pipe, claim socket and pidfd), the run-out told; `Patience::expired` went with it.
 3. **A park's wait for its init's word** (hex-node `createpool::Parker::park`, `Parked::wait_parked`): bounded by
    `seeds.hang`'s W*, past it the park fails and its init is killed. Owed: it follows the init past W*.
 4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
