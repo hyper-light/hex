@@ -1175,7 +1175,7 @@ impl Driver {
                 self.lock()?.admission = Some(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Uncertain,
-                    why: None,
+                    why: Some(format!("its runtime refused its initialization: {refusal}")),
                 });
                 return Err(refusal.into());
             }
@@ -1186,15 +1186,16 @@ impl Driver {
             && observed.phase == hex_api::BackingPhase::Live;
         let mut state = self.lock()?;
         if !accepted || state.node.observe_backing(&observed).is_err() {
+            let why = "its runtime's initialized offer isn't its grant, or its node's index can't take it";
             state.admission = Some(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
-                why: None,
+                why: Some(why.to_owned()),
             });
             return Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
-                why: None,
+                why: Some(why.to_owned()),
             }
             .into());
         }
@@ -1212,10 +1213,10 @@ impl Driver {
         expected.allocation()?;
         let _operation = self.operation()?;
         let key = expected.key;
-        let refused = || Refusal::Backing {
+        let refused = |why: &str| Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
-            why: None,
+            why: Some(why.to_owned()),
         };
         if expected.phase != hex_api::BackingPhase::Draining {
             return Err(invalid_static("native cleanup requires canonical Draining intent").into());
@@ -1223,20 +1224,23 @@ impl Driver {
         self.lock()?
             .node
             .observe_backing(expected)
-            .map_err(|_| refused())?;
+            .map_err(|_| refused("its node's index can't take its draining offer"))?;
         let observed = self.runtimes.get(endpoint)?.release_backing(key)?;
         if observed.key != key
             || observed.cost != expected.cost
             || observed.devices != expected.devices
             || observed.phase != hex_api::BackingPhase::Released
         {
-            self.lock()?.admission = Some(refused());
+            self.lock()?.admission = Some(refused(
+                "its runtime's released offer isn't the one it drained",
+            ));
             return Err(invalid_static("native cleanup changed its exact backing receipt").into());
         }
         let mut state = self.lock()?;
         if state.node.observe_backing(&observed).is_err() {
-            state.admission = Some(refused());
-            return Err(refused().into());
+            let why = "its node's index can't take its released offer";
+            state.admission = Some(refused(why));
+            return Err(refused(why).into());
         }
         Ok(observed)
     }
@@ -1251,19 +1255,22 @@ impl Driver {
         expected.allocation()?;
         let _operation = self.operation()?;
         let key = expected.key;
-        let refused = || Refusal::Backing {
+        let refused = |why: &str| Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
-            why: None,
+            why: Some(why.to_owned()),
         };
         if expected.phase != hex_api::BackingPhase::Released
             || !self
                 .lock()?
                 .node
                 .backing_released(key)
-                .map_err(|_| refused())?
+                .map_err(|_| refused("its node's index can't say whether it is released"))?
         {
-            return Err(refused().into());
+            return Err(refused(
+                "it isn't released in its node's index as its release is acknowledged",
+            )
+            .into());
         }
         let observed = self.runtimes.get(endpoint)?.release_backing(key)?;
         if observed.key != key
@@ -1271,8 +1278,9 @@ impl Driver {
             || observed.devices != expected.devices
             || observed.phase != expected.phase
         {
-            self.lock()?.admission = Some(refused());
-            return Err(refused().into());
+            let why = "its runtime's acknowledged offer isn't the released one";
+            self.lock()?.admission = Some(refused(why));
+            return Err(refused(why).into());
         }
         Ok(())
     }
