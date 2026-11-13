@@ -76,9 +76,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
   Shards `e82b9403` (D231 with D234-D236 and member stdin). Linux boots image VMs; macOS and Windows refuse a
   create `Awaits(RunHostStdioOnly)`, as D231 starts its run host through std's spawn, which hands it what the
-  node holds inheritable. A node there passes an image VM's calls to its guest runtime. Closes with: the run
-  host holding only its stdio and guest time per vCPU in the run's stats (Shards'), the class's wait records
-  and its real-VM runs (`image_real`, ROOT's).
+  node holds inheritable. A node there passes an image VM's calls to its guest runtime. The members a box's
+  caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and `Runtime::member`
+  hands the caller a member's stdin, stdout, stderr and end, once, in process (unit-tested over a model of
+  D231 and the simulator; the node's wire carries no member call yet). Closes with: the run host holding only
+  its stdio and guest time per vCPU in the run's stats (Shards'), the class's wait records and its real-VM runs
+  (`image_real`, ROOT's), and a member's streams over the node's wire.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

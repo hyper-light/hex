@@ -4561,6 +4561,44 @@ fn unknown_grant_tags_are_refused_by_name() {
     }
 }
 
+/// Joint plan step 17, AC-T7.4.1: do create a Shards image VM whose spec names the members its caller drives, one
+/// with variables and a working directory and one with neither; expect it read back whole, its members after its
+/// grants.
+#[test]
+fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
+    let members = vec![
+        hex_api::ImageMember {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            },
+            env: vec![("LANG".to_owned(), "C.UTF-8".to_owned())],
+            workdir: Some("/home/me/project".to_owned()),
+        },
+        hex_api::ImageMember::new(Member {
+            kind: MemberKind::Agent,
+            name: "helper".to_owned(),
+        }),
+    ];
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-members"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            members,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+    })));
+    let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+}
+
 /// Joint plan step 15 (every grant visible in Hex's record of the VM): do create a Shards image VM granted a provider
 /// by name, kiln on its host and a publish; expect it read back whole, its grants written after its command. Do
 /// write one whose grants the check refuses (a loopback destination), and read it as a peer that skipped the check

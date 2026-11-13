@@ -176,7 +176,26 @@ struct ModelRun {
     end: Mutex<Option<RunEnd>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// Each member's end, as the test sets it, by name: none until it does.
+    member_ends: Mutex<std::collections::BTreeMap<String, MemberEnd>>,
+    /// Each member a boot asked the stdin of, by name, with its own ends of its stdin, stdout and stderr: the
+    /// test holds them as the member does.
+    inside: Mutex<
+        Vec<(
+            String,
+            std::io::PipeReader,
+            std::io::PipeWriter,
+            std::io::PipeWriter,
+        )>,
+    >,
 }
+
+/// The orchestrator's ends of a member's stdin, stdout and stderr, each taken once.
+type Outside = (
+    Option<std::io::PipeWriter>,
+    Option<std::io::PipeReader>,
+    Option<std::io::PipeReader>,
+);
 
 /// A booted run in the model: its members, as the test gives the image them, and its ports, bound as its boot
 /// asked them (joint plan step 15).
@@ -184,6 +203,7 @@ struct ModelGuest {
     run: Arc<ModelRun>,
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
+    outside: Mutex<std::collections::BTreeMap<String, Outside>>,
 }
 
 impl ImageGuest for ModelGuest {
@@ -193,20 +213,44 @@ impl ImageGuest for ModelGuest {
     fn published(&self) -> &[Bound] {
         &self.published
     }
-    fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's output",
-            why: "it has none".to_owned(),
+    fn take_output(
+        &self,
+        member: &MemberName,
+        channel: Channel,
+    ) -> Result<std::io::PipeReader, ImageRefusal> {
+        let mut outside = self.outside.lock().unwrap();
+        let ends = outside.get_mut(&member.name);
+        let taken = match channel {
+            Channel::Stdout => ends.and_then(|e| e.1.take()),
+            Channel::Stderr => ends.and_then(|e| e.2.take()),
+        };
+        taken.ok_or_else(|| ImageRefusal::Spec {
+            what: "member",
+            why: format!("{}'s output was taken, or it doesn't run", member.name),
         })
     }
-    fn take_input(&self, _: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's input",
-            why: "it has none".to_owned(),
-        })
+    fn take_input(&self, member: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
+        let mut outside = self.outside.lock().unwrap();
+        outside
+            .get_mut(&member.name)
+            .and_then(|e| e.0.take())
+            .ok_or_else(|| ImageRefusal::Spec {
+                what: "member",
+                why: format!("{}'s stdin was taken, or never asked for", member.name),
+            })
     }
-    fn wait_member(&self, _: &MemberName, _: Duration) -> Result<Option<MemberEnd>, ImageRefusal> {
-        Ok(None)
+    fn wait_member(
+        &self,
+        member: &MemberName,
+        _: Duration,
+    ) -> Result<Option<MemberEnd>, ImageRefusal> {
+        Ok(self
+            .run
+            .member_ends
+            .lock()
+            .unwrap()
+            .get(&member.name)
+            .copied())
     }
     fn wait_ready(&self, _: Option<Ready>, _: Duration) -> Result<Option<Ready>, ImageRefusal> {
         Err(ImageRefusal::Unsupported {
@@ -316,10 +360,29 @@ impl Images for ModelImages {
                 to: Vec::new(),
             })
             .collect();
+        // Each member whose stdin the boot asked for, its three pipes: the member's ends to the test, the
+        // orchestrator's to its takes.
+        let mut outside = std::collections::BTreeMap::new();
+        for m in spec.members.iter().filter(|m| m.stdin) {
+            let (stdin_r, stdin_w) = std::io::pipe().unwrap();
+            let (stdout_r, stdout_w) = std::io::pipe().unwrap();
+            let (stderr_r, stderr_w) = std::io::pipe().unwrap();
+            self.run.inside.lock().unwrap().push((
+                m.member.name.clone(),
+                stdin_r,
+                stdout_w,
+                stderr_w,
+            ));
+            outside.insert(
+                m.member.name.clone(),
+                (Some(stdin_w), Some(stdout_r), Some(stderr_r)),
+            );
+        }
         Ok(Box::new(ModelGuest {
             run: Arc::clone(&self.run),
             members: self.members.lock().unwrap().clone(),
             published,
+            outside: Mutex::new(outside),
         }))
     }
 }
@@ -537,6 +600,139 @@ fn member_exec_and_signals_await_the_agent_control_endpoint() {
     );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Joint plan step 17, AC-T7.4.1: do create an image VM whose spec names a harness its caller drives, with a
+/// variable and a working directory, take it before the start, start it, and take it. Expect: before the start
+/// NotRunning; the boot asks Shards for that member's stdin with its variable and directory and no terminal; the
+/// caller's ends of its three streams, given once; what the caller writes read by the member in order, and its
+/// end of input at the caller's close; what the member writes on stdout and stderr read whole by the caller; no
+/// end until the member's, then its status; its own kill awaiting the agent-control endpoint; a second take
+/// refused, as Shards refuses one; a member the spec doesn't name refused.
+#[test]
+fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
+    use std::io::{Read, Write};
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let mut boxed = spec("image-driven", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember {
+            member: claude.clone(),
+            env: vec![("TZ".to_owned(), "UTC".to_owned())],
+            workdir: Some("/work/project".to_owned()),
+        });
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    assert!(matches!(
+        runtime.member(&id, &claude),
+        Err(Refusal::NotRunning(_, "member"))
+    ));
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    let [m] = asked.members.as_slice() else {
+        panic!("one member asked: {:?}", asked.members);
+    };
+    assert_eq!(
+        (&m.member, m.stdin, m.terminal, m.workdir.as_deref()),
+        (
+            &MemberName::harness("claude"),
+            true,
+            false,
+            Some("/work/project")
+        )
+    );
+    assert_eq!(m.env, vec![("TZ".to_owned(), Secret::from("UTC"))]);
+    let mut proc = runtime.member(&id, &claude).unwrap();
+    assert!(
+        !proc.on_this_host(),
+        "a member is its guest's, no process of this host"
+    );
+    let given = proc.streams().unwrap();
+    assert!(
+        proc.streams().unwrap().stdin.is_none(),
+        "its streams are given once"
+    );
+    let mut to = hex_api::OwnedStream::from(given.stdin.unwrap());
+    let mut from = hex_api::OwnedStream::from(given.stdout.unwrap());
+    let mut errors = hex_api::OwnedStream::from(given.stderr.unwrap());
+    let (name, mut member_in, mut member_out, mut member_err) =
+        images.run.inside.lock().unwrap().pop().unwrap();
+    assert_eq!(name, "claude");
+    to.write_all(b"first\n").unwrap();
+    to.write_all(b"second\n").unwrap();
+    drop(to);
+    let mut heard = String::new();
+    member_in.read_to_string(&mut heard).unwrap();
+    assert_eq!(heard, "first\nsecond\n", "in order, then its end of input");
+    member_out.write_all(b"an answer").unwrap();
+    member_err.write_all(b"a note").unwrap();
+    drop((member_out, member_err));
+    let mut said = String::new();
+    from.read_to_string(&mut said).unwrap();
+    assert_eq!(said, "an answer");
+    let mut noted = String::new();
+    errors.read_to_string(&mut noted).unwrap();
+    assert_eq!(noted, "a note");
+    assert_eq!(proc.try_wait().unwrap(), None, "no end until the member's");
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("claude".to_owned(), MemberEnd::Exited(3));
+    assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(Exit::Code(3)));
+    assert_eq!(
+        proc.kill(),
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberSignal
+        })
+    );
+    assert!(
+        runtime.member(&id, &claude).is_err(),
+        "its streams were taken"
+    );
+    let helper = Member {
+        kind: MemberKind::Agent,
+        name: "helper".to_owned(),
+    };
+    assert!(matches!(
+        runtime.member(&id, &helper),
+        Err(Refusal::Invalid { what: "member", .. })
+    ));
+}
+
+/// Joint plan step 17, AC-T7.4.1: do take a member its caller drives whose run was stopped; expect its end the
+/// run's, KILL (signal 9), as the box's own is.
+#[test]
+fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let codex = Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    };
+    let mut boxed = spec("image-ended", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember::new(codex.clone()));
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.member(&id, &codex).unwrap();
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("codex".to_owned(), MemberEnd::WithRun);
+    *images.run.end.lock().unwrap() = Some(RunEnd::Stopped);
+    assert_eq!(
+        proc.wait_for(Duration::ZERO).unwrap(),
+        Some(Exit::Signal(Signal::KILL.number()))
+    );
 }
 
 /// Joint plan steps 12 and 14: do read a running VM's usage, then one whose stats lack a line. Expect:

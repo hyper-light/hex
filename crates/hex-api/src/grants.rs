@@ -33,25 +33,31 @@ impl Member {
     /// Whether its name is one Shards' Agentfile parser takes, BuildKit's stage name `^[a-z][a-z0-9._-]*$`
     /// (`valid_stage_name`), within [`Member::MAX_NAME`].
     fn check(&self, at: usize) -> Result<(), Refusal> {
+        self.check_named(&format!("grants[{at}].member"))
+            .map_err(invalid)
+    }
+
+    /// [`Member::check`]'s rule, its refusal naming the field `field` it was read from.
+    pub(crate) fn check_named(&self, field: &str) -> Result<(), String> {
         let name = &self.name;
         if name.is_empty() || name.len() > Self::MAX_NAME {
-            return Err(invalid(format!(
-                "grants[{at}].member.name {name:?} isn't 1 to {} bytes",
+            return Err(format!(
+                "{field}.name {name:?} isn't 1 to {} bytes",
                 Self::MAX_NAME
-            )));
+            ));
         }
         if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
-            return Err(invalid(format!(
-                "grants[{at}].member.name {name:?} doesn't start with a lowercase letter"
-            )));
+            return Err(format!(
+                "{field}.name {name:?} doesn't start with a lowercase letter"
+            ));
         }
         if let Some(c) = name.chars().find(|c| {
             !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
         }) {
-            return Err(invalid(format!(
-                "grants[{at}].member.name {name:?} holds {c:?}: a member's name is lowercase letters, digits, \
+            return Err(format!(
+                "{field}.name {name:?} holds {c:?}: a member's name is lowercase letters, digits, \
                  '.', '_' and '-'"
-            )));
+            ));
         }
         Ok(())
     }
