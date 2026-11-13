@@ -17,30 +17,49 @@
 //! Windows: the node's whole CPU, an upper bound, no thread named there).
 //!
 //! The riser rises once its charge has warmed, SEEDABLE windows after its start, to every vCPU and the most any trace
-//! holds; the run lasts its longest trace. Each VM's guest plays its trace with `/bin/sh`, `sleep` and `head` (its
-//! image's, or `HEX_CHARGE_ROOTFS`'s), holding memory in a file of `/dev/shm` (else `/tmp`).
+//! holds; the run lasts its longest trace. Each VM's guest plays its trace with its `/bin/sh` (busybox's `sleep`, `head`,
+//! `truncate`, `grep` and `kill` in an Alpine root), each step until its deadline from the trace's start (read from
+//! `/proc/uptime`, so the play doesn't drift from the trace), holding its memory in a file of the first of `/dev/shm`,
+//! `/tmp` and `/run` that `/proc/mounts` says is a tmpfs, else of a tmpfs it mounts: guest RAM, never a file a shared
+//! root would put on the host. Equal steps in a row are one; a trace whose player's arguments pass Linux's least
+//! `ARG_MAX` (the guest's exec bound, `hex_api::sim::SIM_EXEC_LIMIT`) is refused, naming it.
+//!
+//! Every number it runs with is derived, none picked:
+//! - each VM's workload, what it is admitted for and the class's cost sizes: the most busy threads (a CPU each) and the
+//!   most MiB any step of any trace asks, so every trace and the riser fit their VM's envelope;
+//! - the process box's CPU cap, which it books and asks whole: the median CPU (mean cores, in milli-CPU, nearest rank)
+//!   of the `build` legs kiln's CI ran from 2026-10-22 to 2026-11-05 (bench/sched/kiln-ci-20261022-20261105.trace),
+//!   a CI job's box beside the agents;
+//! - the deadline guarding the node's start and each create (a VM's create boots it, past the client's learned create
+//!   bound): twice the node's own boot bound for the class, so the node's refusal, typed, comes first. `shards`: the
+//!   guest's dial bound, twice the slowest boot to ready this host's class records (bench/native/guest/records.tsv);
+//!   `shards-image`: the image boot's, twice its `image_boot` record, refused, naming the record to take, until
+//!   records.tsv holds one, as the class's creates are; `firecracker`: its configured `boot_ms`;
+//! - the run's window: the node's learner's, as the node says it.
 //!
 //! Inputs, each by its own variable, a missing one failing by name:
-//! - `HEX_CHARGE_CLASS`: `shards-image` (Agentfile image VMs, `HEX_IMAGE`, `NAME@sha256:...`, which the driver pulls
-//!   into the node's Shards home first: Linux; on macOS and Windows its run host awaits `RunHostStdioOnly`), `shards` (Shards guest VMs whose
-//!   box plays the trace from `HEX_CHARGE_ROOTFS`, an OCI layer or root directory with `/bin/sh`) or `firecracker`
-//!   (Linux, `HEX_CHARGE_ROOTFS` a root directory);
-//! - the class's configuration as `hex node` reads it (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
-//!   `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`, `HEX_GUEST_COST_FILE`, `HEX_GUEST_COST_SHA256`,
-//!   `HEX_GUEST_COST_EVIDENCE`; Firecracker's `HEX_FIRECRACKER_CONFIG`), passed through to it;
-//! - `HEX_CHARGE_CPU_MILLI` and `HEX_CHARGE_MEMORY_BYTES`: the workload each VM is admitted for, which the class's cost
-//!   sizes;
+//! - `HEX_CHARGE_CLASS`: `shards-image` (Agentfile image VMs of `HEX_IMAGE`, `NAME@sha256:...`, which the driver pulls
+//!   into the node's Shards home first: Linux, its run host awaiting `RunHostStdioOnly` on macOS and Windows), `shards`
+//!   (Shards guest VMs whose box plays the trace from `HEX_CHARGE_ROOTFS`) or `firecracker` (Linux, `HEX_CHARGE_ROOTFS`
+//!   a root directory). The root: Alpine 3.24.4's minirootfs of the guest's architecture, pinned by its SHA-256 in
+//!   bench/native/oci-validation/inputs.txt (fetched there by fetch.sh), unpacked to a directory, or the tarball itself
+//!   where the node stages a root from one (Windows);
+//! - the class's configuration as `hex node` reads it, passed through to it: `SHARDS_BIN`, `SHARDS_KERNEL` and
+//!   `SHARDS_INIT` (the image class's run hosts), `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `HEX_GUEST_CPUS`,
+//!   `HEX_GUEST_MEMORY_MIB`, `HEX_GUEST_COST_FILE`, `HEX_GUEST_COST_SHA256`, `HEX_GUEST_COST_EVIDENCE`; Firecracker's
+//!   `HEX_FIRECRACKER_CONFIG`;
 //! - `HEX_CHARGE_TRACES`: a directory of recorded agent traces, a file each, a line each `millis threads mib` (so many
-//!   milliseconds of so many busy threads holding so many MiB; `#` comments);
-//! - `HEX_CHARGE_BOX_CPU_MILLI`: the process box's CPU cap, which it books and asks whole;
-//! - `HEX_CHARGE_OUT`: a directory of the run's own, new or empty; `HEX_CHARGE_WAIT_MS`: the run's explicit deadline for the node's
-//!   start and each call that makes a VM (a VM's create boots it, past the client's learned create bound).
+//!   milliseconds of so many busy threads holding so many MiB; `#` comments), as bench/charge/record_trace.py records
+//!   a real harness session;
+//! - `HEX_CHARGE_OUT`: a directory of the run's own, new or empty.
 //!
-//! Run alone, `--ignored`, from the repository's root (Linux inside a cgroup delegated to it, as the node's is):
-//!   Linux:   HEX_DELEGATED=1 systemd-run --user --scope -p Delegate=yes -- cargo test --release --locked -p hex-cli
-//!            --test charge_fleet -- --ignored --nocapture
-//!   macOS:   cargo test --release --locked -p hex-cli --test charge_fleet -- --ignored --nocapture
-//!   Windows: cargo test --release --locked -p hex-cli --test charge_fleet -- --ignored --nocapture
+//! Run alone, `--ignored`, from the repository's root:
+//!   Linux: build first, then run the test binary alone in a cgroup delegated to it, cargo outside it (cargo in the
+//!   scope's root holds it, and the node can't hand its controllers down: EBUSY):
+//!     cargo test --release --locked -p hex-cli --test charge_fleet --no-run    (it says the binary's path)
+//!     HEX_DELEGATED=1 systemd-run --user --scope -p Delegate=yes -- <that binary> --ignored --nocapture
+//!   macOS and Windows:
+//!     cargo test --release --locked -p hex-cli --test charge_fleet -- --ignored --nocapture
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -70,12 +89,6 @@ use hex_sim::charge::trial::{self, Cast, Reading, Window};
 fn input(name: &str) -> String {
     std::env::var(name)
         .unwrap_or_else(|_| panic!("{name} is unset (crates/hex-cli/tests/charge_fleet.rs)"))
-}
-
-fn number(name: &str) -> u64 {
-    input(name)
-        .parse()
-        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 /// One step of a trace: so long, so many busy threads, so many MiB held.
@@ -154,37 +167,144 @@ fn milli(usec: u64, span: Duration) -> u64 {
     u64::try_from(u128::from(usec) * 1000 / span.as_micros().max(1)).unwrap()
 }
 
-/// The guest's player: each step, its threads busy and its MiB held in a file of `/dev/shm` (else `/tmp`) for its
-/// seconds; given as `seconds threads mib` triples.
-const PLAYER: &str = r#"hold=/dev/shm; [ -d "$hold" ] || hold=/tmp
+/// The guest's player, given `millis threads mib` triples: each step its threads busy and its MiB held, until the
+/// step's deadline from the trace's start (`/proc/uptime`, in centiseconds), so a slow step doesn't push the next. Its
+/// memory is held in a tmpfs file, grown and cut in place: `/dev/shm`, `/tmp` or `/run` where `/proc/mounts` says one is
+/// a tmpfs, else one it mounts; with none, or no `/proc/uptime`, it says so and ends.
+const PLAYER: &str = r#"fail() { echo "hex-charge player: $*" >&2; exit 2; }
+[ -r /proc/uptime ] || fail "no /proc/uptime to keep the trace's time by"
+hold=
+for d in /dev/shm /tmp /run; do
+  if grep -qs "^[^ ]* $d tmpfs " /proc/mounts; then hold=$d/hex-charge-hold; break; fi
+done
+if [ -z "$hold" ]; then
+  mkdir -p /run/hex-charge && mount -t tmpfs tmpfs /run/hex-charge 2>/dev/null && hold=/run/hex-charge/hold ||
+    fail "no tmpfs to hold memory in (/dev/shm, /tmp, /run), and none could be mounted"
+fi
+: > "$hold" || fail "can't write $hold"
+cs() { read -r up _ < /proc/uptime; echo "${up%.*}${up#*.}"; }
+start=$(cs); spent=0; held=0
 spin() { while :; do :; done; }
 while [ $# -ge 3 ]; do
-  seconds=$1; threads=$2; mib=$3; shift 3
+  ms=$1; threads=$2; mib=$3; shift 3
   pids=
   i=0
   while [ "$i" -lt "$threads" ]; do spin & pids="$pids $!"; i=$((i + 1)); done
-  [ "$mib" -gt 0 ] && head -c "$((mib * 1048576))" /dev/zero > "$hold/hex-charge-hold"
-  sleep "$seconds"
-  [ -n "$pids" ] && kill $pids 2>/dev/null
+  if [ "$mib" -gt "$held" ]; then
+    head -c "$(((mib - held) * 1048576))" /dev/zero >> "$hold" || fail "can't hold $mib MiB"
+  elif [ "$mib" -lt "$held" ]; then
+    truncate -s "$((mib * 1048576))" "$hold" || fail "can't let go to $mib MiB"
+  fi
+  held=$mib
+  spent=$((spent + ms))
+  left=$((start + spent / 10 - $(cs)))
+  if [ "$left" -gt 0 ]; then sleep "$((left / 100)).$(printf %02d $((left % 100)))"; fi
+  if [ -n "$pids" ]; then kill $pids 2>/dev/null; fi
   wait 2>/dev/null
-  rm -f "$hold/hex-charge-hold"
 done
+rm -f "$hold"
 "#;
 
-/// The player's command for `steps`.
-fn player(steps: &[Step]) -> Vec<String> {
+/// `steps` with each run of equal steps (the same threads and MiB) one step of their whole time.
+fn merged(steps: &[Step]) -> Vec<Step> {
+    let mut out: Vec<Step> = Vec::new();
+    for step in steps {
+        match out.last_mut() {
+            Some(last) if (last.threads, last.mib) == (step.threads, step.mib) => {
+                last.millis += step.millis;
+            }
+            _ => out.push(*step),
+        }
+    }
+    out
+}
+
+/// The player's command for `steps`, refused, naming `trace`, where it passes the guest's exec bound: Linux's least
+/// `ARG_MAX`, whatever its stack limit (`hex_api::sim::SIM_EXEC_LIMIT`).
+fn player(trace: &str, steps: &[Step]) -> Vec<String> {
     let mut args = vec![
         "/bin/sh".to_owned(),
         "-c".to_owned(),
         PLAYER.to_owned(),
         "player".to_owned(),
     ];
-    for step in steps {
-        args.push(format!("{}.{:03}", step.millis / 1000, step.millis % 1000));
+    for step in merged(steps) {
+        args.push(step.millis.to_string());
         args.push(step.threads.to_string());
         args.push(step.mib.to_string());
     }
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let limit = hex_api::sim::SIM_EXEC_LIMIT;
+    let size = limit.size(&Program::of(&words));
+    assert!(
+        size <= limit.block,
+        "{trace}: its player takes {size} bytes of arguments, past the guest's exec bound ({}, {}): record a \
+         shorter session",
+        limit.block,
+        limit.source
+    );
     args
+}
+
+/// Each VM's workload (what it is admitted for, which the class's cost sizes): the most busy threads (a CPU each) and
+/// the most MiB any step of any of `traces` asks, so every trace and the riser fit their VM.
+fn workload(traces: &[(String, Vec<Step>)]) -> CapacityResources {
+    let steps = || traces.iter().flat_map(|(_, steps)| steps);
+    let threads = steps().map(|s| s.threads).max().unwrap_or(0);
+    let mib = steps().map(|s| s.mib).max().unwrap_or(0);
+    assert!(threads > 0, "no step of the traces asks for a CPU");
+    CapacityResources {
+        cpu_milli: threads * 1000,
+        mem_bytes: mib << 20,
+        disk_bytes: 0,
+    }
+}
+
+/// kiln's CI legs from 2026-10-22 to 2026-11-05, as hex-sim's trace (bench/sched/kiln_trace.py made it).
+const CI_LEGS: &str = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
+
+/// The process box's CPU cap: the median, by nearest rank, of the CPU (mean cores, in milli-CPU) of [`CI_LEGS`]' `build`
+/// legs, a CI job's box beside the agents.
+fn box_cpu() -> u64 {
+    let mut cpu: Vec<u64> = CI_LEGS
+        .lines()
+        .filter_map(|line| line.strip_prefix("leg,"))
+        .map(|leg| leg.split(',').collect::<Vec<_>>())
+        .filter(|fields| fields.get(5) == Some(&"build"))
+        .map(|fields| fields[2].parse().unwrap())
+        .collect();
+    assert!(!cpu.is_empty(), "the CI trace holds no build leg");
+    cpu.sort_unstable();
+    cpu[cpu.len().div_ceil(2) - 1]
+}
+
+/// The deadline guarding the node's start and each create of `kind`: twice the node's own boot bound for the class, so
+/// the node's refusal, typed, comes first (module docs).
+fn guard(kind: Kind) -> Duration {
+    let node = match kind {
+        Kind::Shards => {
+            2 * hex_runtime::guest::recorded_boot().unwrap_or_else(|why| panic!("{why}"))
+        }
+        Kind::Image => {
+            2 * hex_runtime::guest::recorded("image_boot").unwrap_or_else(|why| panic!("{why}"))
+        }
+        Kind::Firecracker => firecracker_boot(),
+    };
+    2 * node
+}
+
+/// The Firecracker backend's configured boot bound (`HEX_FIRECRACKER_CONFIG`'s `boot_ms`).
+#[cfg(target_os = "linux")]
+fn firecracker_boot() -> Duration {
+    let path = PathBuf::from(input("HEX_FIRECRACKER_CONFIG"));
+    hex_runtime::firecracker::Config::from_file(&path)
+        .unwrap_or_else(|why| panic!("HEX_FIRECRACKER_CONFIG: {why}"))
+        .boot_timeout
+}
+
+#[cfg(not(target_os = "linux"))]
+fn firecracker_boot() -> Duration {
+    panic!("firecracker VMs run on Linux alone")
 }
 
 /// The VMs' class, as `HEX_CHARGE_CLASS` names it, and the node class its capacity is asked of.
@@ -512,7 +632,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     hex_core::patience::measure_all();
     let kind = Kind::named();
     let class = kind.class();
-    let wait = Duration::from_millis(number("HEX_CHARGE_WAIT_MS"));
+    let wait = guard(kind);
     let out = PathBuf::from(input("HEX_CHARGE_OUT"));
     // A run's node starts from no records: one left by an earlier run would be recovered into this one.
     assert!(
@@ -522,11 +642,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     );
     fs::create_dir_all(&out).unwrap();
     let traces = traces(Path::new(&input("HEX_CHARGE_TRACES")));
-    let workload = CapacityResources {
-        cpu_milli: number("HEX_CHARGE_CPU_MILLI"),
-        mem_bytes: number("HEX_CHARGE_MEMORY_BYTES"),
-        disk_bytes: 0,
-    };
+    let workload = workload(&traces);
     if kind == Kind::Image {
         pull_image(&out.join("state"));
     }
@@ -540,7 +656,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     let cost = capacity.cost.expect("the class's cost profile");
     let allocation = cost.allocate(workload).unwrap();
     let vcpus = allocation.guest().unwrap().cpu_milli.div_ceil(1000);
-    let box_cpu = number("HEX_CHARGE_BOX_CPU_MILLI");
+    let box_cpu = box_cpu();
     let budget = CapacityResources {
         cpu_milli: capacity.total.cpu_milli.saturating_sub(box_cpu),
         ..capacity.total
@@ -648,7 +764,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                 let id = BoxId::new(&format!("charge-vm-{n}")).unwrap();
                 let info = client
                     .create_before(
-                        kind.spec(id.clone(), &player(&steps), next_receipt, workload),
+                        kind.spec(id.clone(), &player(trace, &steps), next_receipt, workload),
                         Instant::now() + wait,
                     )
                     .unwrap();
@@ -811,6 +927,15 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         window.as_nanos(),
         report.windows,
         ran.as_millis()
+    );
+    println!(
+        "HEX-CHARGE-FLEET inputs workload_cpu_milli={} workload_mem_bytes={} allocation={:?} box_cpu_milli={box_cpu} \
+         guard_ms={} traces={}",
+        workload.cpu_milli,
+        workload.mem_bytes,
+        allocation.resources,
+        wait.as_millis(),
+        traces.len()
     );
     println!(
         "HEX-CHARGE-FLEET fairness contended={} ratio_n={} ratio_least_per_mille={} ratio_p1={} ratio_p50={} \
