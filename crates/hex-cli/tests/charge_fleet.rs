@@ -611,7 +611,11 @@ fn holdings(capacity: &hex_api::Capacity) -> BTreeMap<String, CapacityResources>
         .learned
         .iter()
         .flat_map(|learned| &learned.holdings)
-        .map(|h| (h.id.as_str().to_owned(), h.holding))
+        .filter_map(|h| match &h.id {
+            hex_api::LearnedHolder::Box(id) => Some((id.as_str().to_owned(), h.holding)),
+            // A node VM's own: no box of the fleet's.
+            hex_api::LearnedHolder::Node(_) => None,
+        })
         .collect()
 }
 

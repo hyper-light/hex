@@ -4557,14 +4557,14 @@ fn learned_resources(cpu_milli: u64, gib: u64) -> CapacityResources {
 
 fn learned_holding(id: &str, cpu_milli: u64, gib: u64) -> LearnedHolding {
     LearnedHolding {
-        id: BoxId::new(id).unwrap(),
+        id: LearnedHolder::Box(BoxId::new(id).unwrap()),
         holding: learned_resources(cpu_milli, gib),
     }
 }
 
 fn learned_end(id: &str, gib: u64) -> LearnedEnd {
     LearnedEnd {
-        id: BoxId::new(id).unwrap(),
+        id: LearnedHolder::Box(BoxId::new(id).unwrap()),
         held: gib << 30,
         budget: (gib - 1) << 30,
         band: 0,
@@ -4643,6 +4643,31 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     json["learned"].as_object_mut().unwrap().remove("ended");
     let unended = serde_json::from_value::<Capacity>(json).unwrap();
     assert!(unended.learned.unwrap().ended.is_empty());
+}
+
+/// Joint plan step 39 (ROOT's ruling of 2026-11-13; goal 14's wire): a node VM the node runs for itself is a holder in
+/// its learned capacity beside its boxes. Do: encode a capacity whose holdings and ends name a node VM beside a box, and
+/// read it back. Expect it back exactly.
+#[test]
+fn a_node_vms_learned_holding_and_end_cross_the_wire() {
+    let mut capacity = learned_capacity();
+    let run = LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16]));
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.holdings.push(LearnedHolding {
+            id: run.clone(),
+            holding: learned_resources(1_000, 2),
+        });
+        learned.ended.push(LearnedEnd {
+            id: run,
+            ..learned_end("unused", 3)
+        });
+    }
+    let offered = Answer::Capacity(Some(capacity));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with

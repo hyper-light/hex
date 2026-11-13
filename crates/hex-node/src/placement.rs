@@ -1059,11 +1059,14 @@ impl Driver {
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,
     /// is given the room those holdings leave, its room the machine's physical room still. Replaces what
     /// was said before; returns how many boxes it holds so.
-    pub fn rebook(&self, holds: &[(Key, hex_api::CapacityResources)]) -> Result<usize, Error> {
+    pub fn rebook(
+        &self,
+        holds: &[(peer::Holder, hex_api::CapacityResources)],
+    ) -> Result<usize, Error> {
         let mut state = self.lock()?;
-        let kept = state.node.rebook(holds.iter().map(|(key, holding)| {
+        let kept = state.node.rebook(holds.iter().map(|(holder, holding)| {
             (
-                hex_sim::peer::Holder::Box(*key),
+                *holder,
                 Resources {
                     cpu_milli: holding.cpu_milli,
                     mem_bytes: holding.mem_bytes,
