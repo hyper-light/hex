@@ -108,6 +108,11 @@ impl ImageGuest for Run {
         Duration::from_millis(100)
     }
 
+    // How its microVM started (D253): booted alone, as a run given its guest is, which the node VM's boot never reads.
+    fn started_from(&self) -> shards_api::image::StartedFrom {
+        shards_api::image::StartedFrom::Booted
+    }
+
     fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
         Err(unasked())
     }
@@ -202,6 +207,10 @@ impl ImageGuest for Run {
 
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
         Ok(Some(RunEnd::Stopped))
+    }
+
+    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+        Err(unasked())
     }
 }
 

@@ -2070,12 +2070,10 @@ impl<O: Os> Shared<O> {
                 Job::Collect(mut w) => {
                     let exit = match &mut w.run {
                         Run::Local { proc, .. } => {
-                            // Told once its box is gone: the node's learned wait for a box to empty bounds it, the
-                            // removal waiting on that emptying.
-                            match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-                                Ok(Some(exit)) => exit,
-                                Ok(None) | Err(_) => Exit::Unknown,
-                            }
+                            // Told once its box is gone: waited for as a killed box's emptying is, past its W* by the
+                            // program's life alone (decision 9), the removal waiting on that emptying.
+                            crate::emptying::end_of_killed(&mut **proc, Instant::now())
+                                .unwrap_or(Exit::Unknown)
                         }
                         Run::Remote(_) => Exit::Unknown,
                     };
@@ -2551,9 +2549,9 @@ impl<O: Os> Shared<O> {
             }
             Err(Unwatched::Killed(why)) => {
                 drop(table);
-                // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
-                let killed = Instant::now();
-                let _ = proc.wait_for(crate::emptying::empty_patience(killed));
+                // A killed process's end: waited for as a killed box's emptying is, its kind of wait, past its W* by
+                // the program's life alone (decision 9).
+                let _ = crate::emptying::end_of_killed(&mut *proc, Instant::now());
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
@@ -2650,10 +2648,9 @@ impl<O: Os> Shared<O> {
         given: Option<hex_api::Given>,
         mut proc: Box<dyn Proc>,
     ) -> Result<(), Refusal> {
-        let exit = match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-            Ok(Some(exit)) => exit,
-            Ok(None) | Err(_) => Exit::Unknown,
-        };
+        // Waited for as a killed box's emptying is, past its W* by the program's life alone (decision 9).
+        let exit =
+            crate::emptying::end_of_killed(&mut *proc, Instant::now()).unwrap_or(Exit::Unknown);
         self.unreserve(conn)?;
         self.done(conn)?;
         match given {
@@ -2710,8 +2707,9 @@ impl<O: Os> Shared<O> {
         }
     }
 
-    /// The server stops: every connection closes, ending its programs, and the thread waits a bounded
-    /// time for them to be reaped and counted before the workers finish the queue and go.
+    /// The server stops: every connection closes, ending its programs, and the thread waits for them to be reaped and
+    /// counted before the workers finish the queue and go: as a killed box's emptying is waited for, within its W*
+    /// and past it, its run-out told once, by the programs' lives alone (decision 9).
     fn stop(self: &Arc<Self>) {
         // Nothing new comes in, and the stop's own wake no longer wakes the wait below.
         self.os.stop_listening();
@@ -2726,11 +2724,24 @@ impl<O: Os> Shared<O> {
             let _ = self.close(conn);
         }
         let mut events = Vec::with_capacity(EVENTS);
+        let bound = crate::emptying::EMPTYING.deadline();
+        let mut past = false;
         loop {
-            let left = crate::emptying::empty_patience(killed);
             let Ok(table) = self.table() else { break };
-            if table.watched.is_empty() || left.is_zero() {
+            if table.watched.is_empty() {
                 break;
+            }
+            let mut left = if past {
+                None
+            } else {
+                bound.map(|window| window.saturating_sub(killed.elapsed()))
+            };
+            if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
+                // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
+                // lives alone.
+                crate::emptying::EMPTYING.ran_out(window);
+                past = true;
+                left = None;
             }
             let tokens: Vec<u64> = table
                 .watched
@@ -2741,14 +2752,18 @@ impl<O: Os> Shared<O> {
             let sourced = self.sources.lock().is_ok_and(|s| !s.is_empty());
             if tokens.is_empty() && !sourced {
                 // Only remote programs are left, whose ends come from their host's own thread.
-                if self.remote_ended.wait_timeout(table, left).is_err() {
+                let waited = match left {
+                    Some(left) => self.remote_ended.wait_timeout(table, left).map(drop),
+                    None => self.remote_ended.wait(table).map(drop),
+                };
+                if waited.is_err() {
                     break;
                 }
                 continue;
             }
             drop(table);
             events.clear();
-            if self.os.wait(&mut events, Some(left)).is_err() {
+            if self.os.wait(&mut events, left).is_err() {
                 break;
             }
             for event in &events {

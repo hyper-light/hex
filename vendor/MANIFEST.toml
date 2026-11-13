@@ -33,7 +33,7 @@ own = ["UPSTREAM.md"]
 [projects.hyper-raft]
 kind = "git"
 repository = "https://github.com/hyper-light/hyper-raft"
-commit = "0856e05df3d136f0870a98808113294a73399206"
+commit = "045cf3ff82e1d96d1f8c339d6e644d17afc998a3"
 path = "vendor/hyper-raft"
 take = [
     "Cargo.toml",
@@ -113,7 +113,7 @@ own = ["UPSTREAM.md"]
 [projects.shards]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "e0cc059c7bf602c8e91512f5bab7b7a5673a7f39"
+commit = "740fa37268c9200616f6fd543d96625953e23b81"
 path = "vendor/shards"
 take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/dns", "crates/ipc", "crates/remote", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs", "docs/research/measurements/api-flakes/spawns.rs", "docs/research/measurements/api-flakes/half-close.rs"]
 own = ["Cargo.toml", "UPSTREAM.md"]
@@ -127,7 +127,7 @@ own = ["Cargo.toml", "UPSTREAM.md"]
 [projects.shards-gpu]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "e0cc059c7bf602c8e91512f5bab7b7a5673a7f39"
+commit = "740fa37268c9200616f6fd543d96625953e23b81"
 path = "vendor/shards-gpu"
 take = [
     "LICENSE",
