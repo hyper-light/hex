@@ -70,18 +70,20 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **Hex's wire over hyper-transport** (joint plan step 4; `docs/design/hex-quic.md`): built and merged
   (`hex-quic`, `hex node --quic`, `hex node enroll`). TLS13_AES_256_GCM_SHA384 alone, mutual under kiln's CA by
   CSR, learned waits per call kind and class. The hex-api conformance suite passes over QUIC with both ends
-  reporting the suite, in process and through `hex node` (HEX-QUIC-20, -23, -24), on Linux and macOS. Closes
-  with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
+  reporting the suite, in process and through `hex node` (HEX-QUIC-20, -23, -24), on Linux and macOS. The node
+  reports each link's peer, suite and group on its wire and as `hex node links` (Q12, Shards plan step 34;
+  HEX-QUIC-28 to -31). Closes with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
   and a waits census over QUIC to seed its measuring waits.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
-  Shards `e82b9403` (D231 with D234-D236 and member stdin). Linux, macOS and Windows boot image VMs, D231's run
-  host started holding only its stdio (Hex's vendor/patches/shards 0001, offered upstream); a node on macOS or
-  Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and SHARDS_INIT aren't a pair serves none.
+  Shards `1389dc0b` (D231 with D234-D250, image channel version 13). Linux, macOS and Windows boot image VMs, D231's
+  run host started holding only its stdio (D248, Hex's former 0001 upstream); its usage carries each vCPU's guest
+  time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
+  SHARDS_INIT aren't a pair serves none.
   The members a box's caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and
-  `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process (unit-tested over
-  a model of D231 and the simulator; the node's wire carries no member call yet). Closes with: guest time per
-  vCPU in the run's stats (Shards', which Hex carries as a recorded change), the class's wait records and its
-  real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's), and a member's streams over the node's wire.
+  `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
+  wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
+  of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts at Shards `1389dc0b` or later).
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

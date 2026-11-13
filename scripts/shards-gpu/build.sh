@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Rebuilds Hex's `shards`, the binary a node boots its Shards guests and image VMs with (SHARDS_BIN): its GPU VM
 # process carrying the Venus renderer that renders a GPU guest on the host's driver, and its `shards api-run` hosting
-# an image's boot with Hex's recorded changes, from Hex's main alone (AC-T7.4.1; joint plan step 15):
+# an image's boot at the image channel version the node's vendored API speaks, from Hex's main alone (AC-T7.4.1;
+# joint plan steps 12 and 15):
 #   scripts/shards-gpu/build.sh OUT [FROM] [--no-gpu]
 # Upstream at vendor/MANIFEST.toml's [projects.shards-gpu] commit, the same as [projects.shards], which holds the
 # physical-GPU filter, selector transport, native identity bridge and the managed launch and report the node's
-# vendored API speaks to (D232, D233); then each vendor/patches/shards change (the API the run host and the node both
-# speak, so the run host reads what the node writes), then each vendor/patches/shards-gpu change (Windows on arm64's
-# GPU VM process; the run host's hold of each member to its reach of the destinations kept), each in name order as
-# scripts/vendor.py replays them; built as upstream's release builds it: upstream's scripts/gpu-libs builds the
-# renderer from its pinned sources into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
+# vendored API speaks to (D232, D233), and the run host the node's image boot speaks to (D231 to D250); then each
+# vendor/patches/shards change (the API the run host and the node both speak, so the run host reads what the node
+# writes), then each vendor/patches/shards-gpu change, in name order as scripts/vendor.py replays them (none of either
+# at this commit: Hex's last ones are upstream); built as upstream's release builds it: upstream's scripts/gpu-libs
+# builds the renderer from its pinned sources into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
 # `cargo build --release --locked -p shards`, with the Rust toolchain upstream's rust-toolchain.toml names, for this
 # host's own target. With --no-gpu no renderer is built, and `shards` carries no GPU VM process and refuses a GPU, as
 # upstream's build does without SHARDS_GPU_LIBS: what an image VM's run host needs alone.
@@ -29,7 +30,7 @@
 # Natively on each host Shards runs on, whose own target it builds: Linux x86_64 or aarch64 (glibc), macOS arm64,
 # Windows x86_64 or arm64 (under Git Bash, with MSVC's tools, which rustc finds). Needs git, a C compiler (cc; MSVC's
 # on Windows), zig 0.16.0 on PATH (upstream's scripts/install-zig installs it; shards' build compiles its guest
-# init's C with it), on Windows x86_64 NASM on PATH (AWS-LC's x64 assembly is built from source, never from the
+# init's C with it, and on Linux its static musl VM and network processes' C, below), on Windows x86_64 NASM on PATH (AWS-LC's x64 assembly is built from source, never from the
 # objects aws-lc-sys ships: upstream's release installs NASM 3.02, pinned), and rustup with that toolchain, this
 # host's target and x86_64-unknown-linux-musl and aarch64-unknown-linux-musl already installed: it installs nothing
 # (RUSTUP_AUTO_INSTALL=0). The renderer needs curl and python3 too (3.11 to 3.14, for its pinned PyYAML wheels), and
@@ -185,6 +186,20 @@ export SHARDS_GIT_COMMIT=${commit:0:7}
 if [ "$gpu" = yes ]; then
     export SHARDS_GPU_LIBS="$out/gpu-libs"
     "$src/scripts/gpu-libs" "$SHARDS_GPU_LIBS"
+fi
+# On Linux the VM and network processes are static musl whatever C library `shards` links, built by shards' build
+# script with a nested cargo; since Shards' D242 their C (AWS-LC) wants a musl C compiler, which that script names for
+# the guest init's nested build alone (`compile`) and not for theirs (`compile_helpers`): an upstream gap, reported to
+# Shards (2026-11-13), without which a glibc host with no musl gcc can't build them. Named here as Shards names a musl
+# target's compiler for its own builds by hand: zig, through its scripts/zig-cc and zig-ar, and ZIG_TARGET (Shards'
+# CLAUDE.md), unless the caller named one.
+if [ "$os" = Linux ]; then
+    musl=${arch}_unknown_linux_musl
+    cc_var=CC_$musl
+    ar_var=AR_$musl
+    [ -n "${!cc_var:-}" ] || export "$cc_var=$src/scripts/zig-cc"
+    [ -n "${!ar_var:-}" ] || export "$ar_var=$src/scripts/zig-ar"
+    [ -n "${ZIG_TARGET:-}" ] || export ZIG_TARGET="$arch-linux-musl"
 fi
 (cd "$src" && cargo "+$channel" build --release --locked --target "$triple" -p shards)
 cp "$out/target/$triple/release/$exe" "$out/$exe"
