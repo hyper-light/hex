@@ -56,6 +56,8 @@ use hex_api::{
     check_published,
 };
 
+use hex_api::lease::{Lease, LeaseRefused, Value};
+
 use crate::netns;
 
 /// Every message's first bytes.
@@ -63,7 +65,15 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 /// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
 /// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
 /// Two builds talk only when theirs are the same.
-pub const IDENTITY: u64 = identity(&[
+// Its evaluation visits each byte of its sources once, so their length bounds it. rustc's long_running_const_eval lint
+// takes an evaluation that long for one that may never end: on a CRLF checkout (git's core.autocrlf, on by default on
+// Windows) the loop visits every carriage return it skips too, and at main a8f6bfe4 jupiter's 673,005 bytes of
+// sources tripped it, so hex-core didn't build there; LF checkouts are close behind. The lint's own note names this
+// remedy for an evaluation long by design: allowing it here. A static, evaluated once, here, where the allow is: a
+// const is evaluated again in each crate that uses it, beyond this allow's reach (at be251865 hex-client's and
+// hex-runtime's builds tripped the lint on jupiter so).
+#[allow(long_running_const_eval)]
+pub static IDENTITY: u64 = identity(&[
     include_bytes!("wire.rs"),
     include_bytes!("stream.rs"),
     include_bytes!("schedule.rs"),
@@ -164,6 +174,13 @@ mod kind {
     pub const MEMBER: u16 = 0x0017;
     pub const LINKS: u16 = 0x0018;
     pub const LINKS_ANSWER: u16 = 0x8010;
+    pub const LESSORS: u16 = 0x0019;
+    pub const LESSOR: u16 = 0x001a;
+    pub const LEASED: u16 = 0x001b;
+    pub const LESSOR_ASK: u16 = 0x8011;
+    pub const LEASE_ASK: u16 = 0x8012;
+    pub const LEASE_GIVEN: u16 = 0x8013;
+    pub const LESSOR_ENDED: u16 = 0x8014;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -191,6 +208,15 @@ pub enum Request {
     /// The caller opened every connection in an Offered answer. The original exec may now start.
     /// Not answered separately; the exec's Started/Refused and Exited keep its original header id.
     StreamsReady,
+    /// The orchestrator's answer to the node's [`Answer::LessorAsk`] its header's id names (docs/design/credential-grants.md
+    /// C7): the run's lessor made, or why not. Not answered.
+    Lessor(Result<(), Refusal>),
+    /// The orchestrator's answer to the node's [`Answer::LeaseAsk`] its header's id names, of run `run`: the lease, its
+    /// value wiped as it drops and never printed ([`hex_api::lease::Value`]), or why not, of Shards' kinds. Not answered.
+    Leased {
+        run: u64,
+        answer: Result<Lease, LeaseRefused>,
+    },
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
@@ -263,6 +289,10 @@ pub enum Call {
     /// The node's links over QUIC (docs/design/hex-quic.md Q12): answered [`Answer::Links`], refused by type where the
     /// node serves no QUIC listener.
     Links,
+    /// This connection's orchestrator leases the credentials of the Shards image VMs it creates from now on
+    /// (docs/design/credential-grants.md C7): the node asks it over this connection ([`Answer::LessorAsk`],
+    /// [`Answer::LeaseAsk`]). Answered [`Answer::Done`], or refused by type where the node leases through no connection.
+    Lessors,
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -349,6 +379,21 @@ pub enum Answer {
         links: Vec<Link>,
         more: bool,
     },
+    /// A run of box `0`, which this connection created granting a credential, boots: its orchestrator is asked for the
+    /// run's lessor (docs/design/credential-grants.md C7, `Lessors::lessor`). The header's id names the run in what
+    /// follows. Sent unasked; answered [`Request::Lessor`].
+    LessorAsk(BoxId),
+    /// Run `run`'s lease of credential `reference`, under the run's `key` where it binds one (`Lessor::lease`). Sent
+    /// unasked, the header's id the ask's; answered [`Request::Leased`].
+    LeaseAsk {
+        run: u64,
+        reference: String,
+        key: Option<[u8; 32]>,
+    },
+    /// The run its header's id names gave lease `0` back (`Lessor::release`). Sent unasked; not answered.
+    LeaseGiven(String),
+    /// The run its header's id names has ended: its lessor is let go. Sent unasked; not answered.
+    LessorEnded,
 }
 
 /// A peer's connection to the node over QUIC, as the node's own TLS negotiated it (docs/design/hex-quic.md Q12).
@@ -538,8 +583,133 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
         Request::Taken => w.header(kind::TAKEN, id),
         Request::StreamsReady => w.header(kind::STREAMS_READY, id),
         Request::Call(call) => put_call(&mut w, id, call)?,
+        Request::Lessor(made) => {
+            w.header(kind::LESSOR, id);
+            match made {
+                Ok(()) => w.u8(0),
+                Err(refusal) => {
+                    w.u8(1);
+                    put_refusal(&mut w, refusal)?;
+                }
+            }
+        }
+        Request::Leased { run, answer } => {
+            w.header(kind::LEASED, id);
+            w.u64(*run);
+            match answer {
+                Ok(lease) => put_lease(&mut w, lease)?,
+                Err(refused) => {
+                    w.u8(1);
+                    put_lease_refused(&mut w, refused)?;
+                }
+            }
+        }
     }
     w.done()
+}
+
+/// Whether `message` carries a lease's value ([`Request::Leased`]), so whoever held its bytes wipes them as it lets them
+/// go (docs/design/credential-grants.md C7): read from its kind alone, before or without reading the rest.
+pub fn carries_secret(message: &[u8]) -> bool {
+    message
+        .get(12..14)
+        .is_some_and(|got| got == &kind::LEASED.to_le_bytes()[..])
+}
+
+/// A lease as [`Request::Leased`] carries it: given (0), its name, its life, then its value last, so nothing can refuse
+/// the message once the value is in it, and the message's room reserved before, so no copy of the value is left behind
+/// as it grows ([`Writer::secret`]).
+fn put_lease(w: &mut Writer, lease: &Lease) -> Result<(), Fault> {
+    let value = lease.value.expose();
+    let life = lease
+        .life
+        .map(|life| {
+            u64::try_from(life.as_nanos())
+                .map_err(|_| Fault::value("lease life", "it passes a u64 of nanoseconds"))
+        })
+        .transpose()?;
+    let lengths = |n: usize| n.checked_add(size_of::<u32>());
+    let rest = [
+        Some(1usize),
+        lengths(lease.lease.len()),
+        Some(1usize.saturating_add(if life.is_some() { size_of::<u64>() } else { 0 })),
+        lengths(value.len()),
+    ]
+    .into_iter()
+    .try_fold(0usize, |n, part| part.and_then(|part| n.checked_add(part)))
+    .ok_or_else(|| Fault::value("lease", "its size passes this machine's addresses"))?;
+    w.secret();
+    w.reserve_fixed(rest)?;
+    w.u8(0);
+    w.string(&lease.lease)?;
+    w.option(life, |w, nanos| w.u64(nanos));
+    w.bytes(value)
+}
+
+/// A lease read from [`Request::Leased`]: its value copied into a [`Value`] at once, wiped as it drops; the message's own
+/// bytes are their holder's to wipe ([`carries_secret`]).
+fn lease(r: &mut Reader<'_>) -> Result<Lease, Fault> {
+    let lease = r.string("lease")?;
+    let life = r.option(|r| r.u64().map(std::time::Duration::from_nanos))?;
+    let value = r.bytes()?;
+    let mut held: Vec<u8> = Vec::new();
+    held.try_reserve_exact(value.len())
+        .map_err(|_| Fault::Storage {
+            what: "lease value",
+            bound: value.len(),
+        })?;
+    held.extend_from_slice(value);
+    Ok(Lease {
+        lease,
+        value: Value::new(held),
+        life,
+    })
+}
+
+/// Why a lease is refused, by Shards' kinds (`LeaseRefused`), each with its words.
+fn put_lease_refused(w: &mut Writer, refused: &LeaseRefused) -> Result<(), Fault> {
+    match refused {
+        LeaseRefused::Denied(why) => {
+            w.u8(0);
+            w.string(why)
+        }
+        LeaseRefused::KeyReplaced { asked, current } => {
+            w.u8(1);
+            w.string(asked)?;
+            w.option_with(current.as_deref(), |w, current| w.string(current))
+        }
+        LeaseRefused::Unavailable(why) => {
+            w.u8(2);
+            w.string(why)
+        }
+        LeaseRefused::Ended => {
+            w.u8(3);
+            Ok(())
+        }
+        LeaseRefused::Lapsed => {
+            w.u8(4);
+            Ok(())
+        }
+    }
+}
+
+fn lease_refused(r: &mut Reader<'_>) -> Result<LeaseRefused, Fault> {
+    Ok(match r.u8()? {
+        0 => LeaseRefused::Denied(r.string("a denied lease's words")?),
+        1 => LeaseRefused::KeyReplaced {
+            asked: r.string("a replaced key")?,
+            current: r.option(|r| r.string("the run's key"))?,
+        },
+        2 => LeaseRefused::Unavailable(r.string("an unavailable lease's words")?),
+        3 => LeaseRefused::Ended,
+        4 => LeaseRefused::Lapsed,
+        tag => {
+            return Err(Fault::value(
+                "lease refusal",
+                format!("{tag} names a refusal the wire doesn't define"),
+            ));
+        }
+    })
 }
 
 /// An answer as a message of at most `bound` bytes.
@@ -703,6 +873,25 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.bool(*more);
             w.list(links, put_link)?;
         }
+        Answer::LessorAsk(box_id) => {
+            w.header(kind::LESSOR_ASK, id);
+            w.string(box_id.as_str())?;
+        }
+        Answer::LeaseAsk {
+            run,
+            reference,
+            key,
+        } => {
+            w.header(kind::LEASE_ASK, id);
+            w.u64(*run);
+            w.string(reference)?;
+            w.option(key.as_ref(), |w, key| w.raw(key));
+        }
+        Answer::LeaseGiven(lease) => {
+            w.header(kind::LEASE_GIVEN, id);
+            w.string(lease)?;
+        }
+        Answer::LessorEnded => w.header(kind::LESSOR_ENDED, id),
     }
     w.done()
 }
@@ -894,6 +1083,31 @@ fn parse_request(
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
         kind::NETNS => Request::Call(Call::Netns),
         kind::LINKS => Request::Call(Call::Links),
+        kind::LESSORS => Request::Call(Call::Lessors),
+        kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
+            0 => Ok(()),
+            1 => Err(refusal(&mut r).map_err(bad)?),
+            tag => {
+                return Err(bad(Fault::value(
+                    "lessor answer",
+                    format!("{tag} names neither a lessor made nor a refusal"),
+                )));
+            }
+        }),
+        kind::LEASED => {
+            let run = r.u64().map_err(bad)?;
+            let answer = match r.u8().map_err(bad)? {
+                0 => Ok(lease(&mut r).map_err(bad)?),
+                1 => Err(lease_refused(&mut r).map_err(bad)?),
+                tag => {
+                    return Err(bad(Fault::value(
+                        "lease answer",
+                        format!("{tag} names neither a lease nor a refusal"),
+                    )));
+                }
+            };
+            Request::Leased { run, answer }
+        }
         kind::KILL => Request::Call(Call::Kill {
             exec: r.u64().map_err(bad)?,
         }),
@@ -1112,6 +1326,14 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             more: r.bool("more")?,
             links: r.list(link)?,
         },
+        kind::LESSOR_ASK => Answer::LessorAsk(box_id(&mut r)?),
+        kind::LEASE_ASK => Answer::LeaseAsk {
+            run: r.u64()?,
+            reference: r.string("a lease's reference")?,
+            key: r.option(|r| r.array::<32>())?,
+        },
+        kind::LEASE_GIVEN => Answer::LeaseGiven(r.string("a lease given back")?),
+        kind::LESSOR_ENDED => Answer::LessorEnded,
         kind::GIVEN => {
             let pid = r.u32()?;
             let given = r.u8().and_then(Streams::of)?;
@@ -1204,6 +1426,9 @@ fn request_name(kind: u16) -> &'static str {
         kind::BACKING_USAGE => "a backing usage",
         kind::MEMBER => "a member",
         kind::LINKS => "a links",
+        kind::LESSORS => "a lessors",
+        kind::LESSOR => "a lessor",
+        kind::LEASED => "a leased",
         _ => "a request",
     }
 }
@@ -1300,6 +1525,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Links => {
             w.header(kind::LINKS, id);
+            Ok(())
+        }
+        Call::Lessors => {
+            w.header(kind::LESSORS, id);
             Ok(())
         }
         Call::Kill { exec } => {
@@ -1983,8 +2212,17 @@ fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault>
 const PHYSICAL_MIN_BYTES: usize =
     size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u8>();
 const PHYSICAL_PREFIX_BYTES: usize = 2 * size_of::<u32>();
-// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags; no variable refusal data.
-const PHYSICAL_UNAVAILABLE_BYTES: usize = 3 * size_of::<u8>() + BACKING_KEY_BYTES;
+// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags, then its reason's option tag (joint plan step
+// 14): at its least, with no reason; one with a reason adds its length and bytes (`backing_why_bytes`).
+const PHYSICAL_UNAVAILABLE_BYTES: usize = 4 * size_of::<u8>() + BACKING_KEY_BYTES;
+
+/// What a Backing refusal's reason adds past its least: its length and its bytes, where it gives one.
+fn backing_why_bytes(cause: &Refusal) -> Option<usize> {
+    match cause {
+        Refusal::Backing { why: Some(why), .. } => size_of::<u32>().checked_add(why.len()),
+        _ => Some(0),
+    }
+}
 
 fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fault> {
     report
@@ -2022,6 +2260,11 @@ fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fa
             .and_then(|tail| tail.checked_add(size_of::<u32>()))
             .and_then(|tail| bytes.checked_add(tail))
             .ok_or_else(overflow)?;
+        for observation in &report.unavailable {
+            bytes = backing_why_bytes(&observation.cause)
+                .and_then(|why| bytes.checked_add(why))
+                .ok_or_else(overflow)?;
+        }
     }
     w.reserve_fixed(bytes)?;
     w.string(&report.authority)?;
@@ -2395,8 +2638,9 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
 }
 
 // Joint plan step 33 (Shards' D242): credential grants, a Shards image VM's after its shares and an inspect's after its
-// run's words. Each its member as a grant's, its reference, and its hosts. Both sides run `check_credentials` over the
-// network grants beside them, so a list the check refuses is neither sent nor read.
+// run's words. Each its member as a grant's, its reference, its hosts, and its placeholder (after its hosts, as Shards'
+// image channel carries it). Both sides run `check_credentials` over the network grants beside them, so a list the
+// check refuses is neither sent nor read.
 fn put_credentials(
     w: &mut Writer,
     credentials: &[CredentialGrant],
@@ -2407,7 +2651,8 @@ fn put_credentials(
     w.list(credentials, |w, grant| {
         put_member(w, &grant.member)?;
         w.string(&grant.reference)?;
-        w.list(&grant.toward, |w, host| w.string(host))
+        w.list(&grant.toward, |w, host| w.string(host))?;
+        w.string(&grant.placeholder)
     })
 }
 
@@ -2417,6 +2662,7 @@ fn credentials(r: &mut Reader<'_>, grants: &[Grant]) -> Result<Vec<CredentialGra
             member: member(r)?,
             reference: r.string("credential reference")?,
             toward: r.list(|r| r.string("credential host"))?,
+            placeholder: r.string("credential placeholder")?,
         })
     })?;
     check_credentials(&credentials, grants)
@@ -2921,8 +3167,12 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             });
             Ok(())
         }
-        Refusal::Backing { key, cause } => {
-            w.reserve_fixed(1 + BACKING_KEY_BYTES + 1)?;
+        Refusal::Backing { key, cause, why } => {
+            // Its tag, key, cause and reason's option tag, and its reason, reserved whole before any of it is written.
+            let body = backing_why_bytes(refusal)
+                .and_then(|why| why.checked_add(1 + BACKING_KEY_BYTES + 1 + 1))
+                .ok_or_else(|| Fault::value("backing refusal", "encoded size overflows"))?;
+            w.reserve_fixed(body)?;
             w.u8(10);
             put_backing_key(w, *key)?;
             w.u8(match cause {
@@ -2931,7 +3181,8 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
             });
-            Ok(())
+            // Appended after its cause (joint plan step 14): its reason in the refusing site's words, absent a byte 0.
+            w.option_with(why.as_deref(), |w, why| w.string(why))
         }
         Refusal::Connect { port, failure } => {
             w.reserve_fixed(
@@ -3070,6 +3321,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 3 => LifecycleCause::Retired,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
+            why: r.option(|r| r.string("backing refusal reason"))?,
         },
         11 => Refusal::Connect {
             port: r.u32()?,
@@ -3224,6 +3476,16 @@ pub(crate) struct Writer {
     bound: usize,
     mode: WriteMode,
     failure: Option<Fault>,
+    /// Whether what it holds carries a lease's value ([`Writer::secret`]): wiped as it drops, unless handed on whole.
+    secret: bool,
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if self.secret {
+            hex_api::lease::wipe(&mut self.out);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3240,7 +3502,14 @@ impl Writer {
             bound,
             mode: WriteMode::Ordinary,
             failure: None,
+            secret: false,
         }
+    }
+
+    /// What it writes from now carries a lease's value: wiped as it drops unless handed on whole ([`Writer::done`]),
+    /// its room reserved before the value goes in (`reserve_fixed`), so no copy is left as it grows.
+    pub(crate) fn secret(&mut self) {
+        self.secret = true;
     }
 
     fn counting(bound: usize) -> Self {
@@ -3249,6 +3518,7 @@ impl Writer {
             bound,
             mode: WriteMode::Counting(0),
             failure: None,
+            secret: false,
         }
     }
 
@@ -3263,6 +3533,7 @@ impl Writer {
             bound: bytes,
             mode: WriteMode::Fixed,
             failure: None,
+            secret: false,
         })
     }
 
@@ -3360,7 +3631,9 @@ impl Writer {
                 bound: self.bound,
             });
         }
-        Ok(self.out)
+        // Handed on whole: its holder wipes it, if it carries a value ([`carries_secret`]).
+        self.secret = false;
+        Ok(std::mem::take(&mut self.out))
     }
 
     pub(crate) fn u8(&mut self, v: u8) {

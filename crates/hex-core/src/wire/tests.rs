@@ -782,6 +782,95 @@ fn requests() -> Vec<(u64, Request, usize)> {
             3,
         ),
         (206, Request::Call(Call::Links), 0),
+        // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
+        (205, Request::Call(Call::Lessors), 0),
+        (206, Request::Lessor(Ok(())), 0),
+        (
+            207,
+            Request::Lessor(Err(Refusal::Unconfigured {
+                what: "lessors for its image VMs' credentials",
+                why: "no broker answers this run".to_owned(),
+            })),
+            0,
+        ),
+        (
+            208,
+            Request::Leased {
+                run: 206,
+                answer: Ok(Lease {
+                    lease: "lease-1".to_owned(),
+                    value: Value::new(b"a credential's value".to_vec()),
+                    life: Some(std::time::Duration::from_secs(90)),
+                }),
+            },
+            0,
+        ),
+        (
+            209,
+            Request::Leased {
+                run: 206,
+                answer: Ok(Lease {
+                    lease: "lease-2".to_owned(),
+                    value: Value::new(Vec::new()),
+                    life: None,
+                }),
+            },
+            0,
+        ),
+        (
+            210,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Denied("not this run's".to_owned())),
+            },
+            0,
+        ),
+        (
+            211,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::KeyReplaced {
+                    asked: "ab".repeat(32),
+                    current: Some("cd".repeat(32)),
+                }),
+            },
+            0,
+        ),
+        (
+            212,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::KeyReplaced {
+                    asked: "ab".repeat(32),
+                    current: None,
+                }),
+            },
+            0,
+        ),
+        (
+            213,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Unavailable("its broker is away".to_owned())),
+            },
+            0,
+        ),
+        (
+            214,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Ended),
+            },
+            0,
+        ),
+        (
+            215,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Lapsed),
+            },
+            0,
+        ),
     ]
 }
 
@@ -1123,6 +1212,27 @@ fn answers() -> Vec<(u64, Answer)> {
             more: false,
         },
     ));
+    // docs/design/credential-grants.md C7: the node's lease asks of a connection's orchestrator, and its word that a
+    // lease or a run's lessor is let go.
+    out.push((206, Answer::LessorAsk(id("leasing-1"))));
+    out.push((
+        207,
+        Answer::LeaseAsk {
+            run: 206,
+            reference: "providers/anthropic".to_owned(),
+            key: Some([7; 32]),
+        },
+    ));
+    out.push((
+        208,
+        Answer::LeaseAsk {
+            run: 206,
+            reference: "providers/openai".to_owned(),
+            key: None,
+        },
+    ));
+    out.push((206, Answer::LeaseGiven("lease-1".to_owned())));
+    out.push((206, Answer::LessorEnded));
     out
 }
 
@@ -1626,9 +1736,10 @@ fn a_message_of_another_wire_is_refused_naming_both_wires() {
 }
 
 /// One wire (the lead's word of 2026-11-09): the identity is FNV-1a of the wire definitions' source, this module's
-/// and the stream module's, with no number to bump, and a checkout's line endings don't split it. Do: digest the two
-/// files as read now, then with every line ended `\r\n`. Expect: both [`IDENTITY`]; and a source with one byte more
-/// another identity.
+/// and the stream module's, with no number to bump, and a checkout's line endings don't split it. Do: digest the
+/// sources as read now, then with every line ended `\r\n` (a CRLF checkout's, Windows' by default), then with every
+/// line ended `\n` alone (an LF checkout's). Expect: each [`IDENTITY`]; and a source with one byte more another
+/// identity.
 #[test]
 fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1665,6 +1776,11 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     };
     assert_eq!(
         digest(&sources.iter().map(|s| crlf(s)).collect::<Vec<_>>()),
+        IDENTITY
+    );
+    let lf = |bytes: &[u8]| -> Vec<u8> { bytes.iter().copied().filter(|&b| b != b'\r').collect() };
+    assert_eq!(
+        digest(&sources.iter().map(|s| lf(s)).collect::<Vec<_>>()),
         IDENTITY
     );
     for changed in 0..sources.len() {
@@ -1884,7 +2000,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0019, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x001c, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2964,11 +3080,13 @@ fn route_wire_backing_refusals_preserve_key_and_cause() {
         let expected = Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         });
         let bytes = answer(207, &expected, MAX_MESSAGE).unwrap();
-        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1);
+        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1 + 1);
         assert_eq!(bytes[HEADER_BYTES], 10);
-        assert_eq!(bytes.last(), Some(&tag));
+        assert_eq!(bytes[bytes.len() - 2], tag);
+        assert_eq!(bytes.last(), Some(&0), "no reason, a byte 0");
         assert_eq!(
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             expected
@@ -3165,12 +3283,14 @@ fn route_wire_hostile_route_and_backing_tags_are_redacted() {
         &Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause: LifecycleCause::Uncertain,
+            why: None,
         }),
         MAX_MESSAGE,
     )
     .unwrap();
-    // 3 is Retired (joint plan step 14); 4 is no cause.
-    *bytes.last_mut().unwrap() = 4;
+    // 3 is Retired (joint plan step 14); 4 is no cause. The cause is the byte before its reason's option tag.
+    let cause = bytes.len() - 2;
+    bytes[cause] = 4;
     let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
     assert!(matches!(
         fault,
@@ -3416,6 +3536,12 @@ fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() 
         Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause: LifecycleCause::Pending,
+            why: None,
+        }),
+        Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Uncertain,
+            why: Some("its stop's end wasn't seen".to_owned()),
         }),
     ] {
         let bytes = answer(214, &expected, MAX_MESSAGE).unwrap();
@@ -3631,8 +3757,14 @@ fn snapshot_refusal_and_exit_match_canonical_answer_bytes() {
         inputs.push(Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         });
     }
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its record names another generation".to_owned()),
+    });
     for refusal in inputs {
         let ordinary = Answer::Refused(refusal);
         let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
@@ -3664,6 +3796,12 @@ fn snapshot_bounds_include_scalar_trailers_before_allocation() {
     inputs.push(Refusal::Backing {
         key: route_wire_key(),
         cause: LifecycleCause::Uncertain,
+        why: None,
+    });
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its receipt is missing".to_owned()),
     });
     for refusal in inputs {
         let ordinary = Answer::Refused(refusal);
@@ -3739,15 +3877,84 @@ fn physical_unavailable(backend: Class, cause: LifecycleCause) -> BackendUnavail
         Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         },
     )
     .unwrap()
 }
 
+/// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a backing's refusal
+/// carries the refusing site's reason, appended after its cause, and its message says it. Do send a Backing refusal,
+/// Uncertain, with a reason. Expect it read back as sent; the reason's option tag (1) after the cause, then its length
+/// and bytes, so one with none (a byte 0) is a byte longer than before; and its message ending with the reason.
+#[test]
+fn w14_b_a_backing_refusal_carries_its_reason() {
+    let why = "its scope's end wasn't seen after its stop";
+    let reasoned = Answer::Refused(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some(why.to_owned()),
+    });
+    let bytes = answer(216, &reasoned, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        bytes.len(),
+        HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1 + 1 + 4 + why.len()
+    );
+    let reason = bytes.len() - why.len() - 4 - 1;
+    assert_eq!(bytes[reason], 1, "its reason's option tag");
+    assert_eq!(&bytes[bytes.len() - why.len()..], why.as_bytes());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        reasoned
+    );
+    let Answer::Refused(refusal) = &reasoned else {
+        panic!("owned refusal fixture changed its variant");
+    };
+    assert!(
+        refusal.to_string().ends_with(&format!("Uncertain: {why}")),
+        "{refusal}"
+    );
+}
+
+/// Joint plan step 14, (B): an unavailable VM backend's refusal keeps its reason in the physical report. Do report a
+/// Firecracker backend unavailable, Uncertain, with a reason. Expect the report read back as sent, the observation's
+/// bytes its class tag and its refusal's own.
+#[test]
+fn w14_b_an_unavailable_backends_reason_travels_in_the_physical_report() {
+    let mut report = example_physical_report();
+    report.unavailable = vec![
+        BackendUnavailable::from_refusal(
+            Class::Firecracker,
+            Refusal::Backing {
+                key: route_wire_key(),
+                cause: LifecycleCause::Uncertain,
+                why: Some("its pool record names another generation".to_owned()),
+            },
+        )
+        .unwrap(),
+    ];
+    let expected = Answer::PhysicalReport(report);
+    let bytes = answer(221, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
+    let Answer::PhysicalReport(report) = &expected else {
+        panic!("owned physical report changed its variant");
+    };
+    let canonical = snapshot_refusal(&report.unavailable[0].cause, MAX_MESSAGE).unwrap();
+    assert!(bytes.ends_with(&canonical[HEADER_BYTES..]));
+    assert_eq!(answer(221, &expected, bytes.len()).unwrap(), bytes);
+    assert!(matches!(
+        answer(221, &expected, bytes.len() - 1),
+        Err(Fault::Oversized { .. })
+    ));
+}
+
 /// Qualified observer failures append to, rather than replace, actual native identity and load.
 #[test]
 fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
-    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 51);
+    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 52);
     for cause in [
         LifecycleCause::Pending,
         LifecycleCause::Busy,
@@ -3877,10 +4084,11 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
         ));
     }
     assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
-    // 3 is Retired (joint plan step 14); the next cause is unknown.
+    // 3 is Retired (joint plan step 14); the next cause is unknown. The cause is the byte before its reason's option
+    // tag, an entry's last (joint plan step 14, (B)).
     for cause in [4, u8::MAX] {
         let mut raw = bytes.clone();
-        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = cause;
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 2] = cause;
         assert!(matches!(
             refused(&raw),
             Fault::Value {
@@ -3888,6 +4096,12 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
                 ..
             }
         ));
+    }
+    // A reason's option tag that is neither 0 nor 1.
+    for tag in [2, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = tag;
+        assert!(matches!(refused(&raw), Fault::Value { what: "option", .. }));
     }
     let mut duplicate = bytes.clone();
     duplicate[entry + PHYSICAL_UNAVAILABLE_BYTES] = duplicate[entry];
@@ -3904,6 +4118,7 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
             cause: Refusal::Backing {
                 key: route_wire_key(),
                 cause: LifecycleCause::Pending,
+                why: None,
             },
         },
         BackendUnavailable {
@@ -4053,6 +4268,12 @@ fn connect_refusal_reserves_its_whole_body_before_writing() {
     refusals.push(Refusal::Backing {
         key: route_wire_key(),
         cause: LifecycleCause::Busy,
+        why: None,
+    });
+    refusals.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its scope's end wasn't seen after its stop".to_owned()),
     });
     for refusal in &refusals {
         let mut sized = Writer::new(MAX_MESSAGE);
@@ -5225,12 +5446,17 @@ proptest! {
     }
 }
 
+/// A placeholder as kiln's broker mints one (Shards' D242): a visible marker, then 256 random bits in hex.
+const OPENAI_PLACEHOLDER: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// Joint plan step 33's credential grants: one toward the provider `each_way` grants its harness by name, by TCP.
 fn openai_credential(toward: &str) -> Vec<CredentialGrant> {
     vec![CredentialGrant {
         member: harness(),
         reference: "openai/ada".to_owned(),
         toward: vec![toward.to_owned()],
+        placeholder: OPENAI_PLACEHOLDER.to_owned(),
     }]
 }
 
@@ -5240,7 +5466,8 @@ fn unchecked_credentials(list: &[CredentialGrant]) -> Vec<u8> {
     w.list(list, |w, grant| {
         put_member(w, &grant.member)?;
         w.string(&grant.reference)?;
-        w.list(&grant.toward, |w, host| w.string(host))
+        w.list(&grant.toward, |w, host| w.string(host))?;
+        w.string(&grant.placeholder)
     })
     .unwrap();
     w.done().unwrap()
@@ -5340,4 +5567,71 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
             ..
         })
     ));
+}
+
+/// docs/design/credential-grants.md C7: a lease's value crosses the wire in its own message alone, which says it carries
+/// one so its holder wipes it ([`carries_secret`]); what reads it holds the value in a `Value`, and neither side prints it.
+#[test]
+fn s33_a_leases_value_crosses_marked_and_never_printed() {
+    let value = b"hex-s33-a-credential-value";
+    let leased = Request::Leased {
+        run: 3,
+        answer: Ok(Lease {
+            lease: "lease-3".to_owned(),
+            value: Value::new(value.to_vec()),
+            life: None,
+        }),
+    };
+    let bytes = request(4, &leased, MAX_MESSAGE).unwrap();
+    assert!(
+        carries_secret(&bytes),
+        "a leased message says it carries a value"
+    );
+    for (n, other, _) in requests() {
+        if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
+            let other = request(n, &other, MAX_MESSAGE).unwrap();
+            assert_eq!(
+                carries_secret(&other),
+                other.get(12..14) == Some(&0x001b_u16.to_le_bytes()[..]),
+                "only a leased message says it carries a value"
+            );
+        }
+    }
+    for (n, other) in answers() {
+        assert!(!carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()));
+    }
+    let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(back, leased);
+    let printed = format!("{back:?} {leased:?}");
+    assert!(!printed.contains("hex-s33"), "a value printed: {printed}");
+    assert!(
+        printed.contains(&format!("Value({} bytes)", value.len())),
+        "{printed}"
+    );
+}
+
+/// docs/design/credential-grants.md C7: an answer to a lease ask names a lease or a refusal of Shards' kinds, and a
+/// lessor's answer one made or a refusal: any other byte there is refused by type, naming it.
+#[test]
+fn s33_a_lease_answer_of_no_defined_kind_is_refused() {
+    let undefined = |kind: u16, body: &[u8]| {
+        let mut w = Writer::new(MAX_MESSAGE);
+        w.header(kind, 5);
+        w.raw(body);
+        let bytes = w.done().unwrap();
+        read_request(&received(&bytes, 0), MAX_MESSAGE)
+    };
+    for (kind, body) in [
+        (0x001b_u16, [1u8, 0, 0, 0, 0, 0, 0, 0, 2].as_slice()),
+        (0x001b, [1, 0, 0, 0, 0, 0, 0, 0, 1, 5].as_slice()),
+        (0x001a, [2].as_slice()),
+    ] {
+        match undefined(kind, body) {
+            Err(Bad {
+                id: 5,
+                fault: Fault::Value { .. },
+            }) => {}
+            other => panic!("kind {kind:#06x} body {body:?}: {other:?}"),
+        }
+    }
 }

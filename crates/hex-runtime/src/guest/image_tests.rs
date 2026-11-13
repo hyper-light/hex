@@ -4,7 +4,7 @@
 //! (docs/design/shards-image-class.md; joint plan step 12, AC-T7.4.1).
 
 use std::sync::Condvar;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::devices::{Books, Records, Transaction};
@@ -224,9 +224,18 @@ struct ModelRun {
     /// session does (`session::release`).
     lessor: Mutex<Option<shards_api::image::RunLessor>>,
     given: Mutex<Vec<String>>,
+    /// Whether its stop is held, as the test says: a stop asked waits until the test lets it go.
+    stop_held: Mutex<bool>,
+    stop_let_go: Condvar,
 }
 
 impl ModelRun {
+    /// Holds each stop from now on (`true`), or lets every one held go (`false`).
+    fn hold_stops(&self, held: bool) {
+        *self.stop_held.lock().unwrap() = held;
+        self.stop_let_go.notify_all();
+    }
+
     /// The run host's ask of credential `reference` (D242), as it relays its network process's first use of it: put to
     /// the run's lessor under no key, the lease it gives kept for the run's end.
     fn ask(
@@ -394,8 +403,20 @@ impl ImageGuest for ModelGuest {
             why: "it has none".to_owned(),
         })
     }
+    fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's saves",
+            why: "it makes none".to_owned(),
+        })
+    }
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
+        drop(
+            self.run
+                .stop_let_go
+                .wait_while(self.run.stop_held.lock().unwrap(), |held| *held)
+                .unwrap(),
+        );
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         self.run.release();
         Ok(())
@@ -444,6 +465,9 @@ struct ModelImages {
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
     /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
     started_from: Mutex<StartedFrom>,
+    /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
+    /// boot whose thread failed would.
+    abandon: AtomicBool,
 }
 
 impl ModelImages {
@@ -459,6 +483,7 @@ impl ModelImages {
             receivers: Mutex::new(Vec::new()),
             named: Mutex::new(Vec::new()),
             started_from: Mutex::new(StartedFrom::Booted),
+            abandon: AtomicBool::new(false),
         })
     }
 
@@ -572,6 +597,9 @@ impl Images for ModelImages {
             )));
         }
         drop(gate);
+        if self.abandon.swap(false, Ordering::SeqCst) {
+            panic!("the model's boot thread ends with no answer, as the test asked");
+        }
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
@@ -642,6 +670,8 @@ fn waits() -> Result<ImageWaits, Refusal> {
         boot: Patience::measuring("test.hex_runtime.image_boot"),
         stats: Patience::measuring("test.hex_runtime.image_stats"),
         stop: Patience::measuring("test.hex_runtime.image_stop"),
+        delete_boot: Patience::measuring("test.hex_runtime.image_delete_boot"),
+        started: Patience::measuring("test.hex_runtime.image_started"),
     })
 }
 
@@ -1682,8 +1712,8 @@ fn a_refused_boot_ends_the_box_and_says_why() {
 
 /// Decision 9, joint plan step 12: do start a VM whose boot passes its learned patience before its run host
 /// has started (Shards' own patience counting from that start, after the caller's). Expect: start refused
-/// Lifecycle Pending, the box Created while its boot runs, delete Pending; then, the boot answering, the box
-/// Running with no second boot.
+/// Lifecycle Pending, the box Created while its boot runs; then, the boot answering, the box Running with no second
+/// boot. (A delete meanwhile follows the boot: kiln's choice (b), below.)
 #[test]
 fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
     let images = ModelImages::new();
@@ -1704,16 +1734,217 @@ fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
         })
     ));
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Created);
+    images.gate(Gate::Open);
+    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// Each test's delete under way, its intent written or its answer given: these tests' facts alone.
+static DELETE_FOLLOWS_UNSTARTED: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_unstarted");
+static DELETE_FOLLOWS_STARTING: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_starting");
+static DELETE_FOLLOWS_STOP: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_stop");
+static DELETE_FOLLOWS_ABANDONED: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_follows_abandoned");
+
+/// Kiln's choice (b) (ROOT, 2026-11-13; joint plan step 12, decision 9): a delete of an image VM still booting answers
+/// once the box is gone, never Pending, so its caller needs no retry. D231's boot gives no stop for a boot under way
+/// (`Images::boot` blocks until its run starts or its host ends), so the delete follows the boot to its answer. Do:
+/// start a VM whose boot is held before its run host's start past a 1 ns W*, its start Pending; delete it with its
+/// host use as the boot is held; then let the boot end refused, its run never started. Expect: the delete's intent
+/// written as it follows the boot, never Pending; its answer no use (no run, nothing to charge); the box gone with its
+/// run host's diagnostics; one boot asked; and a delete retried then NoSuchBox.
+#[test]
+fn w12_a_delete_over_a_boot_follows_it_and_answers_no_use_where_its_run_never_started() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_unstarted",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-unstarted", None))
+        .unwrap()
+        .id;
     assert!(matches!(
-        runtime.delete(&id),
+        runtime.start(&id),
         Err(Refusal::Lifecycle {
             cause: LifecycleCause::Pending,
             ..
         })
     ));
-    images.gate(Gate::Open);
-    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    let diagnostics = record(&owner, &id).unwrap().diagnostics.unwrap();
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_UNSTARTED,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        *images.refuse.lock().unwrap() = Some(ImageRefusal::Boot(
+            "its run host ended before its run started".to_owned(),
+        ));
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    assert_eq!(answered, Ok(None));
+    assert!(record(&owner, &id).is_none());
+    assert!(!diagnostics.exists(), "{diagnostics:?} outlived its box");
     assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert!(matches!(
+        Runtime::delete_with_host_use(&runtime.images, &id),
+        Err(Refusal::NoSuchBox(_))
+    ));
+}
+
+/// Kiln's choice (b), as above: do start a VM whose boot is held past a 1 ns W*, its start Pending; delete it with its
+/// host use as the boot is held; then let its run start. Expect: the delete never Pending; the run stopped once it
+/// started, the delete's answer its final use of its host, read as it ran, before its stop; the box gone; one boot, one
+/// stop.
+#[test]
+fn w12_a_delete_over_a_boot_whose_run_then_starts_stops_it_and_answers_its_final_use() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_starting",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-starting", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_STARTING,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    let last = answered.unwrap().unwrap();
+    assert_eq!(
+        (last.cpu_ns, last.footprint_bytes, last.guest_ns.len()),
+        (9_000_000, 1 << 20, usize::try_from(vcpus).unwrap())
+    );
+    assert!(record(&owner, &id).is_none());
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Kiln's choice (b): a delete never answers Pending, so one whose stop runs past the stop's W* follows the stop to its
+/// end. Do: start a VM, its stop's W* one a 1 ns stop taught; delete it with its stop held. Expect: the delete waiting
+/// on its stop, never Pending; once the stop is let go, its answer, the box gone, one stop.
+#[test]
+fn w12_a_delete_follows_its_stop_past_the_stops_w_star() {
+    let images = ModelImages::new();
+    let slow = ImageWaits {
+        stop: Patience::seeded(
+            "test.hex_runtime.image_stop_deleted",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(slow));
+    let id = runtime
+        .create(spec("image-deleted-stopping", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    images.run.hold_stops(true);
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        hex_testkit::waits::until(&DELETE_FOLLOWS_STOP, "the delete's stop asked", || {
+            deleting.is_finished() || images.run.stops.load(Ordering::SeqCst) == 1
+        })
+        .unwrap();
+        images.run.hold_stops(false);
+        deleting.join().unwrap()
+    });
+    assert_eq!(answered, Ok(()));
+    assert!(record(&owner, &id).is_none());
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Kiln's choice (b) (ROOT, 2026-11-13: the delete's wait follows the boot until its party's end, and says so there):
+/// a delete following a boot is refused only where the boot's thread ends with no answer, so neither its run's start
+/// nor its run host's end is known. Do: start a VM whose boot is held past a 1 ns W*, its start Pending; delete it as
+/// the boot is held; then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the
+/// node's broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
+#[test]
+fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_deleted_abandoned",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-abandoned", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_ABANDONED,
+            "the delete following the boot",
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        images.abandon.store(true, Ordering::SeqCst);
+        images.gate(Gate::Open);
+        deleting.join().unwrap()
+    });
+    assert!(
+        matches!(&answered, Err(Refusal::Broken(why)) if why.contains("the boot it ends is still under way")),
+        "{answered:?}"
+    );
+    assert_eq!(record(&owner, &id).unwrap().phase, Phase::Deleting);
 }
 
 /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it), joint
@@ -2392,6 +2623,179 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
     }
 }
 
+/// The image class's waits as the guest runtime holds them, so a test can see where a wait of its own stands.
+fn image_waits(runtime: &GuestRuntime) -> &ImageWaits {
+    runtime
+        .images
+        .image
+        .as_ref()
+        .unwrap()
+        .waits
+        .as_ref()
+        .unwrap()
+}
+
+/// `started` asked of `id` on its own thread, and the model's gate opened once that call has returned or its own wait
+/// has run out (its W* a 1 ns one taught it, so it follows the boot from then on): either way the call has looked at
+/// the box with its boot still held. Answers what `started` answered.
+fn started_over_a_held_boot(
+    runtime: &GuestRuntime,
+    images: &ModelImages,
+    id: &BoxId,
+    wait: &Patience,
+) -> Result<BoxInfo, Refusal> {
+    std::thread::scope(|scope| {
+        let asking = scope.spawn(|| runtime.started(id));
+        hex_testkit::waits::until(wait, "started following the boot", || {
+            asking.is_finished() || image_waits(runtime).started.deadline().is_none()
+        })
+        .unwrap();
+        images.gate(Gate::Open);
+        asking.join().unwrap()
+    })
+}
+
+/// Each test's `started` call under way: these tests' facts alone.
+static STARTED_FOLLOWS_RUN: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_run");
+static STARTED_FOLLOWS_FAILURE: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_failure");
+static STARTED_FOLLOWS_ABANDONED: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_abandoned");
+
+/// Waits whose boot and `started` call each run out at once (a 1 ns W*), so a start answers Pending and `started`
+/// follows the boot from its first look.
+fn started_waits(name: &'static str, started: &'static str) -> ImageWaits {
+    ImageWaits {
+        boot: Patience::seeded(name, Duration::from_nanos(1)),
+        started: Patience::seeded(started, Duration::from_nanos(1)),
+        ..waits().unwrap()
+    }
+}
+
+/// Kiln's HexVms adapter (ROOT, 2026-11-13; joint plan step 12, decision 9): a start past its boot's W* answers
+/// Pending, and its caller waits for the box's run with `started` rather than polling. Do: start a VM whose boot is held
+/// past a 1 ns W*, its start Pending; ask `started` as the boot is held, then let its run start. Expect: `started`
+/// following the boot until it answers, then the box Running; one boot.
+#[test]
+fn w12_started_follows_a_held_boot_to_its_run() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_run",
+            "test.hex_runtime.image_started_run",
+        )),
+    );
+    let id = runtime.create(spec("image-started-run", None)).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let info = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_RUN).unwrap();
+    assert_eq!(info.state, BoxState::Running);
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// As above, its boot then refused, its run never started. Expect: `started` answering the run's own failure in its
+/// runtime's words, `Refusal::Failed`, as the box's `ended` keeps them.
+#[test]
+fn w12_started_answers_a_boot_that_fails_in_its_words() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_failure",
+            "test.hex_runtime.image_started_failure",
+        )),
+    );
+    let id = runtime
+        .create(spec("image-started-failure", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    *images.refuse.lock().unwrap() = Some(ImageRefusal::Boot(
+        "its image's members never started".to_owned(),
+    ));
+    let answered = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_FAILURE);
+    assert!(
+        matches!(&answered, Err(Refusal::Failed { id: failed, why }) if failed == &id && why.contains("its image's members never started")),
+        "{answered:?}"
+    );
+    assert!(
+        runtime
+            .inspect(&id)
+            .unwrap()
+            .ended
+            .is_some_and(|why| why.contains("its image's members never started"))
+    );
+}
+
+/// As above, its boot's thread then ending with no answer. Expect: `started` refused only there, as the node's broken
+/// state in its own words, the boot it follows still under way.
+#[test]
+fn w12_started_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_abandoned",
+            "test.hex_runtime.image_started_abandoned",
+        )),
+    );
+    let id = runtime
+        .create(spec("image-started-abandoned", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    images.abandon.store(true, Ordering::SeqCst);
+    let answered = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_ABANDONED);
+    assert!(
+        matches!(&answered, Err(Refusal::Broken(why)) if why.contains("the boot it follows is still under way")),
+        "{answered:?}"
+    );
+}
+
+/// Kiln's HexVms adapter: a box not booting is answered at once, as inspect answers it. Do: create a VM, ask `started`,
+/// start it, ask again. Expect: `Created` with nothing booted, then `Running`, each inspect's answer.
+#[test]
+fn w12_started_of_a_box_not_booting_answers_as_inspect_at_once() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-started-at-once", None))
+        .unwrap()
+        .id;
+    assert_eq!(runtime.started(&id).unwrap(), runtime.inspect(&id).unwrap());
+    assert_eq!(runtime.started(&id).unwrap().state, BoxState::Created);
+    assert!(images.asked.lock().unwrap().is_empty());
+    runtime.start(&id).unwrap();
+    assert_eq!(runtime.started(&id).unwrap().state, BoxState::Running);
+    // An id the class holds no record of is no box of its (a node's guest runtime takes such an id as its guest's).
+    assert!(matches!(
+        Runtime::started(&runtime.images, &BoxId::new("image-started-none").unwrap()),
+        Err(Refusal::NoSuchBox(_))
+    ));
+}
+
 /// Decision 9 (no record is read), joint plan step 12: do make the image waits. Expect: each following its party (no
 /// bound) until its first answer, under its own name, and no refusal for want of a record: an image box needs none.
 #[test]
@@ -2401,13 +2805,27 @@ fn the_image_waits_follow_their_parties_until_their_first_answers() {
         (
             waits.boot.deadline(),
             waits.stats.deadline(),
-            waits.stop.deadline()
+            waits.stop.deadline(),
+            waits.delete_boot.deadline(),
+            waits.started.deadline()
         ),
-        (None, None, None)
+        (None, None, None, None, None)
     );
     assert_eq!(
-        (waits.boot.name(), waits.stats.name(), waits.stop.name()),
-        ("hex.image.boot", "hex.image.stats", "hex.image.stop")
+        (
+            waits.boot.name(),
+            waits.stats.name(),
+            waits.stop.name(),
+            waits.delete_boot.name(),
+            waits.started.name()
+        ),
+        (
+            "hex.image.boot",
+            "hex.image.stats",
+            "hex.image.stop",
+            "hex.image.delete_boot",
+            "hex.image.started"
+        )
     );
     waits.boot.answered(Duration::from_millis(3));
     assert_eq!(waits.boot.deadline(), Some(Duration::from_millis(3)));
@@ -2453,6 +2871,11 @@ fn a_guest_path_call_scans_the_records_once() {
     );
 }
 
+/// The placeholder kiln's broker gives Claude Code's harness for its account's credential (Shards' D242): a visible
+/// marker, then 256 random bits in hex.
+const CLAUDE_PLACEHOLDER: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// Claude Code's harness as kiln boots it (joint plan step 33's example): its providers by name, by TCP, and its
 /// account's credential toward both; and the model's image naming what the harness reaches.
 fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::CredentialGrant>) {
@@ -2482,6 +2905,7 @@ fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::Cred
             "api.anthropic.com".to_owned(),
             "platform.claude.com".to_owned(),
         ],
+        placeholder: CLAUDE_PLACEHOLDER.to_owned(),
     }];
     let mut spec = spec(name, None);
     if let ClassSpec::ShardsImage(image) = &mut spec.class {
@@ -2494,9 +2918,10 @@ fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::Cred
 /// AC-T7.7.2, joint plan step 33 (its step 6; Shards' D242; docs/design/credential-grants.md C3, C4): do create and
 /// start a harness VM granting its credential toward its two providers, on a node whose orchestrator gave it lessors
 /// over a simulated broker; then ask the credential as Shards' run host relays its egress's first use, and stop the VM.
-/// Expect: the boot asked exactly the box's credential, one grant toward both hosts and a lessor; inspect showing every
-/// credential grant as the record holds it; the ask answered with the broker's value, held there; a host the grant
-/// doesn't name carrying no credential (Shards' decision passes it bare); and the lease given back as the run ends.
+/// Expect: the boot asked exactly the box's credential, one grant toward both hosts with its placeholder and a lessor;
+/// inspect showing every credential grant as the record holds it; the ask answered with the broker's value, held
+/// there; a host the grant doesn't name, or a request without its placeholder, carrying no credential (Shards' decision
+/// passes it bare); and the lease given back as the run ends.
 #[test]
 fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_lessors() {
     use hex_api::lease::sim::SimLessors;
@@ -2518,6 +2943,7 @@ fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_le
                 "api.anthropic.com".to_owned(),
                 "platform.claude.com".to_owned()
             ],
+            placeholder: CLAUDE_PLACEHOLDER.to_owned(),
         }]
     );
     assert!(asked[0].lessor.is_some());
@@ -2530,12 +2956,27 @@ fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_le
         shards_api::image::decide(
             &asked[0].credentials,
             "api.anthropic.com",
-            "api.anthropic.com"
+            "api.anthropic.com",
+            Some(CLAUDE_PLACEHOLDER)
         ),
         shards_api::image::Fill::With("anthropic/ada".to_owned())
     );
     assert_eq!(
-        shards_api::image::decide(&asked[0].credentials, "evil.example", "evil.example"),
+        shards_api::image::decide(
+            &asked[0].credentials,
+            "evil.example",
+            "evil.example",
+            Some(CLAUDE_PLACEHOLDER)
+        ),
+        shards_api::image::Fill::Pass
+    );
+    assert_eq!(
+        shards_api::image::decide(
+            &asked[0].credentials,
+            "api.anthropic.com",
+            "api.anthropic.com",
+            None
+        ),
         shards_api::image::Fill::Pass
     );
     let leased = images.run.ask("anthropic/ada").unwrap();

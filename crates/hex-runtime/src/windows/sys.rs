@@ -3,8 +3,10 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process-creation support is unstable. Each `unsafe`
 //! block states the invariant that makes it sound. A box is a job object: this file creates one, sets
 //! its limits, starts a member suspended inside it (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs
-//! outside it) and resumes it, reads the job's accounting, and ends the job. Names, structures and
-//! flags are Windows' own (`windows-sys`; docs/research/runtime/windows-job-objects.md).
+//! outside it) and resumes it, reads the job's accounting, and ends the job. It also counts the handles
+//! the process holds (`GetProcessHandleCount`): what a node holds at its start beside its bounds as it
+//! fits them (`hex_node::serve::fit`). Names, structures and flags are Windows' own (`windows-sys`;
+//! docs/research/runtime/windows-job-objects.md).
 
 // The Windows class's one place `unsafe` is allowed (CLAUDE.md §12); every block below carries its
 // SAFETY comment.
@@ -42,11 +44,11 @@ use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW,
     CreateProcessW, CreateWaitableTimerExW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
-    GetExitCodeProcess, GetProcessTimes, GetSystemTimes, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, SetPriorityClass,
+    GetExitCodeProcess, GetProcessHandleCount, GetProcessTimes, GetSystemTimes,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, SetPriorityClass,
     SetThreadPriority, SetWaitableTimer, THREAD_PRIORITY_TIME_CRITICAL, TIMER_ALL_ACCESS,
     TerminateProcess, WaitForMultipleObjects, WaitForSingleObject,
 };
@@ -99,6 +101,20 @@ pub fn thread_stack_bytes() -> io::Result<usize> {
 
 /// The enclosing job's declared process ceiling, if it sets one. Kernel allocation failures remain
 /// authoritative when the current job has none, or another enclosing job is tighter.
+/// How many handles this process holds now: `GetProcessHandleCount` of its own pseudo-handle
+/// (learn.microsoft.com, "GetProcessHandleCount function"), what a node held at its start beside its
+/// bounds as it fits them (`hex_node::serve::fit`), as Linux's node reads `/proc/self/fd`.
+pub fn open_handles() -> io::Result<u64> {
+    let mut count: u32 = 0;
+    // SAFETY: GetCurrentProcess returns this process's pseudo-handle, which needs no closing;
+    // GetProcessHandleCount writes one u32 to `count`, a local that outlives the call.
+    let held = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    if held == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(count))
+}
+
 pub fn enclosing_process_limit() -> io::Result<Option<usize>> {
     use windows_sys::Win32::System::JobObjects::{
         IsProcessInJob, JOBOBJECT_BASIC_LIMIT_INFORMATION, JobObjectBasicLimitInformation,
@@ -1165,6 +1181,21 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
         WAIT_TIMEOUT => Ok(false),
         _ => Err(last_error()),
     }
+}
+
+/// The host's boot sequence: `KUSER_SHARED_DATA`'s `BootId`, "Boot sequence, incremented for each boot attempt by the
+/// OS loader" (ntddk.h; learn.microsoft.com/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data), so no two
+/// boots of a host share one. Read where the kernel maps that structure read-only into every process, ntddk.h's
+/// `MM_SHARED_USER_DATA_VA` (0x7FFE0000): `BootId` is at 0x2C4 in the header's layout, after `ProcessorFeatures`' 64
+/// bytes from 0x274 and the four 32-bit members `Reserved1`, `Reserved3`, `TimeSlip` and `AlternativeArchitecture`.
+/// No call is made and no handle opened, so no program another thread starts can inherit one.
+pub fn boot_id() -> u32 {
+    /// `MM_SHARED_USER_DATA_VA` and `BootId`'s offset in `KUSER_SHARED_DATA`, 0x7FFE0000 + 0x2C4.
+    const BOOT_ID: usize = 0x7FFE_02C4;
+    // SAFETY: the kernel maps KUSER_SHARED_DATA read-only at MM_SHARED_USER_DATA_VA into every user-mode process, on
+    // every architecture Windows runs, for the process's whole life and before any of its code runs. BootId is a
+    // ULONG at a 4-aligned offset inside that page, initialized at boot; this process never writes it.
+    unsafe { std::ptr::with_exposed_provenance::<u32>(BOOT_ID).read_volatile() }
 }
 
 /// Flushes directory `dir` (FlushFileBuffers on its handle), so a rename or removal in it outlives a host crash.

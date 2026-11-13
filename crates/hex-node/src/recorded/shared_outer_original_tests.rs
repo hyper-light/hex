@@ -219,7 +219,7 @@ fn original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference() 
     assert_eq!(boots.load(Ordering::SeqCst), 0);
     let error = node.create(spec.clone()).unwrap_err();
     assert!(
-        matches!(error, Refusal::Backing { key, cause: LifecycleCause::Uncertain } if key == pool.key),
+        matches!(error, Refusal::Backing { key, cause: LifecycleCause::Uncertain, .. } if key == pool.key),
         "unexpected precondition refusal: {error:?}"
     );
     assert_eq!(

@@ -824,9 +824,10 @@ impl FirecrackerRuntime {
             .pool_records()?
             .into_iter()
             .find(|pool| pool.key == key)
-            .ok_or(Refusal::Backing {
+            .ok_or_else(|| Refusal::Backing {
                 key,
                 cause: LifecycleCause::Uncertain,
+                why: Some("its Firecracker handoff's source backing has no record".to_owned()),
             })?;
         self.preflight_backing(&source)?;
         // This is an exact isolation/identity check, not another picker. Refuse an inseparable
@@ -866,6 +867,7 @@ impl FirecrackerRuntime {
                     return Err(Refusal::Backing {
                         key,
                         cause: LifecycleCause::Pending,
+                        why: None,
                     });
                 }
                 if transaction.read(&id)?.is_some() {

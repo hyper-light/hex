@@ -153,10 +153,14 @@ pub const OCI_BOXES: &str = ".oci";
 pub struct Runs {
     /// VM boxes, a Firecracker VM's or a Shards guest's, whose backends [`Node::install_backends`] installs.
     pub vms: bool,
+    /// Node VMs under shards-init its guest runtime can hold at once, each with its lanes (`crate::serve::fit`).
+    pub hosted: usize,
 }
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
+    /// Its lessors over its wire, where its image VMs lease through them ([`Node::lease_over_wire`]).
+    wire_lessors: OnceLock<Arc<crate::serve::WireLessors>>,
     attachments: hex_runtime::devices::SharedCatalog,
     attachment_turns: Turns,
     backends: OnceLock<backends::Backends>,
@@ -253,6 +257,18 @@ enum Source {
 }
 
 impl Node {
+    /// Its image VMs' credentials leased over its wire (joint plan step 33; docs/design/credential-grants.md C7):
+    /// `lessors`, which its guest runtime's image class was built with, each box's route kept by its socket as the box is
+    /// created. Given once.
+    pub fn lease_over_wire(&self, lessors: Arc<crate::serve::WireLessors>) -> Result<(), Refusal> {
+        self.wire_lessors
+            .set(lessors)
+            .map_err(|_| Refusal::Invalid {
+                what: "lessors over the node's wire",
+                why: "the node was given them already".to_owned(),
+            })
+    }
+
     /// The program started, its stdio as given: an oci box whose init runs is known to the supervisor,
     /// with what its exec needs, so the hot path reads nothing from disk; any other box's record says what
     /// it is.
@@ -361,7 +377,8 @@ impl Node {
             Owner::Root => Pools::root(sizes, files_ahead),
             Owner::Rootless { .. } => Pools::rootless(sizes, files_ahead),
         }
-        .running_vms(runs.vms);
+        .running_vms(runs.vms)
+        .hosting(runs.hosted);
         // Once every descriptor the node holds for its life beside its bounds is open (its store, keeper, roots and
         // /dev/null), and before any thread or pool holds one: every bound that holds them fitted to the hard limit,
         // past which the node's own budgets refuse by type (crate::netns::hold_descriptors).
@@ -387,6 +404,7 @@ impl Node {
         // devfs makes none, so it parks none.
         let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
+            wire_lessors: OnceLock::new(),
             attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
                 |_| Refusal::Exhausted {
                     what: "shared runtime device catalog owners",
@@ -727,6 +745,13 @@ impl Node {
     /// The node's pools' bounds on its host, and where their learned sizes start (Ada's rule, 2026-11-06).
     pub fn sizes(&self) -> Sizes {
         self.pools.sizes
+    }
+
+    /// Each hosted VM's lanes (`crate::serve::fit::lanes`) at the program places its start fitted: what a node VM under
+    /// shards-init's run grants its controller (Shards' D251), counted among the node's descriptors
+    /// ([`Runs::hosted`]).
+    pub fn hosted_lanes(&self) -> usize {
+        crate::serve::fit::lanes(crate::serve::limits(&self.pools.sizes.platform()).programs)
     }
 
     /// The node's pools as its start fitted them to its descriptor limit (`netns::hold_descriptors`): what its own
@@ -2266,6 +2291,10 @@ impl Node {
 impl crate::serve::Host for Node {
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
         Node::abandoned(self, id)
+    }
+
+    fn lessors(&self) -> Option<Arc<crate::serve::WireLessors>> {
+        self.wire_lessors.get().cloned()
     }
 
     /// Its VM backends' evented connections to their guests join the core's loop ([`Node::forward_vm`]).
