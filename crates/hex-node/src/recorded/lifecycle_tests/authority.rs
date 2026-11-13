@@ -34,6 +34,7 @@ fn info(record: &BoxRecord) -> BoxInfo {
         allocation: record.spec.allocation,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 struct Registered {

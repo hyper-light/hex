@@ -130,10 +130,18 @@ split, so a box can be admitted and recorded before it is needed:
 Every member operation D231 doesn't give (a terminal, exec, signals) is refused typed, naming the capability
 (`Refusal::Awaits`), never stubbed. A member's own streams are the joint plan's step 17 (a kiln session's stdio as its
 harness member's):
-- `ShardsImage::members` names the members the box's caller drives (each its `Member`, variables over its image's
-  and a working directory, checked as an exec's variables and as D231's absolute, plain `workdir`; each named once).
-  The boot gives each a `MemberSpec` with `stdin` (step 5's pipe the orchestrator writes) and no terminal; the
-  image's other members run as it declares them, their stdin `/dev/null`.
+- `ShardsImage::members` names the members the box's caller drives (each its `Member`, variables over its image's,
+  a working directory and run-time arguments, checked as an exec's variables, as D231's absolute, plain `workdir`,
+  and as no command line's argument holds a NUL; each named once). The boot gives each a `MemberSpec` with `stdin`
+  (step 5's pipe the orchestrator writes), its arguments after its image's command for it (D256's `args`, kiln's
+  step 17: a harness's session flags, `--resume` and `--model`) and no terminal; the image's other members run as it
+  declares them, their stdin `/dev/null`.
+- `ShardsImage::shares` names the host directories the guest sees (D231's shares, `-v HOST:AT[:ro]`; kiln's step
+  18: a person's home volumes and a project at its host path, D235), each a `Mount`: its host directory, checked as
+  a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
+  read-only. The boot asks Shards for exactly those, in order (default deny: the image's grants widen none), and a
+  share Shards refuses refuses the start as `Invalid`, in Shards' words. A member gets one where its image's
+  `VOLUME` at that path is for it (D109), the run's own command where no `VOLUME` declares it.
 - `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
   stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
   its end (`wait_member`; `WithRun` is the run's end, as the box's own). It is no process of this host

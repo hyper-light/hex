@@ -168,12 +168,15 @@ with the `CAP_NET_BIND_SERVICE` capability may bind to these port numbers"), and
 `CONNECT <port>` line (firecracker `docs/vsock.md`, "Host-Initiated Connections"), any `u32`. Hex assigns its
 ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so a capture reads them:
 
-| port | value | carries |
-|---|---|---|
-| `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
-| `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
-| `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
-| `STAMPS_PORT` | `0x4845_5803` | the boot's own stamps, one line, then closed (bench/native/guest/boot-split) |
+| port | value | socket (`--unix`) | carries |
+|---|---|---|---|
+| `CONTROL_PORT` | `0x4845_5800` | `control.sock` | a control connection: the relay's token, then framed wire messages |
+| `STDIO_PORT` | `0x4845_5801` | `stdio.sock` | one stdio stream of one exec, named by its first `NAME_BYTES` |
+| `FILES_PORT` | `0x4845_5802` | `files.sock` | a staging or removal connection (§4a) |
+| `STAMPS_PORT` | `0x4845_5803` | `stamps.sock` | the boot's own stamps, one line, then closed (bench/native/guest/boot-split) |
+
+Where the relay listens on AF_UNIX stream sockets in a directory of its own (`hex guest relay --unix`, a node under
+shards-init: node-under-shards-init.md §5), each port is the socket the third column names there.
 
 **Control.** A connection opens with the relay's token, then carries frames:
 

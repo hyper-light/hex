@@ -676,6 +676,7 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::RatePeriod => "Awaits(RatePeriod)",
         },
         Refusal::Failed { .. } => "Failed",
+        Refusal::Unconfigured { .. } => "Unconfigured",
     }
 }
 

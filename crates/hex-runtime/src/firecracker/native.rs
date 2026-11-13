@@ -1373,6 +1373,7 @@ impl Runtime for FirecrackerRuntime {
                     abandoned: record.abandoned,
                     last_resort: None,
                     ended: None,
+                    credentials: Vec::new(),
                 });
             }
             let mut info = self.client(record, transaction)?.inspect(id)?;

@@ -1222,6 +1222,8 @@ impl<W: Waits> Stream<W> {
     }
 }
 
+pub mod bridge;
+pub mod lanes;
 pub mod shards;
 pub mod stage;
 

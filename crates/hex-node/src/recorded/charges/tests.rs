@@ -505,6 +505,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             published: Vec::new(),
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         })
         .unwrap();
     assert_eq!(info.last_resort, Some(end));
@@ -781,6 +782,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         footprint_bytes: held,
         resident_bytes: held,
         guest_ns: vec![each_ns; usize::try_from(vcpus).unwrap()],
+        window: std::time::Duration::ZERO,
     };
     io.host
         .borrow_mut()
@@ -892,6 +894,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
             footprint_bytes: GIB,
             resident_bytes: GIB,
             guest_ns: vec![0; 16],
+            window: std::time::Duration::ZERO,
         },
     );
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
