@@ -1,8 +1,8 @@
-//! What the tests' waits take (decision 9 of docs/design/runtime-architecture.md; the lead's rules for test patiences
-//! of 2026-11-06 and 2026-11-08: every wait in the tests uses its own record's patience). A test waits for a fact for
-//! at most its record, then the slowest answer seen for that fact, with no margin, so a fact as slow as any on record
-//! passes and one slower runs out, the run-out told to the census; the next wait for that fact then follows it, for the
-//! fact alone (decision 9's rule after a run-out):
+//! What the tests' waits take (decision 9 of docs/design/runtime-architecture.md; the person's ruling of 2026-11-13, R03
+//! for tests: a wait for a fact waits for the answer). A test's wait for a fact is never refused at its patience: past
+//! it, its record or the slowest answer seen for that fact, the run-out is told to the census, once, and the wait goes
+//! on to its fact, whose answer is the sample its W* rises to. A party to follow, so a fact that will never come fails
+//! its test, is [`follow`]'s; these waits follow their fact alone. What each patience is:
 //! - a fact a census row records takes that row's record, here; a program's end through a `Proc` takes the suites'
 //!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end);
 //! - a fact one node operation makes within itself takes that operation's record, the relation stated where it is
@@ -14,9 +14,10 @@
 //! run 5, waits-census-20261109T184054Z on adacachy2, at ef259dbe): the largest answer of the debug-build arms, the
 //! debug arm and the suites', for the row and every test wait seeded from it, never under a bound one ran out at, named
 //! by its row, in nanoseconds as the census keeps them. They seed tests' waits alone ([`Patience::seeded`], a test-only
-//! constructor): no production wait is seeded from a record (decision 9). [`until`] waits for a fact on a [`Patience`] seeded from one of
-//! them or measuring, and [`within`] gives a wait that takes its own deadline the patience's; where the census probe
-//! runs the suites (`HEX_WAITS_CENSUS`), every answer goes to its file, so the tests' own waits have rows of their own.
+//! constructor): no production wait is seeded from a record (decision 9). [`until`] waits for a fact on a [`Patience`]
+//! seeded from one of them or measuring, and [`within`] gives a wait that takes its own deadline none, so it waits for
+//! its answer; where the census probe runs the suites (`HEX_WAITS_CENSUS`), every answer goes to its file, so the tests'
+//! own waits have rows of their own.
 
 use std::fs::File;
 use std::io::Write;
@@ -69,7 +70,8 @@ pub const SEEDS: Duration = Duration::from_nanos(652_937_547);
 #[cfg(target_os = "macos")]
 pub const OVERSHOOT: Duration = Duration::from_nanos(2_743_000);
 
-/// A wait's fact didn't come within its patience.
+/// A wait's fact didn't come within its patience: no wait of this module's gives it any longer (R03 for tests), the
+/// type kept for the callers that name it, until (d) moves them to [`follow`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waited {
     /// The fact waited for.
@@ -88,15 +90,16 @@ impl std::fmt::Display for Waited {
     }
 }
 
-/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most `wait`'s
-/// deadline (none before its first answer and after a run-out: the fact alone); says how many looks it took, and tells `wait`, and the census
-/// where the probe runs the suites, how long. Refused, naming `what` and the patience, once the deadline has passed
-/// without the fact; a wait that ran out is no sample (Karn's point), but the census is told it ran out at its bound.
-pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
+/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, until it comes; says how
+/// many looks it took, and tells `wait`, and the census where the probe runs the suites, how long. Past `wait`'s
+/// deadline (none before its first answer and from a run-out to the next) the census is told the fact ran out at its
+/// bound, once, and the wait goes on (R03 for tests: a wait for a fact waits for the answer); the answer, however late,
+/// is the sample W* rises to. Never refused: its `Err` is no longer given (the fact's name is for [`follow`]'s waits,
+/// which do refuse, at their party's end or stall).
+pub fn until(wait: &Patience, _what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
     census();
     let began = Instant::now();
-    let patience = wait.deadline();
-    let deadline = patience.and_then(|p| began.checked_add(p));
+    let mut patience = wait.deadline();
     let mut looks = 0u64;
     loop {
         looks = looks.saturating_add(1);
@@ -105,14 +108,11 @@ pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Res
             return Ok(looks);
         }
         if let Some(after) = patience
-            && deadline.is_some_and(|d| Instant::now() >= d)
+            && began.elapsed() >= after
         {
-            // No sample (Karn's point), but the census is told the fact took longer than its bound.
+            // No sample (Karn's point), but the census is told the fact took longer than its bound; the wait goes on.
             wait.ran_out(after);
-            return Err(Waited {
-                what: what.to_owned(),
-                patience: after,
-            });
+            patience = None;
         }
         std::thread::yield_now();
     }
@@ -125,20 +125,22 @@ pub fn answered(wait: &Patience, took: Duration) {
     wait.answered(took);
 }
 
-/// Waits for a fact through `call`, a wait that takes its own deadline (a read's, an accept's, a dial's): `wait`'s
-/// deadline from now, none before its first answer and after a run-out (the fact alone). Tells `wait`, and the census where the probe runs the
-/// suites, how long its answer took; one that came only once the deadline had passed is no sample (Karn's point), and
-/// the census is told it ran out at its bound, as [`until`] tells it.
+/// Waits for a fact through `call`, a wait that takes its own deadline (a read's, an accept's, a dial's): given none,
+/// so it waits for its answer (R03 for tests: a wait for a fact waits for the answer). Tells `wait`, and the census
+/// where the probe runs the suites, how long its answer took, the sample W* rises to; one past `wait`'s deadline has
+/// its run-out told first, as [`until`] tells it.
 pub fn within<T>(wait: &Patience, call: impl FnOnce(Option<Instant>) -> T) -> T {
     census();
     let began = Instant::now();
     let patience = wait.deadline();
-    let got = call(patience.and_then(|p| began.checked_add(p)));
+    let got = call(None);
     let took = began.elapsed();
-    match patience {
-        Some(after) if took >= after => wait.ran_out(after),
-        _ => wait.answered(took),
+    if let Some(after) = patience
+        && took >= after
+    {
+        wait.ran_out(after);
     }
+    wait.answered(took);
     got
 }
 
