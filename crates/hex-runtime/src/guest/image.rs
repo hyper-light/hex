@@ -1180,8 +1180,9 @@ impl ImageClass {
             control: None,
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
-            // No sign-in grant (Shards' D242 step 8, image channel v24): its pass-through is goal 13's.
-            sign_ins: Vec::new(),
+            // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
+            // spec grants them, run-wide as Shards keeps them; their lessor is its run's, as its credentials' is.
+            sign_ins: super::leases::sign_ins(image)?,
         })
     }
 
