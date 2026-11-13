@@ -595,13 +595,14 @@ fn a_destination_its_image_grants_not_refuses_the_boot(
 }
 
 /// What `ask` hands over (`Runtime::member` of box `id`), asked again while it answers `Lifecycle { Pending }`, as a
-/// box whose run is settling answers it, and `shown` (the box's state and end) says the box lives: each ask the node's
-/// own answer, with no timer of the test's (R03), the wait measuring (`MEMBER_HANDED_OVER`). A box that ends first ends
-/// the wait, refused naming its end; any other refusal ends it at once. Says it and how many asks it took.
+/// box whose run is settling answers it, and `shown` (the box's state, its exit and a failed run's words,
+/// `BoxInfo.ended`) says the box lives: each ask the node's own answer, with no timer of the test's (R03), the wait
+/// measuring (`MEMBER_HANDED_OVER`). A box that ends first ends the wait, refused naming its end; any other refusal
+/// ends it at once. Says it and how many asks it took.
 fn handed_over<P>(
     id: &BoxId,
     mut ask: impl FnMut() -> Result<P, Refusal>,
-    mut shown: impl FnMut() -> Result<(BoxState, Option<Exit>), Refusal>,
+    mut shown: impl FnMut() -> Result<(BoxState, Option<Exit>, Option<String>), Refusal>,
 ) -> Result<(P, u64), String> {
     let mut answer = None;
     let asks = hex_testkit::waits::until(
@@ -613,8 +614,8 @@ fn handed_over<P>(
                     cause: LifecycleCause::Pending,
                     ..
                 }) => match shown() {
-                    Ok((BoxState::Empty, exit)) => Err(format!(
-                        "{id} ended before its member was handed over: {exit:?}"
+                    Ok((BoxState::Empty, exit, ended)) => Err(format!(
+                        "{id} ended before its member was handed over: {exit:?}, {ended:?}"
                     )),
                     Ok(_) => return false,
                     Err(why) => Err(format!("{id}, its member pending: {why:?}")),
@@ -637,7 +638,11 @@ fn asked_on_stdin(client: &Client, id: &BoxId, probe: &Probe) -> Report {
     let (mut member, asks) = handed_over(
         id,
         || client.member(id, &probe.member),
-        || client.inspect(id).map(|shown| (shown.state, shown.exit)),
+        || {
+            client
+                .inspect(id)
+                .map(|shown| (shown.state, shown.exit, shown.ended))
+        },
     )
     .unwrap();
     eprintln!("GRANTS-CHECK-2 {id}: its probe handed over at ask {asks}");
@@ -1031,8 +1036,8 @@ fn the_probe_answers_each_connection_with_its_targets_outcomes() {
 
 /// Joint plan step 15 (the hand-over, no VM; R03): do ask a hand-over of a fake that answers `Lifecycle { Pending }`
 /// twice, its box running, as a box settling does, then hands its member over. Expect it handed over at the third ask.
-/// Do ask one that answers Pending while its box has ended; expect the wait refused naming the box's end. Do ask one
-/// that refuses otherwise; expect that refusal, at the first ask.
+/// Do ask one that answers Pending while its box has ended; expect the wait refused naming the box's end, its exit and
+/// its run's words (`BoxInfo.ended`). Do ask one that refuses otherwise; expect that refusal, at the first ask.
 #[test]
 fn a_members_hand_over_is_asked_again_while_its_box_settles() {
     let id = BoxId::new("grants-handover").unwrap();
@@ -1044,16 +1049,24 @@ fn a_members_hand_over_is_asked_again_while_its_box_settles() {
     let handed = handed_over(
         &id,
         || answers.next().unwrap(),
-        || Ok((BoxState::Running, None)),
+        || Ok((BoxState::Running, None, None)),
     );
     assert_eq!(handed, Ok(("the probe", 3)));
     let ended = handed_over(
         &id,
         || Err::<(), _>(pending()),
-        || Ok((BoxState::Empty, Some(Exit::Code(1)))),
+        || {
+            Ok((
+                BoxState::Empty,
+                Some(Exit::Code(1)),
+                Some("its run host's words".to_owned()),
+            ))
+        },
     );
     assert!(
-        matches!(&ended, Err(why) if why.contains("ended") && why.contains("Code(1)")),
+        matches!(&ended, Err(why) if why.contains("ended")
+            && why.contains("Code(1)")
+            && why.contains("its run host's words")),
         "{ended:?}"
     );
     let mut asked = 0;
@@ -1063,7 +1076,7 @@ fn a_members_hand_over_is_asked_again_while_its_box_settles() {
             asked += 1;
             Err::<(), _>(Refusal::NotRunning(id.clone(), "member"))
         },
-        || Ok((BoxState::Running, None)),
+        || Ok((BoxState::Running, None, None)),
     );
     assert!(
         matches!(&other, Err(why) if why.contains("NotRunning")),
