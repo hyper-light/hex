@@ -2227,8 +2227,9 @@ pub enum Upstream {
     /// to such a socket, and D231's run host binds no endpoint (Shards 7a4ef5c0).
     NestedChannel,
     /// The period a Shards VM's rate holds over (D247's hold is D191's governor, its period CFS's), as Shards' API
-    /// says it: shards-api exposes neither a call nor a const for it, so a learner capping a VM through its rate can't
-    /// take its window from it (joint plan step 14, C1).
+    /// says it. Given since Shards 1acbf2cb9 (`ImageGuest::rate_period`, image channel version 17): each run's own, as
+    /// its run host said it as the run started, which the charge learner reads each window (joint plan step 14, C1), so
+    /// no call awaits it now. Its tag stays, the wire being append-only.
     RatePeriod,
 }
 
@@ -2295,7 +2296,7 @@ impl std::fmt::Display for Upstream {
                 "a connection to a runtime nested under shards-init (a lane of Shards' agent-control endpoint to its socket)"
             }
             Self::RatePeriod => {
-                "the period a Shards VM's rate holds over (D191's governor), which shards-api doesn't expose"
+                "the period a Shards VM's rate holds over (D191's governor; given by D247's ImageGuest::rate_period)"
             }
         })
     }

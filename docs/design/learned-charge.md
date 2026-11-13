@@ -48,12 +48,15 @@ contention rule and the predictors; they do not hold the step up.
   (`MacRuntime::charge_window`), so every VM's rate holds on average over one window. On Windows a job's hard cap holds
   per scheduling interval, which Windows doesn't document (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so no window
   derives from it yet. A Shards image VM is capped instead through its rate (`Runtime::rate`, Shards' D247), held by
-  D191's governor over its period, on every OS; shards-api exposes that period neither as a call nor as a const, so a
-  learner takes it nowhere yet (`Recover::image_rate_period`, `Awaits(RatePeriod)`; ROOT asked g121 for
-  `ImageGuest::rate_period`, 2026-11-13). A learner's window is the longest period of the caps it holds; a kind of VM
-  whose cap's period it can't take it doesn't learn, booking each whole off the fleet's budget
-  (`recorded::charges::sort`), and with neither it is refused, typed (Windows today). A charge and the census's overhead
-  are per the same window.
+  D191's governor over its run's period, on every OS. Its run host says that period as the run starts
+  (`ImageGuest::rate_period`, image channel version 17, Shards 1acbf2cb9), so the learner reads each held image VM's
+  own each window (`Recover::image_rate_period`, `GuestRuntime::rate_period`) and copies no number (ROOT,
+  2026-11-13). A learner's window is the longest of its platform's, where it caps managed VMs, and the periods of the
+  image VMs it holds, re-read each window; with neither (Windows holding no image VM) it waits for a box to begin
+  (`recorded::charges::wait`), each create and start telling it. A managed VM on a platform with no window is booked
+  whole off the fleet's budget (`recorded::charges::sort`). A reading is charged over at least the window in force
+  when it was read (`Node::set_window`), and the fastest growth on record (C5) is kept with the window it was seen
+  over and projected over the one in force. A charge and the census's overhead are per the same window.
 - **A window's sample** is the VMM's whole CPU over it, which KVM and HVF count with its guest's (guest_cost's
   `Use`): every vCPU's guest time plus the VMM's own. A Shards image VM's run host reads both (D241's
   `Stats::microvm`, `Runtime::host_use`): its VM process's CPU and each vCPU's guest time, read just before it, so the
@@ -224,7 +227,9 @@ on hardware (ROOT's fairness run).
 - **Last**, when what the fleet's VMs hold plus the fastest growth on record in one window passes the fleet's
   budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
   so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
-  growth is learned from the node's own windows, only rising. Moving it instead of ending it waits on Shards' D176
+  growth is learned from the node's own windows, only rising as a rate: kept with the window it was seen over and
+  projected over the window in force, rounded up, so a window that changes with the caps a learner holds (C1) neither
+  shrinks nor swells it. Moving it instead of ending it waits on Shards' D176
   (`Awaits(LiveMove)`): its saved and live moves are the `shards` command's, which shards-api's image run (D231)
   doesn't offer at 66113379, whose D235 plugs a directory into a running member, not the member into a machine.
 - **In the node** (`node::charges`), once a window after the placement: the learner kills the chosen VM's cgroup
@@ -244,10 +249,11 @@ on hardware (ROOT's fairness run).
 - **Intent first** (ROOT, 2026-11-12: "if the model allows it"; decided so). The learner writes why it ends a VM into
   the VM's record before it ends it (`recorded::charges::LastResort` through `Reach::intend`), so a node that crashes
   between the end and the window's writes still says why on the box. The model allows it on three conditions, each
-  held: (1) the end waits on nothing unbounded: the write waits at most the store's record turn, held only by another
-  write of that record and bounded by its learned patience (`store.turns`, twice the slowest record change, 3.136 ms
-  seeded for a release build: `crates/hex-node/src/store.rs`), and one durable write, within the window whose growth
-  the rule's margin covers (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
+  held: (1) the end waits on nothing but a live holder: the write waits for the store's record turn, held only by
+  another change of that record, this process's own thread, which it follows until it lets go, as every record change
+  does by decision 9's rule (the person's, 2026-11-13: no seed, no doubling; a hold past the slowest seen is told to
+  the census as a run-out, `store.turns`, never refused at a bound of its own; ROOT's item 2b), and one durable write
+  (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
   write that fails: where the intent isn't written (its turn refused, its write failed, the record not that VM's
   lifetime), the VM is ended all the same and why is written after the window, as before, a write that fails kept for
   the next; (3) no record says a VM was ended when it wasn't: an end refused withdraws its intent (written after the
@@ -367,8 +373,9 @@ reaches the view settled with goal 13 the same day:
   VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
 - On macOS and Windows the learner is `hex_node::recorded::charges`, started by `Recorded::start_charges` (hex-cli
   on both): a thread that waits on the node's end beside the window, and once a window reads each running VM it learns
-  (`recorded::charges::Learns`: a kind whose cap's period it takes), learns as Linux's does, and caps each VM at its
-  water-filled share. A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
+  (`recorded::charges::sort`: a managed VM where its platform has a window, and every image VM), learns as Linux's
+  does, and caps each VM at its water-filled share. A VM whose use or period it can't read counts whole, at its
+  receipt, against the fleet's budget until it reads, the failure told (`0e401dbe`). A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
   (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's whole key and its
   rate) sets its control's rate, its debt kept and what came before charged at the old rate; on Windows the job's hard
   cap, at least the machine's least. A Shards image VM, its lifetime its place in its node's start order
@@ -391,7 +398,7 @@ reaches the view settled with goal 13 the same day:
 
 | Number | Value | Kind | Derivation | Pinned by |
 |---|---|---|---|---|
-| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; an image VM's rate's period (awaited from shards-api); Windows' job none until measured; the longest of a learner's kinds | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes) |
+| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; an image VM's its run's own period, as its run host says it; Windows' job none until measured; the longest of those a learner holds, re-read each window | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row; Shards' D247 for an image VM | guest_cost's window; macOS's longest cycle at any rate the learner sets; each run's `ImageGuest::rate_period` | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes), `recorded::charges::tests`, `guest::image::tests` |
 | A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
@@ -403,7 +410,7 @@ reaches the view settled with goal 13 the same day:
 | A box's weight | `ceil(10,000 × booking / machine CPU)`, its booking its caps; an idle slot 1 | derived | its booking's share of the machine on the kernel's range | `node::charges::tests` |
 | The fleet's CPU budget | at most the CPU the units the boxes leave carry, rounded down | derived | each box's weight rounded up comes off the fleet's, so the children's weights stay within the top | `charge::tests` (exact and property), `node::charges::tests` |
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
-| The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
+| The fastest growth | learned per window, projected over the window in force | (a) | the node's own windows, only rising as a rate | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |
 | A node's VMs | its machine's population: the machine over Hex's least bounds (`MIN_CPU_MILLI`, `MIN_MEMORY`) | derived | the most boxes placement places on the machine (`placement::budget`'s runner count); one past it refused, typed (`recorded::charges::bounds`) | `node::charges::tests`, `recorded::charges::tests` |
 | The classes a node remembers | as many as its VMs | derived | the least bound at which no VM's class is refused: that many classes may run at once, and while fewer run, one no VM holds is there to forget | `node::charges::tests`, `recorded::charges::tests` |
@@ -430,7 +437,6 @@ reaches the view settled with goal 13 the same day:
 |---|---|---|
 | per-vCPU guest time of a managed VM | a split in `ManagedGuest`'s use | charges the VMM's whole CPU; `Awaits(GuestCpuTimePerVcpu)` (an image VM's is D241's, taken) |
 | a managed Shards guest told its room | a room call on `ManagedGuest` (asked of g121) | Linux holds the VMM at `memory.high`; `Awaits(GuestRoom)` (an image VM's is D241's, told) |
-| the period an image VM's rate holds over | `ImageGuest::rate_period` or a const in shards-api (asked of g121) | image VMs booked whole off the fleet's budget; `Awaits(RatePeriod)` |
 | a Linux image VM read and placed | its run host in a cgroup of its own (shards-image-class.md §4) | booked at its receipt whole by the ledger, outside the fleet's cgroup |
 | moving an over VM instead of ending it | Shards D176 in shards-api's image run (66113379 has none; D235 plugs directories) | ends it, last; `Awaits(LiveMove)` |
 | class priors across the fleet | step 13's view, hyper-swim's gossip (f67 A) | each node's own record |
