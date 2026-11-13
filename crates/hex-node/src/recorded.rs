@@ -43,6 +43,9 @@ pub struct RecoverySummary {
     /// Why the host's boot session couldn't be read, when it couldn't: no record was known for an earlier
     /// boot's, and each keeps recovery's other rules (T-T7.1.2).
     pub boot_unknown: Option<String>,
+    /// The node VM rows an earlier node process left, each by its run with what this start did with it (joint plan
+    /// step 39).
+    pub node_vms: Vec<(hex_api::NodeRun, crate::store::NodeVmSettled)>,
 }
 
 /// Why recovery keeps a Shards image box's record and claim: its run is an earlier node process's, which
@@ -1721,9 +1724,6 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
         self.books.store.all_node_vms()
     }
-    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
-        self.books.store.remove_node_vm(run)
-    }
     fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
         self.books.store.mint_node_run()
     }
@@ -1965,6 +1965,7 @@ impl<R: Recover> Recorded<R> {
         self.books.store.remove_strays()?;
         let mut summary = RecoverySummary {
             boot_unknown: self.books.store.boot_unread().map(str::to_owned),
+            node_vms: self.books.store.settle_node_vms()?,
             ..RecoverySummary::default()
         };
         let torn = self.remove_torn_before_this_boot(torn, &mut summary)?;
