@@ -27,12 +27,14 @@
 # - toolchain.txt: rustc's, cargo's and zig's versions, cc's but on Windows, and with the renderer clang-cl's on
 #   Windows and python3's.
 # Natively on each host Shards runs on, whose own target it builds: Linux x86_64 or aarch64 (glibc), macOS arm64,
-# Windows x86_64 or arm64 (under Git Bash, with MSVC's tools, which rustc finds). Needs git, curl, a C compiler (cc;
-# MSVC's on Windows), zig 0.16.0 on PATH (upstream's scripts/install-zig installs it; shards' build compiles its
-# guest init's C with it), and rustup with that toolchain, this host's target and x86_64-unknown-linux-musl and
-# aarch64-unknown-linux-musl already installed: it installs nothing (RUSTUP_AUTO_INSTALL=0). The renderer needs
-# python3 too (3.11 to 3.14, for its pinned PyYAML wheels), and on Windows LLVM's clang-cl on PATH or where gpu-libs
-# looks. vendor/shards, vendor/shards-gpu and their changes check out byte for byte on every host (.gitattributes).
+# Windows x86_64 or arm64 (under Git Bash, with MSVC's tools, which rustc finds). Needs git, a C compiler (cc; MSVC's
+# on Windows), zig 0.16.0 on PATH (upstream's scripts/install-zig installs it; shards' build compiles its guest
+# init's C with it), on Windows x86_64 NASM on PATH (AWS-LC's x64 assembly is built from source, never from the
+# objects aws-lc-sys ships: upstream's release installs NASM 3.02, pinned), and rustup with that toolchain, this
+# host's target and x86_64-unknown-linux-musl and aarch64-unknown-linux-musl already installed: it installs nothing
+# (RUSTUP_AUTO_INSTALL=0). The renderer needs curl and python3 too (3.11 to 3.14, for its pinned PyYAML wheels), and
+# on Windows LLVM's clang-cl on PATH or where gpu-libs looks. A tool missing from PATH stops it before it fetches
+# anything. vendor/shards, vendor/shards-gpu and their changes check out byte for byte on every host (.gitattributes).
 # The caller bounds it (CARGO_BUILD_JOBS, nice, a kiln run's --needs); it sets no limit of its own.
 set -euo pipefail
 
@@ -75,6 +77,22 @@ exe=shards
 if [ "$os" = Windows ]; then
     exe=shards.exe
 fi
+tools=(git zig cargo rustc)
+if [ "$os" != Windows ]; then
+    tools+=(cc)
+fi
+if [ "$triple" = x86_64-pc-windows-msvc ]; then
+    tools+=(nasm)
+fi
+if [ "$gpu" = yes ]; then
+    tools+=(curl python3)
+fi
+for tool in "${tools[@]}"; do
+    command -v "$tool" >/dev/null || {
+        echo "build.sh: no $tool on PATH (this script's header says what each is for)" >&2
+        exit 2
+    }
+done
 if command -v sha256sum >/dev/null; then
     sha256() { sha256sum "$@"; }
 else
