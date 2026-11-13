@@ -1505,6 +1505,23 @@ fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
     assert_eq!(runtime.delete_with_host_use(&id).unwrap(), None);
 }
 
+/// HVF's image_real at cf535152 (ROOT's r183: HEX-IMG-1, 6 and 7, each a bare Lifecycle Uncertain where NoSuchBox was
+/// due): a node whose guest keeps its boxes' records (macOS's and Windows', their guest a managed shared one) forwards a
+/// call on an id its host doesn't hold to its guest (hex-node's `forward`), which found the box's guest by its record and,
+/// with none, refused Lifecycle Uncertain, though no record is no box. Do ask the guest runtime for the guest of an id it
+/// holds no record of, as that forward does. Expect none, which the forward answers NoSuchBox.
+#[test]
+fn hvf_an_id_its_guest_holds_no_record_of_has_no_guest() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let absent = BoxId::new("hex-conformance-image-life").unwrap();
+    assert!(
+        matches!(runtime.evented_for(&absent), Ok(None)),
+        "{:?}",
+        runtime.evented_for(&absent).map(|client| client.is_some())
+    );
+}
+
 /// Joint plan step 12 (D253, image channel v19 and v21): a box says how its VM's microVM came up, as its run host said it
 /// as the run started, in its usage and in its record. Do boot an image VM whose run host says it restored its image's
 /// template, its start taking the boot's answer; then one whose run host says it was a warm host's, its start Pending
