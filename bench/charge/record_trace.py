@@ -26,10 +26,14 @@ Or attach to a session already running in a cgroup of its own, a harness under k
   python3 -B -I bench/charge/record_trace.py OUT --attach CGROUP
 CGROUP is its cgroup as `/proc/<pid>/cgroup` (or `systemctl show -p ControlGroup`) names it, rooted at the cgroup
 mount, or its directory under /sys/fs/cgroup. It moves no
-process and writes no cgroup file: it reads the cgroup's `cpu.stat`, `memory.current` (its parent must give it the
-memory controller) and `cgroup.events` each window, from the attach on, until the cgroup empties or is removed. A
-cgroup that has emptied, or a path that is no cgroup, is refused, naming it. OUT's header names the cgroup, never a
-command line: a session's arguments are its own.
+process and writes no cgroup file: it reads the cgroup's `cpu.stat` and `cgroup.events` each window, from the attach
+on, until the cgroup empties or is removed, and its memory: `memory.current` where its parent gives it the memory
+controller, else its processes' own, the sum over `cgroup.procs` of each one's resident set (`/proc/<pid>/smaps_rollup`'s
+Rss, or its `status`'s VmRSS where that can't be read), a process that ends within a window out of the sum (kiln's
+per-agent cgroups have cpu but no memory controller; ROOT, 2026-11-13). OUT's header names which (`memory: cgroup` or
+`memory: procs-rss`), so its replay knows what it holds: a cgroup's memory counts its page cache and kernel memory too,
+its processes' resident sets their own pages. A cgroup that has emptied, or a path that is no cgroup, is refused,
+naming it. OUT's header names the cgroup, never a command line: a session's arguments are its own.
 
 Test: python3 -B -I bench/charge/record_trace_test.py
 """
@@ -94,6 +98,41 @@ def usage_us(cgroup):
     raise SystemExit(f"{cgroup}/cpu.stat has no usage_usec")
 
 
+def cgroup_memory(cgroup):
+    """What the cgroup holds, its memory controller's count (`memory.current`), in bytes."""
+    return int(read(os.path.join(cgroup, "memory.current")))
+
+
+def kib(text, name):
+    """The `name:` line's size in `text`, as /proc writes it in kB, in bytes; none where no line names it."""
+    for line in text.splitlines():
+        if line.startswith(name + ":"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def process_rss(pid, proc="/proc"):
+    """What process `pid` holds resident, in bytes: its smaps_rollup's Rss, or its status's VmRSS where that can't be
+    read (no smaps_rollup, or not this reader's to read); none once it has ended."""
+    try:
+        rss = kib(read(os.path.join(proc, str(pid), "smaps_rollup")), "Rss")
+        if rss is not None:
+            return rss
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        pass
+    try:
+        return kib(read(os.path.join(proc, str(pid), "status")), "VmRSS") or 0
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def procs_memory(cgroup, proc="/proc"):
+    """What the cgroup's processes hold resident, in bytes: the sum over its `cgroup.procs`, a process that ended since
+    its listing out of it."""
+    pids = read(os.path.join(cgroup, "cgroup.procs")).split()
+    return sum(rss for rss in (process_rss(pid, proc) for pid in pids) if rss is not None)
+
+
 def populated(cgroup):
     for line in read(os.path.join(cgroup, "cgroup.events")).splitlines():
         name, value = line.split()
@@ -128,10 +167,10 @@ def sleep_until_ns(deadline_ns):
     time.sleep(max(deadline_ns - time.monotonic_ns(), 0) / 1e9)
 
 
-def record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop, ended):
+def record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop, ended, memory=cgroup_memory):
     """Each window of `period` microseconds from `start` (ns), the cgroup's CPU past `begun` (its `usage_us` then) and
-    its memory as steps into `trace`, until `ended()` says why the record ends, the cgroup is gone, or `stop` holds an
-    interrupt."""
+    its memory (`memory(cgroup)`, in bytes) as steps into `trace`, until `ended()` says why the record ends, the cgroup
+    is gone, or `stop` holds an interrupt."""
     steps = Steps()
     tick, why = start, "interrupted"
     while not stop:
@@ -139,7 +178,7 @@ def record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop, ended
         sleep_until(tick)
         now = now_ns()
         try:
-            cpu, mem = usage_us(cgroup), int(read(os.path.join(cgroup, "memory.current")))
+            cpu, mem = usage_us(cgroup), memory(cgroup)
         except FileNotFoundError:
             why = "the cgroup is gone"
             break
@@ -164,14 +203,25 @@ def interrupts():
 
 
 def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_until=sleep_until_ns, proc="/proc"):
-    """Records the session running in `cgroup` into `out` (module docs), passively, until the cgroup empties. Original
-    (red): `proc` is read for nothing, and a cgroup whose parent gives it no memory controller is refused."""
+    """Records the session running in `cgroup` into `out` (module docs), passively, until the cgroup empties: its memory
+    the cgroup's where its parent gives it the memory controller, else its processes' resident sets (read under
+    `proc`)."""
     if not os.path.exists(os.path.join(cgroup, "cgroup.events")):
         raise SystemExit(f"{cgroup} is no cgroup: it has no cgroup.events")
     if not populated(cgroup):
         raise SystemExit(f"{cgroup} has emptied: nothing runs there to record")
-    if not os.path.exists(os.path.join(cgroup, "memory.current")):
-        raise SystemExit(f"{cgroup} has no memory.current: its parent gives it no memory controller")
+
+    def procs(at):
+        return procs_memory(at, proc)
+
+    if os.path.exists(os.path.join(cgroup, "memory.current")):
+        memory, source = cgroup_memory, "cgroup, its memory.current"
+    else:
+        memory = procs
+        source = (
+            "procs-rss, the sum over its cgroup.procs of each one's smaps_rollup Rss (else status VmRSS): its parent "
+            "gives it no memory controller"
+        )
     period = period_us(cgroup, root)
     if os.path.exists(out):
         raise SystemExit(f"{out} exists: a record starts a new file")
@@ -182,11 +232,12 @@ def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_u
             f"# source: a harness session on {platform.node()} ({platform.system()} {platform.release()}), attached "
             f"to the cgroup {cgroup} by bench/charge/record_trace.py from {began}\n"
             f"# window: {period} us, the CFS period of the nearest cpu.max on its path (Hex's Linux learner's window)\n"
+            f"# memory: {source}\n"
             f"# lines: millis threads mib\n"
         )
         start, begun = now_ns(), usage_us(cgroup)
         record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop,
-               lambda: None if populated(cgroup) else "the cgroup emptied")
+               lambda: None if populated(cgroup) else "the cgroup emptied", memory)
 
 
 def main(argv):
@@ -220,6 +271,7 @@ def main(argv):
             f"recorded by bench/charge/record_trace.py from {began}\n"
             f"# command: {shlex.join(command)}\n"
             f"# window: {period} us, its cgroup's cpu.max period (Hex's Linux learner's window)\n"
+            f"# memory: cgroup, its memory.current\n"
             f"# lines: millis threads mib\n"
         )
         start, begun = time.monotonic_ns(), usage_us(session)
