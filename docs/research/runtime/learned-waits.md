@@ -162,10 +162,10 @@ first where the code is wrong; the tests' own waits are fixed in place. Status a
 
 Production, a W* that still ends something:
 
-1. **`node.emptying` in the socket's core** (hex-node `serve`, `emptying::empty_patience`): a collected run's end
-   (`Job::Collect`) and a gone client's program's end (`Shared::gone`) are `Exit::Unknown` at W*; a killed program's
-   end (`Unwatched::Killed`) is given up at W*; and a stopping server's drain of the programs its closes ended stops at
-   W*. Owed: each follows its program past W*, the run-out told, as `follow_kill` follows a box.
+1. **`node.emptying` in the socket's core** (hex-node `serve`): a collected run's end (`Job::Collect`) and a gone
+   client's program's end (`Shared::gone`) were `Exit::Unknown` at W*, a killed program's end (`Unwatched::Killed`)
+   was given up at W*, and a stopping server's drain stopped at W*. Done: each follows its programs past W* by their
+   lives, the run-out told (`emptying::end_of_killed`; the drain's own loop).
 2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* is taken for hung, killed, and the
    claim falls back to a seed's clone (`Patience::expired`). Owed: the claim follows the init's life (its pidfd, its
    sync pipe and claim socket) past W*, the run-out told.
