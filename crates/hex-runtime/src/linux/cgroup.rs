@@ -1914,6 +1914,40 @@ mod tests {
         assert!(cg.check_managed_bounds(&bounds).is_err());
     }
 
+    /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13, ruling B: no VM has a memory.max, cold or warm) with HEX-RT-15:
+    /// a VM's scope holds no canonical memory bound of its own, its memory held by its budget's memory.high, the last
+    /// resort and its fleet's budget, while its swap stays off, so all it holds is RAM. Do check, against a VM's
+    /// bounds with no memory bound, its scope with memory.max "max" (as its first window leaves it) and with the value
+    /// an earlier create wrote, each with swap off; then with swap on. Expect the first two passing and the last
+    /// refused.
+    #[test]
+    fn w14_a_vm_scope_has_no_memory_bound_of_its_own_and_no_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("managed");
+        fs::create_dir(&dir).unwrap();
+        let bounds = Bounds {
+            cpu_max_milli: Some(1000),
+            ..Bounds::default()
+        };
+        let write = |memory: &str, swap: &str| {
+            for (file, text) in [
+                ("cgroup.procs", "5\n"),
+                ("cpu.max", "100000 100000\n"),
+                ("memory.max", memory),
+                ("memory.swap.max", swap),
+            ] {
+                fs::write(dir.join(file), text).unwrap();
+            }
+        };
+        let cg = pinned_managed_cgroup(&dir);
+        write("max\n", "0\n");
+        cg.check_managed_bounds(&bounds).unwrap();
+        write(&format!("{}\n", hex_api::MIN_MEMORY), "0\n");
+        cg.check_managed_bounds(&bounds).unwrap();
+        write("max\n", "max\n");
+        assert!(cg.check_managed_bounds(&bounds).is_err());
+    }
+
     /// AC-T7.1.2/HEX-RT-15: native backing observation uses the pinned cgroup, never an unrelated
     /// replacement at its old name. An unpinned path is insufficient cleanup/accounting authority.
     #[test]

@@ -1218,6 +1218,41 @@ mod forward_route_tests {
 }
 
 #[cfg(test)]
+mod managed_bounds_tests {
+    use super::*;
+
+    /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13, ruling B; goal 15's finding): a VM's native scope gets no
+    /// memory.max at its create. With a census-free cost its allocation is its guest's RAM alone, so a cap there would
+    /// leave its VMM's own memory no room before its first window; its budget's memory.high, the last resort and its
+    /// fleet's budget hold it. Do bound a Shards image VM's record for its create. Expect its CPU capped at its
+    /// allocation and no memory bound.
+    #[test]
+    fn w14_a_vm_scope_gets_no_memory_max_at_create() {
+        let allocation = hex_api::sim::sim_vm_allocation().unwrap();
+        let spec = BoxSpec {
+            id: BoxId::new("image-vm").unwrap(),
+            bounds: hex_api::Bounds::default(),
+            class: ClassSpec::ShardsImage(Box::new(hex_api::ShardsImage::new(
+                hex_api::sim::SIM_IMAGE,
+            ))),
+            owner: None,
+            devices: Vec::new(),
+            allocation: Some(allocation),
+            route: None,
+            band: 0,
+        };
+        let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([7; 16]));
+        let bounds = Node::managed_bounds(NativeRecord::Box(&record)).unwrap();
+        assert_eq!(bounds.memory_max, None);
+        assert_eq!(
+            bounds.cpu_max_milli,
+            Some(u32::try_from(allocation.resources.cpu_milli).unwrap())
+        );
+    }
+}
+
+#[cfg(test)]
 mod preflight_dispatch_tests {
     use super::*;
     use hex_api::{BackingPhase, CapacityResources};
