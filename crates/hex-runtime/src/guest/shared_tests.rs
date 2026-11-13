@@ -597,6 +597,8 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     .unwrap();
     owner.native.stop_releases.store(true, Ordering::SeqCst);
     let restarted = configured_census_free(dir.path(), &owner);
+    // The node's preflight retires first, before any exact cost check; then its backing is prepared afresh.
+    restarted.retire_census().unwrap();
     let fresh = restarted.prepare_backing().unwrap();
     assert_ne!(fresh.key, offer.key);
     let info = restarted.inspect(&id).unwrap();
@@ -624,6 +626,88 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
     assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
     restarted.delete(&id).unwrap();
+}
+
+/// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13: no legacy receipt runs on with a census number as its bound): a
+/// node's start retires every VM box and backing it recorded under its profile's census cost, before any exact check.
+/// Do record, under a cost whose census measured both overheads, a Shards VM box and a shared backing holding an OCI
+/// box; then start a census-free node: preflight each record, retire, and prepare its backing. Expect each preflight to
+/// pass; both boxes retired, ended in the cause's words, every call but inspect and delete refused; the backing's scope
+/// released, its pool record and receipt gone; and a receipt the node admits now census-free.
+#[test]
+fn w14_a_node_start_retires_every_census_record_before_its_exact_checks() {
+    let dir = socket_fixture();
+    let (old, owner) = configured(dir.path());
+    let offer = old.prepare_backing().unwrap();
+    assert!(old.initialize_backing(grant(&offer)).is_err());
+    let mut oci = super::super::tests::oci(
+        hex_api::Rootfs::Dir(dir.path().join("rootfs.tar")),
+        Vec::new(),
+    );
+    oci.route = Some(hex_api::RouteReceipt {
+        key: old.capacity(Class::Oci).unwrap().unwrap().routes[0].key,
+        backing: Some(offer.key),
+    });
+    let census = old.runtime_cost.unwrap();
+    let mut vm = super::super::tests::oci(
+        hex_api::Rootfs::Dir(dir.path().join("rootfs.tar")),
+        Vec::new(),
+    );
+    vm.id = BoxId::new("vm-census").unwrap();
+    vm.class = match vm.class {
+        hex_api::ClassSpec::Oci(spec) => hex_api::ClassSpec::Shards(spec),
+        other => other,
+    };
+    vm.allocation = Some(census.allocate(CapacityResources::default()).unwrap());
+    for spec in [oci.clone(), vm.clone()] {
+        Transaction::put(
+            owner.as_ref(),
+            &BoxRecord::new(spec, hex_core::record::Phase::Ready, Vec::new()),
+        )
+        .unwrap();
+    }
+    owner.native.stop_releases.store(true, Ordering::SeqCst);
+    let restarted = configured_census_free(dir.path(), &owner);
+    for id in [&oci.id, &vm.id] {
+        let record = Transaction::read(owner.as_ref(), id).unwrap().unwrap();
+        restarted.preflight_box(&record).unwrap();
+    }
+    restarted.preflight_backing(&owner.row()).unwrap();
+    restarted.retire_census().unwrap();
+    for id in [&oci.id, &vm.id] {
+        let kept = Transaction::read(owner.as_ref(), id).unwrap().unwrap();
+        assert!(kept.retired, "{id} kept retired");
+        let info = restarted.inspect(id).unwrap();
+        assert_eq!(
+            info.ended.as_deref(),
+            Some("its backing's identity changed with decision 9's census-free cost")
+        );
+        assert_eq!(info.exit, Some(hex_api::Exit::Unknown));
+        assert!(matches!(
+            restarted.usage(id),
+            Err(Refusal::Backing {
+                cause: LifecycleCause::Retired,
+                ..
+            } | Refusal::Lifecycle {
+                cause: LifecycleCause::Retired,
+                ..
+            })
+        ));
+    }
+    assert!(owner.native.released.load(Ordering::SeqCst));
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+    assert_ne!(restarted.prepare_backing().unwrap().key, offer.key);
+    let fresh = restarted
+        .runtime_cost
+        .unwrap()
+        .allocate(CapacityResources::default())
+        .unwrap();
+    assert_eq!(fresh.resources, fresh.guest().unwrap());
+    for id in [&oci.id, &vm.id] {
+        restarted.delete(id).unwrap();
+        assert!(Transaction::read(owner.as_ref(), id).unwrap().is_none());
+    }
 }
 
 #[test]

@@ -672,6 +672,8 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
             node.bind_guest_books().map_err(failed)?;
+            // Joint plan step 14: what this node recorded under a census cost is retired first.
+            node.retire_census().map_err(failed)?;
             // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
             // Prepared. Fresh GPU observation waits for its real Index/native grant.
             node.prepare_guest_backing()
@@ -791,6 +793,8 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
             node.bind_guest_books().map_err(failed)?;
+            // Joint plan step 14: what this node recorded under a census cost is retired first.
+            node.retire_census().map_err(failed)?;
             // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
             // Prepared. Fresh GPU observation waits for its real Index/native grant.
             node.prepare_guest_backing()
