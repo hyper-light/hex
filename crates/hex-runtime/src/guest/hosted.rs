@@ -67,6 +67,8 @@ impl HostedConfig {
                 members: None,
             },
             credentials: Vec::new(),
+            // No credential, so nothing leases one (D242).
+            lessor: None,
             shares: self
                 .shares
                 .iter()

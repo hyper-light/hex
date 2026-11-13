@@ -1200,7 +1200,7 @@ impl ShardsGuest {
     /// A wait for an answer of `awaited`'s kind that follows its VM process, beginning now:
     /// refused as `gone` says where the guest has ended; none where its process went as the
     /// wait began, whose end is then the wait's.
-    fn follow(&self, awaited: Awaited) -> Result<Option<Follow>, Refusal> {
+    fn follow(&self, awaited: Awaited) -> Result<Option<Follow<'static>>, Refusal> {
         let identity = self.identity()?;
         #[cfg(unix)]
         let followed = Followed::of(&identity);
@@ -1224,7 +1224,7 @@ impl ShardsGuest {
             })?;
             Followed::of(root, identity.pid, identity.started).map_err(process)?
         };
-        Follow::begin(awaited, self.records, &identity, followed)
+        Follow::begin(self.records.of(awaited), followed).map_err(Refusal::from)
     }
 }
 
@@ -1411,9 +1411,14 @@ fn handshake_until(
         HandshakeWait::Until(at) => stream::connect_until(vsock, Some(at)),
         HandshakeWait::Unbounded => stream::connect_until(vsock, None),
     };
+    // A dial its deadline passed in is expired, as a write's and a read's are, whatever the
+    // dial said: Windows' connect waits for its connection to complete, to the deadline, and
+    // says TimedOut there (shards_afunix), which was the dial's own failure.
     let mut s = connected.map_err(|source| {
         *cost = began.elapsed();
-        HandshakeError::io(Dial, source)
+        remaining(wait, Dial)
+            .err()
+            .unwrap_or_else(|| HandshakeError::io(Dial, source))
     })?;
     let mut request = [0; REQUEST];
     let mut unused = request.as_mut_slice();
@@ -2408,7 +2413,7 @@ fn connect_following(
     shared: &Shared,
     vsock: &Path,
     port: u32,
-    follow: &mut Follow,
+    follow: &mut Follow<'_>,
     mut gone: impl FnMut() -> Result<Option<Refusal>, Refusal>,
 ) -> Result<Box<dyn Stream>, Refusal> {
     let began = Instant::now();
@@ -2418,7 +2423,7 @@ fn connect_following(
         }
         if let Err(stalled) = follow.look() {
             // Its end, where it came as the look was made, refuses the connect as any would.
-            return Err(gone()?.unwrap_or(stalled));
+            return Err(gone()?.unwrap_or(stalled.into()));
         }
         let due = follow.due();
         let mut cost = Duration::ZERO;
@@ -2512,7 +2517,7 @@ impl Guest for ShardsGuest {
             if let Err(refusal) = looked
                 && self.end(&mut state).is_none()
             {
-                return Err(refusal);
+                return Err(refusal.into());
             }
         }
     }
@@ -3849,7 +3854,9 @@ mod tests {
     }
 
     /// Records of a test's own, apart from every other test's, each kind in `learned`
-    /// taught as an answer that came `slowest` after its wait began, `cpu` run meanwhile.
+    /// taught as an answer that came `slowest` after its wait began, `cpu` run meanwhile:
+    /// for the Unix tests that judge a VM process's CPU, its only callers.
+    #[cfg(unix)]
     fn records(learned: &[(Awaited, Duration, Duration)]) -> &'static Records {
         let records: &'static Records = Box::leak(Box::new(Records::new()));
         for &(awaited, slowest, cpu) in learned {

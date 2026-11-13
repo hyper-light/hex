@@ -84,6 +84,18 @@ pub struct BoxRecord {
     /// reads as not retired (append-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
+    /// How its Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started
+    /// ([`hex_api::Usage::started_from`]), kept across the node's restarts so Hex can say how the box came up. Outside the
+    /// spec, so no native commitment covers it. Added within version 1, so a record without it reads as `None`
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<hex_api::StartedFrom>,
+    /// The file its Shards image VM's run host's diagnostics are kept in, whole (D258's `keep_diagnostics`; joint plan
+    /// step 12), named as its start's intent is written, before its boot: a failed run's `ended` quotes its last bytes,
+    /// and it goes with the box's delete. Outside the spec, so no native commitment covers it. Added within version 1,
+    /// so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<PathBuf>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -252,6 +264,8 @@ impl BoxRecord {
             started: None,
             ended: None,
             retired: false,
+            started_from: None,
+            diagnostics: None,
         }
     }
 

@@ -19,7 +19,9 @@
 //! - the image, with a `/bin/sh` (HEX-IMG-3's command), in the node's Shards home before the node starts: either
 //!   `HEX_IMAGE_CONTEXT`, an Agentfile image's build context (a harness image, which no registry need serve), built
 //!   there and pinned by the manifest digest its build says, as Shards' store finds a pinned image by content
-//!   (`Store::holding`); or else `HEX_IMAGE`, `NAME@sha256:...`, pulled there by its digest;
+//!   (`Store::holding`): `crates/hex-cli/tests/image_harness` is one any arch builds, its base pinned by its digest
+//!   and its one harness `/bin/sh -c cat`, so a run of its members alone has a member on every host; or else
+//!   `HEX_IMAGE`, `NAME@sha256:...`, pulled there by its digest;
 //! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's or build's; `SHARDS_KERNEL` and `SHARDS_INIT`: the
 //!   kernel the run hosts boot (D231's own, as `shards run` takes it), so no first boot downloads one, and the
 //!   shards-init that `shards` build carries (its build.rs's `OUT_DIR/shards-init`), which a run takes only beside a
@@ -50,7 +52,7 @@
 )]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -220,4 +222,47 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     }
     assert!(left.is_empty(), "a box is left: {left:?}");
     assert!(failures.is_empty(), "the image cases failed: {failures:#?}");
+}
+
+/// Joint plan step 12 (AC-T7.4.1; ROOT's HVF run at c8b4ce6b, whose cases were refused for an image with no member): the
+/// in-tree harness context, `image_harness/`, which `HEX_IMAGE_CONTEXT` and image_record's home take on any host, an
+/// aarch64 one's (macOS on HVF, Windows on arm64) among them, where no harness build of its arch is at hand. Its base is
+/// pinned by its digest, an index each home pulls its own arch's image of as a node's does, and its one harness runs
+/// `/bin/sh -c cat`, so a run of the image's members alone has a member. Do read its Agentfile and its harness's startup
+/// descriptor. Expect one FROM, pinned (`NAME@sha256:<64 hex>`); one HARNESS, from its own directory; and that
+/// harness's descriptor in Shards' simple form (`entrypoint` and `options`), saying `/bin/sh -c cat`.
+#[test]
+fn the_in_tree_harness_context_pins_its_base_and_runs_one_member() {
+    let context = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/image_harness");
+    let agentfile = fs::read_to_string(context.join("Agentfile")).unwrap();
+    let said: Vec<&str> = agentfile
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let [from, harness] = said.as_slice() else {
+        panic!("one FROM and one HARNESS: {said:?}");
+    };
+    let (name, digest) = from
+        .strip_prefix("FROM ")
+        .and_then(|base| base.split_once("@sha256:"))
+        .unwrap_or_else(|| panic!("a base pinned by its digest: {from}"));
+    assert!(
+        !name.is_empty() && !name.contains(char::is_whitespace),
+        "{from}"
+    );
+    assert!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "{from}"
+    );
+    assert_eq!(*harness, "HARNESS cat FROM ./cat");
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&fs::read(context.join("cat/harness.json")).unwrap()).unwrap();
+    assert_eq!(
+        descriptor,
+        serde_json::json!({"entrypoint": "/bin/sh -c", "options": ["cat"]})
+    );
 }
