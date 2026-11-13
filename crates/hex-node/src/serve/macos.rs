@@ -72,6 +72,19 @@ pub fn platform() -> Result<Platform, Refusal> {
     })
 }
 
+/// How many descriptors this process holds now: the entries of `/dev/fd` (fdesc, the process's own descriptor
+/// table), less the one the listing itself opens. What a node holds beside its bounds as its start fits them
+/// ([`crate::serve::fit::fit`]), as Linux's node reads `/proc/self/fd` (`crate::netns::open_descriptors`).
+pub fn open_descriptors() -> Result<u64, Refusal> {
+    let listing = |e| Refusal::os("counting the node's open descriptors in /dev/fd", e);
+    let mut count = 0u64;
+    for entry in std::fs::read_dir("/dev/fd").map_err(listing)? {
+        entry.map_err(listing)?;
+        count = count.saturating_add(1);
+    }
+    Ok(count.saturating_sub(1))
+}
+
 /// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
 /// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
 /// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.

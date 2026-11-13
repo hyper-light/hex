@@ -429,20 +429,33 @@ bytes past what a kind's body holds rather than skip them. A list's answer comes
 need, so a dense node answers it whole.
 
 **Bounds** (`serve::limits`), each a budget for the node over all its connections, each its platform's own as the node
-starts (`serve::Platform`: Linux's from its sizes, macOS's from its kernel), none picked; a hello tells each client the
-budgets and the `KEPT` the node keeps for every connection it admits. Each is refused past by type, naming it:
+starts (`serve::Platform`: Linux's from its sizes, macOS's from its kernel, Windows' from its handle table), none
+picked, those that hold descriptors fitted to them with everything else the node holds (below); a hello tells each
+client the budgets and the `KEPT` the node keeps for every connection it admits. Each is refused past by type, naming
+it:
 
 | Bound | Taken from | Past it |
 |---|---|---|
-| connections | the descriptors the node may hold, one each: Linux its hard `RLIMIT_NOFILE` (its soft raised to it), else `fs.nr_open`; macOS its soft `RLIMIT_NOFILE` within `kern.maxfilesperproc` | `Exhausted`, "connections to the node agent's socket", then closed; the kernel's `EMFILE` pauses accepting first |
+| connections | the descriptors the node may hold, one each: Linux its hard `RLIMIT_NOFILE` (its soft raised to it), else `fs.nr_open`; macOS its soft `RLIMIT_NOFILE` within `kern.maxfilesperproc`; Windows its 2^24 handles; at most the programs' and requests' budgets, `KEPT` each | `Exhausted`, "connections to the node agent's socket", then closed; the kernel's `EMFILE` pauses accepting first |
 | bytes in one message | the format's most, `wire::MAX_MESSAGE`, 131,072: under the kernel's bound on a `SOCK_SEQPACKET` record, the send buffer less 32 bytes (`net/unix/af_unix.c`): 212,960 under the default 212,992-byte buffer, measured on adacachy (Linux 7.2.9) | `Invalid`, naming the size and the bound |
 | requests in flight on the node's connections together | the threads the node may run: Linux the less of its soft `RLIMIT_NPROC` and `kernel.threads-max`; macOS `kern.num_taskthreads` | `Exhausted`, "requests in flight on the node agent's connections together" |
 | programs the node's connections watch together | Linux its supervisor's pidfd budget (`Sizes::inits`: at most its boxes, within its descriptors); macOS what `fork1` holds its user to (`kern.maxproc`, and but for root its soft `RLIMIT_NPROC`) | exec refused `Exhausted`, "programs watched by the node agent's connections together" |
 | answers waiting to be sent on a connection | in flight + programs + 1, by construction | its requests aren't read until they drain |
 | workers running calls | the requests' bound, so a call admitted has a worker that can exist | a call whose worker can't start waits in the queue the in-flight bound holds |
 
-Each is a ceiling, not the room left under it: what else holds the platform's room, the kernel refuses past as the
-node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
+The node's start fits the bounds that hold descriptors to its limit with everything else it holds, each at its most:
+the socket's own and its connections, the program places' streams, the programs it watches, each hosted VM's lanes
+(below) and what it held at its start. Linux's node fits them with its pools' (`netns::fit`); macOS and Windows nodes
+fit them alone (`serve::fit`), the program places the bound they cut, which the connections and lanes follow (ROOT's
+one accounting of 2026-11-13: before it a macOS or Windows node's connections were its raw descriptor limit, counting
+nothing beside them, so a busy node could pass it). Windows' at-start term waits on Ada's word for its
+`GetProcessHandleCount` (CLAUDE.md §12). What else holds the platform's room past that, the kernel refuses as the node
+takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
+
+A hosted VM, a node VM under shards-init (`node-under-shards-init.md` §5), is reached by Shards' socket lanes, each a
+local socket pair on the node's side; its run admits as many as its guest client may hold open at once at the node's
+fitted places, its two control connections and four for each place (a program's three streams and its box's staging
+connection; `serve::fit::lanes`), two descriptors each with its controller's two, counted among the node's own.
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of

@@ -1364,6 +1364,7 @@ impl Transport for Offers {
                         stdin: true,
                         ..Streams::default()
                     },
+                    setup: None,
                 }),
             ),
             Request::Call(Call::Start(_)) => self.queue(header.id, Answer::Done),
