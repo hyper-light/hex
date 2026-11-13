@@ -355,8 +355,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   critical. No event names a descriptor or carries a pointer. Rust can express none of these foreign calls safely.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
-no Hex change but shards-gpu's Windows arm64 packaging patch (`vendor/MANIFEST.toml`): its `unsafe` follows
-Shards' rules, not this list.
+no Hex change but those `vendor/patches` records, each offered upstream (`vendor/MANIFEST.toml`): shards-gpu's
+Windows arm64 packaging, and shards-api's start of D231's run host holding only its stdio (posix_spawn and
+CreateProcessW, `image/spawn.rs`). Its `unsafe` follows Shards' rules, not this list.
 
 ## 13. Lean code
 
