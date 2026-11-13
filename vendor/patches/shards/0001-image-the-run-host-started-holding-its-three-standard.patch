@@ -27,7 +27,7 @@ index eea13892ce711f24d48caf7605b2e3ce872fbf29..4819b61224e2de577c0b969a69037616
  
  pub use wire::{
 diff --git a/crates/api/src/image/session.rs b/crates/api/src/image/session.rs
-index a9588d955ad8ee7e5754e123a4b033bc04755515..0b5fea021c2a349dfab2eb5be9d2897edfc52659 100644
+index a9588d955ad8ee7e5754e123a4b033bc04755515..b10631a84947a1c45280b566cd4ac5b4a6232526 100644
 --- a/crates/api/src/image/session.rs
 +++ b/crates/api/src/image/session.rs
 @@ -11,10 +11,10 @@
@@ -231,6 +231,29 @@ index a9588d955ad8ee7e5754e123a4b033bc04755515..0b5fea021c2a349dfab2eb5be9d2897e
          }
          // The run's end comes as its VM goes, which the host kills at once; or the host is
          // gone. The host's own exit after (its cleanup) is the watcher's to reap.
+@@ -962,15 +875,21 @@ mod tests {
+     #[cfg(unix)]
+     #[test]
+     fn a_feed_sends_its_callers_bytes_within_its_room_then_its_end() {
++        use std::process::{Command, Stdio};
+         let mut host = Command::new("cat")
+             .stdin(Stdio::piped())
+             .stdout(Stdio::piped())
+             .spawn()
+             .unwrap();
++        // The host's stdin as a session holds its run host's: a pipe's write end (spawn.rs).
++        let to_host = host
++            .stdin
++            .take()
++            .map(|stdin| io::PipeWriter::from(std::os::fd::OwnedFd::from(stdin)));
+         let s = Arc::new(Shared {
+             state: Mutex::new(State::default()),
+             changed: Condvar::new(),
+-            to_host: Mutex::new(host.stdin.take()),
++            to_host: Mutex::new(to_host),
+         });
+         lock(&s.state).inputs.insert(1, InputFlow::default());
+         let (reader, mut writer) = io::pipe().unwrap();
 diff --git a/crates/api/src/image/spawn.rs b/crates/api/src/image/spawn.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..4abf855f94d0d70665ccfa239fa759be4f4585c3

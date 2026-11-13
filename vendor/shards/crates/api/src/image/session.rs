@@ -875,15 +875,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_feed_sends_its_callers_bytes_within_its_room_then_its_end() {
+        use std::process::{Command, Stdio};
         let mut host = Command::new("cat")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        // The host's stdin as a session holds its run host's: a pipe's write end (spawn.rs).
+        let to_host = host
+            .stdin
+            .take()
+            .map(|stdin| io::PipeWriter::from(std::os::fd::OwnedFd::from(stdin)));
         let s = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
-            to_host: Mutex::new(host.stdin.take()),
+            to_host: Mutex::new(to_host),
         });
         lock(&s.state).inputs.insert(1, InputFlow::default());
         let (reader, mut writer) = io::pipe().unwrap();
