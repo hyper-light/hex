@@ -245,6 +245,10 @@ impl SimRuntime {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            credentials: match &b.spec.class {
+                ClassSpec::ShardsImage(image) => image.credentials.clone(),
+                _ => Vec::new(),
+            },
         })
     }
 }

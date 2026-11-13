@@ -1653,6 +1653,7 @@ mod projection_tests {
             route: None,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         }
     }
 
