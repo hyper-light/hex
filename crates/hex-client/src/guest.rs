@@ -24,7 +24,7 @@ use crate::calls::{
     BOX_KINDS, CLASSES, Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take,
     Transport, by_class, class_waits, poisoned, protocol_ready,
 };
-use crate::copy::{DuplexIo, copy, copy_in};
+use crate::copy::{DuplexIo, Waiting, copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -1058,7 +1058,8 @@ impl<W: Waits> Stream<W> {
                     "reading the relay's token for the connection",
                 )?;
             }
-            None => conn
+            // As long as the link's transport takes, in poll(2) first on macOS (AC-T7.4.1, joint plan step 4, 2(a)).
+            None => Waiting(&mut *conn)
                 .read_exact(&mut token)
                 .map_err(os("reading the relay's token for the connection"))?,
         }

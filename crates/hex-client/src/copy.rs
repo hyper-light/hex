@@ -60,6 +60,16 @@ pub(crate) struct DuplexIo(pub(crate) crate::guest::DuplexOwner);
 
 impl Read for DuplexIo {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        Waiting(&mut *self.0).read(bytes)
+    }
+}
+
+/// A guest connection read as every read of one must wait: on macOS in poll(2) first ([`wait_readable`]), then the
+/// read; elsewhere the read itself.
+pub(crate) struct Waiting<'a>(pub(crate) &'a mut dyn crate::guest::Duplex);
+
+impl Read for Waiting<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         #[cfg(target_os = "macos")]
         wait_readable(self.0.handle())?;
         self.0.read(bytes)
