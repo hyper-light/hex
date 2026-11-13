@@ -207,7 +207,8 @@ impl Oracle {
         self.counts.most_busy = self.counts.most_busy.max(busy);
     }
 
-    /// A seed up and free goes to the first in line whose wait hasn't ended, those before it refused; or it idles.
+    /// A seed up and free goes to the first in line whose wait hadn't ended before `now`, those before it refused; or
+    /// it idles.
     fn free(
         &mut self,
         seed: SeedId,
@@ -217,7 +218,7 @@ impl Oracle {
     ) -> Option<Ticket> {
         while !self.line.is_empty() {
             let (ticket, since, until) = self.line.remove(0);
-            if until.is_none_or(|u| now < u) {
+            if until.is_none_or(|u| now <= u) {
                 self.wait.answered(now - since);
                 self.hand(seed, now, Some(ticket));
                 self.answered.push((ticket, Ok(seed)));

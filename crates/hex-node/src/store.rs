@@ -42,7 +42,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
-use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;

@@ -593,11 +593,13 @@ impl Seeds {
     }
 
     /// Seed `seed`, up and free, goes to the create that has waited longest, refusing on the way those whose wait
-    /// ended by `now`, and returns its ticket; with none left waiting, it idles. Each turn takes a create out of line,
-    /// so this ends within the line's length.
+    /// ended before `now`, and returns its ticket; with none left waiting, it idles. A seed freed the instant a wait
+    /// ends serves it: its wait is no longer than the slowest answer seen, which comes within the bound (decision 9;
+    /// a create served the instant it joined the line teaches the line a bound of none, which an answer as quick
+    /// still meets). Each turn takes a create out of line, so this ends within the line's length.
     fn free(&mut self, seed: SeedId, now: Duration, served: bool) -> Option<Ticket> {
         while let Some((ticket, (since, until))) = self.line.pop_first() {
-            if until.is_none_or(|u| now < u) {
+            if until.is_none_or(|u| now <= u) {
                 self.wait.answered(now.saturating_sub(since));
                 self.hand(seed, now, Some(ticket));
                 self.answered.insert(ticket, Ok(seed));

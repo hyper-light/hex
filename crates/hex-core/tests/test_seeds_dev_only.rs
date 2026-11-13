@@ -50,7 +50,7 @@ fn code(line: &str) -> &str {
     for (at, c) in line.char_indices() {
         match c {
             '"' => quoted = !quoted,
-            '#' if !quoted => return &line[..at],
+            '#' if !quoted => return line.get(..at).unwrap_or(line),
             _ => {}
         }
     }
@@ -72,14 +72,14 @@ fn only_a_dev_dependency_turns_the_test_seeds_on() {
         let mut section = String::new();
         for (n, line) in text.lines().enumerate() {
             let line = code(line).trim();
-            let at = || format!("{}:{} {section} {line}", file.display(), n + 1);
+            let at = |section: &str| format!("{}:{} {section} {line}", file.display(), n + 1);
             if line.starts_with('[') {
                 section = line.to_owned();
                 if section.contains("hex-testkit")
                     && !section.contains("dev-dependencies")
                     && section != "[workspace.dependencies.hex-testkit]"
                 {
-                    wrong.push(at());
+                    wrong.push(at(&section));
                 }
                 continue;
             }
@@ -88,7 +88,7 @@ fn only_a_dev_dependency_turns_the_test_seeds_on() {
                 if section.ends_with("dev-dependencies]") {
                     dev_uses += 1;
                 } else if section != "[workspace.dependencies]" {
-                    wrong.push(at());
+                    wrong.push(at(&section));
                 }
             }
             if line.contains("test-seeds") {
@@ -103,7 +103,7 @@ fn only_a_dev_dependency_turns_the_test_seeds_on() {
                 {
                     enabled += 1;
                 } else {
-                    wrong.push(at());
+                    wrong.push(at(&section));
                 }
             }
         }

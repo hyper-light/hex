@@ -50,7 +50,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
-    // MEASURING: the waits census's next run records a capacity holder's release (joint plan step 13, CV6).
+    // A capacity holder's release (joint plan step 13, CV6), learned as every kind is.
     Patience::measuring("client.answer.schedule.forget"),
 ];
 
