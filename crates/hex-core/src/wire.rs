@@ -67,9 +67,11 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 // takes an evaluation that long for one that may never end: on a CRLF checkout (git's core.autocrlf, on by default on
 // Windows) the loop visits every carriage return it skips too, and at main a8f6bfe4 jupiter's 673,005 bytes of
 // sources tripped it, so hex-core didn't build there; LF checkouts are close behind. The lint's own note names this
-// remedy for an evaluation long by design: allowing it here.
+// remedy for an evaluation long by design: allowing it here. A static, evaluated once, here, where the allow is: a
+// const is evaluated again in each crate that uses it, beyond this allow's reach (at be251865 hex-client's and
+// hex-runtime's builds tripped the lint on jupiter so).
 #[allow(long_running_const_eval)]
-pub const IDENTITY: u64 = identity(&[
+pub static IDENTITY: u64 = identity(&[
     include_bytes!("wire.rs"),
     include_bytes!("stream.rs"),
     include_bytes!("schedule.rs"),
