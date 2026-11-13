@@ -197,7 +197,9 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
         | Request::Taken
         | Request::StreamsReady
         | Request::Lessor(_)
-        | Request::Leased { .. } => return None,
+        | Request::Leased { .. }
+        | Request::Captured { .. }
+        | Request::Refreshed { .. } => return None,
     };
     waits.get(n)
 }
@@ -1040,6 +1042,9 @@ impl<T: Transport> Shared<T> {
                 | Answer::LeaseAsk { .. }
                 | Answer::LeaseGiven(_)
                 | Answer::LessorEnded
+                | Answer::CaptureAsk { .. }
+                | Answer::RefreshAsk { .. }
+                | Answer::SignInRevoked { .. }
         ) {
             let leasing = self.state()?.leasing.clone();
             return match leasing {
@@ -2847,6 +2852,9 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::LeaseAsk { .. } => "a lease's ask",
         Answer::LeaseGiven(_) => "a lease given back",
         Answer::LessorEnded => "a run's end of its leases",
+        Answer::CaptureAsk { .. } => "a sign-in's capture",
+        Answer::RefreshAsk { .. } => "a sign-in's refresh",
+        Answer::SignInRevoked { .. } => "a sign-in revoked",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }

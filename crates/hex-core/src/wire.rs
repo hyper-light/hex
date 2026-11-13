@@ -53,10 +53,10 @@ use hex_api::{
     MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
     PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
     RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User,
-    check_credentials, check_grants, check_published,
+    check_credentials, check_grants, check_published, check_sign_ins,
 };
 
-use hex_api::lease::{Lease, LeaseRefused, Value};
+use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
 
 use crate::netns;
 
@@ -181,6 +181,11 @@ mod kind {
     pub const LEASE_ASK: u16 = 0x8012;
     pub const LEASE_GIVEN: u16 = 0x8013;
     pub const LESSOR_ENDED: u16 = 0x8014;
+    pub const CAPTURED: u16 = 0x001c;
+    pub const REFRESHED: u16 = 0x001d;
+    pub const CAPTURE_ASK: u16 = 0x8015;
+    pub const REFRESH_ASK: u16 = 0x8016;
+    pub const SIGN_IN_REVOKED: u16 = 0x8017;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -216,6 +221,19 @@ pub enum Request {
     Leased {
         run: u64,
         answer: Result<Lease, LeaseRefused>,
+    },
+    /// The orchestrator's answer to the node's [`Answer::CaptureAsk`] its header's id names, of run `run`
+    /// (docs/design/credential-grants.md C8): the placeholders the sign-in's CLI is to hold and its access token's
+    /// reference, or why not, of Shards' kinds. Not answered.
+    Captured {
+        run: u64,
+        answer: Result<hex_api::Captured, SignInRefused>,
+    },
+    /// The orchestrator's answer to the node's [`Answer::RefreshAsk`] its header's id names, of run `run` (C8): the token
+    /// response the sign-in's CLI is to have, a value wiped as it drops, or why not. Not answered.
+    Refreshed {
+        run: u64,
+        answer: Result<Value, SignInRefused>,
     },
 }
 
@@ -394,6 +412,28 @@ pub enum Answer {
     LeaseGiven(String),
     /// The run its header's id names has ended: its lessor is let go. Sent unasked; not answered.
     LessorEnded,
+    /// Run `run`'s capture of sign-in `sign_in`'s tokens, under the run's `key` where it binds one (`Lessor::capture`;
+    /// docs/design/credential-grants.md C8), each token a value wiped as it drops. Sent unasked, the header's id the ask's;
+    /// answered [`Request::Captured`].
+    CaptureAsk {
+        run: u64,
+        sign_in: String,
+        tokens: SignInTokens,
+        key: Option<[u8; 32]>,
+    },
+    /// Run `run`'s refresh of sign-in `sign_in` (`Lessor::refresh`). Sent unasked, the header's id the ask's; answered
+    /// [`Request::Refreshed`].
+    RefreshAsk {
+        run: u64,
+        sign_in: String,
+        key: Option<[u8; 32]>,
+    },
+    /// Run `run`'s VM revoked sign-in `sign_in` (`Lessor::revoked`). Sent unasked; not answered.
+    SignInRevoked {
+        run: u64,
+        sign_in: String,
+        key: Option<[u8; 32]>,
+    },
 }
 
 /// A peer's connection to the node over QUIC, as the node's own TLS negotiated it (docs/design/hex-quic.md Q12).
@@ -604,6 +644,44 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
                 }
             }
         }
+        Request::Captured { run, answer } => {
+            w.header(kind::CAPTURED, id);
+            // A captured sign-in's placeholders are its capability: wiped where held, as a value is.
+            w.secret();
+            w.u64(*run);
+            match answer {
+                Ok(captured) => {
+                    w.u8(0);
+                    put_captured(&mut w, captured)?;
+                }
+                Err(refused) => {
+                    w.u8(1);
+                    put_sign_in_refused(&mut w, refused)?;
+                }
+            }
+        }
+        Request::Refreshed { run, answer } => {
+            w.header(kind::REFRESHED, id);
+            w.u64(*run);
+            match answer {
+                Ok(response) => {
+                    w.secret();
+                    let room = 1usize
+                        .checked_add(size_of::<u32>())
+                        .and_then(|n| n.checked_add(response.expose().len()))
+                        .ok_or_else(|| {
+                            Fault::value("refresh", "its size passes this machine's addresses")
+                        })?;
+                    w.reserve_fixed(room)?;
+                    w.u8(0);
+                    w.bytes(response.expose())?;
+                }
+                Err(refused) => {
+                    w.u8(1);
+                    put_sign_in_refused(&mut w, refused)?;
+                }
+            }
+        }
     }
     w.done()
 }
@@ -611,9 +689,16 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
 /// Whether `message` carries a lease's value ([`Request::Leased`]), so whoever held its bytes wipes them as it lets them
 /// go (docs/design/credential-grants.md C7): read from its kind alone, before or without reading the rest.
 pub fn carries_secret(message: &[u8]) -> bool {
-    message
-        .get(12..14)
-        .is_some_and(|got| got == &kind::LEASED.to_le_bytes()[..])
+    message.get(12..14).is_some_and(|got| {
+        [
+            kind::LEASED,
+            kind::CAPTURED,
+            kind::REFRESHED,
+            kind::CAPTURE_ASK,
+        ]
+        .iter()
+        .any(|secret| got == &secret.to_le_bytes()[..])
+    })
 }
 
 /// A lease as [`Request::Leased`] carries it: given (0), its name, its life, then its value last, so nothing can refuse
@@ -712,6 +797,110 @@ fn lease_refused(r: &mut Reader<'_>) -> Result<LeaseRefused, Fault> {
     })
 }
 
+/// What a sign-in's capture gave (C8): its access token's reference, its placeholder, and its refresh token's where one.
+fn put_captured(w: &mut Writer, captured: &hex_api::Captured) -> Result<(), Fault> {
+    w.string(&captured.access)?;
+    w.string(&captured.access_placeholder)?;
+    w.option_with(captured.refresh_placeholder.as_deref(), |w, p| w.string(p))
+}
+
+fn captured(r: &mut Reader<'_>) -> Result<hex_api::Captured, Fault> {
+    Ok(hex_api::Captured {
+        access: r.string("a captured access reference")?,
+        access_placeholder: r.string("a captured access placeholder")?,
+        refresh_placeholder: r.option(|r| r.string("a captured refresh placeholder"))?,
+    })
+}
+
+/// Why a sign-in's ask is refused, by Shards' kinds (`SignInRefusal`), each with its words.
+fn put_sign_in_refused(w: &mut Writer, refused: &SignInRefused) -> Result<(), Fault> {
+    match refused {
+        SignInRefused::Denied(why) => {
+            w.u8(0);
+            w.string(why)
+        }
+        SignInRefused::Unavailable(why) => {
+            w.u8(1);
+            w.string(why)
+        }
+        SignInRefused::Ended => {
+            w.u8(2);
+            Ok(())
+        }
+        SignInRefused::Unanswered => {
+            w.u8(3);
+            Ok(())
+        }
+    }
+}
+
+fn sign_in_refused(r: &mut Reader<'_>) -> Result<SignInRefused, Fault> {
+    Ok(match r.u8()? {
+        0 => SignInRefused::Denied(r.string("a denied sign-in's words")?),
+        1 => SignInRefused::Unavailable(r.string("an unavailable sign-in's words")?),
+        2 => SignInRefused::Ended,
+        3 => SignInRefused::Unanswered,
+        tag => {
+            return Err(Fault::value(
+                "sign-in refusal",
+                format!("{tag} names a refusal the wire doesn't define"),
+            ));
+        }
+    })
+}
+
+/// A value read into a [`Value`] at once, wiped as it drops; the message's own bytes are their holder's to wipe.
+fn value(r: &mut Reader<'_>, what: &'static str) -> Result<Value, Fault> {
+    let bytes = r.bytes()?;
+    let mut held: Vec<u8> = Vec::new();
+    held.try_reserve_exact(bytes.len())
+        .map_err(|_| Fault::Storage {
+            what,
+            bound: bytes.len(),
+        })?;
+    held.extend_from_slice(bytes);
+    Ok(Value::new(held))
+}
+
+/// A sign-in's tokens as a capture's ask carries them (C8): the message's room reserved before any token goes in, so no
+/// copy is left as it grows, and the writer wipes what it held of one that fails ([`Writer::secret`]).
+fn put_tokens(w: &mut Writer, tokens: &SignInTokens) -> Result<(), Fault> {
+    let field = |n: usize| n.checked_add(size_of::<u32>());
+    let option = |v: Option<usize>| v.map_or(Some(1), |n| field(n).and_then(|n| n.checked_add(1)));
+    let room = [
+        field(tokens.access.expose().len()),
+        option(tokens.refresh.as_ref().map(|v| v.expose().len())),
+        1usize.checked_add(size_of::<u64>()),
+        option(tokens.id_token.as_ref().map(|v| v.expose().len())),
+        option(tokens.scope.as_ref().map(String::len)),
+    ]
+    .into_iter()
+    .try_fold(0usize, |n, part| part.and_then(|part| n.checked_add(part)))
+    .ok_or_else(|| {
+        Fault::value(
+            "sign-in tokens",
+            "their size passes this machine's addresses",
+        )
+    })?;
+    w.secret();
+    w.reserve_fixed(room)?;
+    w.bytes(tokens.access.expose())?;
+    w.option_with(tokens.refresh.as_ref(), |w, v| w.bytes(v.expose()))?;
+    w.option(tokens.expires_in, |w, s| w.u64(s));
+    w.option_with(tokens.id_token.as_ref(), |w, v| w.bytes(v.expose()))?;
+    w.option_with(tokens.scope.as_deref(), |w, s| w.string(s))
+}
+
+fn tokens(r: &mut Reader<'_>) -> Result<SignInTokens, Fault> {
+    Ok(SignInTokens {
+        access: value(r, "an access token")?,
+        refresh: r.option(|r| value(r, "a refresh token"))?,
+        expires_in: r.option(|r| r.u64())?,
+        id_token: r.option(|r| value(r, "an ID token"))?,
+        scope: r.option(|r| r.string("a token's scope"))?,
+    })
+}
+
 /// An answer as a message of at most `bound` bytes.
 pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(bound);
@@ -763,7 +952,12 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 put_unavailable_devices(w, &capacity.unavailable)?;
                 // Joint plan step 14: last, after `unavailable`.
                 w.reserve_fixed(1)?;
-                w.option_with(capacity.learned.as_ref(), put_learned)
+                w.option_with(capacity.learned.as_ref(), put_learned)?;
+                // Joint plan step 14, C7: the machine's CPU time and uptime, after `learned`.
+                w.reserve_fixed(2)?;
+                w.option(capacity.own.cpu_ns, Writer::u64);
+                w.option(capacity.own.uptime_ns, Writer::u64);
+                Ok(())
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -892,6 +1086,31 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.string(lease)?;
         }
         Answer::LessorEnded => w.header(kind::LESSOR_ENDED, id),
+        Answer::CaptureAsk {
+            run,
+            sign_in,
+            tokens,
+            key,
+        } => {
+            w.header(kind::CAPTURE_ASK, id);
+            w.u64(*run);
+            w.string(sign_in)?;
+            w.option(key.as_ref(), |w, key| w.raw(key));
+            // Its tokens last, so nothing can refuse the message once they are in it.
+            put_tokens(&mut w, tokens)?;
+        }
+        Answer::RefreshAsk { run, sign_in, key } => {
+            w.header(kind::REFRESH_ASK, id);
+            w.u64(*run);
+            w.string(sign_in)?;
+            w.option(key.as_ref(), |w, key| w.raw(key));
+        }
+        Answer::SignInRevoked { run, sign_in, key } => {
+            w.header(kind::SIGN_IN_REVOKED, id);
+            w.u64(*run);
+            w.string(sign_in)?;
+            w.option(key.as_ref(), |w, key| w.raw(key));
+        }
     }
     w.done()
 }
@@ -1108,6 +1327,34 @@ fn parse_request(
             };
             Request::Leased { run, answer }
         }
+        kind::CAPTURED => {
+            let run = r.u64().map_err(bad)?;
+            let answer = match r.u8().map_err(bad)? {
+                0 => Ok(captured(&mut r).map_err(bad)?),
+                1 => Err(sign_in_refused(&mut r).map_err(bad)?),
+                tag => {
+                    return Err(bad(Fault::value(
+                        "capture answer",
+                        format!("{tag} names neither a capture nor a refusal"),
+                    )));
+                }
+            };
+            Request::Captured { run, answer }
+        }
+        kind::REFRESHED => {
+            let run = r.u64().map_err(bad)?;
+            let answer = match r.u8().map_err(bad)? {
+                0 => Ok(value(&mut r, "a refreshed token response").map_err(bad)?),
+                1 => Err(sign_in_refused(&mut r).map_err(bad)?),
+                tag => {
+                    return Err(bad(Fault::value(
+                        "refresh answer",
+                        format!("{tag} names neither a token response nor a refusal"),
+                    )));
+                }
+            };
+            Request::Refreshed { run, answer }
+        }
         kind::KILL => Request::Call(Call::Kill {
             exec: r.u64().map_err(bad)?,
         }),
@@ -1259,8 +1506,13 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                         why: r.device_string("unavailable.why")?,
                     })
                 })?,
-                // Last (joint plan step 14).
+                // Then (joint plan step 14).
                 learned: r.option(learned)?,
+                // Last (joint plan step 14, C7).
+                own: hex_api::MachineTime {
+                    cpu_ns: r.option(Reader::u64)?,
+                    uptime_ns: r.option(Reader::u64)?,
+                },
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -1334,6 +1586,27 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         },
         kind::LEASE_GIVEN => Answer::LeaseGiven(r.string("a lease given back")?),
         kind::LESSOR_ENDED => Answer::LessorEnded,
+        kind::CAPTURE_ASK => {
+            let run = r.u64()?;
+            let sign_in = r.string("a capture's sign-in")?;
+            let key = r.option(|r| r.array::<32>())?;
+            Answer::CaptureAsk {
+                run,
+                sign_in,
+                key,
+                tokens: tokens(&mut r)?,
+            }
+        }
+        kind::REFRESH_ASK => Answer::RefreshAsk {
+            run: r.u64()?,
+            sign_in: r.string("a refresh's sign-in")?,
+            key: r.option(|r| r.array::<32>())?,
+        },
+        kind::SIGN_IN_REVOKED => Answer::SignInRevoked {
+            run: r.u64()?,
+            sign_in: r.string("a revoked sign-in")?,
+            key: r.option(|r| r.array::<32>())?,
+        },
         kind::GIVEN => {
             let pid = r.u32()?;
             let given = r.u8().and_then(Streams::of)?;
@@ -1429,6 +1702,8 @@ fn request_name(kind: u16) -> &'static str {
         kind::LESSORS => "a lessors",
         kind::LESSOR => "a lessor",
         kind::LEASED => "a leased",
+        kind::CAPTURED => "a captured",
+        kind::REFRESHED => "a refreshed",
         _ => "a request",
     }
 }
@@ -2648,7 +2923,8 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
         w.bool(m.read_only);
         Ok(())
     })?;
-    put_credentials(w, &image.credentials, &image.grants)
+    put_credentials(w, &image.credentials, &image.grants)?;
+    put_sign_ins(w, &image.sign_ins, &image.credentials, &image.grants)
 }
 
 fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
@@ -2672,8 +2948,10 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
             })
         })?,
         credentials: Vec::new(),
+        sign_ins: Vec::new(),
     };
     image.credentials = credentials(r, &image.grants)?;
+    image.sign_ins = sign_ins(r, &image.credentials, &image.grants)?;
     Ok(image)
 }
 
@@ -2694,6 +2972,58 @@ fn put_credentials(
         w.list(&grant.toward, |w, host| w.string(host))?;
         w.string(&grant.placeholder)
     })
+}
+
+// Joint plan step 33's sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8): a Shards image VM's after
+// its credentials. Each its member, its name, its CLI (1 Claude Code, 2 Codex, as Shards' wires number them), its hosts,
+// and an earlier capture where there was one. Both sides run `check_sign_ins`, so a list it refuses is neither sent nor
+// read.
+fn put_sign_ins(
+    w: &mut Writer,
+    sign_ins: &[hex_api::SignInGrant],
+    credentials: &[CredentialGrant],
+    grants: &[Grant],
+) -> Result<(), Fault> {
+    check_sign_ins(sign_ins, credentials, grants)
+        .map_err(|e| Fault::value("sign_ins", e.to_string()))?;
+    w.list(sign_ins, |w, grant| {
+        put_member(w, &grant.member)?;
+        w.string(&grant.sign_in)?;
+        w.u8(match grant.cli {
+            hex_api::SignInCli::ClaudeCode => 1,
+            hex_api::SignInCli::Codex => 2,
+        });
+        w.list(&grant.toward, |w, host| w.string(host))?;
+        w.option_with(grant.captured.as_ref(), put_captured)
+    })
+}
+
+fn sign_ins(
+    r: &mut Reader<'_>,
+    credentials: &[CredentialGrant],
+    grants: &[Grant],
+) -> Result<Vec<hex_api::SignInGrant>, Fault> {
+    let sign_ins = r.list(|r| {
+        Ok(hex_api::SignInGrant {
+            member: member(r)?,
+            sign_in: r.string("sign-in")?,
+            cli: match r.u8()? {
+                1 => hex_api::SignInCli::ClaudeCode,
+                2 => hex_api::SignInCli::Codex,
+                code => {
+                    return Err(Fault::value(
+                        "sign-in CLI",
+                        format!("{code} names a CLI the wire doesn't define"),
+                    ));
+                }
+            },
+            toward: r.list(|r| r.string("sign-in host"))?,
+            captured: r.option(captured)?,
+        })
+    })?;
+    check_sign_ins(&sign_ins, credentials, grants)
+        .map_err(|e| Fault::value("sign_ins", e.to_string()))?;
+    Ok(sign_ins)
 }
 
 fn credentials(r: &mut Reader<'_>, grants: &[Grant]) -> Result<Vec<CredentialGrant>, Fault> {

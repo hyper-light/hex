@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hex_api::lease::{Lease, LeaseRefused, Lessor, Lessors};
+use hex_api::lease::{Lease, LeaseRefused, Lessor, Lessors, SignInRefused, SignInTokens, Value};
 use hex_api::{BoxId, Refusal, ShardsImage};
-use shards_api::image::{CredentialGrant, LeaseRefusal, Leased, RunLessor, Secret};
+use shards_api::image::{CredentialGrant, LeaseRefusal, Leased, RunLessor, Secret, SignInRefusal};
 
 use super::{GuestRuntime, ImageClass};
 
@@ -39,7 +39,7 @@ impl ImageClass {
 
     /// Whether this node can lease `image`'s credentials: none asks nothing; any asks for its lessors.
     pub(super) fn can_lease(&self, image: &ShardsImage) -> Result<(), Refusal> {
-        if image.credentials.is_empty() || self.lessors.is_some() {
+        if !leases(image) || self.lessors.is_some() {
             return Ok(());
         }
         Err(unconfigured())
@@ -52,13 +52,52 @@ impl ImageClass {
         id: &BoxId,
         image: &ShardsImage,
     ) -> Result<Option<RunLessor>, Refusal> {
-        if image.credentials.is_empty() {
+        if !leases(image) {
             return Ok(None);
         }
         let lessors = self.lessors.as_ref().ok_or_else(unconfigured)?;
         let run = lessors.lessor(id)?;
         Ok(Some(RunLessor(Arc::new(RunLeases(run)))))
     }
+}
+
+/// Whether a run of `image` asks its orchestrator anything: a credential's lease or a sign-in's capture (C3, C8).
+fn leases(image: &ShardsImage) -> bool {
+    !image.credentials.is_empty() || !image.sign_ins.is_empty()
+}
+
+/// `image`'s sign-in grants as Shards' run host takes them (C8): run-wide, each its name, its CLI, its hosts and an
+/// earlier capture's placeholders, checked again here (C2, C8) so no boot asks for one the check refuses; Hex adds none.
+pub(super) fn sign_ins(
+    image: &ShardsImage,
+) -> Result<Vec<shards_api::image::SignInGrant>, Refusal> {
+    hex_api::check_sign_ins(&image.sign_ins, &image.credentials, &image.grants)?;
+    let mut lowered = Vec::new();
+    lowered
+        .try_reserve_exact(image.sign_ins.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "sign-ins",
+            bound: image.sign_ins.len(),
+        })?;
+    for grant in &image.sign_ins {
+        lowered.push(shards_api::image::SignInGrant {
+            sign_in: grant.sign_in.clone(),
+            cli: match grant.cli {
+                hex_api::SignInCli::ClaudeCode => shards_api::image::Cli::ClaudeCode,
+                hex_api::SignInCli::Codex => shards_api::image::Cli::Codex,
+            },
+            toward: grant.toward.clone(),
+            captured: grant
+                .captured
+                .as_ref()
+                .map(|captured| shards_api::image::Captured {
+                    access: captured.access.clone(),
+                    access_placeholder: captured.access_placeholder.clone(),
+                    refresh_placeholder: captured.refresh_placeholder.clone(),
+                }),
+        });
+    }
+    Ok(lowered)
 }
 
 fn unconfigured() -> Refusal {
@@ -144,6 +183,60 @@ impl shards_api::image::Lessor for RunLeases {
 
     fn release(&self, lease: &str) {
         self.0.release(lease);
+    }
+
+    /// A sign-in's tokens handed on whole to the run's lessor, each moved into a [`Value`] that wipes it, nothing of
+    /// them kept here; its placeholders answered back, or its refusal of Shards' kind and words (C8).
+    fn capture(
+        &self,
+        sign_in: &str,
+        tokens: shards_api::image::SignInTokens,
+        key: Option<[u8; 32]>,
+    ) -> Result<shards_api::image::Captured, SignInRefusal> {
+        let shards_api::image::SignInTokens {
+            mut access,
+            refresh,
+            expires_in,
+            id_token,
+            scope,
+        } = tokens;
+        let moved = |mut secret: Secret| Value::new(std::mem::take(&mut secret.0));
+        let tokens = SignInTokens {
+            access: Value::new(std::mem::take(&mut access.0)),
+            refresh: refresh.map(moved),
+            expires_in,
+            id_token: id_token.map(moved),
+            scope,
+        };
+        let captured = self
+            .0
+            .capture(sign_in, tokens, key)
+            .map_err(sign_in_refusal)?;
+        Ok(shards_api::image::Captured {
+            access: captured.access.clone(),
+            access_placeholder: captured.access_placeholder.clone(),
+            refresh_placeholder: captured.refresh_placeholder.clone(),
+        })
+    }
+
+    /// A sign-in refreshed by the run's lessor: its token response handed on whole into Shards' `Secret` (C8).
+    fn refresh(&self, sign_in: &str, key: Option<[u8; 32]>) -> Result<Secret, SignInRefusal> {
+        let response = self.0.refresh(sign_in, key).map_err(sign_in_refusal)?;
+        Ok(Secret(response.into_bytes()))
+    }
+
+    fn revoked(&self, sign_in: &str, key: Option<[u8; 32]>) {
+        self.0.revoked(sign_in, key);
+    }
+}
+
+/// The orchestrator's refusal of a sign-in as Shards' run host takes it: kind for kind, its words kept.
+fn sign_in_refusal(why: SignInRefused) -> SignInRefusal {
+    match why {
+        SignInRefused::Denied(why) => SignInRefusal::Denied(why),
+        SignInRefused::Unavailable(why) => SignInRefusal::Unavailable(why),
+        SignInRefused::Ended => SignInRefusal::Ended,
+        SignInRefused::Unanswered => SignInRefusal::Unanswered,
     }
 }
 

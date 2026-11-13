@@ -322,6 +322,11 @@ pub struct ShardsImage {
     /// shares (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<crate::CredentialGrant>,
+    /// Its members' CLIs' sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8): each a sign-in its
+    /// orchestrator's store names, its tokens taken outside the VM by its run's injector and kept by its orchestrator,
+    /// its CLI given placeholders in their places. None by default. After the credentials (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign_ins: Vec<crate::SignInGrant>,
 }
 
 /// A member of a Shards image its caller drives ([`ShardsImage::members`]): which one, by the kind and name
@@ -407,6 +412,7 @@ impl ShardsImage {
             members: Vec::new(),
             shares: Vec::new(),
             credentials: Vec::new(),
+            sign_ins: Vec::new(),
         }
     }
 
@@ -513,7 +519,8 @@ impl ShardsImage {
         }
         // Its credentials, each one that could be filled in exactly as it says over the grants just taken (joint plan
         // step 33, docs/design/credential-grants.md C2).
-        crate::check_credentials(&self.credentials, &self.grants)
+        crate::check_credentials(&self.credentials, &self.grants)?;
+        crate::check_sign_ins(&self.sign_ins, &self.credentials, &self.grants)
     }
 }
 
