@@ -49,6 +49,7 @@ use hex_core::record::{BootSession, BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
 
+mod node_vm;
 mod pool;
 use pool::scoped_paths;
 
