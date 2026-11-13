@@ -180,6 +180,9 @@ struct ModelRun {
     end: Mutex<Option<RunEnd>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
+    rooms: Mutex<Vec<Option<i64>>>,
+    rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
     /// Each member's end, as the test sets it, by name: none until it does.
     member_ends: Mutex<std::collections::BTreeMap<String, MemberEnd>>,
     /// Each member a boot asked the stdin of, by name, with its own ends of its stdin, stdout and stderr: the
@@ -262,22 +265,25 @@ impl ImageGuest for ModelGuest {
             None => Ok(self.run.stats.lock().unwrap().clone()),
         }
     }
-    // The model holds no budget (D241), rate (D247) or terminal (D244) of a run: each refused as unsupported.
-    fn room(&self, _: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's room",
-            why: "it holds no budget".to_owned(),
-        })
+    // The model keeps each room (D241) and rate (D247) it is told and holds the run as told: the room within none
+    // where it is short; it gives no member a terminal (D244), refused as unsupported.
+    fn room(&self, room: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
+        if let Some(end) = self.run.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(end));
+        }
+        self.run.rooms.lock().unwrap().push(room);
+        Ok(room.map(|room| u64::try_from(room.max(0)).unwrap()))
     }
     fn rate(
         &self,
-        _: Option<std::num::NonZeroU64>,
+        rate: Option<std::num::NonZeroU64>,
         _: Duration,
     ) -> Result<Option<std::num::NonZeroU64>, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's rate",
-            why: "it holds no rate".to_owned(),
-        })
+        if let Some(end) = self.run.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(end));
+        }
+        self.run.rates.lock().unwrap().push(rate);
+        Ok(rate)
     }
     fn resize(&self, _: &MemberName, _: u16, _: u16, _: Duration) -> Result<(), ImageRefusal> {
         Err(ImageRefusal::Unsupported {
@@ -936,6 +942,70 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     assert!(matches!(
         runtime.usage(&id),
         Err(Refusal::Os { why, .. }) if why.contains("pids")
+    ));
+}
+
+/// Joint plan step 14 (C7, C4, C1; AC-T7.4.1): a running image VM is told its room, held to its rate and read for its
+/// host cost through its runtime, the one call each of the node's charge learner and a caller's own runtime (goal 12's
+/// item B) make. Do tell a VM rooms of 32 MiB, -8 MiB (its budget short of what it holds) and none, hold it at 250
+/// milli-CPU then none, and read its host use, its run's microVM part carrying its VM process's use and each vCPU's guest
+/// time; then each before its start, and its host use where its run host read no host part. Expect each room and rate
+/// asked of its run as told and its answer returned; the host use its VM process's CPU, footprint and resident memory
+/// and its guest time by vCPU; before its start each refused NotRunning, naming the call; the unread host part refused,
+/// naming why, never read as none.
+#[test]
+fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-charge", None)).unwrap().id;
+    let rate = std::num::NonZeroU64::new(250);
+    assert!(matches!(
+        runtime.room(&id, Some(1)),
+        Err(Refusal::NotRunning(_, "room"))
+    ));
+    assert!(matches!(
+        runtime.rate(&id, rate),
+        Err(Refusal::NotRunning(_, "rate"))
+    ));
+    assert!(matches!(
+        runtime.host_use(&id),
+        Err(Refusal::NotRunning(_, "host_use"))
+    ));
+    runtime.start(&id).unwrap();
+    assert_eq!(runtime.room(&id, Some(32 << 20)).unwrap(), Some(32 << 20));
+    assert_eq!(runtime.room(&id, Some(-(8 << 20))).unwrap(), Some(0));
+    assert_eq!(runtime.room(&id, None).unwrap(), None);
+    assert_eq!(
+        *images.run.rooms.lock().unwrap(),
+        [Some(32 << 20), Some(-(8 << 20)), None]
+    );
+    assert_eq!(runtime.rate(&id, rate).unwrap(), rate);
+    assert_eq!(runtime.rate(&id, None).unwrap(), None);
+    assert_eq!(*images.run.rates.lock().unwrap(), [rate, None]);
+    assert_eq!(
+        runtime.host_use(&id).unwrap(),
+        hex_api::HostUse {
+            cpu_ns: 9_000_000,
+            footprint_bytes: 1 << 20,
+            resident_bytes: 1 << 20,
+            guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
+        }
+    );
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: Some(Microvm {
+            host: Err("its VM process's use went unread".to_owned()),
+            guest: Ok(guest_times(vcpus)),
+        }),
+        ..Stats::default()
+    };
+    assert!(matches!(
+        runtime.host_use(&id),
+        Err(Refusal::Os { why, .. }) if why.contains("went unread")
     ));
 }
 
