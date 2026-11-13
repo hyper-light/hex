@@ -149,6 +149,13 @@ impl Follow {
         }
     }
 
+    /// The same, its party first seen at `at` with `progress`, as a first [`Follow::look`] sees it: where its first
+    /// window is judged from, before any look of its shell's.
+    pub const fn starting_at(mut self, progress: u64, at: Duration) -> Self {
+        self.last = Some((progress, at));
+        self
+    }
+
     /// The window a stall is judged over now: W* past it, else the longest gap measured, none before one is.
     fn window(&self) -> Option<Duration> {
         if self.window.is_some() || self.longest.is_zero() {

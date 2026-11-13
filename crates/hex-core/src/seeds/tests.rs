@@ -2,8 +2,9 @@
 //! starts, creates, claims, completions, seed deaths, hangs and the clock moving on, the pool never holds more seeds
 //! than its bound, never hands a create a seed that is starting, busy or gone, answers every event as the oracle does
 //! (its waits, refusals and stale reports among them) and counts what it counts, with every path taken over the run
-//! (non-vacuity counters); and each case the plan names, every seed busy past the wait bound and a seed that dies
-//! mid-create, is answered as the design says, as are a hang, the order of the line, a failed start and a late report.
+//! (non-vacuity counters); and each case the plan names, every seed busy past the line's W* and a seed that dies
+//! mid-create, is answered as the design says (decision 9, the person's ruling of 2026-11-13, for the first), as are a
+//! hang, the order of the line, a failed start and a late report.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -14,6 +15,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use super::*;
+use crate::patience::{Follow, Party};
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -119,6 +121,15 @@ enum Phase {
     },
 }
 
+/// How a create in line waits, as the oracle keeps it: within the line's W* as it was when it came, until the time
+/// held; or following the seeds freed (`crate::patience::Follow`, tested on its own), past its W* or from its start
+/// where the line had none, with the seeds freed as its last look saw them.
+#[derive(Debug, Clone, Copy)]
+enum Wait {
+    Within(Duration),
+    Following(Follow, u64),
+}
+
 /// The pool as plainly as it can be said: each slot's seed and what it does, the line and the answers awaiting
 /// their claims as lists in the order they came, whether it asks for starts, and what it has counted. It names
 /// nothing itself: it takes the pool's seeds and tickets once the test has checked each is new, and the pool's choice
@@ -126,7 +137,7 @@ enum Phase {
 struct Oracle {
     seeds: Vec<Option<(SeedId, Phase)>>,
     up_before: Vec<bool>,
-    line: Vec<(Ticket, Duration, Option<Duration>)>,
+    line: Vec<(Ticket, Duration, Wait)>,
     answered: Vec<(Ticket, Result<SeedId, Refused>)>,
     asking: bool,
     counts: Counts,
@@ -136,6 +147,8 @@ struct Oracle {
     /// that died or hung (Karn's point), after which the next wait follows its party until an answer comes.
     wait: Patience,
     hang: Patience,
+    /// Seeds freed: one each time a seed comes up or is done with its create, the line's progress.
+    freed: u64,
 }
 
 impl Oracle {
@@ -152,6 +165,7 @@ impl Oracle {
             handed: vec![0; slots],
             wait: Patience::measuring(WAIT),
             hang: Patience::measuring(HANG),
+            freed: 0,
         }
         .calibrated(setup)
     }
@@ -207,8 +221,8 @@ impl Oracle {
         self.counts.most_busy = self.counts.most_busy.max(busy);
     }
 
-    /// A seed up and free goes to the first in line whose wait hadn't ended before `now`, those before it refused; or
-    /// it idles.
+    /// A seed up and free is a seed freed, and goes to the first in line, however long it has waited: past its W* and
+    /// yet to claim, its run-out is told first; its wait is a sample. With none in line it idles.
     fn free(
         &mut self,
         seed: SeedId,
@@ -216,22 +230,76 @@ impl Oracle {
         served: bool,
         seen: &mut Paths,
     ) -> Option<Ticket> {
-        while !self.line.is_empty() {
-            let (ticket, since, until) = self.line.remove(0);
-            if until.is_none_or(|u| now <= u) {
-                self.wait.answered(now - since);
-                self.hand(seed, now, Some(ticket));
-                self.answered.push((ticket, Ok(seed)));
-                return Some(ticket);
-            }
-            self.counts.refused_waited += 1;
-            seen.refused_in_line += 1;
-            let wait = until.unwrap() - since;
-            self.wait.ran_out(wait);
-            self.answered.push((ticket, Err(Refused::Waited { wait })));
+        self.freed += 1;
+        if self.line.is_empty() {
+            self.set(seed, Some(Phase::Idle { served }));
+            return None;
         }
-        self.set(seed, Some(Phase::Idle { served }));
-        None
+        let (ticket, since, wait) = self.line.remove(0);
+        if let Wait::Within(until) = wait
+            && until < now
+        {
+            self.wait.ran_out(until - since);
+            seen.handed_past_bound += 1;
+        }
+        self.wait.answered(now - since);
+        self.hand(seed, now, Some(ticket));
+        self.answered.push((ticket, Ok(seed)));
+        Some(ticket)
+    }
+
+    /// A create comes to the line at `now`: within the line's W*, or following the seeds freed from its start where
+    /// the line has none; with when it claims again.
+    fn wait_in_line(&self, now: Duration) -> (Wait, Option<Duration>) {
+        match self.wait.deadline() {
+            Some(wait) => (Wait::Within(now + wait), Some(now + wait)),
+            None => {
+                let follow = self.wait.follow().starting_at(self.freed, now);
+                (Wait::Following(follow, self.freed), follow.stalls_after())
+            }
+        }
+    }
+
+    /// The `i`th in line claims at `now`. Within its W* it waits on. Past it its run-out is told, once, and it follows
+    /// the seeds freed over windows of that W*: it waits on while one frees within each, and is refused once a whole
+    /// window passes with none. Following from its start, it goes by the same rule over its follower's window.
+    fn claim_in_line(&mut self, i: usize, now: Duration, seen: &mut Paths) -> Claim {
+        let (ticket, since, wait) = self.line[i];
+        let (mut follow, last) = match wait {
+            Wait::Within(until) if now < until => {
+                seen.claim_waits += 1;
+                return Claim::Wait { until: Some(until) };
+            }
+            Wait::Within(until) => {
+                self.wait.ran_out(until - since);
+                seen.run_out_at_claim += 1;
+                (
+                    Follow::past(until - since).starting_at(self.freed, now),
+                    self.freed,
+                )
+            }
+            Wait::Following(follow, last) => (follow, last),
+        };
+        let looked = follow.look(
+            Party::Alive {
+                progress: self.freed,
+            },
+            now,
+        );
+        if looked.is_ok() {
+            seen.follow_waits += 1;
+            if self.freed > last {
+                seen.line_moved += 1;
+            }
+            self.line[i] = (ticket, since, Wait::Following(follow, self.freed));
+            return Claim::Wait {
+                until: follow.stalls_after(),
+            };
+        }
+        self.line.remove(i);
+        self.counts.refused_waited += 1;
+        seen.refused_at_claim += 1;
+        Claim::Refused(Refused::Waited { wait: now - since })
     }
 
     /// A seed that left while handed to a create yet to claim it: that create's answer is `refused`.
@@ -257,7 +325,10 @@ struct Paths {
     handed_on_done: usize,
     line_full: usize,
     refused_at_claim: usize,
-    refused_in_line: usize,
+    run_out_at_claim: usize,
+    follow_waits: usize,
+    line_moved: usize,
+    handed_past_bound: usize,
     refused_on_failed_start: usize,
     claim_waits: usize,
     claim_seed: usize,
@@ -446,8 +517,9 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                         "ticket {} doesn't come after every earlier one",
                         ticket
                     );
-                    prop_assert_eq!(until, oracle.wait.deadline().map(|wait| now + wait));
-                    oracle.line.push((ticket, now, until));
+                    let (wait, wakes) = oracle.wait_in_line(now);
+                    prop_assert_eq!(until, wakes);
+                    oracle.line.push((ticket, now, wait));
                     oracle.counts.waited += 1;
                     tickets.push(ticket);
                     seen.waited += 1;
@@ -499,18 +571,8 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                         }
                     }
                 } else if let Some(i) = oracle.line.iter().position(|(t, _, _)| *t == ticket) {
-                    let (_, since, until) = oracle.line[i];
-                    if until.is_none_or(|u| now < u) {
-                        seen.claim_waits += 1;
-                        prop_assert_eq!(got, Ok(Claim::Wait { until }));
-                    } else {
-                        oracle.line.remove(i);
-                        oracle.counts.refused_waited += 1;
-                        seen.refused_at_claim += 1;
-                        let wait = until.unwrap() - since;
-                        oracle.wait.ran_out(wait);
-                        prop_assert_eq!(got, Ok(Claim::Refused(Refused::Waited { wait })));
-                    }
+                    let want = oracle.claim_in_line(i, now, &mut seen);
+                    prop_assert_eq!(got, Ok(want));
                 } else {
                     seen.no_ticket += 1;
                     prop_assert_eq!(got, Err(Stale::Ticket(ticket)));
@@ -754,12 +816,18 @@ fn against_an_oracle_no_create_meets_a_busy_or_gone_seed_the_bound_holds_and_the
         ),
         ("a create refused with the line full", p.line_full),
         (
-            "a create refused at its claim, its wait over",
+            "a create refused at its claim, no seed freed over a whole window",
             p.refused_at_claim,
         ),
+        ("a claim past its W*, its run-out told", p.run_out_at_claim),
+        ("a following claim told to wait on", p.follow_waits),
         (
-            "a create refused in line as a seed freed",
-            p.refused_in_line,
+            "a following claim that saw seeds freed since its last look",
+            p.line_moved,
+        ),
+        (
+            "a seed handed to a create past its W* before it claimed",
+            p.handed_past_bound,
         ),
         (
             "a create refused in line as the last start failed",
@@ -789,11 +857,15 @@ fn against_an_oracle_no_create_meets_a_busy_or_gone_seed_the_bound_holds_and_the
     }
 }
 
-/// HEX-SEEDS-3, the plan's first case: with every seed busy, a create waits in line, and one handed none by the end
-/// of its wait is refused by type at its claim; a seed that frees later goes to the next in line, not to it. With the
-/// line full, a create is refused by type at once.
+/// HEX-SEEDS-3, the plan's first case, under decision 9 (the person's ruling of 2026-11-13: W* is a bound only while
+/// answers come within it): with every seed busy, a create waits in line; past the line's W* its run-out is told and it
+/// waits on, following the seeds freed, refused by type at its claim only once a whole window of that W* passes with
+/// none freed; a seed that frees later goes to the next in line. With the line full, a create is refused by type at
+/// once. Do: two seeds busy, the line's W* 10 ms; creates wait from 1 ms and 5 ms, and a third finds the line full;
+/// claim the first at 10, 11, 21 and 22 ms. Expect: told to wait on to 11 ms; at 11 ms the run-out told and to wait on
+/// to 21 ms; at 21 ms, its window not yet whole, to wait on; at 22 ms refused, its wait 21 ms.
 #[test]
-fn a_create_is_refused_by_type_when_every_seed_is_busy_past_the_wait_bound() {
+fn a_create_past_the_lines_w_star_with_no_seed_freed_over_a_whole_window_is_refused_by_type() {
     let mut pool = seeds(2, 2, 10, 1_000);
     up(&mut pool, ms(0));
     up(&mut pool, ms(0));
@@ -821,11 +893,28 @@ fn a_create_is_refused_by_type_when_every_seed_is_busy_past_the_wait_bound() {
     );
     assert_eq!(
         pool.claim(late, ms(11)),
-        Ok(Claim::Refused(Refused::Waited { wait: ms(10) }))
+        Ok(Claim::Wait {
+            until: Some(ms(21))
+        })
     );
-    assert_eq!(pool.claim(late, ms(11)), Err(Stale::Ticket(late)));
-    assert_eq!(pool.done(first, ms(12)), Ok(Some(next)));
-    assert_eq!(pool.claim(next, ms(12)), Ok(Claim::Seed(first)));
+    assert_eq!(
+        pool.deadlines().0,
+        None,
+        "the run-out told: the line's next wait follows its seeds"
+    );
+    assert_eq!(
+        pool.claim(late, ms(21)),
+        Ok(Claim::Wait {
+            until: Some(ms(21))
+        })
+    );
+    assert_eq!(
+        pool.claim(late, ms(22)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(21) }))
+    );
+    assert_eq!(pool.claim(late, ms(22)), Err(Stale::Ticket(late)));
+    assert_eq!(pool.done(first, ms(23)), Ok(Some(next)));
+    assert_eq!(pool.claim(next, ms(23)), Ok(Claim::Seed(first)));
     let c = pool.counts();
     assert_eq!(
         (
@@ -918,9 +1007,9 @@ fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
     );
 }
 
-/// HEX-SEEDS-3: seeds that free go to the waiting creates in the order they came, and one whose wait ended before a
-/// seed freed is refused on the way and told so at its claim; with no one waiting the seed idles, and the next create
-/// takes it at once.
+/// HEX-SEEDS-3: seeds that free go to the waiting creates in the order they came, however long each has waited: one
+/// past the line's W* when a seed frees, yet to claim, is handed it, its run-out told and its wait the sample the
+/// line's W* rises to (decision 9); with no one waiting the seed idles, and the next create takes it at once.
 #[test]
 fn seeds_go_to_the_waiting_creates_in_the_order_they_came() {
     let mut pool = seeds(1, 8, 10, 1_000);
@@ -931,17 +1020,62 @@ fn seeds_go_to_the_waiting_creates_in_the_order_they_came() {
         other => panic!("a create with its only seed busy was answered {other:?}"),
     };
     let (a, b, c) = (wait(0), wait(5), wait(6));
-    assert_eq!(pool.done(seed, ms(12)), Ok(Some(b)));
+    assert_eq!(pool.done(seed, ms(12)), Ok(Some(a)));
     assert_eq!(
-        pool.claim(a, ms(12)),
-        Ok(Claim::Refused(Refused::Waited { wait: ms(10) }))
+        pool.deadlines().0,
+        Some(ms(12)),
+        "the line's W* rose to the wait past it"
     );
-    assert_eq!(pool.claim(b, ms(12)), Ok(Claim::Seed(seed)));
-    assert_eq!(pool.done(seed, ms(13)), Ok(Some(c)));
-    assert_eq!(pool.claim(c, ms(13)), Ok(Claim::Seed(seed)));
-    assert_eq!(pool.done(seed, ms(14)), Ok(None));
+    assert_eq!(pool.claim(a, ms(12)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.done(seed, ms(13)), Ok(Some(b)));
+    assert_eq!(pool.claim(b, ms(13)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.done(seed, ms(14)), Ok(Some(c)));
+    assert_eq!(pool.claim(c, ms(14)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.done(seed, ms(15)), Ok(None));
     assert_eq!((pool.idle(), pool.waiting()), (1, 0));
-    assert_eq!(pool.create(ms(14)), Ok(Admit::Seed(seed)));
+    assert_eq!(pool.create(ms(15)), Ok(Admit::Seed(seed)));
+}
+
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a create
+/// handed no seed within the line's W* was refused at its claim, though the seeds were freeing for the creates ahead
+/// of it. Do: one seed, the line's W* 10 ms, the seed busy from 0 ms; creates wait from 0 ms and 1 ms; claim the
+/// second at its W*'s end, 11 ms; the seed done at 15 ms (to the first), the second claiming at 21 ms, and the seed
+/// done again at 25 ms. Expect: at 11 ms the second waits on to 21 ms, its run-out told; at 21 ms, a seed freed within
+/// its window, it waits on to 31 ms; handed the seed at 25 ms, its 24 ms the line's W* then; none refused.
+#[test]
+fn original_a_create_past_the_lines_w_star_waits_on_while_seeds_free() {
+    let mut pool = seeds(1, 4, 10, 1_000);
+    let seed = up(&mut pool, ms(0));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
+    let Ok(Admit::Wait { ticket: first, .. }) = pool.create(ms(0)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    let Ok(Admit::Wait {
+        ticket: second,
+        until,
+    }) = pool.create(ms(1))
+    else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(until, Some(ms(11)));
+    assert_eq!(
+        pool.claim(second, ms(11)),
+        Ok(Claim::Wait {
+            until: Some(ms(21))
+        })
+    );
+    assert_eq!(pool.done(seed, ms(15)), Ok(Some(first)));
+    assert_eq!(pool.claim(first, ms(15)), Ok(Claim::Seed(seed)));
+    assert_eq!(
+        pool.claim(second, ms(21)),
+        Ok(Claim::Wait {
+            until: Some(ms(31))
+        })
+    );
+    assert_eq!(pool.done(seed, ms(25)), Ok(Some(second)));
+    assert_eq!(pool.claim(second, ms(25)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.deadlines().0, Some(ms(24)));
+    assert_eq!(pool.counts().refused_waited, 0);
 }
 
 /// HEX-SEEDS-5: a failed start stops the starting until the next create, as does a seed that dies before it serves a
@@ -1058,10 +1192,11 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
 /// Decision 9 (Ada's rules of 2026-11-06 and 2026-11-13; AC-T7.1.3): the line's wait and the hang bound are each the
 /// slowest answer the pool has seen, with no margin, and a wait past its bound makes the next one follow its party. Do:
 /// on a pool of one seed whose waits have seen 4 ms, serve a create for 3 ms while another waits 2 ms in line; let the
-/// second's seed pass its bound; then let a create's wait in line end, and serve a create for 6 ms. Expect: the first
-/// waits within the 4 ms; the faster answers leaving both bounds at 4 ms; the seed taken for hung at 4 ms and not
-/// before, which is no sample, the next seed's wait following it (no bound); the create refused after 4 ms, and the
-/// line's next wait following too; the 6 ms answer, waited for while its seed lived, the hang bound's slowest then.
+/// second's seed pass its bound; then let a create's wait in line pass its bound while the next seed serves another
+/// for 6 ms. Expect: the first waits within the 4 ms; the faster answers leaving both bounds at 4 ms; the seed taken for
+/// hung at 4 ms and not before, which is no sample, the next seed's wait following it (no bound); the create told the
+/// run-out at 4 ms and to wait on, the line's next wait following too; at 13 ms handed the seed, its 6 ms the line's
+/// W* then, as the 6 ms answer, waited for while its seed lived, is the hang bound's.
 #[test]
 fn the_wait_and_the_hang_bound_are_the_slowest_answer_and_follow_past_a_run_out() {
     let mut pool = seeds(1, 4, 4, 4);
@@ -1096,11 +1231,14 @@ fn the_wait_and_the_hang_bound_are_the_slowest_answer_and_follow_past_a_run_out(
     assert_eq!(until, Some(ms(11)));
     assert_eq!(
         pool.claim(ticket, ms(11)),
-        Ok(Claim::Refused(Refused::Waited { wait: ms(4) }))
+        Ok(Claim::Wait {
+            until: Some(ms(15))
+        })
     );
     assert_eq!(pool.deadlines(), (None, None));
-    assert_eq!(pool.done(next, ms(13)), Ok(None));
-    assert_eq!(pool.deadlines(), (None, Some(ms(6))));
+    assert_eq!(pool.done(next, ms(13)), Ok(Some(ticket)));
+    assert_eq!(pool.claim(ticket, ms(13)), Ok(Claim::Seed(next)));
+    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(6))));
 }
 
 /// A failed start with no seed up or starting refuses the line at once, since no seed can come for it. Do: on a new
