@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use hex_api::Refusal;
 use hex_core::patience::Patience;
 use shards_api::image::{
-    ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready,
+    ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready, StatsScope,
 };
 
 use super::shares::Share;
@@ -44,13 +44,14 @@ pub struct HostedConfig {
 impl HostedConfig {
     /// The image boot that runs Hex's own init under the nesting grant. Its parts:
     /// - **command**: [`INIT`] alone;
-    /// - **ready_by**: the deadline given, none while the wait follows its run;
+    /// - **no deadline**: Hex's init would end the boot at one, and a node's learned bound is when its wait tells the
+    ///   census a run-out, never when a boot ends (decision 9);
     /// - **shares**: at the paths the direct boot's init mounts them at, so the host's rewrite is one;
     /// - **no member**: none of the image's own (`NESTING` declares none);
     /// - **no published port and no grant past the VM** (default deny): the host reaches the node through its run's
     ///   agent-control endpoint alone (§5);
     /// - **no credential**.
-    pub fn spec(&self, ready_by: Option<Duration>) -> ImageSpec {
+    pub fn spec(&self) -> ImageSpec {
         ImageSpec {
             image: self.image.clone(),
             vcpus: self.vcpus,
@@ -76,7 +77,7 @@ impl HostedConfig {
                 })
                 .collect(),
             nesting: true,
-            ready_by,
+            ready_by: None,
             binary: Some(self.binary.clone()),
             env: self.env.clone(),
         }
@@ -86,7 +87,7 @@ impl HostedConfig {
 /// A node VM under shards-init whose init has said it is ready.
 pub struct HostedGuest {
     pub guest: Box<dyn ImageGuest>,
-    /// How its init said it: on time, or late past the deadline its run was given.
+    /// How its init said it: on time, as a run given no deadline says it, or late past a deadline its run carried.
     pub ready: Ready,
     /// From the boot's ask to its READY: the node VM's start, its run host's, its VM's and its init's.
     pub took: Duration,
@@ -96,8 +97,7 @@ pub struct HostedGuest {
 pub struct Hosted {
     images: Arc<dyn Images>,
     config: HostedConfig,
-    /// `guest.hosted.ready`, the person's rule of 2026-11-13: none before the first READY, when the wait follows its
-    /// run, then the slowest READY this node has seen; a run-out is no sample, and the next wait follows again.
+    /// `guest.hosted.ready`, W*: the slowest READY this node has seen, none before the first ([`follow_ready`]).
     ready: Patience,
 }
 
@@ -126,44 +126,110 @@ impl Hosted {
 
     /// Boots the node VM and follows it to READY.
     /// - **The boot** waits on its run host: `Duration::MAX`, until the run starts or its host ends.
-    /// - **READY** is waited for to the learned deadline, and the run is given that deadline too, so Hex's init holds
-    ///   its node and relay to it inside the VM. At the cold start, or after a run-out, there is no deadline: the
-    ///   wait follows the run, and the run's end refuses it.
-    /// - **Past the deadline** with no READY is a run-out, no sample (Karn's point): the run is stopped, the boot
-    ///   refused, typed, and the next boot follows again.
-    /// - **A refusal** of Shards' is typed by what it refused.
+    /// - **READY** is followed as [`follow_ready`] says. Its answer, however long it took, is the sample that W*, the
+    ///   slowest READY seen, rises to.
+    /// - **A boot that fails to READY** stops its run, and is refused, typed by what failed.
     pub fn boot(&self) -> Result<HostedGuest, Refusal> {
         let bound = self.ready.deadline();
         let began = Instant::now();
         let guest = self
             .images
-            .boot(&self.config.spec(bound), Duration::MAX)
-            .map_err(|why| refused("booting the node VM under shards-init", why))?;
-        let said = guest.wait_ready(None, bound.unwrap_or(Duration::MAX));
-        let took = began.elapsed();
-        match said {
-            Ok(Some(ready @ (Ready::OnTime | Ready::Late(_)))) => {
+            .boot(&self.config.spec(), Duration::MAX)
+            .map_err(|why| refused(BOOTING, why))?;
+        match follow_ready(guest.as_ref(), bound, began, &self.ready) {
+            Ok(ready) => {
+                let took = began.elapsed();
                 self.ready.answered(took);
                 Ok(HostedGuest { guest, ready, took })
             }
-            Ok(Some(Ready::Passed(_)) | None) => {
-                if let Some(after) = bound {
-                    self.ready.ran_out(after);
-                }
-                stop(guest.as_ref());
-                Err(Refusal::Os {
-                    op: "waiting for the node VM under shards-init to say it is ready",
-                    why: format!("no READY within {bound:?}, the slowest this node has seen"),
-                })
-            }
             Err(why) => {
                 stop(guest.as_ref());
-                Err(refused(
-                    "waiting for the node VM under shards-init to say it is ready",
-                    why,
-                ))
+                Err(why)
             }
         }
+    }
+}
+
+const BOOTING: &str = "booting the node VM under shards-init";
+const WAITING: &str = "waiting for the node VM under shards-init to say it is ready";
+
+/// Follows a node VM's run to its init's READY: the person's rule of 2026-11-13, as decision 9 builds it.
+/// - **Within W*** (`bound`, the slowest READY its node has seen, from `began`), READY is the answer.
+/// - **Past W*** the run-out is told to the census (`ready`), and is no sample (Karn's point). The wait goes on a W*
+///   window at a time while the run progresses, and is refused, stalled, only where a whole window shows none. Its
+///   progress is its VM process's CPU time as its host counts it (D241). A window with no reading of it judges no
+///   stall: the run is then followed by its life alone, as at a cold start.
+/// - **At the cold start**, or after a run-out (no W*), the wait follows the run's life.
+/// - **The run's end**, its host's end or a refusal of Shards' ends the wait at any time, typed.
+/// - **A ready-by passed**, of a run that carries one (Hex gives none), is waited past to its late READY: D234's table
+///   moves from it to ready alone.
+fn follow_ready(
+    guest: &dyn ImageGuest,
+    bound: Option<Duration>,
+    began: Instant,
+    ready: &Patience,
+) -> Result<Ready, Refusal> {
+    let mut seen = None;
+    let Some(window) = bound else {
+        return wait_to(guest, &mut seen, Duration::MAX)?.ok_or_else(|| {
+            Refusal::Broken("Shards answered no readiness to a wait with no timeout".to_owned())
+        });
+    };
+    if let Some(said) = wait_to(guest, &mut seen, window.saturating_sub(began.elapsed()))? {
+        return Ok(said);
+    }
+    ready.ran_out(window);
+    let mut last = progress(guest, window)?;
+    // Ends at READY, the run's end, or a whole window with its progress standing: the run's progress is its bound.
+    loop {
+        if let Some(said) = wait_to(guest, &mut seen, window)? {
+            return Ok(said);
+        }
+        let now = progress(guest, window)?;
+        if let (Some(was), Some(is)) = (last, now)
+            && is <= was
+        {
+            return Err(Refusal::Os {
+                op: WAITING,
+                why: format!(
+                    "no progress over a whole {window:?} past the slowest READY its node has seen: its VM \
+                     process's CPU time stood at {was} ns"
+                ),
+            });
+        }
+        last = now.or(last);
+    }
+}
+
+/// The run's READY within `timeout`, none by then. A ready-by passed, `seen` already or said now, is waited past to its
+/// late READY: D234's table moves at most twice before ready, from starting to ready-by passed, then to ready late.
+fn wait_to(
+    guest: &dyn ImageGuest,
+    seen: &mut Option<Ready>,
+    timeout: Duration,
+) -> Result<Option<Ready>, Refusal> {
+    for _ in 0..2 {
+        match guest.wait_ready(*seen, timeout) {
+            Ok(Some(Ready::Passed(past))) => *seen = Some(Ready::Passed(past)),
+            Ok(said) => return Ok(said),
+            Err(why) => return Err(refused(WAITING, why)),
+        }
+    }
+    Err(Refusal::Broken(
+        "the node VM's readiness moved past D234's table".to_owned(),
+    ))
+}
+
+/// The run's progress as its host counts it: its VM process's CPU time, D241's `Microvm` in the run's stats, read
+/// within `window`. None where its run host has no such reading, or no answer came within the window.
+fn progress(guest: &dyn ImageGuest, window: Duration) -> Result<Option<u64>, Refusal> {
+    match guest.stats(StatsScope::Run, window) {
+        Ok(stats) => Ok(stats
+            .microvm
+            .and_then(|microvm| microvm.host.ok())
+            .map(|host| host.cpu_ns)),
+        Err(ImageRefusal::Unsupported { .. }) => Ok(None),
+        Err(why) => Err(refused(WAITING, why)),
     }
 }
 
