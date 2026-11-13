@@ -14,6 +14,7 @@ mod gpu_pool;
 pub mod held;
 pub mod hosted;
 mod image;
+mod leases;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
@@ -1352,6 +1353,13 @@ impl Runtime for GuestRuntime {
                 self.delete_recorded(&record, id)
             }
             books::Routed::Other(snapshot) => self.delete_payload(snapshot.as_ref(), id),
+        }
+    }
+
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.images.delete_image_used(record),
+            books::Routed::Retired(_) | books::Routed::Other(_) => self.delete(id).map(|()| None),
         }
     }
 }

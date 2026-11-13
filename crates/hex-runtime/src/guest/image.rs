@@ -92,6 +92,9 @@ pub struct ImageClass {
     books: OnceLock<Weak<dyn Books>>,
     binary: PathBuf,
     native_paths: Option<Arc<shards_api::RuntimePaths>>,
+    /// What leases its VMs' credentials, its orchestrator's (joint plan step 33; [`ImageClass::with_lessors`]): none,
+    /// so a box granting a credential is refused as it is created.
+    pub(super) lessors: Option<Arc<dyn hex_api::lease::Lessors>>,
 }
 
 /// A run of this process.
@@ -99,7 +102,7 @@ enum Run {
     /// Its boot, on a thread of its own, answers here.
     Booting(Arc<Slot<Result<Box<dyn ImageGuest>, ImageRefusal>>>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
-    Running(Arc<dyn ImageGuest>),
+    Running(Arc<dyn ImageGuest>, Instant),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known, until its record says it.
@@ -403,7 +406,7 @@ fn started_from(from: shards_api::image::StartedFrom) -> hex_api::StartedFrom {
 /// What a running VM costs its host, from its run's microVM part (D241's `Stats::microvm`): its VM process's CPU time and
 /// own memory, as its run host read the process, and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). A part the run
 /// host did not read is refused, naming why, never read as none.
-fn host_use_of(stats: &Stats, vcpus: u32) -> Result<HostUse, Refusal> {
+fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, Refusal> {
     let unread = |why: String| Refusal::Os {
         op: "reading a Shards image VM's use of its host",
         why,
@@ -418,6 +421,7 @@ fn host_use_of(stats: &Stats, vcpus: u32) -> Result<HostUse, Refusal> {
         footprint_bytes: host.footprint_bytes,
         resident_bytes: host.resident_bytes,
         guest_ns: per_vcpu(stats, vcpus)?,
+        window,
     })
 }
 
@@ -483,6 +487,11 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         },
         last_resort: None,
         ended: None,
+        // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
+        credentials: match &spec.class {
+            ClassSpec::ShardsImage(image) => image.credentials.clone(),
+            _ => Vec::new(),
+        },
     })
 }
 
@@ -600,6 +609,14 @@ impl ImageBoot {
 
     /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
     /// D231 stops a run it drops and that stop would wait on this lock's holder.
+    /// When box `id`'s run started, as its boot answered, where it runs in this process.
+    fn started(&self, id: &BoxId) -> Result<Option<Instant>, Refusal> {
+        Ok(match self.runs()?.get(id) {
+            Some(Run::Running(_, at)) => Some(*at),
+            _ => None,
+        })
+    }
+
     fn forget(&self, id: &BoxId) -> Result<(), Refusal> {
         let mut runs = self.runs()?;
         if matches!(runs.get(id), Some(Run::Ended(_))) {
@@ -735,6 +752,7 @@ impl ImageClass {
             books: OnceLock::new(),
             binary,
             native_paths: None,
+            lessors: None,
         }
     }
 
@@ -885,8 +903,9 @@ impl ImageClass {
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
-            // No credential granted by reference (D242): a box's spec names none, so nothing leases one.
-            credentials: Vec::new(),
+            // Its credentials by reference (D242), as its spec grants them and no other (joint plan step 33); their
+            // lessor is its run's, made as it starts ([`ImageClass::run_lessor`]).
+            credentials: super::leases::lowered(image)?,
             lessor: None,
             binary: Some(self.binary.clone()),
             env,
@@ -1010,8 +1029,10 @@ impl ImageClass {
                             if let Ok(waits) = image.waits() {
                                 waits.boot.answered(took);
                             }
+                            // Its run started as its boot answered.
+                            let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                             let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                            *run = Run::Running(Arc::clone(&guest));
+                            *run = Run::Running(Arc::clone(&guest), at);
                             Next::Started(guest)
                         }
                         // The run host refused or ended the run before it started: its own answer, in its words.
@@ -1024,7 +1045,7 @@ impl ImageClass {
                             Next::Ends(end)
                         }
                     },
-                    Run::Running(guest) => Next::Running(Arc::clone(guest)),
+                    Run::Running(guest, _) => Next::Running(Arc::clone(guest)),
                     Run::Stopping(slot, stop) => match slot.take()? {
                         None => Next::Is(State::Stopping(Arc::clone(slot), stop.clone())),
                         Some((end, took)) => {
@@ -1083,7 +1104,7 @@ impl ImageClass {
         let mut runs = image.runs()?;
         // Another call may have moved it on first: then its stop is that call's, and this one's thread
         // returns with the same end.
-        if let Some(run @ Run::Running(_)) = runs.get_mut(id) {
+        if let Some(run @ Run::Running(..)) = runs.get_mut(id) {
             *run = Run::Stopping(Arc::clone(&slot), reached.clone());
         }
         Ok(State::Stopping(slot, reached))
@@ -1098,6 +1119,8 @@ impl ImageClass {
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
             crate::grants::program(image)?;
+            // As are credentials no one can lease here (joint plan step 33).
+            self.can_lease(image)?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
@@ -1135,7 +1158,10 @@ impl ImageClass {
                 "a Shards image record of another class".to_owned(),
             ));
         };
-        let spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        let mut spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        // The run's lessor, its orchestrator's, made before any effect (joint plan step 33): a run granting no
+        // credential has none and asks nothing.
+        spec.lessor = self.run_lessor(&id, shards)?;
         // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
@@ -1204,8 +1230,10 @@ impl ImageClass {
                 Some(run @ Run::Booting(_)) => match slot.take()? {
                     Some((Ok(guest), took)) => {
                         waits.boot.answered(took);
+                        // Its run started as its boot answered.
+                        let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                         let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                        *run = Run::Running(guest);
+                        *run = Run::Running(guest, at);
                         Ok(())
                     }
                     Some((Err(why), took)) => {
@@ -1425,8 +1453,27 @@ impl ImageClass {
 
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
+        let id = &record.spec.id;
         let (_, stats) = self.stats_image(&record, "host_use")?;
-        host_use_of(&stats, vm_size(&record.spec)?.vcpus)
+        // Its window from its run's start to this read; a run gone since its stats were read has none.
+        let window = self
+            .image()?
+            .started(id)?
+            .map(|at| at.elapsed())
+            .ok_or(Refusal::NotRunning(id.try_clone()?, "host_use"))?;
+        host_use_of(&stats, vm_size(&record.spec)?.vcpus, window)
+    }
+
+    /// Deletes image box `record` as [`ImageClass::delete_image`] does, answering its VM's final use of its host (goal
+    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none where it
+    /// wasn't running or that read failed, never a use made up.
+    pub(super) fn delete_image_used(&self, record: BoxRecord) -> Result<Option<HostUse>, Refusal> {
+        let last = match self.settle(&record)? {
+            State::Running(_) => self.host_use_image(record.clone()).ok(),
+            _ => None,
+        };
+        self.delete_image(record)?;
+        Ok(last)
     }
 
     /// Member `member` of a running image box, which its spec says its caller drives (joint plan step 17): its
@@ -1697,6 +1744,13 @@ impl hex_api::Runtime for ImageClass {
 
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         self.host_use_image(self.called(id)?)
+    }
+
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        self.delete_image_used(record)
     }
 }
 

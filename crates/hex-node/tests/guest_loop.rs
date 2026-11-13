@@ -259,6 +259,7 @@ fn guest_box(id: &BoxId) -> hex_api::BoxInfo {
         route: None,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 

@@ -139,6 +139,14 @@ pub trait Runtime: Send + Sync {
     /// plan steps 12 and 14, C1): counters since the VM booted, so a reader's window is between two of its reads.
     /// Refused, typed, for a part its run host didn't read, never read as none, for a box not running, and by a class
     /// whose boxes run no VM process of their own, naming the class.
+    /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run, read as its
+    /// run ended (goal 54's change 3: a Shards image VM's final [`HostUse`], its window the whole run): `None` where the
+    /// box has no VM process of its own, or where none could be read at its end (its run had ended before its delete, or
+    /// its last read failed). A box already gone is refused `NoSuchBox`, never answered with a use made up.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
+        self.delete(id).map(|()| None)
+    }
+
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         Err(Refusal::Invalid {
             what: "host_use",
@@ -162,6 +170,9 @@ pub struct HostUse {
     pub resident_bytes: u64,
     /// Nanoseconds each vCPU has run the guest, by vCPU index, one for each vCPU of the VM's size.
     pub guest_ns: Vec<u64>,
+    /// The time these counters span: from the VM's run's start, as its boot answered, to this read (goal 54's change
+    /// 3: kiln learns the overhead a VM costs its host over its window, at usage and at its delete).
+    pub window: Duration,
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
@@ -1888,6 +1899,10 @@ pub struct BoxInfo {
     /// none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
+    /// Its credential grants as its record holds them (joint plan step 33, Shards' D242; docs/design/credential-grants.md
+    /// C4): a Shards image VM's, none for any other class. After `ended`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<crate::CredentialGrant>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -2032,6 +2047,12 @@ pub enum Refusal {
     /// (append-only).
     #[error("box {id}'s run failed: {why}")]
     Failed { id: BoxId, why: String },
+    /// What its node isn't configured to serve, `what`, and why it's needed (joint plan step 33): a Shards image VM's
+    /// credential grants on a node its orchestrator gave no lessors ([`crate::lease::Lessors`]), whose values it could
+    /// lease from no one. Its configuration's, not its platform's or its revision's: the same node given lessors serves
+    /// it. After `Failed` (append-only).
+    #[error("this node is configured with no {what}: {why}")]
+    Unconfigured { what: &'static str, why: String },
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's
