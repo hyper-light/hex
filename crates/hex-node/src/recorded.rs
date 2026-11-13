@@ -178,12 +178,13 @@ pub trait Recover: Runtime {
 
     /// An unknown backing configuration retains its grant; absence of an adapter is not cleanup.
     fn preflight_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
-        Err(NativeRecord::Pool(record).refusal(hex_api::LifecycleCause::Uncertain))
+        Err(NativeRecord::Pool(record)
+            .uncertain("its node has no native owner to preflight its pool"))
     }
 
     /// The SAME native owner's scope/receipt metadata, without attaching or adopting that scope.
     fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
-        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+        Err(record.uncertain("its node has no native owner to preflight its managed scope"))
     }
 
     /// Read-only cross-check of native metadata names against the complete retained cohort. Every
@@ -216,7 +217,7 @@ pub trait Recover: Runtime {
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         let _ = (plan, io, patience, publish);
-        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+        Err(record.uncertain("its node has no native owner to launch it"))
     }
 
     fn attach_managed(
@@ -225,7 +226,7 @@ pub trait Recover: Runtime {
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         let _ = identity;
-        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+        Err(record.uncertain("its node has no native owner to attach it"))
     }
 
     /// Called only after the selected VM receipt durably records positive whole-scope release.
@@ -235,11 +236,11 @@ pub trait Recover: Runtime {
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
         let _ = identity;
-        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+        Err(record.uncertain("its node has no native owner to finalize it"))
     }
 
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
-        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+        Err(record.uncertain("its node has no native owner to read its usage"))
     }
 
     /// Joint plan step 14 (C1): the window the charge learner reads and caps this owner's managed VMs over, derived from
@@ -474,7 +475,8 @@ fn check_native_projection(
     introduced: Option<(hex_api::Execution, &[DeviceId])>,
 ) -> Result<(), Refusal> {
     if let Some(pool) = pools.first() {
-        return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+        return Err(NativeRecord::Pool(pool)
+            .uncertain("a native-only runtime holds a VM backing it can't project"));
     }
     if introduced.is_some() {
         return Err(broken("native runtime cannot project a VM backing"));
@@ -668,7 +670,8 @@ pub(crate) fn preflight_records(
                 .iter()
                 .any(|id| !catalog.entries().iter().any(|entry| entry.info.id == *id))
             {
-                return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+                return Err(NativeRecord::Pool(pool)
+                    .uncertain("its pool selects a device its node's catalog doesn't hold"));
             }
         }
         scopes.push(*pool.scope().bytes());
@@ -741,7 +744,7 @@ pub(crate) fn preflight_records(
         return Err(Refusal::Backing {
             key: duplicate,
             cause: hex_api::LifecycleCause::Uncertain,
-            why: None,
+            why: Some("two retained boxes name it as their source".to_owned()),
         });
     }
     scopes.sort_unstable();
@@ -770,25 +773,30 @@ pub(crate) fn preflight_records(
 }
 
 impl Transaction<'_> {
-    fn refused(&self, cause: hex_api::LifecycleCause) -> Refusal {
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
+    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    fn uncertain(&self, why: &str) -> Refusal {
         match self.owner {
             TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => {
                 match id.try_clone() {
-                    Ok(id) => Refusal::Lifecycle { id, cause },
+                    Ok(id) => Refusal::Lifecycle {
+                        id,
+                        cause: hex_api::LifecycleCause::Uncertain,
+                    },
                     Err(error) => error,
                 }
             }
             TransactionOwner::Pool(key) => Refusal::Backing {
                 key: *key,
-                cause,
-                why: None,
+                cause: hex_api::LifecycleCause::Uncertain,
+                why: Some(why.to_owned()),
             },
         }
     }
     fn box_id(&self) -> Result<&BoxId, Refusal> {
         match self.owner {
             TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => Ok(id),
-            TransactionOwner::Pool(_) => Err(self.refused(hex_api::LifecycleCause::Uncertain)),
+            TransactionOwner::Pool(_) => Err(self.uncertain("a pool's transaction has no box id")),
         }
     }
     fn owns(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
@@ -810,7 +818,7 @@ impl Transaction<'_> {
                 .iter()
                 .any(|device| !self.devices.contains(device))
         {
-            return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            return Err(self.uncertain("its record isn't its transaction's owner, or selects devices its transaction doesn't hold"));
         }
         Ok(())
     }
@@ -820,10 +828,9 @@ impl Transaction<'_> {
     ) -> Result<T, Refusal> {
         match self.owner {
             TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => {
-                let record = self
-                    .store
-                    .read_lifecycle(id)?
-                    .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                let record = self.store.read_lifecycle(id)?.ok_or_else(|| {
+                    self.uncertain("its box record is gone as its transaction reads it")
+                })?;
                 let native = NativeRecord::Box(&record);
                 self.owns(native)?;
                 record.spec.check()?;
@@ -846,10 +853,9 @@ impl Transaction<'_> {
                 operation(native)
             }
             TransactionOwner::Pool(key) => {
-                let record = self
-                    .store
-                    .read_pool(&key.pool)?
-                    .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                let record = self.store.read_pool(&key.pool)?.ok_or_else(|| {
+                    self.uncertain("its pool record is gone as its transaction reads it")
+                })?;
                 let native = NativeRecord::Pool(&record);
                 self.owns(native)?;
                 record.check()?;
@@ -881,15 +887,13 @@ impl Transaction<'_> {
                 if let Some(route) = record.spec.route
                     && let Some(key) = route.backing
                 {
-                    let pool =
-                        pools
-                            .iter()
-                            .find(|pool| pool.key == key)
-                            .ok_or(Refusal::Backing {
-                                key,
-                                cause: hex_api::LifecycleCause::Uncertain,
-                                why: None,
-                            })?;
+                    let pool = pools.iter().find(|pool| pool.key == key).ok_or_else(|| {
+                        Refusal::Backing {
+                            key,
+                            cause: hex_api::LifecycleCause::Uncertain,
+                            why: Some("a launching box's source backing has no record".to_owned()),
+                        }
+                    })?;
                     if pool.phase != hex_api::BackingPhase::Released || pool.exit.is_none() {
                         return Err(Refusal::Backing {
                             key,
@@ -921,14 +925,14 @@ impl Transaction<'_> {
                 || current.stage() != NativeStage::Creating
                 || current.init().is_some()
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its launch was published, or its controller set, before its transaction published it"));
             }
             match current {
                 NativeRecord::Box(record) => {
                     let mut current = self
                         .store
                         .read_lifecycle(&record.spec.id)?
-                        .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                        .ok_or_else(|| self.uncertain("its box record is gone as its transaction publishes it"))?;
                     current.init = Some(init);
                     self.store.put_lifecycle(&current)
                 }
@@ -936,7 +940,7 @@ impl Transaction<'_> {
                     let mut current = self
                         .store
                         .read_pool(&record.key.pool)?
-                        .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                        .ok_or_else(|| self.uncertain("its pool record is gone as its transaction publishes it"))?;
                     current.init = Some(init);
                     self.store.put_pool(&current)
                 }
@@ -948,18 +952,18 @@ impl Transaction<'_> {
 impl hex_runtime::devices::Transaction for Transaction<'_> {
     fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
         if !matches!(self.owner, TransactionOwner::Pool(_)) {
-            return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            return Err(self.uncertain("a box's transaction can't prove a pool unsubmitted"));
         }
         self.with_native(|record| {
             let NativeRecord::Pool(pool) = record else {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its transaction's record isn't a pool's as it is proven unsubmitted"));
             };
             if pool.phase != hex_api::BackingPhase::Prepared
                 || pool.allocation.is_some()
                 || pool.init.is_some()
                 || pool.exit.is_some()
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its pool is past its preparation, or holds an allocation, a controller or an end"));
             }
             // The caller's SAME Pool/configuration turn excludes grant/native submission.
             // This is only the native metadata half of cancellation, never a Released witness.
@@ -972,7 +976,9 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 || record.allocation().is_none()
                 || !matches!(record.class()?, Class::Shards | Class::Firecracker)
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(
+                    self.uncertain("its record isn't an allocated VM's as its usage is read")
+                );
             }
             (self.native.usage)(record)
         })
@@ -986,14 +992,16 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
         let deadline = std::time::Instant::now()
             .checked_add(patience)
             .filter(|_| patience != std::time::Duration::MAX && !patience.is_zero())
-            .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+            .ok_or_else(|| {
+                self.uncertain("its transaction's launch patience isn't a finite time")
+            })?;
         self.with_native(|record| {
             if record.class()? != plan.class()
                 || record.allocation().is_none()
                 || record.stage() != NativeStage::Creating
                 || record.init().is_some()
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its record isn't a fresh VM creation as its transaction launches it"));
             }
             self.launch_claims(record)?;
             let deadline = hex_runtime::devices::check_managed_report(
@@ -1005,7 +1013,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             )?;
             let scope = record
                 .scope()
-                .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                .ok_or_else(|| self.uncertain("its record names no native scope to launch"))?;
             let commitment = record.commitment()?;
             let mut introduced = false;
             let mut publish = |identity: &shards_api::Identity| {
@@ -1014,7 +1022,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                     || identity.started == 0
                     || identity.vsock != plan.vsock()
                 {
-                    return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                    return Err(self.uncertain("its launched controller's identity or vsock isn't its plan's"));
                 }
                 self.publish(
                     scope,
@@ -1029,11 +1037,11 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             };
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its transaction's launch deadline passed before its controller was handed over"));
             }
             let receipt = (self.native.launch)(record, plan, io, remaining, &mut publish)?;
             if !introduced {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its launch's controller wasn't introduced to its record"));
             }
             Ok(receipt)
         })
@@ -1047,7 +1055,9 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 || record.scope().is_none()
                 || !matches!(record.class()?, Class::Shards | Class::Firecracker)
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain(
+                    "its record isn't an allocated VM's as its transaction attaches it",
+                ));
             }
             match identity {
                 Some(identity)
@@ -1059,7 +1069,11 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                     record.stage(),
                     NativeStage::Creating | NativeStage::Deleting
                 ) => {}
-                _ => return Err(self.refused(hex_api::LifecycleCause::Uncertain)),
+                _ => {
+                    return Err(self.uncertain(
+                        "its attached controller isn't its record's, or it isn't fresh",
+                    ));
+                }
             }
             (self.native.attach)(record, identity)
         })
@@ -1074,14 +1088,14 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                     NativeStage::Deleting | NativeStage::Released
                 )
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("its record isn't an allocated VM's that is deleting or released as it is finalized"));
             }
             match (record.init(), identity) {
                 (Some(expected), Some(actual))
                     if expected.pid == actual.pid && expected.start_ticks == actual.started => {}
                 (None, Some(actual)) if actual.pid != 0 && actual.started != 0 => {}
                 (None, None) => {}
-                _ => return Err(self.refused(hex_api::LifecycleCause::Uncertain)),
+                _ => return Err(self.uncertain("its finalized controller isn't its record's")),
             }
             (self.native.finalize)(record, identity)
         })
@@ -1091,7 +1105,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
     }
     fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
         if id != self.box_id()? {
-            return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            return Err(self.uncertain("its transaction reads another box than its owner"));
         }
         self.store.read_lifecycle(id)
     }
@@ -1102,7 +1116,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 route.backing.is_some() && route.key.execution != hex_api::Execution::ShardsShared
             }) && !matches!(self.owner, TransactionOwner::Handoff { .. })
             {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(self.uncertain("a new box record names a backing outside a handoff"));
             }
             check_box_claims(self.store, self.native.catalog, &record.spec)?;
         }
@@ -1110,7 +1124,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
     }
     fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
         if id != self.box_id()? {
-            return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            return Err(self.uncertain("its transaction removes another box than its owner"));
         }
         if let Some(record) = self.store.read_lifecycle(id)? {
             self.owns(NativeRecord::Box(&record))?;
@@ -1125,21 +1139,26 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             TransactionOwner::Pool(expected) if expected == key => {}
             TransactionOwner::Handoff { source, .. } if source == key => {}
             TransactionOwner::Box(id) => {
-                let current = self
-                    .store
-                    .read_lifecycle(id)?
-                    .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                let current = self.store.read_lifecycle(id)?.ok_or_else(|| {
+                    self.uncertain("its handoff's box record is gone as its source is read")
+                })?;
                 if current.spec.route.and_then(|route| route.backing) != Some(*key) {
-                    return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                    return Err(self.uncertain("its handoff's box names another source"));
                 }
             }
-            _ => return Err(self.refused(hex_api::LifecycleCause::Uncertain)),
+            _ => {
+                return Err(self.uncertain(
+                    "its transaction reads a pool that isn't its owner or handoff source",
+                ));
+            }
         }
         let record = self.store.read_pool(&key.pool)?;
         if let Some(record) = &record {
             record.check()?;
             if record.key != *key {
-                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                return Err(
+                    self.uncertain("its transaction's pool record names another generation")
+                );
             }
             if matches!(self.owner, TransactionOwner::Pool(_)) {
                 self.owns(NativeRecord::Pool(record))?;
@@ -1148,9 +1167,9 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
         Ok(record)
     }
     fn grant_pool(&self, grant: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
-        let record = self
-            .read_pool(&grant.key)?
-            .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+        let record = self.read_pool(&grant.key)?.ok_or_else(|| {
+            self.uncertain("its pool record is gone before its transaction's grant")
+        })?;
         self.owns(NativeRecord::Pool(&record))?;
         check_pool_claims(self.store, self.native.catalog, &record)?;
         self.store.grant_pool(grant)
@@ -1162,9 +1181,9 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
         self.store.put_pool(record)
     }
     fn remove_pool(&self, key: &hex_api::BackingKey) -> Result<(), Refusal> {
-        let record = self
-            .read_pool(key)?
-            .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+        let record = self.read_pool(key)?.ok_or_else(|| {
+            self.uncertain("its pool record is gone before its transaction removed it")
+        })?;
         self.owns(NativeRecord::Pool(&record))?;
         if record.phase == hex_api::BackingPhase::Released
             && record.allocation.is_none()
@@ -1206,12 +1225,14 @@ pub(crate) fn handoff_transaction(
     native: &Native<'_>,
     callback: &mut dyn FnMut(&dyn hex_runtime::devices::Transaction) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
-    let refused = || Refusal::Backing {
+    let refused = |why: &str| Refusal::Backing {
         key: *source,
         cause: hex_api::LifecycleCause::Uncertain,
-        why: None,
+        why: Some(why.to_owned()),
     };
-    let pool = store.read_pool(&source.pool)?.ok_or_else(refused)?;
+    let pool = store
+        .read_pool(&source.pool)?
+        .ok_or_else(|| refused("its handoff's source has no pool record"))?;
     pool.check()?;
     if pool.key != *source
         || pool.allocation.is_none()
@@ -1226,12 +1247,18 @@ pub(crate) fn handoff_transaction(
                 | hex_api::BackingPhase::Released
         )
     {
-        return Err(refused());
+        return Err(refused(
+            "its handoff's source isn't an allocated dedicated or Firecracker backing that is live, draining or released",
+        ));
     }
     hex_api::BackingOffer::check_selection_parts(&pool.devices, &pool.devices)?;
-    let catalog = native.catalog.ok_or_else(refused)?;
+    let catalog = native
+        .catalog
+        .ok_or_else(|| refused("its node holds no device catalog for its handoff"))?;
     if catalog.conflict_ids(&pool.devices)?.as_slice() != full_conflicts {
-        return Err(refused());
+        return Err(refused(
+            "its handoff source's device conflicts aren't the ones asked",
+        ));
     }
     let records = store.retained_records()?;
     check_single_consumer(&records, *source, id)?;
@@ -2361,10 +2388,10 @@ impl<R: Recover> Runtime for Recorded<R> {
             .store
             .read_pool(&key.pool)?
             .filter(|record| record.key == *key)
-            .ok_or(Refusal::Backing {
+            .ok_or_else(|| Refusal::Backing {
                 key: *key,
                 cause: hex_api::LifecycleCause::Uncertain,
-                why: None,
+                why: Some("its node holds no pool record of it to read usage from".to_owned()),
             })?;
         let mut result = None;
         hex_runtime::devices::Books::with_pool_transaction(
@@ -2916,7 +2943,9 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                 pool.execution,
                 hex_api::Execution::ShardsShared | hex_api::Execution::ShardsDedicated
             ) {
-                return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+                return Err(NativeRecord::Pool(pool).uncertain(
+                    "its pool's execution isn't a Shards backing's, which its routes project",
+                ));
             }
         }
         if introduced.is_some_and(|(execution, _)| {

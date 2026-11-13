@@ -61,14 +61,6 @@ pub const LISTING_ENTRY: Duration = Duration::from_nanos(137_124);
 /// `seeds.hang`: a seed's answer to a create (652.938 ms: the suites', of 493,529), what a test's wait for a seed, in
 /// line or for its answer, takes.
 pub const SEEDS: Duration = Duration::from_nanos(652_937_547);
-/// `timer.overshoot`: how late past its deadline macOS returns a timed wait on Hex's condition variable
-/// (`hex_wait::Condvar`), a one-shot `NOTE_CRITICAL` kqueue timer's (2.743 ms: the largest of 1,000 waits of 0.1 to
-/// 100 ms on 75694786 and 2768d0d5 at the kiln runner's utility QoS, to the microsecond,
-/// `bench/competitive/probes/deadline_waits.md`; docs/design/deadline-waits.md). A kernel timer's lateness, the same
-/// under a debug build as a release one, and an idle machine's: the seed of the precise-wait patience hex-client's
-/// deadline tests hold their refusals to, which each run's own poll(2) waits teach the lateness of a loaded host.
-#[cfg(target_os = "macos")]
-pub const OVERSHOOT: Duration = Duration::from_nanos(2_743_000);
 
 /// A wait's fact didn't come within its patience: no wait of this module's gives it any longer (R03 for tests), the
 /// type kept for the callers that name it, until (d) moves them to [`follow`].

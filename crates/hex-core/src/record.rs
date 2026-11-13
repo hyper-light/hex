@@ -615,6 +615,27 @@ mod tests {
         assert_eq!(BoxRecord::decode(&ran.encode().unwrap()).unwrap(), ran);
     }
 
+    /// Joint plan step 39 (AC-T7.4.1), append-only: a record's last resort names its box by its id alone, as records
+    /// written before a learned end's holder could be a node VM name it. Do write a record whose last resort ended its
+    /// box; expect its text to name the box by its bare id, and to read back the same.
+    #[test]
+    fn a_records_last_resort_names_its_box_as_before_node_vms_held_room() {
+        let mut r = record();
+        r.last_resort = Some(hex_api::LearnedEnd {
+            id: hex_api::LearnedHolder::Box(BoxId::new("r1").unwrap()),
+            held: 12 << 30,
+            budget: 8 << 30,
+            band: 1,
+            fleet_held: 16 << 30,
+            fleet_growth: 4 << 30,
+            fleet_budget: 16 << 30,
+            unmoved: None,
+        });
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(text.contains(r#""last_resort":{"id":"r1","#), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap(), r);
+    }
+
     /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record
     /// with none is written as before, so an older node agent reads it.
     #[test]
