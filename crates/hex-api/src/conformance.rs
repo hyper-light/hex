@@ -1574,6 +1574,118 @@ mod tests {
         }
     }
 
+    /// Past the slowest end on this host class's record until 2026-11-13 (Linux 957 ms, macOS 939 ms, Windows 6,239 ms;
+    /// docs/research/runtime/learned-waits.md, "Owed" 2): how late [`Slow`]'s programs end, as the program HEX-RT-2
+    /// met on the Mac Studio ended later than its class's record.
+    const SLOWER: Duration = Duration::from_millis(if cfg!(windows) { 6_240 } else { 958 });
+
+    /// The simulator, its programs ending [`SLOWER`] after they start: each answers as the simulator's does, only
+    /// that late.
+    struct Slow {
+        sim: SimRuntime,
+    }
+
+    /// A program of [`Slow`]'s: the simulator's, its end shown from `ends_at` on.
+    struct SlowProc {
+        inner: Box<dyn Proc>,
+        ends_at: std::time::Instant,
+    }
+
+    impl Proc for SlowProc {
+        fn pid(&self) -> u32 {
+            self.inner.pid()
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+            if std::time::Instant::now() < self.ends_at {
+                return Ok(None);
+            }
+            self.inner.try_wait()
+        }
+        fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+            let left = self
+                .ends_at
+                .saturating_duration_since(std::time::Instant::now());
+            if timeout < left {
+                rest(timeout).map_err(Refusal::Broken)?;
+                return Ok(None);
+            }
+            rest(left).map_err(Refusal::Broken)?;
+            self.inner.wait_for(timeout.saturating_sub(left))
+        }
+        fn kill(&mut self) -> Result<(), Refusal> {
+            self.inner.kill()
+        }
+        fn streams(&mut self) -> Result<crate::Given, Refusal> {
+            self.inner.streams()
+        }
+    }
+
+    impl Runtime for Slow {
+        fn classes(&self) -> Vec<Class> {
+            self.sim.classes()
+        }
+        fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.sim.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.start(id)
+        }
+        fn exec(
+            &self,
+            id: &BoxId,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            let inner = self.sim.exec(id, program, stdio)?;
+            let ends_at = std::time::Instant::now().checked_add(SLOWER).unwrap();
+            Ok(Box::new(SlowProc { inner, ends_at }))
+        }
+        fn run(
+            &self,
+            spec: BoxSpec,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, program, stdio)
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.sim.signal(id, signal)
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            self.sim.inspect(id)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.sim.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.sim.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.delete(id)
+        }
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13): a case's wait for a program's end was bounded at its
+    /// host class's recorded end, a record seed, and refused a program slower than it: goal 12's macOS checks (r20 on
+    /// the Mac Studio) failed hex_quic_20's conformance over QUIC, HEX-RT-2 "still running after 939ms". Do: run
+    /// HEX-RT-2 against the simulator, its program ending [`SLOWER`] after its start, past this class's record.
+    /// Expect: it passes, the program's end waited for however late it came.
+    #[test]
+    fn original_hex_rt_2_passes_with_a_program_slower_than_the_recorded_end() {
+        let case = CASES.iter().find(|c| c.id == "HEX-RT-2").unwrap();
+        let slow = Slow {
+            sim: SimRuntime::new(),
+        };
+        let began = std::time::Instant::now();
+        let got = (case.run)(&slow, &SimFixture::Process);
+        assert_eq!(
+            got,
+            Ok(()),
+            "HEX-RT-2 refused a program slower than its class's record"
+        );
+        assert!(began.elapsed() >= SLOWER, "its program ended before SLOWER");
+    }
+
     /// Decision 9 (the lead's rule of 2026-11-06 for test patiences): an exit case waits on its fact, a box's
     /// reported exit, for at most its patience, and with a measuring one (no record yet: the longest a `Duration`
     /// holds, so no deadline) for the fact alone. Do: an `oci` box whose init exits with 3, its exit reported from
