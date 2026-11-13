@@ -201,7 +201,7 @@ fn every_granted_or_later_phase_refuses_before_the_native_callback() {
         let before = pool_bytes(directory.path(), row.key);
         let syncs = store.syncs();
         assert!(
-            matches!(pool_transaction(&store, &row.key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: None }) if key == row.key)
+            matches!(pool_transaction(&store, &row.key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: Some(_) }) if key == row.key)
         );
         assert_eq!(pool_bytes(directory.path(), row.key), before);
         assert_eq!(store.syncs(), syncs);
@@ -225,7 +225,7 @@ fn every_granted_or_later_phase_refuses_before_the_native_callback() {
         let before = pool_bytes(directory.path(), row.key);
         let syncs = store.syncs();
         assert!(
-            matches!(pool_transaction(&store, &row.key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: None }) if key == row.key)
+            matches!(pool_transaction(&store, &row.key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: Some(_) }) if key == row.key)
         );
         assert_eq!(pool_bytes(directory.path(), row.key), before);
         assert_eq!(store.syncs(), syncs);
@@ -261,7 +261,7 @@ fn stale_missing_box_and_ungranted_released_owners_refuse_without_callback() {
     let syncs = store.syncs();
     for key in [stale, missing] {
         assert!(
-            matches!(pool_transaction(&store, &key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key: got, cause: LifecycleCause::Uncertain, why: None }) if got == key)
+            matches!(pool_transaction(&store, &key, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Backing { key: got, cause: LifecycleCause::Uncertain, why: Some(_) }) if got == key)
         );
     }
     assert!(
