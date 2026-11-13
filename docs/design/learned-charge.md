@@ -86,6 +86,17 @@ exceed their own charge.
 charge: down at once, freeing room; up only into room no booking holds. A VM whose charge exceeds its booking for
 want of room is **over** by the difference, and it alone bears the contention (C4, C5).
 
+**The order.** Where the rule takes VMs in an order, it takes them in the order their node began them (ROOT,
+2026-11-12: never by anything random). A VM lifetime's place in its node's start order is in its record
+(`BoxRecord::started`), given by the node's store as it begins the lifetime, one past the most any record held when the
+store opened, so the order runs on across the node's restarts; a node's learners key each VM by it
+(`recorded::charges::Lifetime`), never by its scope, whose bytes are random. So within a band the room goes to the
+earliest begun first, and of two VMs rising past their bookings into the same room the later is over and bears the
+contention; of VMs equally past their budgets the last resort ends the latest begun (C5); a budget's spare bytes and a
+CPU share's spare milli-CPU go to the first. A VM of this boot that an earlier node agent began, its record holding no
+place, is given one as the store opens, in box-id order, before the node takes a create; a record of an earlier boot
+names nothing that runs, and is left as that boot wrote it for recovery to remove.
+
 **Sources.** Borg books a task's reservation, which rises fast and decays to measured use, and places work into
 what it reclaims (f21 A). Kubernetes evicts first the pods using more than they asked, never one within its ask
 while another isn't (f45 A).
@@ -197,11 +208,11 @@ on hardware (ROOT's fairness run).
   inspect would have to read, which the box's own record already is.
 - **Bands.** A VM's band is its spec's (`BoxSpec::band`, as its submitter gives it, 0 the lowest; a spec without one
   is band 0, its record and native commitment unchanged), carried whole from the submission to the node's record:
-  the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks each
-  VM in the band its record names. So the room goes to the highest band first (C3), and the last resort ends the
-  lowest band first, of a band the VM most past its budget. The placement's demand doesn't carry it: the spec rides
-  every hop whole with it, and placement neither orders nor preempts by band on a live node, so a band there would
-  change nothing (R13).
+  the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks
+  each VM in the band its record names. So the room goes to the highest band first (C3), and the last resort ends
+  the lowest band first, of a band the VM most past its budget, of VMs equally past theirs the latest begun (C3).
+  The placement's demand doesn't carry it: the spec rides every hop whole with it, and placement neither orders nor
+  preempts by band on a live node, so a band there would change nothing (R13).
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is

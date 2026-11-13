@@ -26,6 +26,27 @@ use crate::store::Store;
 /// A VM by its native scope: one VM's lifetime.
 pub(crate) type Scope = [u8; 16];
 
+/// A VM as a learner's core holds it (C3): its lifetime's place in its node's start order, then its scope, so every
+/// order the rule takes among VMs is the order the node began them, kept in their records across the node's restarts,
+/// never their scopes' random bytes: the room, of a band, to the earliest begun; a budget's spare bytes and a CPU share's
+/// spare milli-CPU to the first; of VMs equally past their budgets, the end to the latest. A record that holds no place
+/// (an earlier boot's, which its store leaves as that boot wrote it) comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Lifetime {
+    pub(crate) started: u64,
+    pub(crate) scope: Scope,
+}
+
+impl Lifetime {
+    /// The lifetime of `scope`, its record's place `started` in its node's start order.
+    pub(crate) fn of(scope: Scope, started: Option<u64>) -> Self {
+        Self {
+            started: started.unwrap_or(0),
+            scope,
+        }
+    }
+}
+
 /// One CPU in milli-CPU, the unit a vCPU and the machine's CPU are counted in.
 const CPU_MILLI: u64 = 1_000;
 
@@ -189,7 +210,7 @@ impl LastResort {
     /// and is written after it. `vm` names each VM the learner holds: its class and box.
     pub(crate) fn window<'a>(
         &mut self,
-        node: &charge::Node<Scope>,
+        node: &charge::Node<Lifetime>,
         vm: impl Fn(&Scope) -> Option<(Class, &'a BoxId)>,
         reach: &impl Reach,
     ) -> Result<(), Refusal> {
@@ -221,7 +242,8 @@ impl LastResort {
                 what: "a microVM fleet's memory budget, every VM within its own",
                 bound: usize::try_from(fleet.budget).unwrap_or(usize::MAX),
             }),
-            charge::Resort::End { vm: scope, why } => {
+            charge::Resort::End { vm: lifetime, why } => {
+                let scope = lifetime.scope;
                 let (class, id) = vm(&scope).ok_or_else(|| {
                     Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
                 })?;
@@ -425,6 +447,8 @@ impl<M: Managed> Reach for Stops<'_, M> {
 /// One VM the learner holds.
 struct Vm {
     id: BoxId,
+    /// How the core holds it: its place in the node's start order and its scope (C3).
+    lifetime: Lifetime,
     class: Class,
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
@@ -436,7 +460,7 @@ struct Vm {
 
 /// The node's learner (module docs).
 pub(crate) struct Learner {
-    node: charge::Node<Scope>,
+    node: charge::Node<Lifetime>,
     vms: BTreeMap<Scope, Vm>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
@@ -525,7 +549,9 @@ impl Learner {
             .copied()
             .collect();
         for scope in gone {
-            self.node.end(&scope).map_err(refused)?;
+            if let Some(vm) = self.vms.get(&scope) {
+                self.node.end(&vm.lifetime).map_err(refused)?;
+            }
             self.vms.remove(&scope);
             self.last.gone(&scope);
         }
@@ -548,7 +574,7 @@ impl Learner {
                 let span = now.saturating_duration_since(at);
                 self.node
                     .observe(
-                        scope,
+                        vm.lifetime,
                         &Sample {
                             cpu: Cpu::Whole(cpu),
                             span,
@@ -563,7 +589,7 @@ impl Learner {
                     .and_then(|n| n.checked_div(span.as_micros().max(1)))
                     .and_then(|n| u64::try_from(n).ok())
                     .unwrap_or(u64::MAX);
-                used.insert(scope, (milli, vm.rate));
+                used.insert(vm.lifetime, (milli, vm.rate));
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
@@ -573,9 +599,10 @@ impl Learner {
                 hex_api::Class::Process | hex_api::Class::Oci => continue,
             };
             let receipt = allocation.booking();
+            let lifetime = Lifetime::of(scope, record.started);
             self.node
                 .track(
-                    scope,
+                    lifetime,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
                     record.spec.band,
                     vcpus(allocation)?,
@@ -586,6 +613,7 @@ impl Learner {
                 scope,
                 Vm {
                     id: record.spec.id.try_clone()?,
+                    lifetime,
                     class,
                     receipt,
                     last: (usage.cpu_usec, now),
@@ -605,7 +633,8 @@ impl Learner {
             .node
             .rates(budget.cpu_milli, &used, u64::from(hex_api::MIN_CPU_MILLI))
             .map_err(refused)?;
-        for (scope, rate) in rates {
+        for (lifetime, rate) in rates {
+            let scope = lifetime.scope;
             let Some(vm) = self.vms.get_mut(&scope) else {
                 continue;
             };
@@ -673,7 +702,7 @@ impl Learner {
             if let Some(vm) = self.vms.get(&scope)
                 && vm.class == class
             {
-                vms.push((scope, &record.spec.id, vm.receipt));
+                vms.push((vm.lifetime, &record.spec.id, vm.receipt));
             }
         }
         learned(&self.node, class, costs, vms, self.last.ended(class)?).map(Some)
@@ -682,13 +711,13 @@ impl Learner {
 
 /// What a capacity answer for `class` carries of `node` (C2, C5, C8), shared by every OS's learner: the priors of
 /// `costs` (at most one per profile and ceiling, none booked whole), the class's learned use and each of its `vms`'
-/// holdings (by scope, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
+/// holdings (by lifetime, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
 /// class's `ended` VMs.
 pub(crate) fn learned(
-    node: &charge::Node<Scope>,
+    node: &charge::Node<Lifetime>,
     class: Class,
     costs: &[RuntimeCost],
-    vms: Vec<(Scope, &hex_api::BoxId, CapacityResources)>,
+    vms: Vec<(Lifetime, &hex_api::BoxId, CapacityResources)>,
     ended: Vec<hex_api::LearnedEnd>,
 ) -> Result<Learned, Refusal> {
     let mut priors: Vec<hex_api::LearnedPrior> = Vec::new();
@@ -714,9 +743,9 @@ pub(crate) fn learned(
             what: "a class's learned holdings",
             bound: vms.len(),
         })?;
-    for (scope, id, receipt) in vms {
+    for (lifetime, id, receipt) in vms {
         let holding = node
-            .holding(&scope)
+            .holding(&lifetime)
             .ok_or_else(|| Refusal::Broken("a learned VM without a holding".into()))?;
         used = used
             .checked_add(LearnedUse {

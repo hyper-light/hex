@@ -26,7 +26,9 @@ use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
-use crate::recorded::charges::{LastResort, Reach, Scope, Writes, record_last_resort, write_ends};
+use crate::recorded::charges::{
+    LastResort, Lifetime, Reach, Scope, Writes, record_last_resort, write_ends,
+};
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
 pub(super) const WINDOW: Duration = Duration::from_micros(CPU_PERIOD_US);
@@ -135,6 +137,8 @@ pub(super) struct Met {
 /// One VM the learner reads.
 struct Vm {
     id: BoxId,
+    /// How the core holds it: its place in the node's start order and its scope (C3).
+    lifetime: Lifetime,
     class: Class,
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
@@ -147,7 +151,7 @@ struct Vm {
 
 /// The node's learner (module docs).
 pub(super) struct Learner {
-    node: charge::Node<Scope>,
+    node: charge::Node<Lifetime>,
     vms: BTreeMap<Scope, Vm>,
     /// The machine's CPU in milli-CPU: the scale every weight is on (C4).
     machine: u64,
@@ -418,7 +422,9 @@ impl Learner {
             .copied()
             .collect();
         for scope in gone {
-            self.node.end(&scope).map_err(refused)?;
+            if let Some(vm) = self.vms.get(&scope) {
+                self.node.end(&vm.lifetime).map_err(refused)?;
+            }
             self.vms.remove(&scope);
             self.rooms.remove(&scope);
             self.last.gone(&scope);
@@ -432,7 +438,7 @@ impl Learner {
                 let (before, at) = vm.last;
                 self.node
                     .observe(
-                        scope,
+                        vm.lifetime,
                         &Sample {
                             cpu: Cpu::Whole(Duration::from_micros(
                                 usage.cpu_usec.saturating_sub(before),
@@ -450,16 +456,17 @@ impl Learner {
                 class,
                 allocation,
                 band,
-                started: _,
+                started,
                 intent,
             }) = record(&id)?
             else {
                 continue;
             };
             let receipt = allocation.booking();
+            let lifetime = Lifetime::of(scope, started);
             self.node
                 .track(
-                    scope,
+                    lifetime,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
                     band,
                     vcpus(allocation)?,
@@ -481,6 +488,7 @@ impl Learner {
                 scope,
                 Vm {
                     id,
+                    lifetime,
                     class,
                     receipt,
                     cgroup,
@@ -553,8 +561,8 @@ impl Learner {
         scale: &Scale,
     ) -> Result<(), Refusal> {
         let placed = self.node.placement(self.machine).map_err(refused)?;
-        for (scope, bounds) in &placed.vms {
-            if let Some(vm) = self.vms.get_mut(scope) {
+        for (lifetime, bounds) in &placed.vms {
+            if let Some(vm) = self.vms.get_mut(&lifetime.scope) {
                 rewrite(io, &vm.cgroup, bounds, &mut vm.written)?;
             }
         }
@@ -643,9 +651,9 @@ impl Learner {
                 what: "a class's learned holdings",
                 bound: self.vms.len(),
             })?;
-        for (scope, vm) in &self.vms {
+        for vm in self.vms.values() {
             if vm.class == class {
-                vms.push((*scope, &vm.id, vm.receipt));
+                vms.push((vm.lifetime, &vm.id, vm.receipt));
             }
         }
         crate::recorded::charges::learned(&self.node, class, costs, vms, self.last.ended(class)?)

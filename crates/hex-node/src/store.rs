@@ -163,6 +163,10 @@ pub struct Store {
     /// The host's boot session ([`host_boot`]), which every record it writes carries; `None` where it
     /// can't be read, with why in [`Store::boot_unread`].
     boot: Option<BootSession>,
+    /// The next place in the node's start order (joint plan step 14, C3) the store gives a VM lifetime it begins
+    /// ([`BoxRecord::started`]): one past the most any of its records held when it opened, so the order runs on
+    /// across the node's restarts. Shared by clones.
+    begun: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default)]
@@ -233,7 +237,9 @@ impl Store {
             #[cfg(all(debug_assertions, target_os = "linux"))]
             crash_before_write: Arc::default(),
             boot: host_boot().as_ref().ok().cloned().flatten(),
+            begun: Arc::new(AtomicU64::new(1)),
         };
+        store.count_starts()?;
         Ok(store)
     }
 
@@ -502,11 +508,61 @@ impl Store {
             return Err(uncertain(&record.spec.id));
         }
         let scope = fresh_scope()?;
+        let started = self.next_start()?;
         self.write_encoded(
             record,
-            record.encode_fresh_scope(scope, self.boot.as_ref())?,
+            record.encode_fresh_scope(scope, started, self.boot.as_ref())?,
             true,
         )
+    }
+
+    /// The node's start order as the store opens (joint plan step 14, C3): the next place is one past the most any
+    /// record holds; then each VM record of this boot that holds none, begun by an earlier node agent, is given the next,
+    /// in box-id order, so every VM that may run holds one before the node takes a create. A record of an earlier boot
+    /// names nothing that runs and is recovery's to remove, so it is left as that boot wrote it, as is a torn one.
+    fn count_starts(&self) -> Result<(), Refusal> {
+        let records = self.all()?;
+        let most = records
+            .values()
+            .filter_map(|record| record.as_ref().ok()?.started)
+            .max()
+            .unwrap_or(0);
+        let next = most.checked_add(1).ok_or(Refusal::Exhausted {
+            what: "a node's start order",
+            bound: usize::MAX,
+        })?;
+        self.begun.store(next, Ordering::Relaxed);
+        for (id, record) in &records {
+            let Ok(record) = record else {
+                continue;
+            };
+            let unplaced = record.native_scope.is_some()
+                && record.started.is_none()
+                && record.boot == self.boot;
+            if !unplaced {
+                continue;
+            }
+            let place = self.next_start()?;
+            let scope = record.native_scope;
+            self.update(id, |current| {
+                if current.native_scope != scope || current.started.is_some() {
+                    return false;
+                }
+                current.started = Some(place);
+                true
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The next place in the node's start order (C3), refused once the count would pass a `u64`.
+    fn next_start(&self) -> Result<u64, Refusal> {
+        self.begun
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Refusal::Exhausted {
+                what: "a node's start order",
+                bound: usize::MAX,
+            })
     }
 
     /// Writes `record` in its place, carrying the host's boot session (T-T7.1.2).
