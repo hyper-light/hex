@@ -1063,6 +1063,25 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
     );
 }
 
+/// Joint plan step 14 (AC-T7.4.1; the person's rule, 2026-11-13, and Shards' R03 for test waits): the driver times
+/// none of its waits and reads no record. Each client call waits for its answer while the node's connection stands, its
+/// waits unarmed (`hex_core::patience::measure_all`), and the node's start for its ready line while the node runs.
+/// Do read the driver's own source; expect no caller deadline, no timed receive and no record of boots read.
+#[test]
+fn w14_the_driver_times_no_wait_and_reads_no_record() {
+    let source = include_str!("charge_fleet.rs");
+    for timer in [
+        concat!("_be", "fore("),
+        concat!("recv_", "timeout"),
+        concat!("guest::", "recorded"),
+    ] {
+        assert!(
+            !source.contains(timer),
+            "the driver still times a wait or reads a record: {timer}"
+        );
+    }
+}
+
 /// Joint plan step 14 (AC-T7.4.1): the process box is a CI job's, each of its caps derived from kiln's CI. Do reckon
 /// the box from the CI trace; expect the nearest-rank medians of its 3,946 build legs: 363 milli-CPU and a peak of
 /// 2,228,883,456 bytes, and no disk.
