@@ -124,11 +124,14 @@ pub(crate) fn in_this_boot(record: BoxRecord) -> BoxRecord {
 }
 
 /// Flushes the state directory `dir` after the boot session marker's rename or removal, so it outlives a
-/// host crash; apart from the records' own counted flushes ([`Store::syncs`]).
+/// host crash; apart from the records' own counted flushes ([`Store::syncs`]). On Windows the directory is
+/// opened as FlushFileBuffers asks ([`hex_runtime::windows::sys::flush_directory`]).
 fn sync_marker_dir(dir: &Path) -> Result<(), Refusal> {
-    File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| Refusal::os("flushing the boot session marker's directory", e))
+    #[cfg(windows)]
+    let flushed = hex_runtime::windows::sys::flush_directory(dir);
+    #[cfg(not(windows))]
+    let flushed = File::open(dir).and_then(|d| d.sync_all());
+    flushed.map_err(|e| Refusal::os("flushing the boot session marker's directory", e))
 }
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
