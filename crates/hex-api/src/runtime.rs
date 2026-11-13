@@ -1138,24 +1138,30 @@ pub struct LearnedRate {
     pub held: RateHeld,
 }
 
+impl RateHeld {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(match self {
+            Self::Governor => Self::Governor,
+            Self::GovernorUnderJob => Self::GovernorUnderJob,
+            Self::Platform(why) => {
+                let mut copy = String::new();
+                copy.try_reserve_exact(why.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "a managed VM's rate's reason",
+                        bound: why.len(),
+                    })?;
+                copy.push_str(why);
+                Self::Platform(copy)
+            }
+        })
+    }
+}
+
 impl LearnedRate {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         Ok(Self {
             id: self.id.try_clone()?,
-            held: match &self.held {
-                RateHeld::Governor => RateHeld::Governor,
-                RateHeld::GovernorUnderJob => RateHeld::GovernorUnderJob,
-                RateHeld::Platform(why) => {
-                    let mut copy = String::new();
-                    copy.try_reserve_exact(why.len())
-                        .map_err(|_| Refusal::Exhausted {
-                            what: "a managed VM's rate's reason",
-                            bound: why.len(),
-                        })?;
-                    copy.push_str(why);
-                    RateHeld::Platform(copy)
-                }
-            },
+            held: self.held.try_clone()?,
         })
     }
 }

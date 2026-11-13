@@ -233,19 +233,79 @@ pub enum ManagedRate {
     Platform(Refusal),
 }
 
+/// A managed VM's rate's ask (decision 9; D255; ROOT, 2026-11-13), from its ask until its VM process answers: a wait
+/// of its own, measuring. Shards follows the VM with no bound of Hex's (`Duration::MAX`: until its process answers or
+/// the guest ends). Past the slowest answer seen, a watcher tells the run-out while the ask goes on, which is refused
+/// only at the VM's end.
+static RATE: Patience = Patience::measuring("managed.rate");
+
 /// Joint plan step 14 (D255; ROOT, 2026-11-13): asks managed guest `guest`'s VM's governor, box `id`'s, to hold its
-/// vCPUs to `rate` milli-CPU. Original (red): no governor is asked, so its platform's cap holds every managed VM.
+/// vCPUs to `rate` milli-CPU, through Shards on its VM process's socket ([`RATE`]). Its answer: the governor holds it,
+/// over its period; a refusal in the process's words; a process that takes no rate, which its platform's cap is to
+/// hold, told why; or the VM's end.
 pub(super) fn rate(
     guest: &shards_api::ManagedGuest,
     id: &BoxId,
     rate: u64,
 ) -> Result<ManagedRate, Refusal> {
-    let _ = (guest, id, rate);
-    Ok(ManagedRate::Platform(Refusal::Platform {
-        what: "a managed VM's governor",
-        platform: std::env::consts::OS,
-        why: "no managed VM's governor is asked".to_owned(),
-    }))
+    let asked = std::num::NonZeroU64::new(rate);
+    let began = Instant::now();
+    let answer = match RATE.deadline() {
+        Some(bound) => told_past(bound, || guest.rate(asked, Duration::MAX))?,
+        None => guest.rate(asked, Duration::MAX),
+    };
+    let took = began.elapsed();
+    match answer {
+        Ok(held) => {
+            RATE.answered(took);
+            Ok(ManagedRate::Governor {
+                held,
+                period: guest.rate_period(),
+            })
+        }
+        Err(shards_api::Refusal::Rate(why)) => {
+            RATE.refused(took);
+            Err(Refusal::Invalid {
+                what: "a managed VM's rate",
+                why,
+            })
+        }
+        Err(shards_api::Refusal::Unsupported { why, .. }) => {
+            Ok(ManagedRate::Platform(Refusal::Platform {
+                what: "a managed VM's governor",
+                platform: std::env::consts::OS,
+                why,
+            }))
+        }
+        Err(shards_api::Refusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, "rate")),
+        Err(why) => Err(refusal("asking a managed VM's governor its rate", &why)),
+    }
+}
+
+/// Answers `ask`, a watcher telling [`RATE`]'s run-out once `bound` passes with no answer while the ask goes on.
+fn told_past<T>(bound: Duration, ask: impl FnOnce() -> T) -> Result<T, Refusal> {
+    let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
+        hex_wait::Failed::Poisoned => {
+            Refusal::Broken("a managed VM rate's watch is poisoned".to_owned())
+        }
+        hex_wait::Failed::Os(why) => Refusal::os("making a managed VM rate's watch", why),
+    })?;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("hex-managed-rate".to_owned())
+            .spawn_scoped(scope, move || {
+                if matches!(
+                    waiting.recv_timeout(bound),
+                    Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    RATE.ran_out(bound);
+                }
+            })
+            .map_err(|why| Refusal::os("starting a managed VM rate's watcher", why))?;
+        let answer = ask();
+        drop(answered);
+        Ok(answer)
+    })
 }
 
 #[cfg(test)]
@@ -283,10 +343,14 @@ mod tests {
                     .unwrap()
                     .0
             };
-            Ok(stopped.then(|| shards_api::ManagedEnd {
-                status: shards_api::ManagedStatus::Unknown,
-                scope: shards_api::TerminalScope::Released,
-            }))
+            Ok(if stopped {
+                Some(shards_api::ManagedEnd {
+                    status: shards_api::ManagedStatus::Unknown,
+                    scope: shards_api::TerminalScope::Released,
+                })
+            } else {
+                None
+            })
         }
         fn stop(&self) -> Result<(), shards_api::Refusal> {
             *self.stopped.lock().unwrap() = true;

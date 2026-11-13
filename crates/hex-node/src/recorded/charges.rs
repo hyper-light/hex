@@ -668,9 +668,12 @@ struct Vm {
     rate: u64,
     /// The room its guest was told last, an image VM's (D188): none until it is first told.
     room: Option<i64>,
-    /// The period its cap holds over, an image VM's its run's own as last read (D247): none for a managed VM, whose cap
-    /// holds over its platform's window.
+    /// The period its cap holds over as last read: an image VM's its run's own (D247), a managed VM's its governor's
+    /// (D255); none for a managed VM whose governor hasn't answered or whose platform's cap holds it, its platform's
+    /// window holding instead.
     period: Option<Duration>,
+    /// What holds it at its cap (D255): none until the learner first caps it.
+    held: Option<hex_api::RateHeld>,
 }
 
 /// The node's learner (module docs).
@@ -828,16 +831,13 @@ impl Learner {
             let Some(allocation) = record.spec.allocation else {
                 continue;
             };
-            // Each window reads the VM's use and an image VM's period, its run's own, which its cap holds over (C1;
-            // D247). A VM either read fails for counts whole, at its receipt, against the fleet's budget this window,
-            // its learner untouched (ROOT, 2026-11-13: never starving its neighbours by holding nothing): no sample
-            // taken, its booking as it was, and the failure told ([`Learner::unread`]). One that ended since its
-            // listing is ended by the next.
-            // Original (red, D255): a managed VM's governor's period isn't read.
-            let reading = running_image(record)
-                .then(|| io.rate_period(record))
-                .transpose()
-                .map(Option::flatten)
+            // Each window reads the VM's use and the period its cap holds over (C1): an image VM's its run's own (D247),
+            // a managed VM's its governor's as its VM process last answered (D255), none before. A VM either read fails
+            // for counts whole, at its receipt, against the fleet's budget this window, its learner untouched (ROOT,
+            // 2026-11-13: never starving its neighbours by holding nothing): no sample taken, its booking as it was,
+            // and the failure told ([`Learner::unread`]). One that ended since its listing is ended by the next.
+            let reading = io
+                .rate_period(record)
                 .and_then(|period| Read::of(io, record).map(|read| (period, read)));
             let (period, read) = match reading {
                 Ok(reading) => reading,
@@ -916,6 +916,7 @@ impl Learner {
                     rate: allocation.resources.cpu_milli,
                     room: None,
                     period,
+                    held: None,
                 },
             );
             let intent = record
@@ -947,8 +948,7 @@ impl Learner {
                 .iter()
                 .find(|record| scope_of(record) == Some(scope))
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-            // Original (red, D255): what holds it is told nowhere.
-            let _held = io.set_rate(record, rate)?;
+            vm.held = Some(io.set_rate(record, rate)?);
             vm.rate = rate;
         }
         // Each image VM's guest told its room as it moves (C5, C7; D188): its budget less what it holds, everything it
@@ -1037,7 +1037,56 @@ impl Learner {
                 vms.push((vm.lifetime, &record.spec.id, vm.receipt));
             }
         }
-        learned(&self.node, class, costs, vms, self.last.ended(class)?).map(Some)
+        let mut learned = learned(&self.node, class, costs, vms, self.last.ended(class)?)?;
+        learned.rates = self.rates(class, running)?;
+        Ok(Some(learned))
+    }
+
+    /// What holds each of `class`'s VMs among `running` at its cap (D255), those its governor doesn't hold alone first:
+    /// its platform's cap, then its governor under its job, then its governor; each in its records' order.
+    fn rates(
+        &self,
+        class: Class,
+        running: &[BoxRecord],
+    ) -> Result<Vec<hex_api::LearnedRate>, Refusal> {
+        let rank = |held: &hex_api::RateHeld| match held {
+            hex_api::RateHeld::Platform(_) => 0u8,
+            hex_api::RateHeld::GovernorUnderJob => 1,
+            hex_api::RateHeld::Governor => 2,
+        };
+        let mut held: Vec<(u8, &BoxId, &hex_api::RateHeld)> = Vec::new();
+        held.try_reserve_exact(running.len().min(MAX_LEARNED_HOLDINGS))
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned rates",
+                bound: MAX_LEARNED_HOLDINGS,
+            })?;
+        for record in running {
+            let Some(scope) = Scope::of(record) else {
+                continue;
+            };
+            if let Some(vm) = self.vms.get(&scope)
+                && vm.class == class
+                && let Some(how) = &vm.held
+                && held.len() < MAX_LEARNED_HOLDINGS
+            {
+                held.push((rank(how), &record.spec.id, how));
+            }
+        }
+        held.sort_by_key(|(rank, _, _)| *rank);
+        let mut rates = Vec::new();
+        rates
+            .try_reserve_exact(held.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned rates",
+                bound: held.len(),
+            })?;
+        for (_, id, how) in held {
+            rates.push(hex_api::LearnedRate {
+                id: hex_api::LearnedHolder::Box(id.try_clone()?),
+                held: how.try_clone()?,
+            });
+        }
+        Ok(rates)
     }
 
     /// Gives `capacity`, `class`'s capacity answer, what this learner carries (C2, C8), fitted to one message: the
