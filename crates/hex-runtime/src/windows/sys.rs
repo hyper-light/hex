@@ -38,14 +38,17 @@ use windows_sys::Win32::System::JobObjects::{
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetActiveProcessorCount, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
-    WaitForMultipleObjects, WaitForSingleObject,
+    ALL_PROCESSOR_GROUPS, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW,
+    CreateProcessW, CreateWaitableTimerExW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
+    GetExitCodeProcess, GetProcessTimes, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, SetPriorityClass,
+    SetThreadPriority, SetWaitableTimer, THREAD_PRIORITY_TIME_CRITICAL, TIMER_ALL_ACCESS,
+    TerminateProcess, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -1071,6 +1074,73 @@ pub(crate) fn wait_either(first: &Handle, second: &Handle) -> io::Result<bool> {
             Ok(false)
         }
         _ => Err(last_error()),
+    }
+}
+
+/// Joint plan step 14 (AC-T7.4.1): runs the calling thread at `THREAD_PRIORITY_TIME_CRITICAL`, so a sampler keeps its own
+/// deadlines beside busy threads of normal priority (the Windows charge-window probe's,
+/// crates/hex-runtime/tests/windows_charge_window.rs).
+pub fn time_critical() -> io::Result<()> {
+    // SAFETY: GetCurrentThread returns the calling thread's pseudo-handle, valid for this call and closing nothing;
+    // SetThreadPriority takes it and a documented priority level.
+    if unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Joint plan step 14 (AC-T7.4.1): runs the calling process at `BELOW_NORMAL_PRIORITY_CLASS`, so its busy threads give
+/// way to a sampler of normal priority or above (the charge-window probe's spinners).
+pub fn below_normal() -> io::Result<()> {
+    // SAFETY: GetCurrentProcess returns the calling process's pseudo-handle, valid for this call and closing nothing;
+    // SetPriorityClass takes it and a documented priority class.
+    if unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// A high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`): a wait on it ends near its due time, not
+/// at the system timer's tick (15.6 ms unless raised), so a sampler can keep a 1 ms cadence without spinning (joint
+/// plan step 14's charge-window probe).
+pub struct HighResTimer(Handle);
+
+impl HighResTimer {
+    pub fn new() -> io::Result<Self> {
+        // SAFETY: no security attributes and no name are allowed; the flag and the access are documented values. The
+        // handle returned, where not null, is this process's own and owned below.
+        let h = unsafe {
+            CreateWaitableTimerExW(
+                null(),
+                null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS,
+            )
+        };
+        if h.is_null() {
+            return Err(last_error());
+        }
+        // SAFETY: a timer handle just made, owned from here.
+        Ok(Self(unsafe { Handle::own(h) }))
+    }
+
+    /// Waits `after` from now: the timer is set that far ahead, relative (a negative due time, in 100 ns), and waited
+    /// on.
+    pub fn wait(&self, after: std::time::Duration) -> io::Result<()> {
+        let due = i64::try_from(after.as_nanos() / 100)
+            .ok()
+            .and_then(i64::checked_neg)
+            .ok_or_else(|| io::Error::other("a timer's due time passes an i64 of 100 ns"))?;
+        // SAFETY: the timer is a valid handle this value owns; `due` outlives the call; no period, no completion
+        // routine and no argument for one, and no resume from suspend.
+        if unsafe { SetWaitableTimer(self.0.raw(), &due, 0, None, null(), 0) } == 0 {
+            return Err(last_error());
+        }
+        // SAFETY: the timer is a valid handle this value owns; the wait ends when it is signalled.
+        match unsafe { WaitForSingleObject(self.0.raw(), u32::MAX) } {
+            WAIT_OBJECT_0 => Ok(()),
+            _ => Err(last_error()),
+        }
     }
 }
 
