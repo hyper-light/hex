@@ -4,8 +4,8 @@
 use std::sync::{Arc, Mutex};
 
 use shards_api::image::{
-    Bound, Channel, GuestTimes, HostUse, MemberEnd, MemberInfo, MemberName, Microvm, RunEnd, Stats,
-    StatsScope,
+    Bound, Channel, GuestTimes, HostUse, ImageRefusal, MemberEnd, MemberInfo, MemberName, Microvm,
+    RunEnd, Stats, StatsScope,
 };
 
 use super::*;

@@ -198,9 +198,14 @@ impl Store {
         let records = self.retained_records()?;
         let mut pools = self.all_pools()?;
         for (id, row) in &records {
-            let row = row.as_ref().map_err(|_| super::uncertain(id))?;
+            let row = row
+                .as_ref()
+                .map_err(|_| super::uncertain(id, "its record can't be read"))?;
             if row.version != RECORD_VERSION || row.spec.id != *id {
-                return Err(super::uncertain(id));
+                return Err(super::uncertain(
+                    id,
+                    "its record is of another version or names another box",
+                ));
             }
             row.spec.check()?;
         }
@@ -611,7 +616,7 @@ impl Store {
         self.flush_pool_directory(directory)
     }
 
-    fn flush_pool_directory(&self, directory: &Path) -> Result<(), Refusal> {
+    pub(super) fn flush_pool_directory(&self, directory: &Path) -> Result<(), Refusal> {
         #[cfg(windows)]
         {
             let _ = directory;

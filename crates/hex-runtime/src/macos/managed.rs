@@ -22,11 +22,13 @@ use super::proc::{BoxProc, Prepared, Reaping, process_failure};
 use super::process::ProcessBox;
 use super::{MacRuntime, native_allocation, native_owner_index, sys};
 
-pub(super) fn uncertain(id: &BoxId) -> Refusal {
+/// Box `id`'s lifecycle uncertain, in the refusing site's own words (joint plan step 12).
+pub(super) fn uncertain(id: &BoxId, why: &str) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
             id,
             cause: LifecycleCause::Uncertain,
+            why: Some(why.to_owned()),
         },
         Err(error) => error,
     }
@@ -149,11 +151,11 @@ impl Scope {
             vsock: std::sync::OnceLock::new(),
         })
     }
-    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
-    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan steps 14 and 12): a pool's
+    /// backing refusal and a box's Lifecycle refusal carry them alike.
     pub(super) fn uncertain(&self, owner: OwnerRef<'_>, why: &str) -> Refusal {
         match owner {
-            OwnerRef::Box(id) => uncertain(id),
+            OwnerRef::Box(id) => uncertain(id, why),
             OwnerRef::Pool(pool) => Refusal::Backing {
                 key: hex_api::BackingKey {
                     pool: *pool,

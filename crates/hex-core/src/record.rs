@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cgroup::Baseline;
 
+mod node_vm;
 mod pool;
+pub use node_vm::{NodeVmPhase, NodeVmRecord};
 pub use pool::{NativeRecord, NativeStage, OwnerKey, OwnerRef, PoolRecord};
 
 /// The record format's version; a record of another is refused, never guessed at.
@@ -213,6 +215,7 @@ impl BoxRecord {
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,
                 cause: hex_api::LifecycleCause::Retired,
+                why: None,
             },
         })
     }

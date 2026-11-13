@@ -1013,14 +1013,17 @@ fn refusals() -> Vec<Refusal> {
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Pending,
+            why: None,
         },
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Uncertain,
+            why: Some("its record names another native scope".to_owned()),
         },
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Busy,
+            why: None,
         },
         Refusal::Uncertain {
             id: id("unclean-box"),
@@ -1630,28 +1633,73 @@ fn retained_box_allocations_survive_inspect_and_mixed_list_messages() {
     ));
 }
 
+/// Joint plan step 12 (ROOT, 2026-11-13: every Lifecycle Uncertain gets its reason, as a Backing one does): do answer a
+/// box's Lifecycle refusal with its refusing site's words, and one with none. Expect each read back whole, the words
+/// after the cause as an option, and the message ending ": <words>", or at its cause where there are none.
+#[test]
+fn w12_a_lifecycle_refusal_carries_its_reason() {
+    let words = "its record names another native scope";
+    let worded = Refusal::Lifecycle {
+        id: id("retained-box"),
+        cause: LifecycleCause::Uncertain,
+        why: Some(words.to_owned()),
+    };
+    let bare = Refusal::Lifecycle {
+        id: id("retained-box"),
+        cause: LifecycleCause::Uncertain,
+        why: None,
+    };
+    for refused in [&worded, &bare] {
+        let answered = Answer::Refused(refused.clone());
+        let bytes = answer(42, &answered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            answered
+        );
+    }
+    assert!(
+        worded.to_string().ends_with(&format!(": {words}")),
+        "{worded}"
+    );
+    assert!(
+        bare.to_string()
+            .ends_with("physical termination or absence has not been proved"),
+        "{bare}"
+    );
+}
+
 /// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
 /// an unknown cause cannot become absence, success or a default retry decision.
 #[test]
 fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
-    for cause in [
-        LifecycleCause::Pending,
-        LifecycleCause::Uncertain,
-        LifecycleCause::Busy,
+    for (cause, why) in [
+        (LifecycleCause::Pending, None),
+        (
+            LifecycleCause::Uncertain,
+            Some("its record names another native scope".to_owned()),
+        ),
+        (LifecycleCause::Busy, None),
     ] {
+        let worded = why.is_some();
         let refused = Answer::Refused(Refusal::Lifecycle {
             id: id("retained-box"),
             cause,
+            why,
         });
         let bytes = answer(41, &refused, MAX_MESSAGE).unwrap();
         assert_eq!(
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             refused
         );
-        // 3 is Retired (joint plan step 14); the next tag is unknown.
+        if worded {
+            continue;
+        }
+        // 3 is Retired (joint plan step 14); the next tag is unknown. The cause is the byte before its reason's
+        // option, a 0 where it gives none (joint plan step 12).
         for tag in [4, u8::MAX] {
             let mut invalid = bytes.clone();
-            *invalid.last_mut().unwrap() = tag;
+            let at = invalid.len() - 2;
+            invalid[at] = tag;
             let error = read_answer(&received(&invalid, 0), MAX_MESSAGE).unwrap_err();
             assert!(matches!(
                 error,
@@ -2502,9 +2550,10 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
                 LifecycleCause::Pending,
                 LifecycleCause::Uncertain,
                 LifecycleCause::Busy
-            ])
+            ]),
+            proptest::option::of(any_text())
         )
-            .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
+            .prop_map(|(id, cause, why)| Refusal::Lifecycle { id, cause, why }),
         (any::<u32>(), any_connect_failure())
             .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
         proptest::sample::select(Upstream::ALL.to_vec())
@@ -4710,6 +4759,7 @@ fn learned_capacity() -> Capacity {
                 disk_bytes: Some(0),
             },
         }],
+        rates: Vec::new(),
     });
     capacity
 }
@@ -4779,6 +4829,39 @@ fn a_node_vms_learned_holding_and_end_cross_the_wire() {
     );
 }
 
+/// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds each running managed VM's CPU to its rate crosses the wire
+/// on its class's capacity answer, after the ceilings, where its node tells it. Do: encode a capacity whose learned
+/// rates name a box its platform's cap holds, with why, one its governor holds under its job, and a node VM its
+/// governor holds; read it back, and write and read it as JSON. Expect it back exactly each way.
+#[test]
+fn w14_d255_what_holds_each_managed_vms_rate_crosses_the_wire() {
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.rates = vec![
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-7").unwrap()),
+                held: hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-8").unwrap()),
+                held: hex_api::RateHeld::GovernorUnderJob,
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16])),
+                held: hex_api::RateHeld::Governor,
+            },
+        ];
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let json = serde_json::to_value(&capacity).unwrap();
+    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
+}
+
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with
 /// a prior more than a class has profiles, a prior booked past its ceiling, and a box's holding twice; then read one
 /// whose holdings' count says one more than a node's boxes. Expect each refused, the last before any holding is read.
@@ -4813,9 +4896,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
         learned.ceilings = Vec::new();
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count and
-    // no ceiling's.
-    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
+    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count, no
+    // ceiling's and no rate's.
+    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -4910,8 +4993,8 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its id's length, the id, five u64s, its band and its unmoved capability's
-    // option and tag; then no ceiling's count.
-    let at = bytes.len() - (3 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
+    // option and tag; then no ceiling's count and no rate's.
+    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(

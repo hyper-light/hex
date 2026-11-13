@@ -2655,7 +2655,7 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain, .. }))) if *id == absolute_spec().id),
         "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
@@ -2798,12 +2798,15 @@ fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
             settled.kills, settled.starts,
             "{start:?}: one Kill, of its exec"
         );
-        assert_eq!(
-            settled.result,
-            Err(Refusal::Lifecycle {
-                id: settled.id,
-                cause: hex_api::LifecycleCause::Uncertain,
-            }),
+        assert!(
+            matches!(
+                &settled.result,
+                Err(Refusal::Lifecycle {
+                    id,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                    ..
+                }) if *id == settled.id
+            ),
             "{start:?}: a refused kill leaves the program's end unproved"
         );
         assert_eq!(
@@ -3405,7 +3408,7 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain, .. }))) if *id == absolute_spec().id),
         "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(

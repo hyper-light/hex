@@ -259,7 +259,7 @@ impl State {
             return scope.uncertain(self.id.as_ref(), why);
         }
         match &self.id {
-            OwnerKey::Box(id) => super::managed::uncertain(id),
+            OwnerKey::Box(id) => super::managed::uncertain(id, why),
             OwnerKey::Pool(_) => super::native_allocation(std::mem::size_of::<State>()),
         }
     }

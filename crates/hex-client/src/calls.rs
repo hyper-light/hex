@@ -370,21 +370,12 @@ enum ReplyBound {
     Caller(Duration),
     CallerAbsolute,
     Learned(Duration),
-    /// A guest link's own bound on a connection's setup, where its caller gave no deadline.
-    Link(Duration),
 }
 
 impl ReplyDeadline {
     pub(crate) fn caller(budget: Option<Duration>) -> Result<Option<Self>, Refusal> {
         budget
             .map(|budget| Self::from_now(budget, ReplyBound::Caller(budget), "client reply budget"))
-            .transpose()
-    }
-
-    /// A link's own setup bound from now ([`crate::guest::Link::setup_bound`]): none where it has none.
-    pub(crate) fn link(bound: Option<Duration>) -> Result<Option<Self>, Refusal> {
-        bound
-            .map(|bound| Self::from_now(bound, ReplyBound::Link(bound), "guest link setup bound"))
             .transpose()
     }
 
@@ -468,9 +459,6 @@ impl ReplyDeadline {
                 format!(
                     "none came in {wait:?}, the slowest answer to a call of its kind this process has seen"
                 )
-            }
-            ReplyBound::Link(bound) => {
-                format!("the guest link's own setup bound of {bound:?} expired")
             }
         };
         Refusal::Os { op, why }
@@ -2743,9 +2731,13 @@ impl<T: Transport> Core<T> {
                         };
                         Err(match killed {
                             Ok(()) => why,
-                            Err(_) => Refusal::Lifecycle {
+                            Err(kill) => Refusal::Lifecycle {
                                 id,
                                 cause: hex_api::LifecycleCause::Uncertain,
+                                why: Some(format!(
+                                    "its exec's streams couldn't be set up ({why}), and its kill couldn't confirm its \
+                                     end ({kill}), so the program may still run"
+                                )),
                             },
                         })
                     }

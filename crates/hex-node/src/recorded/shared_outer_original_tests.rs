@@ -358,7 +358,7 @@ fn an_orphaned_guest_receipt_is_refused_at_the_startup_barrier() {
     assert!(
         matches!(
             &refused,
-            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id.as_str() == "orphaned-box"
+            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain, .. }) if id.as_str() == "orphaned-box"
         ),
         "an orphaned guest receipt passed the startup barrier: {refused:?}"
     );

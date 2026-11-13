@@ -1600,13 +1600,14 @@ fn t_t7_1_2_a_torn_record_no_guest_box_carries_is_kept_and_its_name_never_reused
         node.create(process(&torn)),
         Err(Refusal::Exists(torn.clone()))
     );
-    assert_eq!(
+    assert!(matches!(
         node.inspect(&torn),
         Err(Refusal::Lifecycle {
-            id: torn.clone(),
-            cause: LifecycleCause::Uncertain
-        })
-    );
+            id,
+            cause: LifecycleCause::Uncertain,
+            why: Some(_),
+        }) if id == torn
+    ));
     assert!(gate.unstaged.lock().unwrap().is_empty());
 }
 

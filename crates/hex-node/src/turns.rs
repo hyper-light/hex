@@ -168,6 +168,7 @@ impl Turns {
             Ok(id) => Refusal::Lifecycle {
                 id,
                 cause: hex_api::LifecycleCause::Busy,
+                why: None,
             },
             Err(error) => error,
         })

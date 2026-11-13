@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::devices::{Books, Records, Transaction};
-use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
+use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, Runtime};
+use hex_core::record::{NodeVmPhase, NodeVmRecord};
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
     Receiving, StartedFrom, VcpuTime,
@@ -19,6 +20,8 @@ use shards_api::image::{
 /// written, stays; only a Deleting record is removed.
 struct Owner {
     records: Mutex<Records>,
+    /// Its node VMs' records (joint plan step 39), apart from its boxes' as the node Store keeps them.
+    node_vms: Mutex<std::collections::BTreeMap<NodeRun, NodeVmRecord>>,
     /// Its scans of every record ([`Books::records`]), each a read of the node's whole Store.
     scans: AtomicUsize,
     /// The node's state's own directory for its image boxes' diagnostics, gone with the owner.
@@ -29,6 +32,7 @@ impl Owner {
     fn new() -> Self {
         Self {
             records: Mutex::default(),
+            node_vms: Mutex::default(),
             scans: AtomicUsize::new(0),
             state: tempfile::tempdir().unwrap(),
         }
@@ -188,6 +192,21 @@ impl Books for Owner {
     ) -> Result<(), Refusal> {
         Err(broken("an image box hands nothing off"))
     }
+    fn node_vm(&self, run: &NodeRun) -> Result<Option<NodeVmRecord>, Refusal> {
+        Ok(self.node_vms.lock().unwrap().get(run).cloned())
+    }
+    fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
+        record.check()?;
+        self.node_vms
+            .lock()
+            .unwrap()
+            .insert(record.run, record.clone());
+        Ok(())
+    }
+    fn remove_node_vm(&self, run: &NodeRun) -> Result<(), Refusal> {
+        self.node_vms.lock().unwrap().remove(run);
+        Ok(())
+    }
 }
 
 /// A run in the model: its end, which the test or its stop sets, its stops, and its stats.
@@ -280,6 +299,18 @@ struct ModelGuest {
     rate_period: Duration,
     /// How its microVM started (D253), as the model's run host said it at its boot.
     started_from: StartedFrom,
+    /// Its run's agent-control endpoint, where its boot asked one (D252).
+    control: Option<shards_api::image::ControlAt>,
+    /// Whether its boot gave its command the nesting grant (D234), whose READY it then says.
+    nesting: bool,
+}
+
+/// Where the model's run host binds a run's agent-control endpoint, and its microVM's key (D252).
+fn model_control() -> shards_api::image::ControlAt {
+    shards_api::image::ControlAt {
+        address: std::net::SocketAddr::from(([127, 0, 0, 1], 49_000)),
+        vm: [7; 32],
+    }
 }
 
 /// The period the model's run host says its VM's governor holds a rate over (D247's `rate_period`): the model's
@@ -293,9 +324,8 @@ impl ImageGuest for ModelGuest {
     fn published(&self) -> &[Bound] {
         &self.published
     }
-    // No agent-control endpoint: the image class asks for none yet (D252).
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
-        None
+        self.control.as_ref()
     }
     fn rate_period(&self) -> Duration {
         self.rate_period
@@ -375,15 +405,19 @@ impl ImageGuest for ModelGuest {
             why: "it gives no member a terminal".to_owned(),
         })
     }
-    // As Shards refuses them for a run that asks no nesting grant (D234) and of a model with no plugs (D235).
+    // Ready on time where its run gave its command the nesting grant; refused as Shards refuses a run that asks none
+    // (D234), and the plugs of a model with none (D235).
     fn wait_ready(
         &self,
         _: Option<shards_api::image::Ready>,
         _: Duration,
     ) -> Result<Option<shards_api::image::Ready>, ImageRefusal> {
+        if self.nesting {
+            return Ok(Some(shards_api::image::Ready::OnTime));
+        }
         Err(ImageRefusal::Spec {
             what: "nesting",
-            why: "the model's runs ask no nesting grant".to_owned(),
+            why: "the run asked no nesting grant".to_owned(),
         })
     }
     fn plug(
@@ -693,6 +727,8 @@ impl Images for ModelImages {
             outside: Mutex::new(outside),
             rate_period: *self.period.lock().unwrap(),
             started_from: *self.started_from.lock().unwrap(),
+            control: spec.control.as_ref().map(|_| model_control()),
+            nesting: spec.nesting,
         }))
     }
 }
@@ -3197,6 +3233,157 @@ fn w33_a_credential_no_one_here_can_lease_or_beyond_its_egress_is_refused_before
     ));
     assert!(record(&owner, &id).is_none());
     assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// The node VM these tests boot (joint plan step 39): run 1's, Hex's node image, the model's admitted size, one share
+/// where Hex's init finds it, its node's key, and its lanes as its node fitted them (a fixture: six, one place's).
+fn node_vm() -> NodeVm {
+    NodeVm {
+        run: NodeRun::from_bytes([1; 16]),
+        image: hex_api::sim::SIM_IMAGE.to_owned(),
+        allocation: allocation(),
+        shares: vec![ImageShare {
+            host: std::path::PathBuf::from("/srv/node-state"),
+            at: "/run/hex/shares/0".to_owned(),
+            read_only: false,
+        }],
+        controller: [9; 32],
+        lanes: 6,
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: the hosted node VM is an image VM, one code path): do boot a node
+/// VM through the image class. Expect its boot asked of Shards as Hex's own init under the nesting grant (`/init`, no
+/// member, no published port, no grant past the VM, no credential, no ready-by of Hex's), at its admitted size, with its
+/// shares, and with its run's agent-control endpoint taking its node's key alone and admitting its lanes to the relay's
+/// sockets, each a guest frame wide; its endpoint and READY answered; its record a node VM's, Ready, named by its run;
+/// and no box call seeing it: no box record, nothing listed.
+#[test]
+fn w39_a_node_vm_boots_under_shards_init_through_the_image_class_and_is_never_a_box() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    let booted = runtime.images.boot_node(&vm).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    let spec = &asked[0];
+    let size = vm.allocation.vm_size().unwrap();
+    assert_eq!(
+        (spec.image.as_str(), spec.vcpus, spec.memory_mib),
+        (vm.image.as_str(), size.vcpus, size.memory_mib)
+    );
+    assert_eq!(spec.command, Some(vec!["/init".to_owned()]));
+    assert!(spec.nesting && spec.ready_by.is_none());
+    assert!(spec.members.is_empty() && spec.publish.is_empty() && spec.credentials.is_empty());
+    assert_eq!(
+        spec.egress,
+        shards_api::image::Narrowing {
+            egress: Keep::Only(Vec::new()),
+            mcp: Keep::Only(Vec::new()),
+            destinations: Keep::Only(Vec::new()),
+            dns: false,
+            members: None,
+        }
+    );
+    assert_eq!(spec.shares, vm.shares);
+    assert_eq!(
+        spec.control,
+        Some(shards_api::image::ControlAsk {
+            controller: vm.controller,
+            sockets: Some(shards_api::image::SocketGrant {
+                dir: hex_client::guest::lanes::DIR.to_owned(),
+                lanes: vm.lanes,
+                window: u32::try_from(hex_core::stream::MAX_FRAME).unwrap(),
+            }),
+        })
+    );
+    assert_eq!(
+        (booted.run, booted.control, booted.ready),
+        (vm.run, model_control(), shards_api::image::Ready::OnTime)
+    );
+    let record = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (
+            record.phase,
+            record.image.as_str(),
+            record.allocation,
+            record.exit
+        ),
+        (NodeVmPhase::Ready, vm.image.as_str(), vm.allocation, None)
+    );
+    assert!(owner.records.lock().unwrap().is_empty());
+    assert!(runtime.list().unwrap().is_empty());
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: its HostUse readable, as an image VM's): do boot a node VM, read
+/// what it costs its host, then stop it. Expect its use its run's microVM part, through the same stats as an image
+/// box's; its stop its run's end, `KILL`, kept in its record, Ended; and its use no longer read, its run gone.
+#[test]
+fn w39_a_node_vms_host_use_is_its_runs_and_its_stop_ends_its_record() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    runtime.images.boot_node(&vm).unwrap();
+    let vcpus = vm.allocation.vm_size().unwrap().vcpus;
+    images.run.stats.lock().unwrap().microvm = microvm(Ok(guest_times(vcpus)));
+    let used = runtime.images.host_use_node(vm.run).unwrap();
+    assert_eq!(
+        (used.cpu_ns, used.resident_bytes, used.footprint_bytes),
+        (9_000_000, 1 << 20, 1 << 20)
+    );
+    assert_eq!(
+        used.guest_ns,
+        (1..=u64::from(vcpus))
+            .map(|i| 1_000 * i)
+            .collect::<Vec<_>>()
+    );
+    let exit = runtime.images.stop_node(vm.run).unwrap();
+    assert_eq!(exit, Exit::Signal(Signal::KILL.number()));
+    let record = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (record.phase, record.exit),
+        (NodeVmPhase::Ended, Some(exit))
+    );
+    assert!(runtime.images.host_use_node(vm.run).is_err());
+}
+
+/// Joint plan step 39 (AC-T7.4.1): do boot a node VM that Shards refuses to start. Expect the boot refused in Shards'
+/// words, typed by what failed, and its record Ended, its exit unknown: no run of it held.
+#[test]
+fn w39_a_node_vm_whose_boot_is_refused_ends_its_record_in_shards_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    *images.refuse.lock().unwrap() = Some(ImageRefusal::Boot("no room for the VM".to_owned()));
+    let vm = node_vm();
+    let refused = runtime.images.boot_node(&vm).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("no room for the VM")),
+        "{refused:?}"
+    );
+    let record = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (record.phase, record.exit),
+        (NodeVmPhase::Ended, Some(Exit::Unknown))
+    );
+    assert!(runtime.images.host_use_node(vm.run).is_err());
 }
 
 /// Joint plan step 33's sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8), red first: do create and

@@ -99,10 +99,10 @@ impl GuestRuntime {
         for (id, boxed) in records {
             let boxed = match boxed {
                 Ok(boxed) => boxed,
-                Err(_) => return Err(super::books::uncertain(id)?),
+                Err(_) => return Err(super::books::uncertain(id, "its record can't be read")?),
             };
             if boxed.spec.id != *id {
-                return Err(super::books::uncertain(id)?);
+                return Err(super::books::uncertain(id, "its record names another box")?);
             }
             boxed.spec.check()?;
             let Some(receipt) = boxed.spec.route else {

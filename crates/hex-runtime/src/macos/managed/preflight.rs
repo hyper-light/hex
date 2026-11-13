@@ -153,7 +153,7 @@ impl MacRuntime {
                     records
                         .get(id)
                         .and_then(|record| record.as_ref().ok())
-                        .ok_or_else(|| uncertain(id))?,
+                        .ok_or_else(|| uncertain(id, "its record is gone or can't be read"))?,
                 ),
                 OwnerRef::Pool(pool) => {
                     let generation = *boxed
@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn uncertain(result: Result<(), Refusal>, record: &BoxRecord) -> bool {
-        matches!(result, Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == record.spec.id)
+        matches!(result, Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain, .. }) if id == record.spec.id)
     }
 
     /// AC-T7.4.1: with the Box's launch retained (its scope prepared, before any spawn) and then its

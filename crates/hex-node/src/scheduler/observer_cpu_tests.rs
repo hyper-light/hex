@@ -679,6 +679,7 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
         Refusal::Lifecycle {
             id: BoxId::new("not-a-pool").unwrap(),
             cause: LifecycleCause::Busy,
+            why: None,
         },
     ];
     for why in errors {

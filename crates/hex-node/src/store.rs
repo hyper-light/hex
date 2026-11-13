@@ -49,6 +49,7 @@ use hex_core::record::{BootSession, BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
 
+mod node_vm;
 mod pool;
 use pool::scoped_paths;
 
@@ -352,7 +353,10 @@ impl Store {
             && current.spec.route.and_then(|route| route.backing)
                 != record.spec.route.and_then(|route| route.backing)
         {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "its record names another backing than the one it is put with",
+            ));
         }
         let _backing_phase = self.check_box_backing(record)?;
         self.write(record)
@@ -400,7 +404,10 @@ impl Store {
         match self.get(id)? {
             Some(Ok(record)) if &record.spec.id == id => Ok(Some(record)),
             None => Ok(None),
-            Some(_) => Err(uncertain(id)),
+            Some(_) => Err(uncertain(
+                id,
+                "its record can't be read as its own: unreadable, or another box's",
+            )),
         }
     }
 
@@ -414,14 +421,20 @@ impl Store {
         let _turn = self.claim(&record.spec.id)?;
         let _backing_phase = self.check_box_backing(record)?;
         if record.version != hex_core::record::RECORD_VERSION {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "its record is of another version than this node writes",
+            ));
         }
         record.spec.check()?;
         let Some(mut current) = self.read_lifecycle(&record.spec.id)? else {
             return if record.phase == Phase::Creating {
                 self.write_fresh(record)
             } else {
-                Err(uncertain(&record.spec.id))
+                Err(uncertain(
+                    &record.spec.id,
+                    "it has no record for a Ready or Deleting one to be put over",
+                ))
             };
         };
         if current.version != record.version
@@ -434,14 +447,20 @@ impl Store {
                     | (Phase::Deleting, Phase::Deleting)
             )
         {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "its record's directories or phase can't become the ones put",
+            ));
         }
         if current.native_scope.is_none()
             && managed_scope_required(&current)
             && (current.init != record.init
                 || (current.phase == Phase::Creating && record.phase == Phase::Ready))
         {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "its record names no native scope for its managed init to be put under",
+            ));
         }
         // A VMM's pid/start is introduced while Creating, before its guest is Ready (the
         // Firecracker native create caller). Slot/run are likewise lifetime identities; their
@@ -504,7 +523,10 @@ impl Store {
         if let Some(record) = self.read_lifecycle(id)?
             && record.phase != Phase::Deleting
         {
-            return Err(uncertain(id));
+            return Err(uncertain(
+                id,
+                "its record isn't Deleting, so no delete has proved its cleanup",
+            ));
         }
         self.unlink(id)
     }
@@ -528,7 +550,10 @@ impl Store {
         // Existing update callers change init, exit or abandoned accounting. They cannot introduce
         // or erase a backing reference while owning only a Box turn (source-before-Box ordering).
         if record.spec.route.and_then(|route| route.backing) != source {
-            return Err(uncertain(id));
+            return Err(uncertain(
+                id,
+                "a change of its record would introduce or erase its backing under its turn alone",
+            ));
         }
         self.write(&record)?;
         Ok(true)
@@ -536,13 +561,19 @@ impl Store {
 
     fn write_fresh(&self, record: &BoxRecord) -> Result<(), Refusal> {
         if record.native_scope.is_some() {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "a fresh record names a native scope already",
+            ));
         }
         if !managed_scope_required(record) {
             return self.write(record);
         }
         if record.phase != Phase::Creating {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "a fresh record of a box its managed scope holds isn't Creating",
+            ));
         }
         let scope = fresh_scope()?;
         let started = self.next_start()?;
@@ -931,7 +962,10 @@ impl Store {
         for dir in self.listed() {
             for (id, path) in records_in(&dir, retained)? {
                 if retained && (out.len() >= TURNS || out.contains_key(&id)) {
-                    return Err(uncertain(&id));
+                    return Err(uncertain(
+                        &id,
+                        "the node's retained records name it twice, or more boxes than the store's turns",
+                    ));
                 }
                 let bytes = if retained {
                     let file = File::open(&path)
@@ -990,7 +1024,12 @@ impl Store {
                 .sync_all()
                 .map_err(|e| Refusal::os("flushing the record directory", e))?;
         }
-        #[cfg(not(target_os = "linux"))]
+        // Windows flushes a directory only through a handle opened as FlushFileBuffers asks
+        // (`hex_runtime::windows::sys::flush_directory`); macOS's open for reading flushes it.
+        #[cfg(windows)]
+        hex_runtime::windows::sys::flush_directory(dir)
+            .map_err(|e| Refusal::os("flushing the record directory", e))?;
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         File::open(dir)
             .and_then(|d| d.sync_all())
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
@@ -1084,18 +1123,26 @@ fn lifecycle_fact<T: PartialEq>(
     id: &BoxId,
 ) -> Result<Option<T>, Refusal> {
     match (current, proposed) {
-        (Some(known), Some(other)) if known != other => Err(uncertain(id)),
-        (None, Some(_)) if !introducing => Err(uncertain(id)),
+        (Some(known), Some(other)) if known != other => Err(uncertain(
+            id,
+            "its record holds another value of a fact once written",
+        )),
+        (None, Some(_)) if !introducing => Err(uncertain(
+            id,
+            "a write would introduce a fact its record lacks outside the write that introduces it",
+        )),
         (Some(known), _) => Ok(Some(known)),
         (None, next) => Ok(next),
     }
 }
 
-fn uncertain(id: &BoxId) -> Refusal {
+/// Box `id`'s lifecycle uncertain, in the refusing site's own words (joint plan step 12).
+fn uncertain(id: &BoxId, why: &str) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
             id,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: Some(why.to_owned()),
         },
         Err(error) => error,
     }
@@ -1447,6 +1494,52 @@ mod tests {
         assert_eq!(read(), kept);
     }
 
+    /// Joint plan step 12 (ROOT, 2026-11-13: every Lifecycle Uncertain gets its reason; a bare one cost two diagnoses):
+    /// a store write it can't take is refused Uncertain in the refusing site's own words. Do write a record, then another
+    /// value of a fact it holds, then one of another record version. Expect each refused Uncertain, its words saying
+    /// which: the fact once written, the version this node writes; its message ending in them.
+    #[test]
+    fn w12_a_store_write_it_cant_take_says_why_in_its_own_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut written = record("image-why");
+        written.phase = Phase::Creating;
+        store.put_lifecycle(&written).unwrap();
+        written.phase = Phase::Ready;
+        written.started_from = Some(hex_api::StartedFrom::Restored);
+        store.put_lifecycle(&written).unwrap();
+        let said = |refused: Result<(), Refusal>| match refused {
+            Err(
+                why @ Refusal::Lifecycle {
+                    cause: hex_api::LifecycleCause::Uncertain,
+                    why: Some(_),
+                    ..
+                },
+            ) => why,
+            other => panic!("not refused Uncertain in words: {other:?}"),
+        };
+        let another = said(store.put_lifecycle(&BoxRecord {
+            started_from: Some(hex_api::StartedFrom::Booted),
+            ..written.clone()
+        }));
+        assert!(
+            another
+                .to_string()
+                .ends_with(": its record holds another value of a fact once written"),
+            "{another}"
+        );
+        let versioned = said(store.put_lifecycle(&BoxRecord {
+            version: hex_core::record::RECORD_VERSION.wrapping_add(1),
+            ..written.clone()
+        }));
+        assert!(
+            versioned
+                .to_string()
+                .ends_with(": its record is of another version than this node writes"),
+            "{versioned}"
+        );
+    }
+
     /// Joint plan step 12 (D258; AC-T7.4.1): a Shards image VM's record names the file its run host's diagnostics are
     /// kept in as its start's intent is written (its record's step from Creating to Ready), and the VM adapters' later
     /// writes keep it. Do write a Creating record, then it Ready naming its file; then as a writer that read it before,
@@ -1629,6 +1722,37 @@ mod tests {
             ),
             "each record in its place: the durable one in the state directory, the rest beside the runtime state"
         );
+    }
+
+    /// T-T7.1.2 on every OS: do write, then update, a record naming a directory on disk (no native scope), which must
+    /// outlive the host. Expect: each write flushed, its file and its directory, and the record kept in the state
+    /// directory. Windows refused the directory's flush of a handle opened for reading alone: "Access is denied" (os
+    /// error 5).
+    #[test]
+    fn a_record_with_a_directory_on_disk_is_written_durably_on_every_os() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory on disk, beside this test's binary, else its crate's sources: a host's `/tmp` may be tmpfs.
+        let disk = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_owned))
+            .into_iter()
+            .chain([PathBuf::from(env!("CARGO_MANIFEST_DIR"))])
+            .filter(|d| !on_tmpfs(d))
+            .find_map(|d| tempfile::tempdir_in(d).ok())
+            .unwrap();
+        let store = store_in(dir.path());
+        let mut kept = record("d");
+        kept.dirs = vec![disk.path().join("d")];
+        assert!(must_outlive_host(&kept));
+        assert_eq!(store.put(&kept), Ok(()));
+        assert_eq!(store.syncs(), Syncs { files: 1, dirs: 1 });
+        let bump = |r: &mut BoxRecord| {
+            r.abandoned = r.abandoned.saturating_add(1);
+            true
+        };
+        assert_eq!(store.update(&kept.spec.id, bump), Ok(true));
+        assert_eq!(store.syncs(), Syncs { files: 2, dirs: 2 });
+        assert_eq!(names(&dir.path().join("state")), vec!["d.json".to_owned()]);
     }
 
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one

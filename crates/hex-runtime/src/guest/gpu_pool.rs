@@ -345,7 +345,10 @@ impl GuestRuntime {
         boxed
             .spec
             .route
-            .ok_or(super::books::uncertain(&boxed.spec.id)?)?
+            .ok_or(super::books::uncertain(
+                &boxed.spec.id,
+                "its record routes it on no backing",
+            )?)?
             .check_backing_parts(
                 boxed.spec.allocation.map(|allocation| allocation.cost),
                 key,

@@ -228,11 +228,10 @@ fn a_port_the_relay_has_no_socket_for_is_refused_before_a_lane() {
 
 /// D251: the relay's socket closed while Hex still sends is the lane's reset, never its end in order, and Hex reads
 /// the bytes that came before it, then the cut. Do: the relay writes a line, reads a byte of what Hex sends, and closes;
-/// Hex sends past the lane's window and reads. Expect: the line, then an error that is a reset, not `Ok(0)`. Linux's
-/// alone: the run host's pump that tells the reset is shards-init's, in the Linux guest, and this case's stand-in runs
-/// Shards' pump on the test's own host; on macOS that pump told the socket's end as the lane's end in order before its
-/// writer failed (4 of 4 on the Mac Studio, 2026-11-13), which is the pump's to answer, not the Link's.
-#[cfg(target_os = "linux")]
+/// Hex sends past the lane's window and reads. Expect: the line, then an error that is a reset, not `Ok(0)`. On Linux
+/// and macOS alike: this case's stand-in run host runs Shards' unix-lane pump on the test's own host, which told the
+/// socket's end as the lane's end in order before its writer failed (4 of 4 on the Mac Studio, once under the whole
+/// client suite on Linux) until Shards 8754b451f, vendored with Shards 3114e082f.
 #[test]
 fn a_lane_its_socket_cuts_short_reads_its_bytes_then_the_cut() {
     let dir = socket_dir();
