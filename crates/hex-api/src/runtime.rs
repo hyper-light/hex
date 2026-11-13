@@ -1852,6 +1852,12 @@ pub struct BoxInfo {
     /// inspect says it too. After `published`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<LearnedEnd>,
+    /// Why its run ended where it failed, in its runtime's words (joint plan step 12): a Shards image VM's whose VM, run
+    /// host or guest failed, or whose own command never started (Shards' D249), or whose boot was refused, its exit then
+    /// `Unknown`. Kept in its record, so a restarted node's inspect says it too. After `last_resort`, so absent means
+    /// none (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
