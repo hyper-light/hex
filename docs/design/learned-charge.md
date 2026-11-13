@@ -238,10 +238,11 @@ on hardware (ROOT's fairness run).
 - **Intent first** (ROOT, 2026-11-12: "if the model allows it"; decided so). The learner writes why it ends a VM into
   the VM's record before it ends it (`recorded::charges::LastResort` through `Reach::intend`), so a node that crashes
   between the end and the window's writes still says why on the box. The model allows it on three conditions, each
-  held: (1) the end waits on nothing unbounded: the write waits at most the store's record turn, held only by another
-  write of that record and bounded by its learned patience (`store.turns`, twice the slowest record change, 3.136 ms
-  seeded for a release build: `crates/hex-node/src/store.rs`), and one durable write, within the window whose growth
-  the rule's margin covers (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
+  held: (1) the end waits on nothing but a live holder: the write waits for the store's record turn, held only by
+  another change of that record, this process's own thread, which it follows until it lets go, as every record change
+  does by decision 9's rule (the person's, 2026-11-13: no seed, no doubling; a hold past the slowest seen is told to
+  the census as a run-out, `store.turns`, never refused at a bound of its own; ROOT's item 2b), and one durable write
+  (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
   write that fails: where the intent isn't written (its turn refused, its write failed, the record not that VM's
   lifetime), the VM is ended all the same and why is written after the window, as before, a write that fails kept for
   the next; (3) no record says a VM was ended when it wasn't: an end refused withdraws its intent (written after the
