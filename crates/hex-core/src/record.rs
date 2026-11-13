@@ -90,6 +90,12 @@ pub struct BoxRecord {
     /// (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_from: Option<hex_api::StartedFrom>,
+    /// The file its Shards image VM's run host's diagnostics are kept in, whole (D258's `keep_diagnostics`; joint plan
+    /// step 12), named as its start's intent is written, before its boot: a failed run's `ended` quotes its last bytes,
+    /// and it goes with the box's delete. Outside the spec, so no native commitment covers it. Added within version 1,
+    /// so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<PathBuf>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -259,6 +265,7 @@ impl BoxRecord {
             ended: None,
             retired: false,
             started_from: None,
+            diagnostics: None,
         }
     }
 

@@ -889,6 +889,7 @@ fn configured_guest(
         .with_images(
             hex_runtime::guest::host_images(),
             Ok(hex_runtime::guest::ImageWaits::new()),
+            backend_path(state, "image-diagnostics").map_err(failed)?,
         )
         .with_runtime_cost(cost)
         .map_err(failed)?;

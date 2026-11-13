@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -68,11 +68,14 @@ impl Default for ImageWaits {
 }
 
 /// Shards' image boot as the guest runtime holds it: the booter or why this node has none, its waits or
-/// why it has none, this process's runs, and the host's boot session, which proves a run of an earlier
-/// boot ended.
+/// why it has none, where its runs' diagnostics are kept, this process's runs, and the host's boot session,
+/// which proves a run of an earlier boot ended.
 pub(super) struct ImageBoot {
     images: Result<Arc<dyn Images>, Refusal>,
     waits: Result<ImageWaits, Refusal>,
+    /// The directory each box's run host's diagnostics are kept in, whole, one file each (D258's
+    /// `ImageGuest::keep_diagnostics`), under the node's state.
+    diagnostics: PathBuf,
     /// One for each box with a boot, run or stop of this process; at most a box's every own, so bounded
     /// by the node's boxes ([`crate::MAX_BOXES`]).
     runs: Mutex<BTreeMap<BoxId, Run>>,
@@ -639,15 +642,18 @@ fn guest_pair(kernel: Option<&OsStr>, init: Option<&OsStr>) -> Result<(), Refusa
 impl GuestRuntime {
     /// Shards' image boot (D231) or why this node has none ([`host_images`]), and the waits its calls
     /// make or why there are none: a create is refused with either refusal, so no box exists that this
-    /// node couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6).
+    /// node couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6). Each
+    /// box's run host's diagnostics are kept whole in `diagnostics`, a directory under the node's state.
     pub fn with_images(
         mut self,
         images: Result<Arc<dyn Images>, Refusal>,
         waits: Result<ImageWaits, Refusal>,
+        diagnostics: PathBuf,
     ) -> Self {
         self.image = Some(ImageBoot {
             images,
             waits,
+            diagnostics,
             runs: Mutex::new(BTreeMap::new()),
             session: OnceLock::new(),
         });
