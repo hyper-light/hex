@@ -91,6 +91,10 @@ pub const ENV_CPUS: &str = "HEX_GUEST_CPUS";
 pub const ENV_MEMORY_MIB: &str = "HEX_GUEST_MEMORY_MIB";
 /// Explicit shared Venus enable; absent preserves the CPU-only guest configuration.
 pub const ENV_GPU: &str = "HEX_GUEST_GPU";
+/// The node's guest under shards-init (docs/design/node-under-shards-init.md §4): an Agentfile image of Hex's own
+/// init, pinned by digest, which Shards boots with its nesting grant. It is the other form of the guest to the kernel
+/// and initramfs above, and a node boots one form.
+pub const ENV_IMAGE: &str = "HEX_GUEST_IMAGE";
 
 impl GuestConfig {
     /// The guest named by the environment ([`GuestConfig::from_vars`] over the process's).
@@ -104,7 +108,31 @@ impl GuestConfig {
     /// guessed), and `HEX_GUEST_SHARES` (else [`shares::defaults`]). Every one missing is named in one
     /// refusal, read before anything boots, so an operator fixes them in one go. Shards refuses vCPUs or
     /// memory past the host's (its `Bounds`) when it boots.
+    ///
+    /// A guest under shards-init ([`ENV_IMAGE`]) is refused `Awaits(NestedChannel)` before anything else is read
+    /// or booted: its host would reach its node only through a lane of Shards' agent-control endpoint to the node's
+    /// sockets, which Shards doesn't give yet (docs/design/node-under-shards-init.md §5). Named beside the kernel or
+    /// the initramfs, it is refused naming both forms.
     pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self, Refusal> {
+        if var(ENV_IMAGE).is_some() {
+            let direct: Vec<&str> = [ENV_KERNEL, ENV_INITRD]
+                .into_iter()
+                .filter(|name| var(name).is_some())
+                .collect();
+            if direct.is_empty() {
+                return Err(Refusal::Awaits {
+                    needs: hex_api::Upstream::NestedChannel,
+                });
+            }
+            return Err(Refusal::Invalid {
+                what: "the oci class's guest",
+                why: format!(
+                    "{ENV_IMAGE} and {} are both set: a node boots one form of its guest, the image under \
+                     shards-init or the kernel and initramfs",
+                    direct.join(", ")
+                ),
+            });
+        }
         let needed = [
             ENV_SHARDS_BIN,
             ENV_KERNEL,

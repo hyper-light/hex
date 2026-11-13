@@ -27,7 +27,7 @@ use hex_sim::model::Class;
 
 use super::Node;
 use crate::recorded::charges::{
-    LastResort, Lifetime, Reach, Scope, Writes, record_last_resort, write_ends,
+    LastResort, Lifetime, Reach, Scope, Writes, bounds, record_last_resort, write_ends,
 };
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
@@ -169,21 +169,6 @@ pub(super) struct Learner {
     fault: Option<Refusal>,
     /// The last resort (C5), which ends a VM by killing its cgroup.
     last: LastResort,
-}
-
-/// The most VMs a machine of `machine` could hold, each at least the least reservation placement takes
-/// (`MIN_CPU_MILLI` of its CPU, `MIN_MEMORY` of its memory).
-fn population(machine: CapacityResources) -> Result<usize, Refusal> {
-    let cpus = machine
-        .cpu_milli
-        .checked_div(u64::from(hex_api::MIN_CPU_MILLI));
-    let memory = machine.mem_bytes.checked_div(hex_api::MIN_MEMORY);
-    cpus.zip(memory)
-        .and_then(|(cpus, memory)| usize::try_from(cpus.min(memory)).ok())
-        .ok_or_else(|| Refusal::Invalid {
-            what: "a microVM's learned charge",
-            why: "the machine's population passes a usize".into(),
-        })
 }
 
 /// A VM's vCPUs: its admitted guest's CPU in whole CPUs, rounded up.
@@ -361,21 +346,13 @@ impl Learner {
             what: "a microVM fleet's parent cgroup",
             why: format!("{} has no parent", fleet.display()),
         })?;
-        let bound = population(machine)?;
+        let bounds = bounds(machine)?;
         let root = parent.parent().ok_or_else(|| Refusal::Invalid {
             what: "a node's root cgroup",
             why: format!("{} has no parent", parent.display()),
         })?;
         Ok(Self {
-            node: charge::Node::new(
-                WINDOW,
-                machine,
-                charge::Bounds {
-                    vms: bound,
-                    classes: bound,
-                },
-            )
-            .map_err(refused)?,
+            node: charge::Node::new(WINDOW, machine, bounds).map_err(refused)?,
             vms: BTreeMap::new(),
             machine: machine.cpu_milli,
             fleet: (BoxCgroup::at(fleet.to_path_buf()), Vec::new()),
@@ -384,7 +361,7 @@ impl Learner {
             oci: root.join(super::OCI_BOXES),
             rooms: BTreeMap::new(),
             fault: None,
-            last: LastResort::new(bound.min(MAX_LEARNED_HOLDINGS)),
+            last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
         })
     }
 
