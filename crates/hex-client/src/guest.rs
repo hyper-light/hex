@@ -618,6 +618,7 @@ impl<W: Waits> Transport for Stream<W> {
             token: self.token,
             exec,
             streams,
+            setup: self.link.setup_bound(),
         })
     }
 
