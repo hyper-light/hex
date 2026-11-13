@@ -1626,9 +1626,10 @@ fn a_message_of_another_wire_is_refused_naming_both_wires() {
 }
 
 /// One wire (the lead's word of 2026-11-09): the identity is FNV-1a of the wire definitions' source, this module's
-/// and the stream module's, with no number to bump, and a checkout's line endings don't split it. Do: digest the two
-/// files as read now, then with every line ended `\r\n`. Expect: both [`IDENTITY`]; and a source with one byte more
-/// another identity.
+/// and the stream module's, with no number to bump, and a checkout's line endings don't split it. Do: digest the
+/// sources as read now, then with every line ended `\r\n` (a CRLF checkout's, Windows' by default), then with every
+/// line ended `\n` alone (an LF checkout's). Expect: each [`IDENTITY`]; and a source with one byte more another
+/// identity.
 #[test]
 fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1665,6 +1666,11 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     };
     assert_eq!(
         digest(&sources.iter().map(|s| crlf(s)).collect::<Vec<_>>()),
+        IDENTITY
+    );
+    let lf = |bytes: &[u8]| -> Vec<u8> { bytes.iter().copied().filter(|&b| b != b'\r').collect() };
+    assert_eq!(
+        digest(&sources.iter().map(|s| lf(s)).collect::<Vec<_>>()),
         IDENTITY
     );
     for changed in 0..sources.len() {
