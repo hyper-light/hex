@@ -228,14 +228,12 @@ fn a_port_the_relay_has_no_socket_for_is_refused_before_a_lane() {
 
 /// D251: the relay's socket closed while Hex still sends is the lane's reset, never its end in order, and Hex reads
 /// the bytes that came before it, then the cut. Do: the relay writes a line, reads a byte of what Hex sends, and closes;
-/// Hex sends past the lane's window and reads. Expect: the line, then an error that is a reset, not `Ok(0)`.
-///
-/// Ignored on every OS until Hex vendors Shards 8754b451f (ROOT, 2026-11-13): the vendored unix-lane pump can tell the
-/// socket's end as the lane's end in order before its writer fails, a race of the pump's, not the Link's (4 of 4 on the
-/// Mac Studio; once under the whole client suite on Linux, at b936eb2e). Shards fixed it at 8754b451f. With goal 12's
-/// re-vendor that collects it, the case comes back on Linux and macOS, red first if anything is left.
+/// Hex sends past the lane's window and reads. Expect: the line, then an error that is a reset, not `Ok(0)`. Linux's
+/// alone: the run host's pump that tells the reset is shards-init's, in the Linux guest, and this case's stand-in runs
+/// Shards' pump on the test's own host; on macOS that pump told the socket's end as the lane's end in order before its
+/// writer failed (4 of 4 on the Mac Studio, 2026-11-13), which is the pump's to answer, not the Link's.
+#[cfg(target_os = "linux")]
 #[test]
-#[ignore = "Shards' unix-lane pump tells the socket's end before its writer's reset (D251), fixed at Shards 8754b451f; back with the re-vendor that collects it"]
 fn a_lane_its_socket_cuts_short_reads_its_bytes_then_the_cut() {
     let dir = socket_dir();
     let listener = listen(dir.path(), stream::CONTROL_PORT);
