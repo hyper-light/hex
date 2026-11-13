@@ -2,9 +2,9 @@
 
 Each harness VM Hex launches reaches what its grants name and nothing else. It publishes nothing they don't
 name, and Hex's record of the VM shows every grant. This record states the grant model, who enforces it, what
-Hex can program through Shards today (`743c5b32`, which holds Shards' step 9: destinations, D236, and each
-published port's receivers, D231's `Bound::to`; each member held apart, D246; a run's network kept, D250) and what
-still waits on Shards. Decided by goal 15 with Hex's lead,
+Hex can program through Shards today (the revision vendor/MANIFEST.toml pins, `1389dc0b` as this was reviewed, which
+holds Shards' step 9: destinations, D236, and each published port's receivers, D231's `Bound::to`; each member held
+apart, D246; a run's network kept, D250) and what still waits on Shards. Decided by goal 15 with Hex's lead,
 2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
 VMs" (joint plan kiln `01a1cd8e862e7169a074db3d5fa33f3d`, "Decided by the person" 2); its ruling on step 9's
 destinations (N4) and receivers (N6) followed the same day.
@@ -17,7 +17,7 @@ Hex's record of the VM".
 ## N1. The grant: who, to whom, which ports, which way
 
 Default deny is Shards' rule as well as this step's: "a network flow that no directive explicitly grants does
-not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `743c5b32`).
+not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `1389dc0b`).
 A box's grants are a list of `hex_api::Grant` (`crates/hex-api/src/grants.rs`). The variant is the way:
 
 | Grant | Who | To whom | Ports | Way |
@@ -161,7 +161,7 @@ What would falsify N3:
 Either would make Hex refuse that grant typed until the interface is exact. Neither would make Hex build its own
 enforcer.
 
-## N4. What Hex programs, through Shards `743c5b32`'s image boot (D231) and its hold of each member apart (D246)
+## N4. What Hex programs, through Shards' image boot (D231) and its hold of each member apart (D246)
 
 Hex boots harness images through `shards_api::image::ImageShards::boot`. The run host, `shards api-run`, gives
 the VM a NIC and its network process where something passes the microVM (a published port, or a narrowing that
@@ -220,7 +220,7 @@ after a boot, so it gave Hex no way to keep a destination for some members and n
 3. **Chosen: each member's reach in the narrowing, held by the run host.** Built first as Hex's recorded change
    0002 to its vendored Shards (Ada, 2026-11-12: an upstream blocker is fixed in Hex's vendored copy and carried to
    Shards' ROOT), it is upstream as D246 (`7a4ef5c02`), which holds the remote MCP servers kept beside the
-   destinations, and Hex vendors it at `743c5b32` with its change dropped. The orchestrator names what each member may
+   destinations, and Hex vendors it with its change dropped. The orchestrator names what each member may
    reach (`Narrowing::members`, `MemberReach`). The run host, from the Agentfile it already reads, refuses the boot
    before the VM starts unless every member the image declares, named or not, reaches exactly what it is let:
    `named(X) ∩ K` equal to the member's entry, sorted, each once, a member in no entry nothing (`api_run`'s
@@ -234,11 +234,11 @@ host from both sides (a member that would reach more than its grants, or less, r
 reaches Hex's start typed, through shards-api's `ImageRefusal`: a widening `Invalid` past the image's grants, the
 image's `Invalid` naming the image (a grant for a member it doesn't declare), the request's `Invalid` naming the
 request (Hex names each member once, which the property test pins). The channel is at version 13 for every request,
-the hold a flag in it (D246's version 12, D247's rate 13), so the run host must be Shards `743c5b32` or later, as
-Hex's `shards` built by `scripts/shards-gpu/build.sh` at the vendored revision is: an older one refuses the request
-by its version (`Cause::Request`, naming both versions) and never runs it.
+the hold a flag in it (D246's version 12, D247's rate 13), so the run host must speak version 13, as Hex's `shards`
+built by `scripts/shards-gpu/build.sh` at the vendored revision does: an older one refuses the request by its
+version (`Cause::Request`, naming both versions) and never runs it.
 
-| A box's grants | What Shards `743c5b32` holds | Hex |
+| A box's grants | What Shards holds (D236, D246, D250) | Hex |
 |---|---|---|
 | none | no NIC where the image links no member past the microVM (`network none`); else a NIC whose network process, told nothing kept, lets nothing past (D250) | programmed: nothing kept, no publish, every member reaching nothing |
 | `Publish` of a member's port at a host address, on any run | `Publish { guest_port, proto, host: Some(addr), host_port }`, for a port the image gives a member coming in, or (a run with a command of its own) any port the image doesn't declare as egress, which then reaches the command (D122) | programmed; held to the receiver Shards names as the boot returns (N6) |
@@ -359,7 +359,7 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
     where it reaches the run's own command;
   - a publish to a member the image doesn't run stops the VM.
 - Conformance `HEX-IMG-7`, which the simulator passes.
-- Shards' own tests, upstream at `743c5b32`: D246's (the agentfile crate's `each_member_reaches_its_own_names`, the
+- Shards' own tests, upstream at the vendored revision: D246's (the agentfile crate's `each_member_reaches_its_own_names`, the
   wire's `each_members_reach_rides_the_request_last`, `api_run::tests::each_member_is_held_to_its_reach_of_the_names_kept`)
   and D250's (`api_run::tests::a_run_keeping_nothing_past_the_microvm_has_its_members_network_and_no_policy`).
 - `crates/hex-cli/tests/image_grants_real.rs`, without a VM, on Linux, macOS and Windows: the grants probe
@@ -391,7 +391,7 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 
 ## Sources
 
-- Shards at `743c5b32`:
+- Shards at `1389dc0b`:
   - `docs/design/architecture.md`: D31, D59 parts seven, ten and eleven, D109, D122, D124, D192, D231, D236, D246,
     D247, D250;
   - `docs/research/measurements/s9-grants-v1/README.md`, step 9's record;
