@@ -2160,3 +2160,61 @@ mod output_end {
         agent.join().unwrap();
     }
 }
+
+/// A stream cut short (joint plan step 4, route (b): ROOT's decision of 2026-11-12, docs/design/hex-quic.md Q11).
+mod cut_short {
+    use super::*;
+
+    /// AC-T7.4.1 (route (b)): exec a program whose stdout is the caller's own pipe, through a stand-in agent that writes
+    /// part of a line on it and, once the caller has read that part, resets the connection (an abortive close, RST),
+    /// then says the program exited 0. Expect the caller's pipe to read the part, then its end, and the program's end
+    /// to be refused Broken, naming stdout: a stream cut short is told, never read as complete.
+    #[test]
+    fn a_carried_stream_cut_short_ends_its_program_broken() {
+        let (control, stdio, link) = listeners();
+        let (read_part, part_read) = std::sync::mpsc::channel::<()>();
+        let agent = std::thread::spawn(move || {
+            let (mut conn, _) = control.accept().unwrap();
+            hello(&mut conn);
+            let (h, _) = next_request(&mut conn);
+            let (mut out, _) = stdio.accept().unwrap();
+            let mut name = [0u8; stream::NAME_BYTES];
+            out.read_exact(&mut name).unwrap();
+            send_answer(&mut conn, h.id, &Answer::Started { pid: 11 });
+            out.write_all(b"par").unwrap();
+            part_read.recv().unwrap();
+            rustix::net::sockopt::set_socket_linger(&out, Some(Duration::ZERO)).unwrap();
+            drop(out);
+            send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
+            // Held open until the client has its end, as an agent's connection is.
+            let _ = next_request(&mut conn);
+        });
+        let client = Client::connect(link).unwrap();
+        let (mut out_r, out_w) = std::io::pipe().unwrap();
+        let mut proc = client
+            .exec(
+                &BoxId::new("b").unwrap(),
+                Program::of(&["p"]),
+                Stdio {
+                    stdout: Some(out_w),
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let mut part = [0u8; 3];
+        out_r.read_exact(&mut part).unwrap();
+        assert_eq!(&part, b"par");
+        read_part.send(()).unwrap();
+        let mut rest = Vec::new();
+        out_r.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "{rest:?}");
+        let ended = proc.wait_for(Duration::MAX);
+        assert!(
+            matches!(&ended, Err(Refusal::Broken(why)) if why.contains("stdout")),
+            "{ended:?}"
+        );
+        drop(proc);
+        let _ = client.inspect(&BoxId::new("b").unwrap());
+        agent.join().unwrap();
+    }
+}
