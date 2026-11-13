@@ -777,6 +777,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
             }),
             3,
         ),
+        (206, Request::Call(Call::Links), 0),
     ]
 }
 
@@ -1072,6 +1073,33 @@ fn answers() -> Vec<(u64, Answer)> {
     out.push((
         201,
         Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+    ));
+    // TLS_AES_256_GCM_SHA384 (0x1302, RFC 8446 §B.4) under SecP384r1MLKEM1024 (0x11ed, IANA's TLS Supported
+    // Groups), and a link whose handshake named no group, in a part with more to come.
+    out.push((
+        204,
+        Answer::Links {
+            links: vec![
+                Link {
+                    peer: "kiln.links.test".to_owned(),
+                    suite: 0x1302,
+                    group: Some(0x11ed),
+                },
+                Link {
+                    peer: "other.links.test".to_owned(),
+                    suite: 0x1302,
+                    group: None,
+                },
+            ],
+            more: true,
+        },
+    ));
+    out.push((
+        204,
+        Answer::Links {
+            links: Vec::new(),
+            more: false,
+        },
     ));
     out
 }
@@ -1664,6 +1692,48 @@ fn a_long_list_is_split_into_messages_within_the_bound() {
     );
 }
 
+/// HEX-QUIC-30 (docs/design/hex-quic.md Q12): a node's links report longer than one message carries is split as a
+/// list is, each message within the bound and each but the last marked `more`, and the parts read back as the whole
+/// report, in order. Do: split 2,000 links with 253-byte names, and none. Expect: more than one part, each within the
+/// bound, read back whole; none as one part.
+#[test]
+fn hex_quic_30_a_long_links_report_is_split_into_messages_within_the_bound() {
+    let all: Vec<Link> = (0..2_000)
+        .map(|n| Link {
+            peer: format!("{n:06}-{}", "l".repeat(246)),
+            suite: 0x1302,
+            group: Some(0x11ed),
+        })
+        .collect();
+    let parts = links(10, &all, MAX_MESSAGE).unwrap();
+    assert!(parts.len() > 1, "2,000 links fit one message");
+    let mut back = Vec::new();
+    for (n, bytes) in parts.iter().enumerate() {
+        assert!(
+            bytes.len() <= MAX_MESSAGE,
+            "part {n} is {} bytes",
+            bytes.len()
+        );
+        match read_answer(&received(bytes, 0), MAX_MESSAGE).unwrap() {
+            (Header { id: 10, .. }, Answer::Links { links, more }) => {
+                assert_eq!(more, n + 1 < parts.len(), "part {n}'s more");
+                back.extend(links);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(back, all);
+    let one = links(10, &[], MAX_MESSAGE).unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(
+        read_answer(&received(&one[0], 0), MAX_MESSAGE).unwrap().1,
+        Answer::Links {
+            links: Vec::new(),
+            more: false
+        }
+    );
+}
+
 /// HEX-SOCK-1: every truncation of every request and answer is refused, by type, never a panic.
 #[test]
 fn every_truncation_is_refused() {
@@ -1790,7 +1860,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0018, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0019, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();

@@ -160,6 +160,8 @@ mod kind {
     pub const BACKING_OFFER: u16 = 0x800f;
     pub const BACKING_USAGE: u16 = 0x0016;
     pub const MEMBER: u16 = 0x0017;
+    pub const LINKS: u16 = 0x0018;
+    pub const LINKS_ANSWER: u16 = 0x8010;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -256,6 +258,9 @@ pub enum Call {
         streams: Streams,
         ask: Streams,
     },
+    /// The node's links over QUIC (docs/design/hex-quic.md Q12): answered [`Answer::Links`], refused by type where the
+    /// node serves no QUIC listener.
+    Links,
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -336,6 +341,24 @@ pub enum Answer {
     Capacity(Option<Capacity>),
     PhysicalReport(PhysicalReport),
     BackingOffer(BackingOffer),
+    /// links': each peer connected to the node's QUIC endpoint, in as many messages as they need ([`links`]), all
+    /// with the call's id, each but the last with `more`.
+    Links {
+        links: Vec<Link>,
+        more: bool,
+    },
+}
+
+/// A peer's connection to the node over QUIC, as the node's own TLS negotiated it (docs/design/hex-quic.md Q12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// The name the peer's certificate carries, which kiln's CA bound at its enrollment.
+    pub peer: String,
+    /// The TLS 1.3 cipher suite, its value in IANA's TLS Cipher Suites registry (RFC 8446 §B.4).
+    pub suite: u16,
+    /// The key exchange group, its value in IANA's TLS Supported Groups registry (RFC 8446 §4.2.7), where the
+    /// handshake named one.
+    pub group: Option<u16>,
 }
 
 /// A Shards guest's identity and the names of an exec's caller-owned streams (HEX-RT-17).
@@ -660,6 +683,11 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 })?;
             }
         }
+        Answer::Links { links, more } => {
+            w.header(kind::LINKS_ANSWER, id);
+            w.bool(*more);
+            w.list(links, put_link)?;
+        }
     }
     w.done()
 }
@@ -697,27 +725,51 @@ fn snapshot(
 /// message but the last marked `more`, so a node holding more boxes than one message carries still
 /// answers a list whole. An empty list is one message.
 pub fn boxes(id: u64, infos: &[BoxInfo], bound: usize) -> Result<Vec<Vec<u8>>, Fault> {
-    // A message's bytes before its boxes: the header, `more` and the list's count.
+    parts(id, infos, bound, put_info, |infos, more| Answer::Boxes {
+        infos,
+        more,
+    })
+}
+
+/// A links answer as messages of at most `bound` bytes each, split as [`boxes`] splits a list: a node's connections
+/// bound admits more peers than one message names.
+pub fn links(id: u64, links: &[Link], bound: usize) -> Result<Vec<Vec<u8>>, Fault> {
+    parts(id, links, bound, put_link, |links, more| Answer::Links {
+        links,
+        more,
+    })
+}
+
+/// `items` as `whole`'s answers of at most `bound` bytes each: as many in each as fit, every one but the last marked
+/// `more`; none is one answer.
+fn parts<T: Clone>(
+    id: u64,
+    items: &[T],
+    bound: usize,
+    put: fn(&mut Writer, &T) -> Result<(), Fault>,
+    whole: fn(Vec<T>, bool) -> Answer,
+) -> Result<Vec<Vec<u8>>, Fault> {
+    // A message's bytes before its items: the header, `more` and the list's count.
     const OVERHEAD: usize = HEADER_BYTES + 1 + 4;
     let room = bound.checked_sub(OVERHEAD).ok_or(Fault::Oversized {
         bytes: OVERHEAD,
         bound,
     })?;
-    let mut parts: Vec<Vec<BoxInfo>> = vec![Vec::new()];
+    let mut parts: Vec<Vec<T>> = vec![Vec::new()];
     let mut used = 0usize;
-    for info in infos {
+    for item in items {
         let mut w = Writer::new(room);
-        put_info(&mut w, info)?;
+        put(&mut w, item)?;
         let size = w.done()?.len();
         let fits = used.checked_add(size).filter(|u| *u <= room);
         match (fits, parts.last_mut()) {
             (Some(u), Some(part)) => {
                 used = u;
-                part.push(info.clone());
+                part.push(item.clone());
             }
             _ => {
                 used = size;
-                parts.push(vec![info.clone()]);
+                parts.push(vec![item.clone()]);
             }
         }
     }
@@ -725,16 +777,7 @@ pub fn boxes(id: u64, infos: &[BoxInfo], bound: usize) -> Result<Vec<Vec<u8>>, F
     parts
         .into_iter()
         .enumerate()
-        .map(|(n, infos)| {
-            answer(
-                id,
-                &Answer::Boxes {
-                    infos,
-                    more: n < last,
-                },
-                bound,
-            )
-        })
+        .map(|(n, items)| answer(id, &whole(items, n < last), bound))
         .collect()
 }
 
@@ -835,6 +878,7 @@ fn parse_request(
         kind::LIST => Request::Call(Call::List),
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
         kind::NETNS => Request::Call(Call::Netns),
+        kind::LINKS => Request::Call(Call::Links),
         kind::KILL => Request::Call(Call::Kill {
             exec: r.u64().map_err(bad)?,
         }),
@@ -1047,6 +1091,10 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             };
             Answer::Netns(counts)
         }
+        kind::LINKS_ANSWER => Answer::Links {
+            more: r.bool("more")?,
+            links: r.list(link)?,
+        },
         kind::GIVEN => {
             let pid = r.u32()?;
             let given = r.u8().and_then(Streams::of)?;
@@ -1138,6 +1186,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::RELEASE_BACKING => "a release backing",
         kind::BACKING_USAGE => "a backing usage",
         kind::MEMBER => "a member",
+        kind::LINKS => "a links",
         _ => "a request",
     }
 }
@@ -1230,6 +1279,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Netns => {
             w.header(kind::NETNS, id);
+            Ok(())
+        }
+        Call::Links => {
+            w.header(kind::LINKS, id);
             Ok(())
         }
         Call::Kill { exec } => {
@@ -2537,6 +2590,21 @@ fn class(r: &mut Reader<'_>) -> Result<Class, Fault> {
         3 => Ok(Class::Shards),
         t => Err(Fault::value("class", format!("variant {t}"))),
     }
+}
+
+fn put_link(w: &mut Writer, link: &Link) -> Result<(), Fault> {
+    w.string(&link.peer)?;
+    w.u16(link.suite);
+    w.option(link.group, Writer::u16);
+    Ok(())
+}
+
+fn link(r: &mut Reader<'_>) -> Result<Link, Fault> {
+    Ok(Link {
+        peer: r.string("a link's peer")?,
+        suite: r.u16()?,
+        group: r.option(Reader::u16)?,
+    })
 }
 
 fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {

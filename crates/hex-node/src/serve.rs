@@ -420,6 +420,13 @@ pub trait Os: Send + Sync + 'static {
     fn watch_source(&self, handle: Handle<'_>, token: u64, write: bool) -> Result<(), Refusal>;
     /// Stops watching a host's own connection.
     fn unwatch_source(&self, handle: Handle<'_>, token: u64);
+    /// The node's links over QUIC ([`Call::Links`]): a node serving this OS's socket alone has no QUIC listener.
+    fn links(&self) -> Result<Vec<wire::Link>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "links",
+            why: "this node serves no QUIC listener (`hex node --quic`)".into(),
+        })
+    }
 }
 
 impl<O: Os> Os for Arc<O> {
@@ -480,6 +487,9 @@ impl<O: Os> Os for Arc<O> {
     }
     fn unwatch_source(&self, handle: Handle<'_>, token: u64) {
         (**self).unwatch_source(handle, token)
+    }
+    fn links(&self) -> Result<Vec<wire::Link>, Refusal> {
+        (**self).links()
     }
 }
 
@@ -2231,6 +2241,18 @@ impl<O: Os> Shared<O> {
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
             Call::Netns => host.netns().map(Answer::Netns),
+            // The endpoint's links at one moment, in as many parts as they need.
+            Call::Links => {
+                let links = self.os.links();
+                self.done(conn)?;
+                return match links {
+                    Ok(links) => {
+                        let parts = wire::links(header.id, &links, self.limits.message_bytes);
+                        self.parts(conn, header, "links", parts)
+                    }
+                    Err(r) => self.answer(conn, header.id, &Answer::Refused(r)),
+                };
+            }
         };
         reply(answer.unwrap_or_else(Answer::Refused))
     }
@@ -2395,14 +2417,27 @@ impl<O: Os> Shared<O> {
         header: Header,
         infos: &[hex_api::BoxInfo],
     ) -> Result<(), Refusal> {
-        let parts = match wire::boxes(header.id, infos, self.limits.message_bytes) {
+        let parts = wire::boxes(header.id, infos, self.limits.message_bytes);
+        self.parts(conn, header, "list", parts)
+    }
+
+    /// An answer in `parts` ([`wire::boxes`], [`wire::links`]), each sent once the one before has gone; one that
+    /// couldn't be written is refused, naming `what`.
+    fn parts(
+        &self,
+        conn: &Conn<O>,
+        header: Header,
+        what: &str,
+        parts: Result<Vec<Vec<u8>>, wire::Fault>,
+    ) -> Result<(), Refusal> {
+        let parts = match parts {
             Ok(parts) => parts,
             Err(fault) => {
                 return self.answer(
                     conn,
                     header.id,
                     &Answer::Refused(Refusal::Broken(format!(
-                        "the node agent's list couldn't be written: {fault}"
+                        "the node agent's {what} couldn't be written: {fault}"
                     ))),
                 );
             }
