@@ -24,4 +24,7 @@ case $target in
 *-windows-*) zig_target=$arch-windows-gnu ;;
 *) echo "zig-cc: no zig target for '$target'" >&2; exit 2 ;;
 esac
-exec zig cc -target "$zig_target" "$@"
+# zig cc turns UBSan on for C it compiles unoptimized (cc-rs's -O0, and AWS-LC's jitterentropy, which aws-lc-sys
+# always compiles so), and only zig's own link brings UBSan's runtime: linked by rust-lld, a musl build of hex then
+# fails on undefined __ubsan_handle_* (Shards' scripts/zig-cc, 279eaa487). So it is always off.
+exec zig cc -target "$zig_target" -fno-sanitize=undefined "$@"
