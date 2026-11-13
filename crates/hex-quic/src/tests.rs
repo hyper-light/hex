@@ -497,7 +497,7 @@ mod silent {
     }
 
     /// What `owner` holds now, read without waiting (its socket non-blocking) and kept in `got`: whether its end has
-    /// come (an end of input, or a reset).
+    /// come (an end of input, a reset, or the cut of its connection's close, Q11).
     fn drain(owner: &mut DuplexOwner, got: &mut Vec<u8>) -> bool {
         let mut buf = [0u8; 64];
         loop {
@@ -506,7 +506,14 @@ mod silent {
                 Ok(n) => got.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return false,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == ErrorKind::ConnectionReset => return true,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return true;
+                }
                 Err(e) => panic!("reading a bridged socket: {e}"),
             }
         }

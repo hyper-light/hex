@@ -298,3 +298,36 @@ at its handshake rate. Exporting the count is a metric, to agree with kiln's Obs
 
 **Falsified by** a peer the endpoint doesn't name holding one of its connections, or a named holder refused for room
 an unnamed peer took (`hex-node` `scheduler::capacity_lane_tests::a_peer_the_lane_doesnt_name_holds_none_of_its_connections`).
+
+## Q11. A stream cut short is told as cut
+
+A connection gone before its peer's End, by a reset or the link's end, is cut short: hex-quic's `Conn` reads the bytes
+that came and then the error (`conn.rs` `take`). The bridge (Q3) gives its owner one end of a local socket pair, and a
+socket pair carries no reset. Linux reports `ECONNRESET` to an AF_UNIX peer only when the closing socket's receive queue
+still holds unread bytes (net/unix/af_unix.c, `unix_release_sock`), and XNU reports a disconnect as an end
+(bsd/kern/uipc_usrreq.c, `unp_disconnect`). So the bridge ended its owner's socket as cleanly for a cut as for an End,
+and a truncated stdout read as complete. Over vsock the kernel reports the reset, but hex-client's copy of a carried
+stream swallowed read errors (`copy.rs`: "there is no one else to tell"), so a carried stream cut short read as complete
+there too.
+
+**Chosen** (route (b); ROOT, 2026-11-12). The bridge records the cut, the error its connection's read ended with, as it
+ends the owner's socket. The owner's end that `link::Link` dials (`bridge::Bridged`) reads the bytes that came, then
+that error (`ConnectionReset` for a reset, `ConnectionAborted` for the link's close), as a vsock socket reads a reset.
+hex-client's own reads of a bridged stream (the control connection, a carried stream's copy, staging) see the cut so.
+To follow in hex-client: the copy hands its outcome on instead of swallowing it, and the exec's `Proc` ends
+`Refusal::Broken` naming the stream that was cut, for a carried stream and for an asked one, whose socket the caller reads
+itself. `bridge::socket`, which hex-node's staging server reads, keeps a clean end.
+
+**Alternatives.**
+- Route (a): loopback TCP pairs on Unix too (Windows' adapter), closed with `SO_LINGER` at zero on a cut, so the reset
+  (RFC 9293 §3.10.5's ABORT) reads as `ECONNRESET` after the bytes before it. It would also remove XNU's lost
+  half-close wakeup (Shards M236: no TCP reader of 50,000 asleep). Rejected for its costs. Each open bridge holds two
+  ports of the dynamic range (16,384, RFC 6335 §6). Each normal close leaves one side in TIME-WAIT for twice the MSL
+  (RFC 9293 §3.6), 30 s on macOS (`net.inet.tcp.msl`, 15,000 ms; its ports 49152 to 65535), which caps a client at about 16,384 / 30 s, 546 closes a
+  second, less the bridges open. A Unix socket pair holds two descriptors and no port.
+- Closing the owner's socket with unread bytes, Linux's reset: Linux's alone, and only with bytes the bridge can't put
+  there.
+- A marker in the stream: the stream carries a program's bytes as they are, so no byte is free to mean "cut".
+
+**Falsified by** a stream cut short whose owner reads a clean end (`tests::ac_t7_4_1_a_stream_cut_short_reads_as_cut`),
+or, once hex-client's part lands, a program whose stream was cut short ending without `Refusal::Broken`.

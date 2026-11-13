@@ -3,12 +3,16 @@
 //! one a direction with one frame's buffer, copy between the pair's other end and the connection. Each ends on a
 //! fact: the owner's close, the peer's End, or the connection's end. The bridge lasts as long as its connection:
 //! once both halves have ended, or the connection is gone, both threads end and the pair's other end closes, so the
-//! owner's socket ends both ways however its halves stood (AC-T7.4.1, HEX-QUIC-25 B3).
+//! owner's socket ends both ways however its halves stood (AC-T7.4.1, HEX-QUIC-25 B3). A socket pair carries no reset,
+//! so a connection cut short (gone before its peer's End) ends the owner's socket as cleanly as an End does; the bridge
+//! records the cut, and the owner's end [`bridged`] gives reads it after the bytes that came before it (Q11).
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use hex_client::guest::{Duplex, DuplexOwner, Handle, own_duplex};
 use hex_core::lanes::{DATA_BOUND, Why};
 
 use crate::Conn;
@@ -48,18 +52,99 @@ fn pair() -> io::Result<(Local, Local)> {
     ))
 }
 
-/// `conn` as a local stream socket: the owner's end, its bytes the connection's.
+/// `conn` as a local stream socket: the owner's end, its bytes the connection's. Its reads end cleanly whatever ended
+/// the connection; [`bridged`]'s tell a cut.
 pub fn socket(conn: Conn) -> io::Result<Local> {
+    bridged(conn).map(|bridged| bridged.sock)
+}
+
+/// What cut a bridged connection short: the error its connection's read ended with before the peer's End (a reset,
+/// the link's end), recorded once, as the bridge ends the owner's socket.
+#[derive(Clone, Default)]
+struct Cut(Arc<OnceLock<(io::ErrorKind, String)>>);
+
+impl Cut {
+    fn error(&self) -> Option<io::Error> {
+        self.0
+            .get()
+            .map(|(kind, why)| io::Error::new(*kind, why.clone()))
+    }
+}
+
+/// The owner's end of a bridged connection, read as the connection is: the bytes that came, then its End, or the
+/// error that cut it short, which the socket pair alone would read as an End.
+pub(crate) struct Bridged {
+    sock: Local,
+    cut: Cut,
+}
+
+/// `conn` as the owner's end of a bridge that tells a cut.
+pub(crate) fn bridged(conn: Conn) -> io::Result<Bridged> {
     let (owner, ours) = pair()?;
     let conn = Arc::new(conn);
+    let cut = Cut::default();
     let up = (Arc::clone(&conn), ours.try_clone()?);
     std::thread::Builder::new()
         .name("hex-quic-up".to_owned())
         .spawn(move || upward(&up.0, up.1))?;
+    let recorded = cut.clone();
     std::thread::Builder::new()
         .name("hex-quic-down".to_owned())
-        .spawn(move || downward(&conn, ours))?;
-    Ok(owner)
+        .spawn(move || downward(&conn, ours, &recorded))?;
+    Ok(Bridged { sock: owner, cut })
+}
+
+impl Read for Bridged {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.sock.read(buf)?;
+        if n == 0
+            && !buf.is_empty()
+            && let Some(cut) = self.cut.error()
+        {
+            return Err(cut);
+        }
+        Ok(n)
+    }
+}
+
+impl Write for Bridged {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.sock.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sock.flush()
+    }
+}
+
+impl Duplex for Bridged {
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(Bridged {
+            sock: Local::try_clone(&self.sock)?,
+            cut: self.cut.clone(),
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        Local::shutdown(&self.sock, how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        Local::set_write_timeout(&self.sock, timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        Local::set_read_timeout(&self.sock, timeout)
+    }
+
+    fn handle(&self) -> Handle<'_> {
+        Duplex::handle(&self.sock)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        Local::set_nonblocking(&self.sock, on)
+    }
 }
 
 /// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
@@ -95,9 +180,10 @@ fn upward(conn: &Conn, mut from: Local) {
     }
 }
 
-/// What the peer sends, to the owner; its End is the owner's end of input. It stays until the connection is done
-/// both ways or gone, so the connection's end ends [`upward`] too, whichever half ended first.
-fn downward(conn: &Conn, mut to: Local) {
+/// What the peer sends, to the owner; its End is the owner's end of input, and a cut its cut, recorded before the
+/// owner's socket ends. It stays until the connection is done both ways or gone, so the connection's end ends
+/// [`upward`] too, whichever half ended first.
+fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         match conn.read(&mut buf, None) {
@@ -115,7 +201,8 @@ fn downward(conn: &Conn, mut to: Local) {
                     return;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                let _ = cut.0.set((e.kind(), e.to_string()));
                 end(&to);
                 return;
             }
