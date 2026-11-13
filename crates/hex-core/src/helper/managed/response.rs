@@ -39,9 +39,9 @@ pub fn read(bytes: &[u8], fds: usize) -> Result<(u16, u64), Fault> {
 pub fn encode_answer(version: u16, id: u64, slowest: Option<Duration>) -> Result<Vec<u8>, Fault> {
     let nanos = match slowest {
         Some(response) if response.is_zero() => return Err(invalid("native CPU response")),
-        Some(response) => Some(
-            u64::try_from(response.as_nanos()).map_err(|_| invalid("native CPU response"))?,
-        ),
+        Some(response) => {
+            Some(u64::try_from(response.as_nanos()).map_err(|_| invalid("native CPU response"))?)
+        }
         None => None,
     };
     encode_bounded(MAX_ANSWER, |out| {

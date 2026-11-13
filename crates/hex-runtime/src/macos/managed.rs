@@ -103,15 +103,15 @@ pub(super) struct Scope {
 }
 
 impl Scope {
-    /// Original (joint plan step 14, 2c, red): `response`, the helper's own, is taken nowhere; the control starts from
-    /// the launch's field.
+    /// A managed scope under `control`'s cost, its CPU control starting from `response`, the helper's own (joint plan
+    /// step 14, 2c; ROOT, 2026-11-13): the slowest stop it has seen, the cold one before any. The launch's response field
+    /// is kept for helpers that predate learning and read here by none.
     pub(super) fn new(
         record: NativeRecord<'_>,
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
         response: Duration,
     ) -> Result<Self, Refusal> {
-        let _ = response;
         let allocation = record
             .allocation()
             .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
@@ -128,13 +128,8 @@ impl Scope {
             .check()
             .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
         let cpu = Some(Mutex::new(
-            super::cpu::Control::new(
-                allocation.resources.cpu_milli,
-                maximum,
-                control.response,
-                baseline,
-            )
-            .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+            super::cpu::Control::new(allocation.resources.cpu_milli, maximum, response, baseline)
+                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
         ));
         Ok(Self {
             scope: record
