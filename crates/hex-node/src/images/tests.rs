@@ -198,3 +198,65 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
         .collect();
     assert_eq!(after, vec![(RESERVED.to_owned(), BoxState::Running)]);
 }
+
+/// An allocation of `vcpus` vCPUs and `memory_mib` MiB, its cost's quantum Hex's own (whole vCPUs, MiB).
+fn sized(vcpus: u64, memory_mib: u64) -> Allocation {
+    let vm = hex_api::CapacityResources {
+        cpu_milli: vcpus * 1_000,
+        mem_bytes: memory_mib << 20,
+        disk_bytes: 0,
+    };
+    hex_api::RuntimeCost {
+        id: [4; 32],
+        floor: hex_api::CapacityResources::default(),
+        ceiling: vm,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 1 << 20,
+            disk_bytes: 1,
+        },
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources::default(),
+    }
+    .allocate(vm)
+    .unwrap()
+}
+
+/// Joint plan step 12's item B (goal 54's changes 1 and 2; AC-T7.4.1): kiln reserves a box's amount before the box
+/// exists, by `shards_api::envelope`, the pure function Shards' own `check` holds a guest to (its unit and least memory,
+/// one source), and a create takes the reservation it is passed. Do create an image VM whose allocation is its own
+/// envelope; one whose memory isn't (an odd MiB, which Shards boots one MiB up); and one asking less than Shards' least
+/// guest, its floor. Expect the first made; each other refused as Invalid before any record, naming the allocation and
+/// what Shards would boot for it, as `shards_api::envelope` says it: the second its next unit, the third the floor.
+#[test]
+fn w12_a_create_takes_its_reservation_as_shards_envelope_says_and_refuses_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    let arch = std::env::consts::ARCH;
+    let (vcpus, mib) = shards_api::envelope(arch, 2, 256).unwrap();
+    let mut fits = image_box("kiln-r1-1");
+    fits.allocation = Some(sized(u64::from(vcpus), mib));
+    images.create(fits).unwrap();
+    for (name, asked_mib) in [("kiln-r1-2", 255), ("kiln-r1-3", 2)] {
+        let (_, booted_mib) = shards_api::envelope(arch, 1, asked_mib).unwrap();
+        assert_ne!(booted_mib, asked_mib);
+        let mut past = image_box(name);
+        past.allocation = Some(sized(1, asked_mib));
+        match images.create(past) {
+            Err(Refusal::Invalid {
+                what: "shards image",
+                why,
+            }) => assert!(
+                why.contains("allocation") && why.contains(&format!("{booted_mib} MiB")),
+                "{name}: {why}"
+            ),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    let kept: Vec<String> = Books::records(images.as_ref())
+        .unwrap()
+        .into_keys()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    assert_eq!(kept, vec!["kiln-r1-1".to_owned()]);
+}
