@@ -58,9 +58,10 @@ naming the field (CLAUDE.md §3). It refuses:
   it. Shards' run host holds the same (`api_run::credentials`, `shards_net::reaches`); Hex keeps no port egress, so
   its hold is by name alone.
 - **A member's credential granted twice.**
-- **A second credential toward one host.** Shards' injector fills in the first credential a host's grants name (D242's
-  `decide`), so a second one toward it would never be filled in: a grant that can never act is refused, never kept
-  silently (D242's own rule for a grant toward an address).
+- **A second credential toward one host.** Shards' injector at `740fa372` fills in the first credential a host's grants
+  name (D242's `decide`), so a second one toward it would never be filled in: a grant that can never act is refused,
+  never kept silently (D242's own rule for a grant toward an address). Shards' main since (step 33's step 3, the
+  injector) decides by each grant's placeholder too, so the re-vendor past it drops this rule (Owed).
 - **A host a member reaches ungranted.** Shards' network process holds the whole VM to the union of its members'
   grants and can't tell one member's flow from another's, so its injector ends the TLS of every flow to a credential's
   host, whichever member's (D242, "Who"), and every member whose grants reach it trusts the run's CA. A member that
@@ -174,6 +175,10 @@ it, and never printed.
 
 ## Owed
 
+- **The re-vendor past Shards `740fa372`**: step 3's injector moved the grant to `shards_dns::credential` and gave it
+  its member's `placeholder`, filling a value only where that placeholder stands (D242). `CredentialGrant` then gains
+  its placeholder (appended, never printed; kiln mints it where it stages the credential into its member), lowered
+  with the grant, and C2's one-credential-per-host rule goes (Shards refuses a placeholder two grants share).
 - **kiln's wiring** (kiln, once it vendors this Hex): `hex_api::lease::Lessors` over its run-lease broker (kiln's
   `secrets::lessor`, built on kiln main beside its broker's per-lease give-back), given to the node it runs its
   harness microVMs on; and its sandbox's credential grants (`kiln_seams::sandbox::Launch::credentials`, SANDBOX-13)

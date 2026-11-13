@@ -472,8 +472,10 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         last_resort: None,
         ended: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
-        // Red: none shown yet.
-        credentials: Vec::new(),
+        credentials: match &spec.class {
+            ClassSpec::ShardsImage(image) => image.credentials.clone(),
+            _ => Vec::new(),
+        },
     })
 }
 

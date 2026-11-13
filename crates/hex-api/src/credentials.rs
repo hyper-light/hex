@@ -40,10 +40,6 @@ pub struct CredentialGrant {
 ///
 /// Bounded by its input (C5): two working lists, reserved fallibly and sorted, and no recursion.
 pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> Result<(), Refusal> {
-    // Red: no check yet.
-    if credentials.len() < usize::MAX || grants.is_empty() {
-        return Ok(());
-    }
     let hosts = credentials
         .iter()
         .try_fold(0usize, |n, grant| n.checked_add(grant.toward.len()))

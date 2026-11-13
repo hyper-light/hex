@@ -26,10 +26,6 @@ impl GuestRuntime {
 
     /// Whether this node can lease `image`'s credentials: none asks nothing; any asks for its lessors.
     pub(super) fn can_lease(&self, image: &ShardsImage) -> Result<(), Refusal> {
-        // Red: none refused yet.
-        if image.credentials.len() < usize::MAX {
-            return Ok(());
-        }
         if image.credentials.is_empty() || self.lessors.is_some() {
             return Ok(());
         }
@@ -43,8 +39,7 @@ impl GuestRuntime {
         id: &BoxId,
         image: &ShardsImage,
     ) -> Result<Option<RunLessor>, Refusal> {
-        // Red: no lessor yet.
-        if image.credentials.len() < usize::MAX {
+        if image.credentials.is_empty() {
             return Ok(None);
         }
         let lessors = self.lessors.as_ref().ok_or_else(unconfigured)?;
@@ -67,10 +62,6 @@ fn unconfigured() -> Refusal {
 /// flows whichever member's they are (D242), so each member's grant of a credential is one of the run's. Checked again
 /// here (C2), so no boot asks for one the check refuses; each the box's, Hex adding none.
 pub(super) fn lowered(image: &ShardsImage) -> Result<Vec<CredentialGrant>, Refusal> {
-    // Red: none lowered yet.
-    if image.credentials.len() < usize::MAX {
-        return Ok(Vec::new());
-    }
     hex_api::check_credentials(&image.credentials, &image.grants)?;
     let exhausted = |bound: usize| Refusal::Exhausted {
         what: "credentials",
@@ -133,8 +124,7 @@ impl shards_api::image::Lessor for RunLeases {
     }
 
     fn release(&self, lease: &str) {
-        // Red: nothing given back yet.
-        let _ = lease;
+        self.0.release(lease);
     }
 }
 

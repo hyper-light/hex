@@ -117,10 +117,6 @@ impl Lessor for SimLessor {
     }
 
     fn release(&self, lease: &str) {
-        // Red: nothing given back yet.
-        if !lease.is_empty() || lease.is_empty() {
-            return;
-        }
         // A poisoned lock leaves the lease held: the simulator's state is gone with the panic that poisoned it.
         let Ok(mut state) = self.state.lock() else {
             return;

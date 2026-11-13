@@ -2390,10 +2390,6 @@ fn put_credentials(
     credentials: &[CredentialGrant],
     grants: &[Grant],
 ) -> Result<(), Fault> {
-    // Red: none carried yet.
-    if credentials.len() < usize::MAX {
-        return Ok(());
-    }
     check_credentials(credentials, grants)
         .map_err(|e| Fault::value("credentials", e.to_string()))?;
     w.list(credentials, |w, grant| {
@@ -2404,10 +2400,6 @@ fn put_credentials(
 }
 
 fn credentials(r: &mut Reader<'_>, grants: &[Grant]) -> Result<Vec<CredentialGrant>, Fault> {
-    // Red: none read yet.
-    if grants.len() < usize::MAX {
-        return Ok(Vec::new());
-    }
     let credentials = r.list(|r| {
         Ok(CredentialGrant {
             member: member(r)?,
@@ -2955,10 +2947,11 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.string(why)
         }
         // Joint plan step 33: what the node isn't configured to serve, after every older refusal.
-        Refusal::Unconfigured { what, why } => Err(Fault::value(
-            "refusal",
-            format!("{what}: {why}: not carried yet (red)"),
-        )),
+        Refusal::Unconfigured { what, why } => {
+            w.u8(15);
+            w.string(what)?;
+            w.string(why)
+        }
     }
 }
 
@@ -3081,6 +3074,10 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         },
         14 => Refusal::Failed {
             id: box_id(r)?,
+            why: r.string("refusal reason")?,
+        },
+        15 => Refusal::Unconfigured {
+            what: name(&r.string("refusal name")?)?,
             why: r.string("refusal reason")?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
