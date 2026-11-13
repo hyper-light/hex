@@ -407,6 +407,46 @@ mod tests {
         assert!(got.is_ok(), "the exec was refused at W*: {got:?}");
     }
 
+    /// Decision 9 (the person's ruling of 2026-11-13: W* is a bound only while answers come within it; past it the wait
+    /// follows its party, the busy seeds, by their life alone for now, the seeds freed too coarse a progress to judge a
+    /// stall at W*'s scale): an exec past W* was refused once a whole window passed with no seed freed, though its seed
+    /// still served. Do: a pool of one seed out with an exec, W* 1 ms; an exec waits; once its run-out is told, the seed
+    /// stays out for a hundred windows of W*, or until the exec is answered; then it is freed. Expect: the exec not
+    /// answered while the seed is out, then handed the seed freed.
+    #[test]
+    fn an_exec_past_w_star_waits_on_while_its_seed_serves_however_long_none_frees() {
+        let learned = Duration::from_millis(1);
+        let pool = busy_pool(learned);
+        let waiter = {
+            let pool = Arc::clone(&pool);
+            std::thread::spawn(move || pool.acquire().map(drop))
+        };
+        let asked = Instant::now();
+        while pool.answers.deadline().is_some() && !waiter.is_finished() {
+            assert!(
+                asked.elapsed() < PATIENCE,
+                "the exec's wait neither ran out nor ended"
+            );
+            std::thread::park_timeout(learned);
+        }
+        let told = Instant::now();
+        while !waiter.is_finished() && told.elapsed() < learned.saturating_mul(100) {
+            std::thread::park_timeout(learned);
+        }
+        if waiter.is_finished() {
+            panic!(
+                "the exec was answered with its seed still out: {:?}",
+                waiter.join().unwrap()
+            );
+        }
+        pool.release(stand_in());
+        let got = waiter.join().unwrap();
+        assert!(
+            got.is_ok(),
+            "the exec was refused with a seed freed: {got:?}"
+        );
+    }
+
     /// Decision 9 (the person's ruling of 2026-11-13): past W* an exec follows the busy seeds by the seeds freed, and
     /// one that sees none freed over a whole window is refused. Do: a pool of one seed out with an exec, W* 200 ms, no
     /// seed freed. Expect: refused by type, the run-out told, never before a whole window past W* (400 ms after the

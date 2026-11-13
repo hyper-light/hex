@@ -390,7 +390,7 @@ impl CreatePool {
     ) -> Result<(i32, OwnedFd), Trip> {
         let shared = &self.shared;
         let (id, proc, patience) = shared.acquire().map_err(Trip::Refused)?;
-        match round_trip(proc.socket.as_fd(), create, fds, patience) {
+        match round_trip(&proc, create, fds, patience, || Ok(())) {
             Ok((pid, pidfd, made)) => {
                 if pruned && let Some(count) = shared.made.get(usize::from(made.code())) {
                     let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -801,7 +801,7 @@ impl Shared {
         end(&proc);
         if let Ok(mut inner) = self.lock() {
             self.reap_hung(&mut inner);
-            if inner.seeds.died(id).is_ok() {
+            if inner.seeds.died(id, self.now()).is_ok() {
                 self.wake_line();
                 self.wake_starter();
             }
@@ -813,7 +813,7 @@ impl Shared {
     fn died(&self, id: SeedId, proc: Proc) {
         end(&proc);
         if let Ok(mut inner) = self.lock() {
-            let _ = inner.seeds.died(id);
+            let _ = inner.seeds.died(id, self.now());
             self.wake_line();
             self.wake_starter();
         }
@@ -1007,11 +1007,14 @@ enum Trip {
 /// learned, so a wedged seed is taken for hung rather than waited on for ever (CLAUDE.md §2, §4); `None`
 /// only while the hang bound measures with nothing seen.
 fn round_trip(
-    socket: BorrowedFd<'_>,
+    proc: &Proc,
     create: &Create,
     fds: &[BorrowedFd<'_>],
     patience: Option<Duration>,
+    _past: impl FnOnce() -> Result<(), OciError>,
 ) -> Result<(i32, OwnedFd, MountNamespace), Trip> {
+    // Behavior kept here: past its bound the seed is taken for hung, its run-out never told.
+    let socket = proc.socket.as_fd();
     rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
     if !readable(socket, patience).map_err(Trip::Broken)? {
         return Err(Trip::Hung(OciError::Broken(format!(
@@ -1549,6 +1552,110 @@ mod tests {
         assert_eq!(claim(Some(refuses), before), ("refused", String::new()));
         assert_eq!(claim(Some(ends), before), ("broken", String::new()));
         assert_eq!(claim(None, Some(Duration::ZERO)), ("hung", String::new()));
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): the
+    /// shell's wait for a create seed's answer ended at the hang bound, the slowest create answer the pool had seen,
+    /// and the seed was killed as hung, its create refused ("a create seed did not answer within 1.16752ms", oci_box).
+    /// Do: a round trip with a stand-in seed, alive (its pidfd the test's own process's), that takes the create and
+    /// answers, refusing it by type, only once the round trip has passed its bound, a nanosecond, and told its
+    /// run-out; and one with a stand-in seed, a child of the test's, that answers nothing and ends once the round trip
+    /// has told its run-out. Expect: the first round trip takes the seed's answer, the seed whole; the second ends at
+    /// the seed's end, the seed broken; each told its run-out.
+    #[test]
+    fn original_a_round_trip_past_the_hang_bound_follows_its_seed_by_its_life() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use rustix::fs::{Mode, OFlags};
+        use rustix::pipe::{PipeFlags, pipe_with};
+        use std::sync::mpsc::channel;
+        let lab = tempfile::tempdir().unwrap();
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = rustix::fs::open(
+            lab.path(),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let (_sync_r, sync_w) = pipe_with(PipeFlags::CLOEXEC).unwrap();
+        let (map_r, _map_w) = pipe_with(PipeFlags::CLOEXEC).unwrap();
+        let req = CloneReq {
+            bundle: lab.path(),
+            dir: lab.path(),
+            cgroup: &cgroup,
+            network: None,
+            sync_w,
+            map_r: Some(map_r),
+            config: config.as_fd(),
+            pruned: None,
+        };
+        let (create, fds) = message(&req);
+        let bound = Some(Duration::from_nanos(1));
+        let came = |got: Result<(i32, OwnedFd, MountNamespace), Trip>| match got {
+            Ok(_) => "started".to_owned(),
+            Err(Trip::Refused(_)) => "refused".to_owned(),
+            Err(Trip::Broken(e)) => format!("broken: {e}"),
+            Err(Trip::Hung(_)) => "hung".to_owned(),
+        };
+
+        // Alive throughout: the test's own process.
+        let (ours, theirs) = rt_seed::socketpair().unwrap();
+        let pidfd =
+            rustix::process::pidfd_open(rustix::process::getpid(), PidfdFlags::empty()).unwrap();
+        let proc = Proc {
+            socket: ours,
+            pidfd,
+        };
+        // It answers once told, the create left on its socket unread; a round trip that never tells drops `told`, and
+        // the stand-in ends without a word.
+        let (told, heard) = channel::<()>();
+        let seed = std::thread::spawn(move || {
+            if heard.recv().is_ok() {
+                let refusal = Answer::Refused {
+                    failed: Failed::Request,
+                    why: "refused for the test".to_owned(),
+                };
+                rt_seed::send_answer(theirs.as_fd(), &refusal, None).unwrap();
+            }
+            theirs
+        });
+        let past = move || {
+            told.send(())
+                .map_err(|_| OciError::Broken("the stand-in left".to_owned()))
+        };
+        let got = came(round_trip(&proc, &create, &fds, bound, past));
+        let _theirs = seed.join().unwrap();
+        assert_eq!(got, "refused", "the seed's answer past the bound");
+
+        // Ends once told: a child of the test's, `cat` on a pipe the test closes.
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let (ours, theirs) = rt_seed::socketpair().unwrap();
+        let proc = Proc {
+            socket: ours,
+            pidfd: rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap(),
+        };
+        let stdin = child.stdin.take().unwrap();
+        let (told, heard) = channel::<()>();
+        let ender = std::thread::spawn(move || {
+            let _ = heard.recv();
+            drop(stdin);
+        });
+        let past = move || {
+            told.send(())
+                .map_err(|_| OciError::Broken("the stand-in left".to_owned()))
+        };
+        let got = came(round_trip(&proc, &create, &fds, bound, past));
+        ender.join().unwrap();
+        child.wait().unwrap();
+        drop(theirs);
+        assert!(
+            got.starts_with("broken") && got.contains("ended before it answered"),
+            "the round trip past the bound ended other than at the seed's end: {got}"
+        );
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the

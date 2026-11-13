@@ -623,7 +623,7 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                 let Some(seed) = pick(k, &oracle.with(|_| true), &issued) else {
                     continue;
                 };
-                let got = pool.died(seed);
+                let got = pool.died(seed, now);
                 match oracle.phase(seed) {
                     None => {
                         seen.gone += 1;
@@ -938,9 +938,12 @@ fn a_seed_that_dies_mid_create_refuses_that_create_and_is_restarted_and_counted(
     let mut pool = seeds(1, 4, 1_000, 1_000);
     let first = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(first)));
-    assert_eq!(pool.died(first), Ok(Some(Refused::Died { seed: first })));
+    assert_eq!(
+        pool.died(first, ms(1)),
+        Ok(Some(Refused::Died { seed: first }))
+    );
     assert_eq!(pool.done(first, ms(2)), Err(Stale::Gone(first)));
-    assert_eq!(pool.died(first), Err(Stale::Gone(first)));
+    assert_eq!(pool.died(first, ms(2)), Err(Stale::Gone(first)));
     assert_eq!(pool.wanted(), 1);
     let second = pool.start().unwrap();
     assert_eq!(second.slot(), first.slot());
@@ -957,7 +960,10 @@ fn a_seed_that_dies_mid_create_refuses_that_create_and_is_restarted_and_counted(
         panic!("a create with its only seed busy didn't wait");
     };
     assert_eq!(pool.done(second, ms(6)), Ok(Some(ticket)));
-    assert_eq!(pool.died(second), Ok(Some(Refused::Died { seed: second })));
+    assert_eq!(
+        pool.died(second, ms(6)),
+        Ok(Some(Refused::Died { seed: second }))
+    );
     assert_eq!(
         pool.claim(ticket, ms(7)),
         Ok(Claim::Refused(Refused::Died { seed: second }))
@@ -991,7 +997,7 @@ fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
     assert_eq!(pool.until(second), Ok(None));
     assert_eq!(pool.hung(ms(1_000_000)), None);
     let died = Refused::Died { seed: second };
-    assert_eq!(pool.died(second), Ok(Some(died)));
+    assert_eq!(pool.died(second, ms(1_000_000)), Ok(Some(died)));
     assert_eq!(pool.claim(ticket, ms(1_000_000)), Ok(Claim::Refused(died)));
     let c = pool.counts();
     assert_eq!(
@@ -1078,6 +1084,135 @@ fn original_a_create_past_the_lines_w_star_waits_on_while_seeds_free() {
     assert_eq!(pool.counts().refused_waited, 0);
 }
 
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a seed
+/// that had served its create for the hang bound, the slowest create answer the pool had seen, was taken for hung, to
+/// be killed, and its create refused ("a create seed did not answer within 1.16752ms", oci_box). Do: one seed, the hang
+/// bound 30 ms, serving a create from 0 ms, a second create waiting in line from 5 ms; ask after the seeds past the
+/// bound at 29 ms, at 30 ms twice and at 1,000 s; the seed done at 1,000 s. Expect: none past it at 29 ms; at 30 ms the
+/// seed's run-out told, once, and the seed followed by its life (no time it passes, the next seed's wait following
+/// it), never taken for hung; done at 1,000 s, its answer the sample the hang bound rises to, and the seed handed to
+/// the create in line; no seed died or was restarted.
+#[test]
+fn original_a_seed_past_the_hang_bound_is_followed_by_its_life_to_its_answer() {
+    let mut pool = seeds(1, 4, 1_000, 30);
+    let first = up(&mut pool, ms(0));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(first)));
+    let Ok(Admit::Wait { ticket, .. }) = pool.create(ms(5)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(pool.past_hang(ms(29)), 0);
+    assert_eq!(pool.until(first), Ok(Some(ms(30))));
+    assert_eq!(pool.past_hang(ms(30)), 1, "the run-out told");
+    assert_eq!(pool.past_hang(ms(30)), 0, "told once");
+    assert_eq!(pool.until(first), Ok(None), "followed by its life");
+    assert_eq!(pool.deadlines().1, None, "the next seed's wait follows it");
+    assert_eq!(pool.past_hang(ms(1_000_000)), 0);
+    assert_eq!(pool.done(first, ms(1_000_000)), Ok(Some(ticket)));
+    assert_eq!(pool.claim(ticket, ms(1_000_000)), Ok(Claim::Seed(first)));
+    assert_eq!(pool.deadlines().1, Some(ms(1_000_000)));
+    let c = pool.counts();
+    assert_eq!(
+        (c.done, c.died, c.refused_died, c.started, c.restarted),
+        (1, 0, 0, 1, 0)
+    );
+}
+
+/// HEX-SEEDS-3, the plan's first case, under decision 9 (the person's ruling of 2026-11-13: W* is a bound only while
+/// answers come within it; past it a create follows its party, the busy seeds, by their life alone for now, the seeds
+/// freed too coarse a progress to judge a stall at W*'s scale): with every seed busy, a create waits in line; past the
+/// line's W* its run-out is told and it waits on while its seeds live, however long none frees, until a seed freed goes
+/// to it. With the line full, a create is refused by type at once. Do: two seeds busy, the line's W* 10 ms; creates
+/// wait from 1 ms and 5 ms, and a third finds the line full; claim the first at 10 ms, 11 ms, 22 ms and 1,000 s, no
+/// seed freed; a seed done at 1,000 s; the second claims then. Expect: told to wait on to 11 ms; at 11 ms the run-out
+/// told and to wait on for the shell's wake alone; so at 22 ms, a whole window past W* with none freed, and at 1,000 s;
+/// handed the seed done, its 999.999 s the line's W*; the second, past its W* too, waiting on; none refused in line.
+#[test]
+fn a_create_past_the_lines_w_star_waits_on_while_its_seeds_live_however_long_none_frees() {
+    let mut pool = seeds(2, 2, 10, 1_000);
+    up(&mut pool, ms(0));
+    up(&mut pool, ms(0));
+    let Ok(Admit::Seed(first)) = pool.create(ms(0)) else {
+        panic!("an idle seed wasn't handed out");
+    };
+    assert!(matches!(pool.create(ms(0)), Ok(Admit::Seed(_))));
+    let Ok(Admit::Wait {
+        ticket: late,
+        until,
+    }) = pool.create(ms(1))
+    else {
+        panic!("a create with every seed busy didn't wait");
+    };
+    assert_eq!(until, Some(ms(11)));
+    let Ok(Admit::Wait { ticket: next, .. }) = pool.create(ms(5)) else {
+        panic!("a create with every seed busy didn't wait");
+    };
+    assert_eq!(pool.create(ms(5)), Err(Refused::Busy { waiting: 2 }));
+    assert_eq!(
+        pool.claim(late, ms(10)),
+        Ok(Claim::Wait {
+            until: Some(ms(11))
+        })
+    );
+    let following = Ok(Claim::Wait { until: None });
+    assert_eq!(pool.claim(late, ms(11)), following);
+    assert_eq!(
+        pool.deadlines().0,
+        None,
+        "the run-out told: the line's next wait follows its seeds"
+    );
+    assert_eq!(
+        pool.claim(late, ms(22)),
+        following,
+        "a whole window past W*, none freed"
+    );
+    assert_eq!(pool.claim(late, ms(1_000_000)), following);
+    assert_eq!(pool.done(first, ms(1_000_000)), Ok(Some(late)));
+    assert_eq!(pool.claim(late, ms(1_000_000)), Ok(Claim::Seed(first)));
+    assert_eq!(pool.deadlines().0, Some(ms(999_999)));
+    assert_eq!(pool.claim(next, ms(1_000_000)), following);
+    let c = pool.counts();
+    assert_eq!(
+        (
+            c.asked,
+            c.handed,
+            c.waited,
+            c.refused_busy,
+            c.refused_waited,
+            c.done
+        ),
+        (5, 3, 2, 1, 0, 1)
+    );
+    assert_eq!(c.most_busy, 2);
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13: a following wait is refused at its party's end): a create in line
+/// whose seeds are all gone, none asked for, is refused at once, since no seed can come; following its seeds by their
+/// life alone, it would otherwise wait for ever. Do: one slot, the line's W* 10 ms; a create waits in line from 0 ms
+/// for the seed starting, which dies at 2 ms before it serves (so the starting stops until the next create). Expect:
+/// the create refused at its claim at 2 ms, its wait the 2 ms it waited; the line empty; neither wait moved (no seed
+/// was slow: none came).
+#[test]
+fn a_create_in_line_is_refused_at_once_when_its_last_seed_dies_and_none_can_come() {
+    let mut pool = seeds(1, 4, 10, 1_000);
+    let seed = pool.start().unwrap();
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(0)) else {
+        panic!("a create with no seed up didn't wait");
+    };
+    assert_eq!(until, Some(ms(10)));
+    assert_eq!(pool.died(seed, ms(2)), Ok(None));
+    assert_eq!(
+        pool.wanted(),
+        0,
+        "the starting stopped until the next create"
+    );
+    assert_eq!(
+        pool.claim(ticket, ms(2)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(2) }))
+    );
+    assert_eq!(pool.waiting(), 0);
+    assert_eq!(pool.deadlines(), (Some(ms(10)), Some(ms(1_000))));
+}
+
 /// HEX-SEEDS-5: a failed start stops the starting until the next create, as does a seed that dies before it serves a
 /// create; a seed that dies after serving one has its slot asked for at once.
 #[test]
@@ -1095,9 +1230,9 @@ fn a_failed_start_or_a_seed_dead_before_serving_stops_the_starting_until_the_nex
     assert_eq!(pool.started(served, ms(1)), Ok(Some(ticket)));
     assert_eq!(pool.claim(ticket, ms(1)), Ok(Claim::Seed(served)));
     assert_eq!(pool.done(served, ms(2)), Ok(None));
-    assert_eq!(pool.died(served), Ok(None));
+    assert_eq!(pool.died(served, ms(2)), Ok(None));
     assert_eq!(pool.wanted(), 1);
-    assert_eq!(pool.died(unserved), Ok(None));
+    assert_eq!(pool.died(unserved, ms(2)), Ok(None));
     assert_eq!((pool.wanted(), pool.start()), (0, None));
     assert_eq!(pool.started(unserved, ms(3)), Err(Stale::Gone(unserved)));
     assert!(matches!(pool.create(ms(4)), Ok(Admit::Wait { .. })));
@@ -1143,13 +1278,13 @@ fn a_late_or_out_of_order_report_is_refused_by_type() {
     assert_eq!(pool.started(old, ms(0)), Err(starting));
     assert_eq!(pool.start_failed(old, ms(0)), Err(starting));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(old)));
-    assert_eq!(pool.died(old), Ok(Some(Refused::Died { seed: old })));
+    assert_eq!(pool.died(old, ms(0)), Ok(Some(Refused::Died { seed: old })));
     let new = pool.start().unwrap();
     for late in [
         pool.started(old, ms(1)).map(|_| ()),
         pool.start_failed(old, ms(1)).map(|_| ()),
         pool.done(old, ms(1)).map(|_| ()),
-        pool.died(old).map(|_| ()),
+        pool.died(old, ms(1)).map(|_| ()),
     ] {
         assert_eq!(late, Err(Stale::Gone(old)));
     }

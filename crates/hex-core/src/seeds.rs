@@ -540,7 +540,9 @@ impl Seeds {
     /// the slot to be started again. The create it served, if any, is refused and the refusal returned; a waiting
     /// create it was handed to meets the refusal at its claim. A seed that dies before serving a create (starting,
     /// or idle since it started) stops the starting until the next create. [`Stale::Gone`] if it had left already.
-    pub fn died(&mut self, seed: SeedId) -> Result<Option<Refused>, Stale> {
+    pub fn died(&mut self, seed: SeedId, now: Duration) -> Result<Option<Refused>, Stale> {
+        // Behavior kept here: a death refuses no create in line, whether or not a seed can still come.
+        let _ = now;
         let slot = self.slot(seed)?;
         let held = std::mem::replace(&mut slot.holds, Holds::Nothing);
         bump(&mut self.counts.died);
@@ -596,6 +598,16 @@ impl Seeds {
             self.answered.insert(ticket, Err(refused));
         }
         Some((seed, refused))
+    }
+
+    /// The seeds that have served their creates past the hang bound by `now`: how many. Behavior kept here: each is
+    /// taken for hung, as [`Seeds::hung`] takes them.
+    pub fn past_hang(&mut self, now: Duration) -> usize {
+        let mut told = 0usize;
+        while self.hung(now).is_some() {
+            told = told.saturating_add(1);
+        }
+        told
     }
 
     /// A create found no seed idle: a vacant slot is added for a seed to start, unless one is vacant already or the
