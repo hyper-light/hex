@@ -470,18 +470,28 @@ pub(crate) struct Learner {
     last: LastResort,
 }
 
-/// The most VMs a machine of `machine` could hold, each at least the least reservation placement takes.
-fn population(machine: CapacityResources) -> Result<usize, Refusal> {
+/// The most a learner on a machine of `machine` holds (CLAUDE.md §2), every OS's alike. VMs: the machine's population,
+/// the most boxes placement places on it (`placement::budget`'s runner count: the machine over Hex's least bounds,
+/// `MIN_CPU_MILLI` of its CPU and `MIN_MEMORY` of its memory), so a VM past it, which only a node driven past its
+/// placement meets, is refused, typed, and its window with it. Classes: as many, the least bound at which no VM's
+/// class is refused, as VMs of that many classes may run at once, and while fewer run one class no VM holds is there
+/// to forget.
+pub(crate) fn bounds(machine: CapacityResources) -> Result<charge::Bounds, Refusal> {
     let cpus = machine
         .cpu_milli
         .checked_div(u64::from(hex_api::MIN_CPU_MILLI));
     let memory = machine.mem_bytes.checked_div(hex_api::MIN_MEMORY);
-    cpus.zip(memory)
+    let population = cpus
+        .zip(memory)
         .and_then(|(cpus, memory)| usize::try_from(cpus.min(memory)).ok())
         .ok_or_else(|| Refusal::Invalid {
             what: "a microVM's learned charge",
             why: "the machine's population passes a usize".into(),
-        })
+        })?;
+    Ok(charge::Bounds {
+        vms: population,
+        classes: population,
+    })
 }
 
 /// A VM's vCPUs: its admitted guest's CPU in whole CPUs, rounded up.
@@ -496,20 +506,12 @@ fn vcpus(allocation: hex_api::Allocation) -> Result<u32, Refusal> {
 impl Learner {
     /// A learner over `window` on a machine of `machine`.
     pub(crate) fn new(window: Duration, machine: CapacityResources) -> Result<Self, Refusal> {
-        let bound = population(machine)?;
+        let bounds = bounds(machine)?;
         Ok(Self {
-            node: charge::Node::new(
-                window,
-                machine,
-                charge::Bounds {
-                    vms: bound,
-                    classes: bound,
-                },
-            )
-            .map_err(refused)?,
+            node: charge::Node::new(window, machine, bounds).map_err(refused)?,
             vms: BTreeMap::new(),
             fault: None,
-            last: LastResort::new(bound.min(MAX_LEARNED_HOLDINGS)),
+            last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unheld: Refusal::Platform {
                 what: "memory_high",
                 platform: std::env::consts::OS,

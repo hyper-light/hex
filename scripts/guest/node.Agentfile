@@ -1,0 +1,12 @@
+# Hex's node image for shards-init (docs/design/node-under-shards-init.md §4): Hex's own init, the static `hex` at
+# /init, which shards-init runs as its run's own command under the nesting grant (Shards' D234), PID 1 of the
+# workload's own PID namespace. Nothing else: init makes every directory its node needs. Built by node-image.sh from a
+# context holding this file as its Agentfile and the guest's `hex`.
+FROM scratch
+COPY --chmod=0755 hex /init
+# The grant's word (D234): with no AGENT or HARNESS beside it, the command is the microVM's only principal.
+NESTING
+# A nested runtime's command runs as root: one of another user keeps only its bounding set across its execve (D234).
+USER 0:0
+# `argv[0]` is `/init`, as the kernel names the initramfs's first process, so `hex` runs as init under either host.
+ENTRYPOINT ["/init"]
