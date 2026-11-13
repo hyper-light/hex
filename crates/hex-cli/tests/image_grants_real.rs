@@ -34,8 +34,10 @@
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`: on Linux
 //! inside a cgroup delegated to this binary (`HEX_DELEGATED`); with image_real's node inputs (`SHARDS_BIN`, which
 //! must be Hex's `shards`, `scripts/shards-gpu/build.sh`'s, whose run host holds each member to its reach;
-//! `SHARDS_KERNEL`, the node's `HEX_GUEST_*`, `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a
-//! short path where the node's socket lies, `HEX_IMAGE_WAIT_MS` and `HEX_WAITS_CENSUS_MAX`), and the probe's:
+//! `SHARDS_KERNEL` and `SHARDS_INIT`, the kernel the run hosts boot and the init beside it, which Shards takes
+//! together, the init the `shards` build carries (build.sh's `shards-init`); the node's `HEX_GUEST_*`,
+//! `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a short path where the node's socket lies,
+//! `HEX_IMAGE_WAIT_MS` and `HEX_WAITS_CENSUS_MAX`), and the probe's:
 //! - the probe image, in the node's Shards home before the node starts: `HEX_GRANTS_CONTEXT`, the context
 //!   `scripts/grants-probe/build.sh` made, built there; or else `HEX_GRANTS_IMAGE`, `NAME@sha256:...`, pulled there;
 //! - the recipe's own inputs, as it was given them: `HEX_GRANTS_MEMBER`, `HEX_GRANTS_PORT`,
@@ -1013,6 +1015,9 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
     let shards = PathBuf::from(input("SHARDS_BIN"));
     let kernel = PathBuf::from(input("SHARDS_KERNEL"));
     assert!(kernel.is_file(), "SHARDS_KERNEL {kernel:?} is no file");
+    // A kernel goes with its init in Shards (`--kernel` and `--init` together); the node's run hosts inherit both.
+    let init = PathBuf::from(input("SHARDS_INIT"));
+    assert!(init.is_file(), "SHARDS_INIT {init:?} is no file");
     let wait = Duration::from_millis(number("HEX_IMAGE_WAIT_MS"));
     assert!(!wait.is_zero(), "HEX_IMAGE_WAIT_MS is 0");
     let work = PathBuf::from(input("HEX_IMAGE_WORK"));
