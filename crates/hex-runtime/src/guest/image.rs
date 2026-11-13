@@ -1061,30 +1061,27 @@ impl GuestRuntime {
         }
     }
 
-    /// The run's stats (D231's STATS, D241's microVM part among them), asked within the stats wait's learned patience,
-    /// for `call`.
+    /// The run's stats (D231's STATS, D241's microVM part among them), for `call`. Shards waits for its run's answer or its
+    /// end alone (`Duration::MAX`): the stats wait's learned W* is where the census is told a run-out, never where the
+    /// ask ends (decision 9, the person's ruling of 2026-11-13). D231 shows no progress of an ask it holds, so the ask
+    /// is followed by its run's life alone, refused only at its end; its answer, however late, the sample W* rises to.
     fn stats_image(&self, record: &BoxRecord, call: &'static str) -> Result<Stats, Refusal> {
         let id = &record.spec.id;
         let guest = self.image_guest(record, call)?;
         let waits = self.image()?.waits()?;
         let asked = Instant::now();
         let bound = waits.stats.deadline();
-        match guest.stats(StatsScope::Run, bound.unwrap_or(Duration::MAX)) {
+        let answer = guest.stats(StatsScope::Run, Duration::MAX);
+        let took = asked.elapsed();
+        if let Some(bound) = bound.filter(|bound| took > *bound) {
+            waits.stats.ran_out(bound);
+        }
+        match answer {
             Ok(stats) => {
-                waits.stats.answered(asked.elapsed());
+                waits.stats.answered(took);
                 Ok(stats)
             }
             Err(ImageRefusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, call)),
-            // D231's answer to a stats ask its patience passed, as its client says it.
-            Err(ImageRefusal::Unsupported { what: "stats", why }) => {
-                if let Some(bound) = bound {
-                    waits.stats.ran_out(bound);
-                }
-                Err(Refusal::Os {
-                    op: "reading a Shards image VM's stats",
-                    why,
-                })
-            }
             Err(why) => Err(refused(id, "reading a Shards image VM's stats", why)),
         }
     }
