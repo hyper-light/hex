@@ -2,20 +2,22 @@
 //! own PID 1 kept, booted to its readiness and measured.
 //!
 //! The probe boots the node image (`scripts/guest/node.Agentfile`, built by `scripts/guest/node-image.sh`) through
-//! shards-api's image boot, as the node's shards-init form is to boot it. Hex's init runs as the run's own command
+//! the node's own boot of its guest under shards-init (`hex_runtime::guest::hosted::Hosted::boot`): shards-api's image
+//! boot, then its READY followed, exactly as a node does it. Hex's init runs as the run's own command
 //! under the nesting grant (Shards' D234), PID 1 of the workload's own PID namespace. Its READY=1 comes only once init
 //! has done its duties there and its node and relay have each said they are ready, so a READY is that init's whole
 //! boot under shards-init. Each run prints:
-//! - its boot, from `Images::boot` to its return;
-//! - its readiness, from the same start to READY;
+//! - its readiness, from the boot's ask to READY (`HostedGuest::took`);
 //! - its stop, to the run's end;
 //! - the run's CPU time, memory and tasks as its init reads its cgroup (STATS).
 //!
 //! The probe ends with n, p50, p90, p99 and max of each. The host's own cost of the VM, its VM and network processes,
 //! is read beside it (ROOT's).
 //!
-//! Every wait is for its fact, `Duration::MAX`, and follows its party: the run host's life bounds the boot, and the
-//! run's end refuses the readiness, the stats and the stop.
+//! Its waits are a node's own:
+//! - the boot follows its run host, and READY follows its run at the cold start, then waits for the slowest READY
+//!   this node has seen (decision 9, the person's rule of 2026-11-13);
+//! - the stats and the stop wait for their fact (`Duration::MAX`), the run's end refusing them.
 //!
 //! Explicit inputs, each a variable; a missing one fails by name:
 //! - `SHARDS_BIN`: the `shards` binary;
@@ -40,11 +42,11 @@
 )]
 
 use std::ffi::OsString;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shards_api::image::{
-    ImageShards, ImageSpec, Images, Keep, Narrowing, Ready, RunEnd, StatsScope,
-};
+use hex_runtime::guest::hosted::{Hosted, HostedConfig};
+use shards_api::image::{ImageShards, Ready, RunEnd, StatsScope};
 
 fn given(name: &str) -> OsString {
     std::env::var_os(name)
@@ -59,33 +61,21 @@ where
     given(name).to_str().unwrap().parse().unwrap()
 }
 
-/// The node VM's image boot, as docs/design/node-under-shards-init.md §4 has it: Hex's init its command, under the
-/// nesting grant, with no deadline (the following wait's), no published port and every grant of the image dropped.
-fn spec() -> ImageSpec {
+/// The node's guest under shards-init as `hex node` would configure it, with no share: Shards' binary and home, the
+/// pinned node image and the VM's size.
+fn config() -> HostedConfig {
     let mut env = vec![(OsString::from("SHARDS_HOME"), given("SHARDS_HOME"))];
     for name in ["SHARDS_KERNEL", "SHARDS_INIT"] {
         if let Some(value) = std::env::var_os(name) {
             env.push((OsString::from(name), value));
         }
     }
-    ImageSpec {
+    HostedConfig {
+        binary: given("SHARDS_BIN").into(),
         image: given("HEX_GUEST_IMAGE").into_string().unwrap(),
         vcpus: number("HEX_GUEST_CPUS"),
         memory_mib: number("HEX_GUEST_MEMORY_MIB"),
-        command: Some(vec!["/init".to_owned()]),
-        members: Vec::new(),
-        publish: Vec::new(),
-        egress: Narrowing {
-            egress: Keep::Only(Vec::new()),
-            mcp: Keep::Only(Vec::new()),
-            destinations: Keep::Only(Vec::new()),
-            dns: false,
-            members: None,
-        },
         shares: Vec::new(),
-        nesting: true,
-        ready_by: None,
-        binary: Some(given("SHARDS_BIN").into()),
         env,
     }
 }
@@ -107,43 +97,36 @@ fn summary(values: &mut [u128]) -> String {
 #[test]
 #[ignore = "a measurement: run with --ignored --nocapture, release, where Shards boots VMs"]
 fn the_node_under_shards_init_boots_to_ready_with_hexs_own_init() {
-    let spec = spec();
+    let config = config();
     let n: usize = number("HEX_NODE_HOSTED_RUNS");
-    let images = ImageShards::new();
-    let (mut boots, mut readies, mut stops, mut memory) = (vec![], vec![], vec![], vec![]);
     println!(
         "NODE-HOSTED image={} vcpus={} memory_mib={} n={n}",
-        spec.image, spec.vcpus, spec.memory_mib
+        config.image, config.vcpus, config.memory_mib
     );
+    let hosted = Hosted::new(Arc::new(ImageShards::new()), config);
+    let (mut readies, mut stops, mut memory) = (vec![], vec![], vec![]);
     for i in 1..=n {
-        let began = Instant::now();
-        let guest = images.boot(&spec, Duration::MAX).unwrap();
-        let booted = began.elapsed();
-        let ready = guest.wait_ready(None, Duration::MAX).unwrap();
-        let ready_at = began.elapsed();
-        // No deadline was given, so READY=1 is on time, from Hex's init once its node and relay are ready.
-        assert_eq!(ready, Some(Ready::OnTime), "run {i}");
-        let stats = guest.stats(StatsScope::Run, Duration::MAX).unwrap();
+        let booted = hosted.boot().unwrap();
+        // No deadline at the cold start, so READY=1 is on time, from Hex's init once its node and relay are ready.
+        assert_eq!(booted.ready, Ready::OnTime, "run {i}");
+        let stats = booted.guest.stats(StatsScope::Run, Duration::MAX).unwrap();
         let stopping = Instant::now();
-        guest.stop().unwrap();
-        let end = guest.wait_for(Duration::MAX).unwrap();
+        booted.guest.stop().unwrap();
+        let end = booted.guest.wait_for(Duration::MAX).unwrap();
         let stopped = stopping.elapsed();
         assert_eq!(end, Some(RunEnd::Stopped), "run {i}");
         println!(
-            "NODE-HOSTED {i} boot_us={} ready_us={} stop_us={} cpu_ns={:?} memory_bytes={:?} pids={:?}",
-            booted.as_micros(),
-            ready_at.as_micros(),
+            "NODE-HOSTED {i} ready_us={} stop_us={} cpu_ns={:?} memory_bytes={:?} pids={:?}",
+            booted.took.as_micros(),
             stopped.as_micros(),
             stats.cpu_ns,
             stats.memory_bytes,
             stats.pids
         );
-        boots.push(booted.as_micros());
-        readies.push(ready_at.as_micros());
+        readies.push(booted.took.as_micros());
         stops.push(stopped.as_micros());
         memory.push(u128::from(stats.memory_bytes.unwrap()));
     }
-    println!("NODE-HOSTED boot_us {}", summary(&mut boots));
     println!("NODE-HOSTED ready_us {}", summary(&mut readies));
     println!("NODE-HOSTED stop_us {}", summary(&mut stops));
     println!("NODE-HOSTED memory_bytes {}", summary(&mut memory));
