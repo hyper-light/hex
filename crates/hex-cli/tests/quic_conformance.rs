@@ -109,8 +109,8 @@ fn this_hosts_limit() -> hex_api::ExecLimit {
     return hex_core::hcs::exec_limit();
 }
 
-/// A runtime served as a node's host: macOS's and Windows' `process` class, in this process.
-#[cfg(not(target_os = "linux"))]
+/// A runtime served as a node's host, in this process: macOS's and Windows' `process` class, and on every OS the
+/// simulator's (HEX-QUIC-27).
 mod hosted {
     use hex_api::{
         BackingGrant, BackingKey, BackingOffer, BoxId, BoxInfo, BoxSpec, Capacity, Class, Proc,
