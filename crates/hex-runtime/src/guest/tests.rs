@@ -579,14 +579,14 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     }
 }
 
-/// AC-T7.4.1, joint plan step 39 (original; docs/design/node-under-shards-init.md §4, §5): a node's guest under
-/// shards-init is named by `HEX_GUEST_IMAGE`, an Agentfile image of Hex's own init. Its host reaches that guest's node
-/// only through a lane of Shards' agent-control endpoint to the node's sockets, which Shards doesn't give yet. Do:
-/// read the guest from variables naming the image, alone and then beside the direct boot's kernel and initramfs.
-/// Expect: alone, refused `Awaits(NestedChannel)` before anything boots, not as a direct boot missing its kernel;
-/// beside them, refused naming both forms, as a node boots one form of its guest.
+/// AC-T7.4.1, joint plan step 39 (docs/design/node-under-shards-init.md §4, §5): a node's guest under shards-init is
+/// named by `HEX_GUEST_IMAGE`, an Agentfile image of Hex's own init, which its node boots through the image class and
+/// reaches through its run's agent-control endpoint. Do: read the guest from variables naming the image, then the same
+/// asking a GPU, then beside the direct boot's kernel and initramfs. Expect: the image form read whole, sized as the
+/// direct boot's and sharing its folders; a GPU awaited, as D234's `gpus=` isn't given; and both forms refused,
+/// naming them, as a node boots one form of its guest.
 #[test]
-fn original_a_guest_under_shards_init_awaits_its_channel_before_anything_boots() {
+fn w39_a_guest_under_shards_init_is_read_from_its_image() {
     use std::collections::BTreeMap;
     let read = |given: &[(&str, &str)]| {
         let vars: BTreeMap<String, OsString> = given
@@ -602,10 +602,24 @@ fn original_a_guest_under_shards_init_awaits_its_channel_before_anything_boots()
         ("HEX_GUEST_CPUS", "2"),
         ("HEX_GUEST_MEMORY_MIB", "1024"),
     ];
+    let config = read(&image).unwrap();
+    assert_eq!(config.boot, Boot::Image("hex-node@sha256:0123".to_owned()));
     assert_eq!(
-        read(&image),
+        (
+            config.binary.as_path(),
+            config.vcpus,
+            config.memory_mib,
+            config.gpu
+        ),
+        (std::path::Path::new("/opt/shards"), 2, 1024, false)
+    );
+    assert_eq!(config.shares, shares::defaults().unwrap());
+    let mut gpu = image.to_vec();
+    gpu.push(("HEX_GUEST_GPU", "true"));
+    assert_eq!(
+        read(&gpu),
         Err(Refusal::Awaits {
-            needs: hex_api::Upstream::NestedChannel
+            needs: hex_api::Upstream::NestedRuntime
         })
     );
     let mut both = image.to_vec();
@@ -1745,6 +1759,7 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
         },
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     let runtime = capacity_runtime(Some(reported.try_clone().unwrap()), config);
     let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
@@ -1805,12 +1820,14 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
             free,
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         },
         &configured,
-        &kept_identity(123),
+        "guest:123:1230".to_owned(),
     )
     .unwrap();
     assert_eq!((actual.total, actual.free), (room, free));
+    assert_eq!(actual.id, "guest:123:1230");
 }
 
 #[path = "device_routing_tests.rs"]

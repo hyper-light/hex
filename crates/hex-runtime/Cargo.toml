@@ -55,6 +55,9 @@ hex-testkit.workspace = true
 shards-abi = { path = "../../vendor/shards/crates/abi" }
 proptest = "1.12.0"
 tempfile.workspace = true
+# src/guest/image_tests.rs: a node VM's run's real agent-control endpoint (D251, D252) on loopback, its run host the
+# test's, which the guest under shards-init is reached through.
+shards-remote = { path = "../../vendor/shards/crates/remote" }
 
 [lints]
 workspace = true

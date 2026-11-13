@@ -598,6 +598,11 @@ pub trait Books: Send + Sync {
         let _ = run;
         Err(no_node_vms())
     }
+    /// Every node VM's record it keeps, in their runs' order: their receipts' one source, which the node's capacity
+    /// answer carries (joint plan step 39). An owner that keeps no node VM refuses, naming it.
+    fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        Err(no_node_vms())
+    }
     /// Writes node VM `record.run`'s record whole, replacing what it held, durable before it returns.
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         let _ = record;
@@ -606,6 +611,10 @@ pub trait Books: Send + Sync {
     /// Lets node VM `run`'s record go, once its run has ended.
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         let _ = run;
+        Err(no_node_vms())
+    }
+    /// A run for a node VM about to be booked: named by no record it keeps.
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
         Err(no_node_vms())
     }
 }
@@ -1692,6 +1701,7 @@ mod native_route_tests {
                 backings: Vec::new(),
                 unavailable: Vec::new(),
                 learned: None,
+                node_vms: Vec::new(),
             };
             native_routes(&mut capacity, hex_api::Class::Oci, image).unwrap();
             assert_eq!(capacity.device_routes, vec![2]);

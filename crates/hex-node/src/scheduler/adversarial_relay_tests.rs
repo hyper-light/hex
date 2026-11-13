@@ -90,6 +90,7 @@ impl Runtime for RelayRuntime {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         }))
     }
     fn classes(&self) -> Vec<hex_api::Class> {

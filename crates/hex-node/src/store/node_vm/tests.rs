@@ -2,8 +2,8 @@
 //! let go.
 
 use super::*;
-use hex_api::{Allocation, Exit};
-use hex_core::record::{NodeVmPhase, RECORD_VERSION};
+use hex_api::{Allocation, Exit, NodeVmPhase};
+use hex_core::record::RECORD_VERSION;
 
 /// A node VM's admitted size, its cost's own allocation: one CPU and the least memory.
 fn allocation() -> Allocation {
@@ -89,4 +89,29 @@ fn a_node_vms_row_is_kept_apart_from_box_and_pool_rows() {
     );
     store.remove_node_vm(&ready.run).unwrap();
     assert_eq!(store.node_vm(&ready.run).unwrap(), None);
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a node VM's row is its receipt's one source): do keep three node VMs' rows,
+/// written out of their runs' order, beside a box's, and list them; then put a record file in their directory whose
+/// name is no run's. Expect the three listed whole, in their runs' order, the box not among them; then the listing
+/// refused for the file whose name is no run's.
+#[test]
+fn every_node_vms_row_is_listed_in_its_runs_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    store.put(&a_box("a-box")).unwrap();
+    let rows = [
+        record(9, NodeVmPhase::Ended),
+        record(2, NodeVmPhase::Booting),
+        record(5, NodeVmPhase::Ready),
+    ];
+    for row in &rows {
+        store.put_node_vm(row).unwrap();
+    }
+    assert_eq!(
+        store.all_node_vms().unwrap(),
+        [rows[1].clone(), rows[2].clone(), rows[0].clone()]
+    );
+    std::fs::write(store.node_vm_directory().join("a-box.json"), b"{}\n").unwrap();
+    assert!(matches!(store.all_node_vms(), Err(Refusal::Invalid { .. })));
 }

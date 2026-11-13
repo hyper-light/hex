@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::devices::{Books, Records, Transaction};
-use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, Runtime};
-use hex_core::record::{NodeVmPhase, NodeVmRecord};
+use hex_api::{
+    Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, NodeVmPhase, Runtime,
+};
+use hex_core::record::NodeVmRecord;
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
     Receiving, StartedFrom, VcpuTime,
@@ -203,9 +205,17 @@ impl Books for Owner {
             .insert(record.run, record.clone());
         Ok(())
     }
+    fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        Ok(self.node_vms.lock().unwrap().values().cloned().collect())
+    }
     fn remove_node_vm(&self, run: &NodeRun) -> Result<(), Refusal> {
         self.node_vms.lock().unwrap().remove(run);
         Ok(())
+    }
+    // One past the runs it keeps, in every byte: unique while it keeps fewer than 255.
+    fn mint_node_run(&self) -> Result<NodeRun, Refusal> {
+        let next = u8::try_from(self.node_vms.lock().unwrap().len() + 1).unwrap();
+        Ok(NodeRun::from_bytes([next; 16]))
     }
 }
 
@@ -510,6 +520,9 @@ struct ModelImages {
     stopped: AtomicUsize,
     /// The boots that answered with a run started.
     answered: AtomicUsize,
+    /// Where the next boots' runs' relays listen, as the test sets it: a run whose boot asks an endpoint then binds a
+    /// real one ([`serve_lanes`]); none, and its endpoint is the model's address alone.
+    serve: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl ModelImages {
@@ -529,6 +542,7 @@ impl ModelImages {
             abandon: AtomicBool::new(false),
             stopped: AtomicUsize::new(0),
             answered: AtomicUsize::new(0),
+            serve: Mutex::new(None),
         })
     }
 
@@ -727,7 +741,11 @@ impl Images for ModelImages {
             outside: Mutex::new(outside),
             rate_period: *self.period.lock().unwrap(),
             started_from: *self.started_from.lock().unwrap(),
-            control: spec.control.as_ref().map(|_| model_control()),
+            control: match (spec.control.as_ref(), self.serve.lock().unwrap().clone()) {
+                (None, _) => None,
+                (Some(_), None) => Some(model_control()),
+                (Some(ask), Some(dir)) => Some(serve_lanes(ask, dir)),
+            },
             nesting: spec.nesting,
         }))
     }
@@ -3384,6 +3402,331 @@ fn w39_a_node_vm_whose_boot_is_refused_ends_its_record_in_shards_words() {
         (NodeVmPhase::Ended, Some(Exit::Unknown))
     );
     assert!(runtime.images.host_use_node(vm.run).is_err());
+}
+
+/// A run's real agent-control endpoint (D252) on loopback, its microVM's key the model's own, taking `ask`'s controller
+/// alone and admitting the lanes it grants; its host connects each lane to the socket it names in `dir`, as
+/// shards-init's relay host does (D251). A model run's endpoint and host live while the test does.
+#[cfg(unix)]
+fn serve_lanes(
+    ask: &shards_api::image::ControlAsk,
+    dir: std::path::PathBuf,
+) -> shards_api::image::ControlAt {
+    let grant = ask.sockets.as_ref().unwrap();
+    let vm = shards_api::control::Identity::generate().unwrap();
+    let (endpoint, served) = shards_remote::control::Endpoint::bind(
+        &vm,
+        ask.controller,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        shards_remote::control::Streams {
+            outputs: &[],
+            inputs: &[],
+            execs: None,
+            sockets: Some(shards_api::control::SocketAdmission {
+                lanes: grant.lanes,
+                window: grant.window,
+            }),
+        },
+    )
+    .unwrap();
+    let address = endpoint.address;
+    std::thread::spawn(move || endpoint.run());
+    let asks = served.sockets.unwrap();
+    let revoke = served.revoke;
+    std::thread::spawn(move || {
+        // Held for the endpoint's life: let go, it would end every lane.
+        let _revoke = revoke;
+        for ask in asks {
+            let reply = match std::os::unix::net::UnixStream::connect(dir.join(ask.name())) {
+                Ok(socket) => shards_remote::control::unix::Reply::Connected(socket),
+                // Linux's ECONNREFUSED: the run host is the guest's.
+                Err(_) => shards_remote::control::unix::Reply::Unreached(
+                    std::num::NonZeroU16::new(111).unwrap(),
+                ),
+            };
+            let _ = ask.reply(reply);
+        }
+    });
+    shards_api::image::ControlAt {
+        address,
+        vm: vm.fingerprint(),
+    }
+}
+
+#[cfg(not(unix))]
+fn serve_lanes(
+    _: &shards_api::image::ControlAsk,
+    _: std::path::PathBuf,
+) -> shards_api::image::ControlAt {
+    model_control()
+}
+
+/// The node's relay in the guest under shards-init, as far as its first connection needs it: its control socket in
+/// `dir`, one connection's token, then its node's hello answered, and each capacity ask after it with `pool`, its
+/// guest's own, where one is given; held until the client goes. Says whether it greeted.
+#[cfg(unix)]
+fn greeting_relay(dir: &std::path::Path, pool: Option<Capacity>) -> std::thread::JoinHandle<bool> {
+    use std::io::{Read, Write};
+    let listener = std::os::unix::net::UnixListener::bind(
+        dir.join(hex_core::stream::socket_name(hex_core::stream::CONTROL_PORT).unwrap()),
+    )
+    .unwrap();
+    std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(&7u64.to_le_bytes()).unwrap();
+        let mut d = hex_core::stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
+        let mut byte = [0u8; 1];
+        let mut greeted = false;
+        loop {
+            let message = loop {
+                // Held until the client goes, as a relay's connection is.
+                if !matches!(conn.read(&mut byte), Ok(1)) {
+                    return greeted;
+                }
+                if let (_, Some(m)) = d.take(&byte).unwrap() {
+                    break m;
+                }
+            };
+            let (h, request) =
+                hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+            let answer = match (request, &pool) {
+                (hex_core::wire::Request::Hello { .. }, _) => {
+                    greeted = true;
+                    hex_core::wire::Answer::Hello(hex_core::wire::Hello {
+                        build: hex_core::wire::build(),
+                        classes: vec![hex_api::Class::Oci],
+                        limits: hex_core::wire::Limits {
+                            connections: 1,
+                            message_bytes: hex_core::wire::MAX_MESSAGE,
+                            in_flight: 1,
+                            programs: 1,
+                        },
+                        budgets: hex_core::wire::Budgets {
+                            in_flight: 1,
+                            programs: 1,
+                        },
+                    })
+                }
+                (hex_core::wire::Request::Call(hex_core::wire::Call::Capacity(_)), Some(pool)) => {
+                    hex_core::wire::Answer::Capacity(Some(pool.try_clone().unwrap()))
+                }
+                (other, _) => panic!("the relay was asked {other:?}"),
+            };
+            let bytes = hex_core::wire::answer(h.id, &answer, hex_core::wire::MAX_MESSAGE).unwrap();
+            conn.write_all(&hex_core::stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+        }
+    })
+}
+
+/// A fixed VM's cost profile for `config`'s guest: its vCPUs and memory, floor and ceiling alike, as a node's guest is
+/// charged (`GuestConfig::checked_runtime_allocation`).
+#[cfg(unix)]
+fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
+    let vm = crate::guest::selected::resources(config).unwrap();
+    hex_api::RuntimeCost {
+        id: *b"hex-runtime node VM test profile",
+        floor: vm,
+        ceiling: vm,
+        quantum: CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 1 << 20,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources::default(),
+    }
+}
+
+/// A node's guest runtime of the image form, its node VM booted through `images`, its records `owner`'s, its node
+/// having fitted it six lanes: with the configuration it was made from.
+#[cfg(unix)]
+fn image_form(
+    images: &Arc<ModelImages>,
+    owner: &Arc<Owner>,
+) -> (GuestRuntime, crate::guest::GuestConfig) {
+    let config = crate::guest::GuestConfig {
+        boot: crate::guest::Boot::Image(hex_api::sim::SIM_IMAGE.to_owned()),
+        ..super::super::tests::config()
+    };
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        config.clone(),
+    )
+    .with_images(
+        Ok(Arc::clone(images) as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    )
+    .with_runtime_cost(fixed_cost(&config))
+    .unwrap();
+    runtime.set_lanes(6).unwrap();
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    (runtime, config)
+}
+
+/// Joint plan step 39 (AC-T7.4.1; docs/design/node-under-shards-init.md §4, §5; ROOT, 2026-11-13: one code path): do
+/// boot a node's guest under shards-init. Expect it booted through the image class as a node VM, its run's endpoint
+/// taking this runtime's key and admitting the lanes its node fitted; its record a node VM's, Ready, charged at the
+/// configured VM; its relay dialed through a lane of that endpoint and its node's hello the answer; and the runtime's
+/// next ask the same guest, its run still running, no second boot.
+#[cfg(unix)]
+#[test]
+fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_node_over_its_runs_lanes()
+ {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), None);
+    let owner = Arc::new(Owner::new());
+    let (runtime, config) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    let spec = &asked[0];
+    assert!(spec.nesting && spec.command == Some(vec!["/init".to_owned()]));
+    let control = spec.control.as_ref().unwrap();
+    assert_ne!(control.controller, [0; 32]);
+    assert_eq!(control.sockets.as_ref().map(|grant| grant.lanes), Some(6));
+    let records = owner.node_vms.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let record = records.into_values().next().unwrap();
+    assert_eq!(record.phase, NodeVmPhase::Ready);
+    assert_eq!(
+        record.allocation,
+        config
+            .checked_runtime_allocation(fixed_cost(&config))
+            .unwrap()
+    );
+    // The same guest again: its run still runs.
+    runtime.boot().unwrap();
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// A node's loop with no room for one more connection: it refuses every guest connection's join.
+#[cfg(unix)]
+struct FullLoop;
+
+#[cfg(unix)]
+impl crate::guest::Joins for FullLoop {
+    fn reserve(&self) -> Result<(u64, crate::guest::Room), Refusal> {
+        Err(Refusal::Exhausted {
+            what: "the node loop's connections",
+            bound: 0,
+        })
+    }
+    fn join(&self, _: u64, _: hex_client::guest::Pump) -> Result<(), Refusal> {
+        Err(Refusal::Exhausted {
+            what: "the node loop's connections",
+            bound: 0,
+        })
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13): do boot a node's guest under shards-init whose connection its
+/// node's loop can't join, though its node greeted it. Expect: the boot refused as the loop refused it, and its node
+/// VM's run stopped first: its record Ended with its exit, so no run is left beside the next boot's.
+#[cfg(unix)]
+#[test]
+fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stopped() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), None);
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.join_loop(Arc::new(FullLoop)).unwrap();
+    let refused = runtime.boot().unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            Refusal::Exhausted {
+                what: "the node loop's connections",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    let records = owner.node_vms.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let record = records.into_values().next().unwrap();
+    assert_eq!(
+        (record.phase, record.exit.is_some()),
+        (NodeVmPhase::Ended, true),
+        "{record:?}"
+    );
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// The guest node's own pool as its relay answers it: two CPUs and 4 GiB, all of them free.
+#[cfg(unix)]
+fn guest_pool() -> Capacity {
+    let room = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 4 << 30,
+        disk_bytes: 0,
+    };
+    Capacity {
+        id: "guest-node".to_owned(),
+        total: room,
+        free: room,
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: Default::default(),
+        node_vms: Vec::new(),
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
+/// answer, its record the one source): do ask the `oci` class's capacity of a node whose guest is a node VM under
+/// shards-init. Expect its guest's pool, fenced by its node VM's run, carrying that node VM's receipt as its record
+/// keeps it: its run, what its allocation books, Ready.
+#[cfg(unix)]
+#[test]
+fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    let record = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let run: String = record
+        .run
+        .bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(capacity.id, format!("node-vm:{run}"));
+    assert_eq!(
+        capacity.node_vms,
+        vec![hex_api::NodeVmReceipt {
+            run: record.run,
+            booking: record.allocation.booking(),
+            phase: NodeVmPhase::Ready,
+        }]
+    );
+    drop(runtime);
+    assert!(relay.join().unwrap());
 }
 
 /// Joint plan step 33's sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8), red first: do create and

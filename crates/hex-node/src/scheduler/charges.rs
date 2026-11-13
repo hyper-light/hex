@@ -104,5 +104,42 @@ pub(super) fn holds(
     Ok(out)
 }
 
+/// The node VMs `reports` name that hold room (joint plan step 39; ROOT, 2026-11-13: a node VM's receipt reaches the
+/// scheduler on its node's capacity answer): each Booting or Ready one by its run, at what its receipt books. An Ended
+/// one holds none. One node's records name each of its node VMs once, so answers naming a run twice are refused.
+pub(super) fn node_vms(
+    reports: &[(Class, Option<hex_api::Capacity>)],
+) -> Result<BTreeMap<hex_api::NodeRun, hex_sim::model::Resources>, Refusal> {
+    let mut named = std::collections::BTreeSet::new();
+    let mut booked = BTreeMap::new();
+    for receipt in reports
+        .iter()
+        .filter_map(|(_, capacity)| capacity.as_ref())
+        .flat_map(|capacity| &capacity.node_vms)
+    {
+        if !named.insert(receipt.run) {
+            return Err(Refusal::Invalid {
+                what: "node VM receipts",
+                why: "two capacity answers name one node VM".to_owned(),
+            });
+        }
+        if matches!(
+            receipt.phase,
+            hex_api::NodeVmPhase::Booting | hex_api::NodeVmPhase::Ready
+        ) {
+            booked.insert(
+                receipt.run,
+                hex_sim::model::Resources {
+                    cpu_milli: receipt.booking.cpu_milli,
+                    mem_bytes: receipt.booking.mem_bytes,
+                    disk_bytes: receipt.booking.disk_bytes,
+                    gpus: 0,
+                },
+            );
+        }
+    }
+    Ok(booked)
+}
+
 #[cfg(test)]
 mod tests;

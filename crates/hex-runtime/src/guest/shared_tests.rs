@@ -332,6 +332,7 @@ impl Books for Owner {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         })
     }
     fn with_transaction(
@@ -1023,6 +1024,7 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
         ],
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     native.check().unwrap();
     assert_eq!(owner.capacity_calls.load(Ordering::SeqCst), 0);
@@ -1335,6 +1337,7 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         capacity.free.mem_bytes = free;
         capacity
@@ -1384,6 +1387,7 @@ fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_
             cpu_ns: Some(cpu_ns),
             uptime_ns: Some(uptime_ns),
         },
+        node_vms: Vec::new(),
     };
     let boxes = |cpu_ns: u64| super::Boxes {
         cpu_ns,
@@ -1523,6 +1527,7 @@ fn w14_a_shared_backing_goes_live_only_measured() {
             cpu_ns: Some(4_000_000_000),
             uptime_ns: Some(10_000_000_000),
         },
+        node_vms: Vec::new(),
     };
     *runtime.booted.lock().unwrap() = Some(super::super::tests::running_guest(
         Some(answer),

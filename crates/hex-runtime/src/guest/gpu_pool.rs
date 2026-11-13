@@ -457,9 +457,14 @@ impl GuestRuntime {
             let booted = match reservation.previous.as_ref() {
                 Some(known) => {
                     self.matches_pool(&known.booted, &record)?;
-                    let identity = known.booted.guest.identity().map_err(|why| {
-                        refusal("checking the same GPU backing publication", &why)
-                    })?;
+                    let identity = known
+                        .booted
+                        .guest
+                        .shards_for("checking the same GPU backing publication")?
+                        .identity()
+                        .map_err(|why| {
+                            refusal("checking the same GPU backing publication", &why)
+                        })?;
                     managed::same_native(NativeRecord::Pool(&record), &identity)?;
                     self.pool_alive(&known.booted, record.key)?;
                     let receipt = pool::read(&definition.path)?.ok_or_else(|| {
@@ -1539,6 +1544,7 @@ mod tests {
                 cost: None,
                 unavailable: Vec::new(),
                 learned: None,
+                node_vms: Vec::new(),
             }),
             physical: Some(vec![factual]),
             effects: AtomicUsize::new(0),
@@ -1679,6 +1685,7 @@ mod tests {
             cost: None,
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         prefix.check().unwrap();
         assert_ne!(
@@ -2273,6 +2280,7 @@ mod tests {
                 cost: None,
                 unavailable: Vec::new(),
                 learned: None,
+                node_vms: Vec::new(),
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
