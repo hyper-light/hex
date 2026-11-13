@@ -30,7 +30,8 @@
 //! - the process box's CPU cap and memory bound, which it books (the run's admission leaves it both) and of which it
 //!   asks the CPU whole: the median CPU (mean cores, in milli-CPU) and the median peak memory, each by nearest rank, of
 //!   the `build` legs kiln's CI ran from 2026-10-22 to 2026-11-05 (bench/sched/kiln-ci-20261022-20261105.trace), a CI
-//!   job's box beside the agents;
+//!   job's box beside the agents. macOS holds a process box at no CPU cap (refused, typed): there the box books its
+//!   memory alone and its spinners ask a CPU each, taking what the scheduler gives them;
 //! - the deadline guarding the node's start and each create (a VM's create boots it, past the client's learned create
 //!   bound): twice the node's own boot bound for the class, so the node's refusal, typed, comes first. `shards`: the
 //!   guest's dial bound, twice the slowest boot to ready this host's class records (bench/native/guest/records.tsv);
@@ -287,13 +288,26 @@ fn ci_box() -> CapacityResources {
     }
 }
 
-/// The process box beside the fleet, `id`, bounded at its caps `caps`, which it books.
-fn box_spec(id: BoxId, caps: CapacityResources) -> BoxSpec {
+/// What the process box books of its caps `caps`, the bounds its node holds (a native box books its caps, C4): both on
+/// Linux and Windows; on macOS, which holds a process box at no CPU cap (refused, typed), its memory alone.
+fn box_booking(caps: CapacityResources) -> CapacityResources {
+    if cfg!(target_os = "macos") {
+        CapacityResources {
+            cpu_milli: 0,
+            ..caps
+        }
+    } else {
+        caps
+    }
+}
+
+/// The process box beside the fleet, `id`, bounded at its booking `booked`: a CPU cap where it books CPU.
+fn box_spec(id: BoxId, booked: CapacityResources) -> BoxSpec {
     BoxSpec {
         id,
         bounds: Bounds {
-            cpu_max_milli: Some(u32::try_from(caps.cpu_milli).unwrap()),
-            memory_max: Some(caps.mem_bytes),
+            cpu_max_milli: (booked.cpu_milli > 0).then(|| u32::try_from(booked.cpu_milli).unwrap()),
+            memory_max: Some(booked.mem_bytes),
             ..Bounds::default()
         },
         class: ClassSpec::Process,
@@ -686,11 +700,17 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     // The fleet's budget: the machine less the process box's caps, which it books (a native box's booking is its caps,
     // as the node's learner reads them, C4).
     let box_caps = ci_box();
-    let box_cpu = box_caps.cpu_milli;
+    let box_booked = box_booking(box_caps);
+    // What the box's spinners ask: its CPU cap, where its node holds one; else a CPU each spinner.
+    let box_cpu = if box_booked.cpu_milli > 0 {
+        box_booked.cpu_milli
+    } else {
+        box_caps.cpu_milli.div_ceil(1000) * 1000
+    };
     let budget = capacity
         .total
-        .checked_sub(box_caps)
-        .expect("the machine holds the process box's caps");
+        .checked_sub(box_booked)
+        .expect("the machine holds the process box's booking");
     let envelope = [
         (budget.cpu_milli, allocation.resources.cpu_milli),
         (budget.mem_bytes, allocation.resources.mem_bytes),
@@ -704,8 +724,8 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     let boxed = BoxId::new("charge-box").unwrap();
     let _spinning = client
         .run_before(
-            box_spec(boxed.clone(), box_caps),
-            spinner(box_cpu),
+            box_spec(boxed.clone(), box_booked),
+            spinner(box_caps.cpu_milli),
             Stdio::null(),
             Instant::now() + wait,
         )
@@ -880,12 +900,13 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                 vm: BOX,
                 asked: box_cpu,
                 given,
-                booked: box_cpu,
+                booked: box_booked.cpu_milli,
             });
             writeln!(
                 tsv,
-                "{at}\tbox\t-\t{}\t{box_cpu}\t{given}\t{box_cpu}",
-                span.as_micros()
+                "{at}\tbox\t-\t{}\t{box_cpu}\t{given}\t{}",
+                span.as_micros(),
+                box_booked.cpu_milli
             )
             .unwrap();
         }
@@ -946,12 +967,12 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         ran.as_millis()
     );
     println!(
-        "HEX-CHARGE-FLEET inputs workload_cpu_milli={} workload_mem_bytes={} allocation={:?} box_cpu_milli={box_cpu} \
-         box_mem_bytes={} guard_ms={} traces={}",
+        "HEX-CHARGE-FLEET inputs workload_cpu_milli={} workload_mem_bytes={} allocation={:?} box_asks_milli={box_cpu} \
+         box_booked={:?} guard_ms={} traces={}",
         workload.cpu_milli,
         workload.mem_bytes,
         allocation.resources,
-        box_caps.mem_bytes,
+        box_booked,
         wait.as_millis(),
         traces.len()
     );
@@ -991,9 +1012,9 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
 
 /// Joint plan step 14 (AC-T7.4.1): the process box beside the fleet runs its spinners under the bounds it books, so
 /// the run's CPU contention is real and its box's readings are its spinners'. Do run, in a macOS process box bounded as
-/// the driver bounds it, the driver's spinner for the box's CPU cap; expect the shell and every spinner of it running,
-/// never its program ended first (a bound that can't hold the shell ends it at once, and every contended window would
-/// then read the box short).
+/// the driver bounds it there (its booking, its memory alone), the driver's spinner for the box's CPU; expect the shell
+/// and every spinner of it running, never its program ended first or the box refused (a bound that can't hold the
+/// shell ends it at once, and every contended window would then read the box short).
 #[cfg(target_os = "macos")]
 #[test]
 fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
@@ -1013,7 +1034,7 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
     let caps = ci_box();
     let id = BoxId::new("w14-charge-box").unwrap();
     let _ = rt.delete(&id);
-    rt.create(box_spec(id.clone(), caps)).unwrap();
+    rt.create(box_spec(id.clone(), box_booking(caps))).unwrap();
     let mut program = rt
         .exec(&id, spinner(caps.cpu_milli), Stdio::null())
         .unwrap();
@@ -1038,7 +1059,7 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
         ended,
         None,
         "the box's spinner ended before its {members} members ran, under {:?}: {usage:?}",
-        box_spec(id, caps).bounds
+        box_spec(id, box_booking(caps)).bounds
     );
 }
 
