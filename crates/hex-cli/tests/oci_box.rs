@@ -2651,10 +2651,7 @@ fn run_in(rt: &dyn Runtime, id: &BoxId, argv: &[&str]) -> (Exit, String) {
         .expect("exec in the box");
     let mut s = String::new();
     std::io::Read::read_to_string(&mut out, &mut s).unwrap();
-    let exit = proc
-        .wait_for(conformance::PATIENCE)
-        .unwrap()
-        .expect("the program ends");
+    let exit = conformance::end_of(&mut proc).unwrap();
     (exit, s)
 }
 
@@ -3634,7 +3631,7 @@ fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, ow
     let second = node.exec(&id, program, hex_api::Stdio::null());
     let small = node
         .exec(&id, lab.program(&Act::Say("small")), hex_api::Stdio::null())
-        .map(|mut p| p.wait_for(conformance::patience()));
+        .map(|mut p| conformance::end_of(&mut p));
     let last = stack_reads();
     setrlimit(Resource::Stack, was).expect("restore this node's stack limit");
     relearn_stack();
@@ -3692,7 +3689,7 @@ fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, ow
         "the learned bound refused it with no further reading"
     );
     assert!(
-        matches!(small, Ok(Ok(Some(Exit::Code(0))))),
+        matches!(small, Ok(Ok(Exit::Code(0)))),
         "a program within the bound still runs, got {small:?}"
     );
     node.delete(&id).expect("delete");
@@ -4151,10 +4148,7 @@ fn loopback_flags(rt: &dyn Runtime, id: &BoxId) -> String {
         .expect("exec cat");
     let mut flags = String::new();
     std::io::Read::read_to_string(&mut out, &mut flags).unwrap();
-    assert_eq!(
-        proc.wait_for(conformance::PATIENCE).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(conformance::end_of(&mut proc).unwrap(), Exit::Code(0));
     flags.trim().to_owned()
 }
 
@@ -4245,10 +4239,7 @@ fn program_alone(lab: &Lab, own: &Path) {
     // Each program was a member of the box cgroup, so delete's cgroup.kill reached it: reap it (the
     // caller's own Proc, as HEX-RT-7 does) and find it ended by a signal, no zombie left.
     for mut p in [first, second] {
-        let exit = p
-            .wait_for(conformance::PATIENCE)
-            .expect("wait for a deleted program")
-            .expect("the program ended with the box");
+        let exit = conformance::end_of(&mut p).expect("wait for a deleted program");
         assert!(
             matches!(exit, Exit::Signal(_)),
             "delete ended the program by a signal: {exit:?}"
@@ -4302,9 +4293,7 @@ fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
     }
     drop(stray);
     node.delete(&id).expect("delete ends the programs");
-    exec.wait_for(conformance::PATIENCE)
-        .expect("wait for a deleted program")
-        .expect("the program ended with the box");
+    conformance::end_of(&mut exec).expect("wait for a deleted program");
 }
 
 /// Goal 3 plan step 6: an exec into a running box reads nothing of the box's from disk; what it needs
@@ -4326,11 +4315,11 @@ fn exec_reads_no_state(lab: &Lab, own: &Path) {
             hex_api::Program::of(&["/usr/bin/true"]),
             hex_api::Stdio::null(),
         )
-        .and_then(|mut p| p.wait_for(conformance::PATIENCE));
+        .and_then(|mut p| conformance::end_of(&mut p));
     std::fs::rename(&aside, &file).expect("put the container's state back");
     assert_eq!(
         ran,
-        Ok(Some(Exit::Code(0))),
+        Ok(Exit::Code(0)),
         "exec ran its program with the container's state file gone"
     );
     node.delete(&id).expect("delete");
@@ -4418,10 +4407,7 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
             },
         )
         .unwrap();
-    assert_eq!(
-        proc.wait_for(conformance::PATIENCE).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(conformance::end_of(&mut proc).unwrap(), Exit::Code(0));
     // Read to the pipe's end on a thread of its own, within the patience: an orphan still holding the pipe
     // fails the test by name rather than hang it.
     let (got, read) = std::sync::mpsc::channel();

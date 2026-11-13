@@ -449,6 +449,13 @@ impl Store {
             true,
             &record.spec.id,
         )?;
+        // The file its run host's diagnostics are kept in (D258), named with its start's intent alone.
+        let diagnostics = lifecycle_fact(
+            current.diagnostics.take(),
+            record.diagnostics.clone(),
+            introducing,
+            &record.spec.id,
+        )?;
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
@@ -464,6 +471,7 @@ impl Store {
         current.exit = exit;
         current.ended = ended;
         current.started_from = started_from;
+        current.diagnostics = diagnostics;
         current.native_scope = native_scope;
         // Both writers count monotonically: publishing a backend completion cannot discard a
         // disconnect counted by the existing socket owner while native I/O was in flight.
@@ -1420,6 +1428,65 @@ mod tests {
         };
         assert!(store.put_lifecycle(&other_start).is_err());
         assert_eq!(read(), kept);
+    }
+
+    /// Joint plan step 12 (D258; AC-T7.4.1): a Shards image VM's record names the file its run host's diagnostics are
+    /// kept in as its start's intent is written (its record's step from Creating to Ready), and the VM adapters' later
+    /// writes keep it. Do write a Creating record, then it Ready naming its file; then as a writer that read it before,
+    /// then naming another file; then another box's Ready record naming one after its start. Expect the file kept as
+    /// named, a stale writer's absence keeping it, and another file refused as uncertain, as is one named past a start.
+    #[test]
+    fn w12_lifecycle_writes_keep_the_file_a_vms_start_names_for_its_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut created = record("image-diagnostics");
+        created.phase = Phase::Creating;
+        store.put_lifecycle(&created).unwrap();
+        let file = dir
+            .path()
+            .join("image-diagnostics")
+            .join("image-diagnostics.log");
+        let started = BoxRecord {
+            phase: Phase::Ready,
+            diagnostics: Some(file.clone()),
+            ..created.clone()
+        };
+        store.put_lifecycle(&started).unwrap();
+        let named = |id: &str| {
+            store
+                .read_lifecycle(&BoxId::new(id).unwrap())
+                .unwrap()
+                .unwrap()
+                .diagnostics
+        };
+        assert_eq!(named("image-diagnostics"), Some(file.clone()));
+        let stale = BoxRecord {
+            phase: Phase::Ready,
+            ..created.clone()
+        };
+        store.put_lifecycle(&stale).unwrap();
+        assert_eq!(
+            named("image-diagnostics"),
+            Some(file.clone()),
+            "a stale writer's absence keeps it"
+        );
+        let other = BoxRecord {
+            diagnostics: Some(file.with_file_name("other.log")),
+            ..started.clone()
+        };
+        assert!(store.put_lifecycle(&other).is_err());
+        let mut late = record("image-late");
+        late.phase = Phase::Creating;
+        store.put_lifecycle(&late).unwrap();
+        late.phase = Phase::Ready;
+        store.put_lifecycle(&late).unwrap();
+        let named_late = BoxRecord {
+            diagnostics: Some(file.with_file_name("image-late.log")),
+            ..late.clone()
+        };
+        assert!(store.put_lifecycle(&named_late).is_err());
+        assert_eq!(named("image-late"), None);
+        assert_eq!(named("image-diagnostics"), Some(file));
     }
 
     /// The names of the records in the runtime record directory `run`'s shards, sorted.

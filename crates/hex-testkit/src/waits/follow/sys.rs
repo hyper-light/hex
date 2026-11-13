@@ -3,7 +3,7 @@
 
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
-use hex_core::patience::Party;
+use super::Party;
 
 /// A thread of this process, as its OS names it: Linux's tid, macOS's 64-bit thread id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,37 +25,19 @@ pub fn current() -> std::io::Result<Id> {
         })
 }
 
-/// Thread `id` as a party, from `/proc/self/task/<tid>/stat`: gone or a zombie, ended; running or runnable (`R`),
-/// live; otherwise alive, its CPU time in nanoseconds from `schedstat` where the kernel keeps it, else in clock ticks
-/// from `stat`'s utime and stime (fields 14 and 15), one source for the thread's whole life. One the OS shows no state
-/// of is followed by its life alone.
+/// Thread `id` as a party, from `/proc/self/task/<tid>/stat`: gone or a zombie, ended; otherwise live.
 #[cfg(target_os = "linux")]
 pub fn party(id: Id) -> Party {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/self/task/{}/stat", id.0)) else {
         return Party::Ended;
     };
-    // The command name is in parentheses and may hold anything: the fields after it are read past its last ')'.
-    let Some((_, fields)) = stat.rsplit_once(')') else {
-        return Party::Live;
-    };
-    let fields: Vec<&str> = fields.split_whitespace().collect();
-    match fields.first().copied() {
-        Some("Z" | "X" | "x") => return Party::Ended,
-        Some("R") | None => return Party::Live,
-        Some(_) => {}
-    }
-    let nanos = std::fs::read_to_string(format!("/proc/self/task/{}/schedstat", id.0))
-        .ok()
-        .and_then(|s| s.split_whitespace().next().and_then(|n| n.parse().ok()));
-    // After the ')': state is field 3, so utime (14) and stime (15) are the 12th and 13th.
-    let ticks = || {
-        let utime: u64 = fields.get(11)?.parse().ok()?;
-        let stime: u64 = fields.get(12)?.parse().ok()?;
-        utime.checked_add(stime)
-    };
-    match nanos.or_else(ticks) {
-        Some(progress) => Party::Alive { progress },
-        None => Party::Live,
+    // The command name is in parentheses and may hold anything: the state, after it, is read past its last ')'.
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next());
+    match state {
+        Some("Z" | "X" | "x") => Party::Ended,
+        _ => Party::Live,
     }
 }
 
@@ -74,12 +56,8 @@ pub fn current() -> std::io::Result<Id> {
 /// XNU's flavor reading a thread by its 64-bit id (`sys/proc_info.h`), which libc doesn't name.
 #[cfg(target_os = "macos")]
 const PROC_PIDTHREADID64INFO: libc::c_int = 15;
-/// A thread running or runnable (`mach/thread_info.h`).
-#[cfg(target_os = "macos")]
-const TH_STATE_RUNNING: i32 = 1;
 
-/// Thread `id` as a party, from `proc_pidinfo(PROC_PIDTHREADID64INFO)`: no such thread, ended; running or runnable,
-/// live; otherwise alive, its user and system time in nanoseconds. A short answer is followed by its life alone.
+/// Thread `id` as a party, from `proc_pidinfo(PROC_PIDTHREADID64INFO)`: no such thread, ended; otherwise live.
 #[cfg(target_os = "macos")]
 pub fn party(id: Id) -> Party {
     let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::zeroed();
@@ -98,18 +76,8 @@ pub fn party(id: Id) -> Party {
         )
     };
     if wrote <= 0 {
-        return Party::Ended;
-    }
-    if wrote != size {
-        return Party::Live;
-    }
-    // SAFETY: proc_pidinfo wrote the whole struct (`wrote == size`), and it was zeroed before, every field plain data.
-    let info = unsafe { info.assume_init() };
-    if info.pth_run_state == TH_STATE_RUNNING {
-        return Party::Live;
-    }
-    match info.pth_user_time.checked_add(info.pth_system_time) {
-        Some(progress) => Party::Alive { progress },
-        None => Party::Live,
+        Party::Ended
+    } else {
+        Party::Live
     }
 }

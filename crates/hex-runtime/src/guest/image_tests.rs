@@ -17,11 +17,27 @@ use shards_api::image::{
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
 /// written, stays; only a Deleting record is removed.
-#[derive(Default)]
 struct Owner {
     records: Mutex<Records>,
     /// Its scans of every record ([`Books::records`]), each a read of the node's whole Store.
     scans: AtomicUsize,
+    /// The node's state's own directory for its image boxes' diagnostics, gone with the owner.
+    state: tempfile::TempDir,
+}
+
+impl Owner {
+    fn new() -> Self {
+        Self {
+            records: Mutex::default(),
+            scans: AtomicUsize::new(0),
+            state: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    /// Where the class keeps its runs' diagnostics ([`GuestRuntime::with_images`]).
+    fn diagnostics(&self) -> std::path::PathBuf {
+        self.state.path().join("image-diagnostics")
+    }
 }
 
 fn broken(why: &str) -> Refusal {
@@ -185,6 +201,9 @@ struct ModelRun {
     stats: Mutex<Stats>,
     /// The patience each stats ask was given, in order (decision 9).
     stats_asked: Mutex<Vec<Duration>>,
+    /// Each file its run host's diagnostics were told to go to (`ImageGuest::keep_diagnostics`), in order: the test
+    /// writes the host's diagnostics into the last, as the run host's do.
+    diagnostics: Mutex<Vec<std::fs::File>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -346,6 +365,10 @@ impl ImageGuest for ModelGuest {
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
+        Ok(())
+    }
+    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+        self.run.diagnostics.lock().unwrap().push(to);
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
@@ -593,14 +616,18 @@ fn model_runtime(
     images: &Arc<ModelImages>,
     waits: Result<ImageWaits, Refusal>,
 ) -> (GuestRuntime, Arc<Owner>) {
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(Ok(Arc::clone(images) as Arc<dyn Images>), waits);
+    .with_images(
+        Ok(Arc::clone(images) as Arc<dyn Images>),
+        waits,
+        owner.diagnostics(),
+    );
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     (runtime, owner)
@@ -867,6 +894,51 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
         (Some(Exit::Unknown), Some(words))
     );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one
+/// file under the node's state, named in its record as its start's intent is written, and a failed run's `ended` quotes
+/// their last bytes after its own words; the file goes with the box's delete. Do start an image VM, write its run host's
+/// diagnostics into the file the class named, then end its run failed and inspect it; then delete it. Expect its record
+/// to name the class's file for the box, Shards told once to keep the diagnostics there; the box shown Empty, its
+/// `ended` its run's words, then the run host's last words from the file, its record keeping the same; after the
+/// delete, the file gone with the record.
+#[test]
+fn w12_a_failed_runs_ended_quotes_its_run_hosts_diagnostics_and_its_delete_removes_them() {
+    use std::io::Write as _;
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-diagnostics", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let file = owner.diagnostics().join("image-diagnostics.log");
+    assert_eq!(
+        record(&owner, &id).unwrap().diagnostics.as_deref(),
+        Some(file.as_path())
+    );
+    assert_eq!(images.run.diagnostics.lock().unwrap().len(), 1);
+    let last =
+        "api-run: its VM's kernel panicked: VFS: unable to mount root fs on unknown-block(0,0)";
+    {
+        let mut kept = images.run.diagnostics.lock().unwrap();
+        let to = kept.last_mut().unwrap();
+        to.write_all(b"api-run: booting its microVM\n").unwrap();
+        to.write_all(format!("{last}\n").as_bytes()).unwrap();
+    }
+    let words = "its VM failed";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    let ended = info.ended.unwrap();
+    assert!(
+        ended.starts_with(words) && ended.trim_end().ends_with(last),
+        "{ended}"
+    );
+    assert_eq!(
+        record(&owner, &id).unwrap().ended.as_deref(),
+        Some(ended.as_str())
+    );
+    runtime.delete(&id).unwrap();
+    assert!(!file.exists(), "{file:?} outlived its box");
+    assert!(record(&owner, &id).is_none());
 }
 
 /// Joint plan step 12 (goal 15's finding; ROOT's (b), 2026-11-13): do start a VM whose run fails as it boots, its command
@@ -1567,7 +1639,7 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
 /// any record.
 #[test]
 fn a_create_is_refused_before_any_record_on_a_node_without_an_image_boot() {
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
@@ -1657,14 +1729,14 @@ fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
         }
         return;
     };
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(host_images(), waits());
+    .with_images(host_images(), waits(), owner.diagnostics());
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     let made = runtime

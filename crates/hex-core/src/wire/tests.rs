@@ -2449,6 +2449,7 @@ fn route_wire_shared_key() -> BackingKey {
 
 fn route_wire_shared_backing(phase: BackingPhase) -> BackingOffer {
     BackingOffer {
+        guest: Default::default(),
         key: route_wire_shared_key(),
         cost: route_wire_cost(),
         phase,
@@ -2482,6 +2483,7 @@ fn route_wire_cost() -> RuntimeCost {
 
 fn route_wire_backing(phase: BackingPhase) -> BackingOffer {
     BackingOffer {
+        guest: Default::default(),
         key: route_wire_key(),
         cost: route_wire_cost(),
         phase,
@@ -2581,6 +2583,27 @@ fn route_wire_capacity() -> Capacity {
         route_wire_shared_backing(BackingPhase::Live),
     ];
     capacity
+}
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's guest overhead, as its runtime measured it, crosses
+/// to the scheduler on its offer: per dimension, none while cold. Do answer a capacity whose shared backing's guest is
+/// measured at 0.25 CPU and 256 MiB, its disk unmeasured, and read it back. Expect it whole.
+#[test]
+fn w14_a_shared_backings_measured_guest_crosses_on_its_offer() {
+    let mut capacity = route_wire_capacity();
+    for backing in &mut capacity.backings {
+        backing.guest = LearnedOverhead {
+            cpu_milli: Some(250),
+            mem_bytes: Some(256 << 20),
+            disk_bytes: None,
+        };
+    }
+    let expected = Answer::Capacity(Some(capacity));
+    let bytes = answer(209, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
 }
 
 // Use the real old prefix and emit chosen new fields without the capacity validator, so invalid
@@ -3165,10 +3188,11 @@ fn route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts() {
             )
             .unwrap()
         };
+        // Where its claims begin: after its count, an offer's guest following them (joint plan step 14, C7).
         let minimum = if grant {
             BACKING_GRANT_MIN_BYTES
         } else {
-            BACKING_OFFER_MIN_BYTES
+            BACKING_OFFER_MIN_BYTES - BACKING_OFFER_GUEST_MIN_BYTES
         };
         let first = HEADER_BYTES + minimum;
         let original = bytes.clone();
@@ -3445,6 +3469,10 @@ fn route_wire_fixed_backing_profiles_and_grants_are_revalidated() {
     put_cost(&mut raw, offer.cost).unwrap();
     raw.u8(0);
     put_provisioning(&mut raw, &offer.devices).unwrap();
+    // Its guest, each dimension none (joint plan step 14, C7).
+    for _ in 0..BACKING_OFFER_GUEST_MIN_BYTES {
+        raw.u8(0);
+    }
     let bytes = raw.done().unwrap();
     assert!(matches!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE),

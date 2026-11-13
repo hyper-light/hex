@@ -291,6 +291,14 @@ where the room init is told covers it past the room the run needs to go on (wher
 available memory), idle slots go back as a told room shrinks, and the relay that pins them is in the run's cgroup, so
 once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
 
+A shared backing's guest holds its own kernel and relay inside its envelope, beside its boxes, and that overhead is
+measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `guest_overhead`). At each capacity
+answer its runtime reads its guest agent's memory in use (its total less its free) past what its boxes hold, the most
+seen, only rising, kept per backing generation (`guest::shared::guest_seen`); its CPU and disk the agent's answer
+doesn't read, so they stay none. Its offer carries it (`BackingOffer::guest`), a shared payload fits its envelope with
+it (`BackingOffer::check_inner`), its boxes' sum alone while cold, and the scheduler's rank takes its CPU
+(`hex_sim::index::routes::rank_cpu`).
+
 **Sources.** The plan's architecture ("Hex sets budgets per fleet, and Shards' D188 tells each guest its room.
 Everything a VM holds, ring pins included, comes out of that room"); D188 (f53 B); Borg admits quota by the limit and
 places by reservation (f87 B, f21 A). Per-owner budgets across cells are B16's escrowed rights, not this step.
