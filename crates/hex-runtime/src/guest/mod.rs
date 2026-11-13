@@ -26,7 +26,7 @@ pub mod selected;
 mod shared;
 pub mod shares;
 
-pub use image::{ImageWaits, host_images};
+pub use image::{ImageClass, ImageWaits, host_images};
 pub use observer::config::{
     ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
     GpuObserverInput,
@@ -485,13 +485,13 @@ pub struct GuestRuntime {
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
     native_images: Option<shards_api::NativeImages>,
-    native_paths: Option<shards_api::RuntimePaths>,
+    native_paths: Option<Arc<shards_api::RuntimePaths>>,
     shared_pool: Mutex<Option<hex_api::BackingKey>>,
     gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
-    /// Shards' image boot, for the Shards class on Agentfile images ([`GuestRuntime::with_images`]).
-    image: Option<image::ImageBoot>,
+    /// The Shards class on Agentfile images ([`GuestRuntime::with_images`]), its boot none until given.
+    images: image::ImageClass,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -581,6 +581,7 @@ impl GuestRuntime {
     /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
     /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
+        let images = image::ImageClass::new(config.binary.clone());
         Self {
             guests,
             config,
@@ -601,7 +602,7 @@ impl GuestRuntime {
             shared_pool: Mutex::new(None),
             gpu_observer: None,
             joins: Mutex::new(None),
-            image: None,
+            images,
         }
     }
 
@@ -1095,7 +1096,7 @@ impl Runtime for GuestRuntime {
             });
         }
         if let ClassSpec::ShardsImage(_) = &spec.class {
-            return self.create_image(spec);
+            return self.images.create_image(spec);
         }
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
         if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
@@ -1115,7 +1116,7 @@ impl Runtime for GuestRuntime {
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.start_image(record),
+            books::Routed::Image(record) => self.images.start_image(record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, true, || {
@@ -1159,7 +1160,7 @@ impl Runtime for GuestRuntime {
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.member_image(record, member),
+            books::Routed::Image(record) => self.images.member_image(record, member),
             books::Routed::Other(_) => Err(Refusal::Invalid {
                 what: "member",
                 why: format!(
@@ -1174,7 +1175,7 @@ impl Runtime for GuestRuntime {
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.room_image(record, room),
+            books::Routed::Image(record) => self.images.room_image(record, room),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(record))
                 if matches!(record.spec.class, ClassSpec::Shards(_)) =>
@@ -1201,7 +1202,7 @@ impl Runtime for GuestRuntime {
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.rate_image(record, rate),
+            books::Routed::Image(record) => self.images.rate_image(record, rate),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
                 what: "rate",
@@ -1216,7 +1217,7 @@ impl Runtime for GuestRuntime {
     fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.host_use_image(record),
+            books::Routed::Image(record) => self.images.host_use_image(record),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
                 what: "host_use",
@@ -1230,7 +1231,7 @@ impl Runtime for GuestRuntime {
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.signal_image(record, signal),
+            books::Routed::Image(record) => self.images.signal_image(record, signal),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, true, || {
@@ -1244,7 +1245,7 @@ impl Runtime for GuestRuntime {
         match self.routed(id)? {
             // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
             books::Routed::Retired(record) => record.retired_info(),
-            books::Routed::Image(record) => self.inspect_image(record),
+            books::Routed::Image(record) => self.images.inspect_image(record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, false, || {
@@ -1259,7 +1260,7 @@ impl Runtime for GuestRuntime {
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         let snapshot = match self.routed(id)? {
             books::Routed::Retired(record) => return Err(record.retired_refusal()?),
-            books::Routed::Image(record) => return self.usage_image(record),
+            books::Routed::Image(record) => return self.images.usage_image(record),
             books::Routed::Other(snapshot) => snapshot,
         };
         let snapshot = snapshot.as_ref();
@@ -1303,7 +1304,7 @@ impl Runtime for GuestRuntime {
                 }
             }
         }
-        let images = self.image_infos()?;
+        let images = self.images.image_infos()?;
         boxes
             .try_reserve_exact(images.len())
             .map_err(|_| Refusal::Exhausted {
@@ -1317,7 +1318,7 @@ impl Runtime for GuestRuntime {
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => self.delete_retired(&record),
-            books::Routed::Image(record) => self.delete_image(record),
+            books::Routed::Image(record) => self.images.delete_image(record),
             books::Routed::Other(Some(record)) if self.owns_record(&record.spec) => {
                 self.delete_recorded(&record, id)
             }
