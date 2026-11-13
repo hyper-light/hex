@@ -348,6 +348,13 @@ pub struct BackingOffer {
     /// Exact administrator-provisioned claims. These IDs supply no model, memory or load facts.
     #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
+    /// Its guest's own overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13): what its guest
+    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until the
+    /// backing's first capacity answer measures it (its cold start: its boxes' sum alone). Never the census's
+    /// `guest_overhead`, which a census-free cost carries as none. A shared backing's payload fits its envelope with it
+    /// ([`BackingOffer::check_inner`]). Absent from an older JSON report, read as cold.
+    #[serde(default, skip_serializing_if = "LearnedOverhead::cold")]
+    pub guest: LearnedOverhead,
 }
 impl BackingOffer {
     /// A workload's exact selection is separate from its source observer's full grant. This
@@ -377,13 +384,24 @@ impl BackingOffer {
             cost: self.cost,
             phase: self.phase,
             devices: copy_provisioning(&self.devices)?,
+            guest: self.guest,
         })
     }
 
     /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
     /// and host allowances and quantization. A residual host debit alone is not guest admission.
+    /// With them, the guest's own overhead as its runtime measured it, in each dimension it has
+    /// measured (joint plan step 14, C7): cold, the boxes' sum alone.
     pub fn check_inner(&self, used: CapacityResources) -> Result<(), Refusal> {
         let granted = self.allocation()?;
+        let guest = CapacityResources {
+            cpu_milli: self.guest.cpu_milli.unwrap_or(0),
+            mem_bytes: self.guest.mem_bytes.unwrap_or(0),
+            disk_bytes: self.guest.disk_bytes.unwrap_or(0),
+        };
+        let used = used.checked_add(guest).ok_or_else(|| {
+            invalid_route("aggregate payload and the guest's own overhead overflow")
+        })?;
         if self.cost.allocate(used)? != granted {
             return Err(invalid_route(
                 "aggregate payload differs from its fixed backing grant",
@@ -2531,6 +2549,7 @@ mod route_tests {
         })
         .unwrap();
         let backing = serde_json::to_value(BackingOffer {
+            guest: Default::default(),
             key: BackingKey {
                 pool: [1; 32],
                 generation: [2; 16],
@@ -2589,6 +2608,7 @@ mod route_tests {
         let error = serde_json::from_value::<BackingGrant>(input.clone()).unwrap_err();
         assert!(error.to_string().contains("physical claim count"));
         let mut offer = serde_json::to_value(BackingOffer {
+            guest: Default::default(),
             key: grant.key,
             cost: cost(),
             phase: BackingPhase::Prepared,
@@ -2651,10 +2671,53 @@ mod route_tests {
             learned: None,
         }
     }
+    /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own
+    /// overhead its runtime measured, never the census's (a census-free cost carries none); cold, its boxes' sum alone.
+    /// Do check boxes summing 0.5 CPU and 512 MiB against a backing of a 1 CPU, 1 MiB-quantum envelope of 1 GiB, cold;
+    /// with a guest measured at 0.25 CPU and 256 MiB; then at 0.25 CPU and 600 MiB. Expect the first two to fit and the
+    /// third, its memory past the envelope with the boxes', refused.
+    #[test]
+    fn w14_a_shared_backings_payload_fits_with_its_guests_measured_overhead() {
+        let envelope = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: 1 << 30,
+            disk_bytes: 0,
+        };
+        let mut backing = BackingOffer {
+            guest: Default::default(),
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            cost: RuntimeCost {
+                floor: envelope,
+                ceiling: envelope,
+                ..cost()
+            },
+            phase: BackingPhase::Live,
+            devices: Vec::new(),
+        };
+        let boxes = CapacityResources {
+            cpu_milli: 500,
+            mem_bytes: 512 << 20,
+            disk_bytes: 0,
+        };
+        backing.check_inner(boxes).unwrap();
+        backing.guest = LearnedOverhead {
+            cpu_milli: Some(250),
+            mem_bytes: Some(256 << 20),
+            disk_bytes: None,
+        };
+        backing.check_inner(boxes).unwrap();
+        backing.guest.mem_bytes = Some(600 << 20);
+        assert!(backing.check_inner(boxes).is_err());
+    }
+
     /// AC-T7.4.1: original OCI form can identify a real Linux guest on Mac and alongside Windows HCS.
     #[test]
     fn typed_oci_routes_preserve_workload_form_and_distinguish_platform_and_charge() {
         let backing = BackingOffer {
+            guest: Default::default(),
             key: BackingKey {
                 pool: [2; 32],
                 generation: [3; 16],
@@ -2839,6 +2902,7 @@ mod route_tests {
         assert!(c.validate_route(&spec).is_err());
         c.device_routes[0] = 1;
         let backing = BackingOffer {
+            guest: Default::default(),
             key: BackingKey {
                 pool: [2; 32],
                 generation: [3; 16],
@@ -2906,12 +2970,14 @@ mod route_tests {
         c.routes = vec![historical, fresh];
         c.backings = vec![
             BackingOffer {
+                guest: Default::default(),
                 key: parent,
                 cost: cost(),
                 phase: BackingPhase::Released,
                 devices: vec![crate::DeviceId { key: 7, ..id }, id],
             },
             BackingOffer {
+                guest: Default::default(),
                 key: current,
                 cost: cost(),
                 phase: BackingPhase::Live,
@@ -3004,6 +3070,7 @@ mod route_tests {
             }),
         });
         let mut backing = BackingOffer {
+            guest: Default::default(),
             key: BackingKey {
                 pool: [2; 32],
                 generation: [3; 16],
