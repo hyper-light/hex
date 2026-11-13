@@ -1383,6 +1383,42 @@ fn physical_gpu_refusals_preserve_retry_category() {
     );
 }
 
+/// AC-T7.4.1 (Shards 18f59d497, D232): a VM process that refuses its GPU selection says so in place of a receipt,
+/// certain, which is the selection's own refusal; a report writer closed with nothing written is the VM process ended
+/// before its renderer said anything of its selection, which leaves the selection's fate unknown. Do: map each kind of
+/// the VM process's refusal, and an unwritten report. Expect: each refusal Invalid, naming the selection, with its
+/// reason's words kept; the unwritten report an OS refusal of the call that says so, never Invalid.
+#[test]
+fn a_vm_process_refusing_its_gpu_selection_says_why() {
+    use shards_api::GpuProbeError;
+    use shards_api::physical::{GpuRefusal, JoinError};
+    for (refused, says) in [
+        (
+            GpuRefusal::Join(JoinError::Missing),
+            "no exact live Vulkan identity",
+        ),
+        (GpuRefusal::NoHostMemory, "no memory the host can map"),
+        (GpuRefusal::Acknowledgment(7), "ACK (7)"),
+    ] {
+        let mapped = shards::refusal(
+            "booting",
+            &shards_api::Refusal::GpuProbe(GpuProbeError::Refused(refused)),
+        );
+        assert!(
+            matches!(&mapped, Refusal::Invalid { what: "physical GPU selection", why } if why.contains(says)),
+            "{mapped:?}"
+        );
+    }
+    let unreported = shards::refusal(
+        "booting",
+        &shards_api::Refusal::GpuProbe(GpuProbeError::Unreported),
+    );
+    assert!(
+        matches!(&unreported, Refusal::Os { op: "booting", why } if why.contains("no report")),
+        "{unreported:?}"
+    );
+}
+
 /// AC-T7.4.1 (Shards R04): pass Shards' CONNECT failure in every phase and cause through the
 /// adapter, an owned guest's (`Connect`) and a borrowed one's (`Borrowed`'s channel, as a Windows
 /// caller opens an offered stream): expect Hex's typed refusal with the same port, phase, cause and
