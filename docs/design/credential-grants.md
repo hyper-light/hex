@@ -66,18 +66,27 @@ naming the field (CLAUDE.md §3). It refuses:
   server by its DNS name alone (RFC 6066 §3), so a grant toward an address could never be filled in; by TCP, as TLS rides
   it. Shards' run host holds the same (`api_run::credentials`, `shards_net::reaches`); Hex keeps no port egress, so
   its hold is by name alone.
+- **A placeholder no request could carry.** Its member sends it where the credential goes, as a bearer token is sent,
+  and Shards' injector fills the value in only where it finds it there (D242's step 3): so it is RFC 6750 §2.1's
+  `b64token` (`1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`), which an `x-api-key` field's value
+  holds too, as `shards_dns::credential::placeholder` takes it. Shards' run host would refuse the run's request at its
+  boot; refused at create instead. The refusal names the field, never the placeholder: holding it is the capability.
+- **One placeholder for two credentials.** The injector could not tell which credential a request carrying it asks,
+  so it could stand for neither alone (`shards_dns::credential::check`'s `Shared`). Grants of one credential may share
+  one, as each member's stands for the same value; kiln's broker mints one for each credential it stages.
 - **A member's credential granted twice.**
-- **A second credential toward one host.** Shards' injector at `740fa372` fills in the first credential a host's grants
-  name (D242's `decide`), so a second one toward it would never be filled in: a grant that can never act is refused,
-  never kept silently (D242's own rule for a grant toward an address). Shards' main since (step 33's step 3, the
-  injector) decides by each grant's placeholder too, so the re-vendor past it drops this rule (Owed).
 - **A host a member reaches ungranted.** Shards' network process holds the whole VM to the union of its members'
   grants and can't tell one member's flow from another's, so its injector ends the TLS of every flow to a credential's
   host, whichever member's (D242, "Who"), and every member whose grants reach it trusts the run's CA. A member that
-  reaches the host by its own egress grant (by name, by TCP) without the credential would have its flows ended there
-  with no grant of Hex's record saying so. So each such member must be granted the credential toward that host too, or
+  reaches the host by its own egress grant (by name, by TCP) without a credential would have its flows ended there
+  with no grant of Hex's record saying so. So each such member must be granted a credential toward that host too, or
   not reach it. This is N4's ruling carried to credentials: refuse rather than leave a window, and record exactly what
   the run does.
+
+Two credentials toward one host are taken, one member's or two members': Shards' injector at `db4168345` fills each in
+only where its own grant's placeholder stands (D242's step 3, `decide` taking the request's token), so neither stands in
+the other's way. At `740fa372` it filled in the first credential a host's grants named, and C2 refused a second toward
+one host as a grant that could never act; the re-vendor to `db4168345` dropped that rule.
 
 Hex adds none: the lowering (C4) is the box's grants alone, and every host lowered is one a grant of the box names for
 that credential (`w33_a_boxs_credentials_lower_to_one_grant_of_each_credential_toward_its_hosts`). The orchestrator
@@ -145,12 +154,13 @@ hosts alone (D242's `decide`).
 | a reference's characters | 1 to 512 of A-Z a-z 0-9 / _ + = . @ - | Secrets Manager's `CreateSecret` `Name`, as kiln-seams' `Secrets` keeps it (`NAME_MAX`, `check_name`) |
 | a lease's life with no end of its own | `u64::MAX` nanoseconds | Shards' run channel: a lease's life is a u64 of nanoseconds, its most read as the run's life (D242's literals) |
 | the simulator's leases held at once | 10,000 | the simulator's own bound, as `SIM_BOXES` is the runtime simulator's |
+| a placeholder's characters | 1 or more of A-Z a-z 0-9 - . _ ~ + /, then any = | RFC 6750 §2.1's `b64token`, as Shards' `shards_dns::credential::placeholder` takes it |
 
 There is no count constant: a box's credential grants cross the node's wire in one message (`MAX_MESSAGE`) and live in
-its record (`MAX_RECORD_BYTES`). The check's two working lists are reserved fallibly (refused `Exhausted` past what
-memory gives), sorted, O(n log n) in the hosts named, with no recursion (§11). A lease's value is held by the
-orchestrator's lessor, Hex's adapter and Shards' run host only as long as each passes it on, wiped as each lets go of
-it, and never printed.
+its record (`MAX_RECORD_BYTES`). The check's three working lists (each grant's hosts, its member and credential, its
+placeholder and credential) are reserved fallibly (refused `Exhausted` past what memory gives), sorted, O(n log n) in
+the hosts named, with no recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
+Shards' run host only as long as each passes it on, wiped as each lets go of it, and never printed.
 
 ## C6. What would falsify it
 
@@ -158,45 +168,49 @@ it, and never printed.
   decision widens, and C2's exactness fails); ROOT's real runs hold it.
 - A lease Shards' session was given and never gave back at the run's end (then Hex needs a release path of its own,
   C3's alternative 1).
-- An image harness that needs one host filled in with two credentials (then C2's one-credential-per-host rule waits on
-  Shards' injector deciding by placeholder rather than by host).
+- A placeholder Hex takes that Shards' run host refuses, or the other way (then C2's placeholder rules and
+  `shards_dns::credential::check` part, and one follows the other); a boot refused `Invalid` naming `shards image` for
+  its credential grants would show it.
 
 ## Tests
 
 - `crates/hex-api/src/credentials/tests.rs`: a harness's credential toward its own egress hosts taken; each malformed
   field refused by name; a host its member's egress doesn't reach by name, by TCP (none, UDP, an address, another
-  member's, another case) refused; a credential granted twice, and two toward one host, refused; a member reaching a
-  credential's host ungranted refused, then taken granted, and one reaching it by UDP alone no such member; the record's
-  JSON round trip.
+  member's, another case) refused; a credential granted twice refused; two credentials toward one host, one member's or
+  two members', each by its own placeholder, taken; a placeholder no request could carry (none, a space, a colon, an
+  `=` before its end, a byte past ASCII) refused naming its field, never its bytes, and kiln's and every `b64token`
+  character taken; one placeholder for two credentials refused, one member's or two members', and two members' grants
+  of one credential sharing one taken; a member reaching a credential's host ungranted refused, then taken granted, and
+  one reaching it by UDP alone no such member; the record's JSON round trip, a record kept before placeholders read with
+  none; a grant's `Debug` showing its placeholder's length alone.
 - `crates/hex-api/src/lease/tests.rs`: the simulator passes HEX-LEASE-1 to 4, leaving no lease held; lessors that give
   nothing back and refuse a missing credential as unavailable fail exactly HEX-LEASE-2 and 3; a value prints its length
   alone and is handed on whole.
-- `crates/hex-api/src/conformance.rs` HEX-IMG-8, which the simulator passes.
+- `crates/hex-api/src/conformance.rs` HEX-IMG-8, which the simulator passes: two credentials toward one host, each by
+  its own placeholder, made and inspected; a placeholder with a space, and another credential's placeholder, refused.
 - `crates/hex-core/src/wire/tests.rs`: a Shards image VM's credential grants cross the wire after its shares, refused
   written and read where the check refuses them; an inspect's credential grants are its last bytes; `Unconfigured`
   round-trips with every refusal (and in the property test's).
-- `crates/hex-runtime/src/guest/leases/tests.rs`: a box's credentials lowered to one grant of each credential toward its
-  hosts, each one the box names, none from none; a credential the check refuses never lowered; the run's leases answer
-  Shards' run host from its own lessor (its key passed on, the value whole, a life of none living past the channel's
-  most, each refusal kind for kind, each give-back passed on).
+- `crates/hex-runtime/src/guest/leases/tests.rs`: a box's credentials lowered to one grant of each credential and
+  placeholder toward its hosts, each one the box names, none from none, and a member's own placeholder for a credential
+  lowered to a grant of its own toward its own hosts; a credential the check refuses never lowered; the run's leases
+  answer Shards' run host from its own lessor (its key passed on, the value whole, a life of none living past the
+  channel's most, each refusal kind for kind, each give-back passed on).
 - `crates/hex-runtime/src/guest/image_tests.rs`, over the model of D231 (its run host now asking the run's lessor and
   giving back every lease at the run's end, as Shards' session does):
   `w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_lessors` (the boot's credentials and
-  lessor, inspect and the record showing every credential grant, Shards' decision filling the granted host and passing
-  an ungranted one bare, the ask answered from the simulated broker and held there, an unheld credential `Denied`, and
-  the lease given back as the VM stops) and
+  lessor, inspect and the record showing every credential grant, Shards' decision filling the granted host where its
+  placeholder stands and passing an ungranted one, or a request without it, bare, the ask answered from the simulated
+  broker and held there, an unheld credential `Denied`, and the lease given back as the VM stops) and
   `w33_a_credential_no_one_here_can_lease_or_beyond_its_egress_is_refused_before_any_record`.
 
 ## Owed
 
-- **The re-vendor past Shards `740fa372`**: step 3's injector moved the grant to `shards_dns::credential` and gave it
-  its member's `placeholder`, filling a value only where that placeholder stands (D242). `CredentialGrant` then gains
-  its placeholder (appended, never printed; kiln mints it where it stages the credential into its member), lowered
-  with the grant, and C2's one-credential-per-host rule goes (Shards refuses a placeholder two grants share).
 - **kiln's wiring** (kiln, once it vendors this Hex): `hex_api::lease::Lessors` over its run-lease broker (kiln's
   `secrets::lessor`, built on kiln main beside its broker's per-lease give-back), given to the node it runs its
   harness microVMs on; and its sandbox's credential grants (`kiln_seams::sandbox::Launch::credentials`, SANDBOX-13)
-  carried to `ShardsImage::credentials` for the launch's member.
+  carried to `ShardsImage::credentials` for the launch's member, each with the placeholder its broker minted where it
+  staged the credential into that member.
 - **A remote orchestrator**: a node reached over its wire (`hex node`) is given no lessors and refuses credential grants
   `Unconfigured`; a lessor carried over the node's wire is a later change.
 - **Shards**: the injector (step 33's step 3) that asks the first lease; until it lands, nothing in a run asks.

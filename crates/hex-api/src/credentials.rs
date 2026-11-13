@@ -52,14 +52,19 @@ impl std::fmt::Debug for CredentialGrant {
 /// - its member's name, as a network grant's member's;
 /// - its reference, a name its orchestrator's store could hold ([`REFERENCE_MAX`]);
 /// - one host at least, each named once, and each one an egress grant of its member's own reaches by name, by TCP;
+/// - its placeholder a token a request carries a credential as (RFC 6750 §2.1's `b64token`), as its member sends it
+///   where Shards' injector fills the value in (D242); no refusal names it, as holding it is the capability;
+/// - each placeholder one credential's alone: grants of one credential may share theirs, but one standing for two
+///   could stand for neither, as Shards' injector could not tell which a request carrying it asks (D242);
 /// - each member's credential granted once;
-/// - each host one credential's alone: Shards' injector fills in the first credential a host's grants name (D242's
-///   `decide`), so a second toward it would never be filled in;
-/// - every member an egress grant lets reach a credential's host by name, by TCP, granted that credential toward it:
+/// - every member an egress grant lets reach a credential's host by name, by TCP, granted a credential toward it:
 ///   Shards' injector ends the TLS of every flow to a credential's host, whichever member's (D242, "Who"), so a
 ///   member left out here would have its flows ended there, unrecorded.
 ///
-/// Bounded by its input (C5): two working lists, reserved fallibly and sorted, and no recursion.
+/// Two credentials toward one host are taken: Shards' injector fills each in only where its own placeholder stands
+/// (D242's step 3), so neither stands in the other's way.
+///
+/// Bounded by its input (C5): three working lists, reserved fallibly and sorted, and no recursion.
 pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> Result<(), Refusal> {
     let hosts = credentials
         .iter()
@@ -70,6 +75,7 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
         })?;
     let mut each: Vec<(&str, &str, &Member, usize)> = working(hosts)?;
     let mut granted: Vec<(&Member, &str, usize)> = working(credentials.len())?;
+    let mut standing: Vec<(&str, &str, usize)> = working(credentials.len())?;
     for (at, grant) in credentials.iter().enumerate() {
         grant
             .member
@@ -97,7 +103,16 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
             }
             each.push((host.as_str(), grant.reference.as_str(), &grant.member, at));
         }
+        if !token(&grant.placeholder) {
+            return Err(invalid(format!(
+                "credentials[{at}].placeholder isn't a token a request carries a credential as, RFC 6750 §2.1's \
+                 b64token (1 or more of A-Z a-z 0-9 - . _ ~ + /, then any =), so its member could never send it where \
+                 Shards' injector fills {} in (D242)",
+                grant.reference
+            )));
+        }
         granted.push((&grant.member, grant.reference.as_str(), at));
+        standing.push((grant.placeholder.as_str(), grant.reference.as_str(), at));
     }
     granted.sort_unstable();
     for pair in granted.windows(2) {
@@ -109,18 +124,25 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
             )));
         }
     }
-    each.sort_unstable();
-    for pair in each.windows(2) {
-        if let [(host, reference, _, a), (next, other, _, b)] = pair
-            && host == next
+    standing.sort_unstable();
+    for pair in standing.windows(2) {
+        if let [(placeholder, reference, a), (same, other, b)] = pair
+            && placeholder == same
             && reference != other
         {
+            let ((first, its), (then, theirs)) = if a < b {
+                ((a, reference), (b, other))
+            } else {
+                ((b, other), (a, reference))
+            };
             return Err(invalid(format!(
-                "credentials[{a}] and credentials[{b}] fill {reference} and {other} in toward {host}: Shards' injector \
-                 fills in the first credential a host's grants name (D242), so the other would never be"
+                "credentials[{then}].placeholder is credentials[{first}]'s too, so it stands for {theirs} and {its}, \
+                 neither alone: Shards' injector could not tell which credential a request carrying it asks (D242), \
+                 so each credential's placeholder is its own"
             )));
         }
     }
+    each.sort_unstable();
     for (g, grant) in grants.iter().enumerate() {
         let Grant::Egress {
             member,
@@ -169,6 +191,17 @@ fn check_reference(at: usize, reference: &str) -> Result<(), Refusal> {
         "credentials[{at}].reference {reference:?} isn't 1 to {REFERENCE_MAX} of A-Z a-z 0-9 / _ + = . @ -, a name its \
          orchestrator's store could hold"
     )))
+}
+
+/// Whether `placeholder` is a token a request carries a credential as: RFC 6750 §2.1's `b64token`, `1*( ALPHA / DIGIT /
+/// "-" / "." / "_" / "~" / "+" / "/" ) *"="`, which a bearer token is and an `x-api-key` field's value may be (RFC 9110
+/// §5.5's field-vchar holds each), as Shards' `shards_dns::credential::placeholder` takes it.
+fn token(placeholder: &str) -> bool {
+    let body = placeholder.trim_end_matches('=');
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
 }
 
 /// Whether an egress grant of `member`'s reaches `host` by name, by TCP.
