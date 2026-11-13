@@ -483,9 +483,19 @@ window, which would under-count Hex here.
   2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
   `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
   of which must hold, and each mistake caught on some.
+- The stand-in holder (`crates/hex-cli/tests/capacity_view/stand_in.rs`): kiln's runner's side of the contract above,
+  item by item, driving `hex_api::capacity::Holder` over `hex_quic::capacity::Link`, its epoch and runs in a ledger
+  written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md
+  section 13; Shards R05, R13). Against `hex node` and `hex schedule serve` as processes of their own, the scheduler
+  enrolled by `hex node enroll` and a CA's answer: HEX-CV-L1 (`capacity_view::hex_cv_l1`, a normal test on every OS,
+  over loopback): a peer the lane doesn't name refused at its handshake, Hex's boxes and the holder's runs filling the
+  room and refused past it, the scheduler killed and started again, a link dropped, kiln-shaped work, every view's CPU
+  held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
+  records once it has ended, the holder's own. HEX-CV-2H (`capacity_view::two_hosts`, ignored phases, ROOT's): the same
+  across two hosts, either on Linux, macOS or Windows, the scheduler killed by its pid and the lane's UDP port dropped
+  and healed.
 - ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
-  `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), then two real machines,
-  once the transport binding lands.
+  `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), and HEX-CV-2H on two real machines.
 
 ## Open items
 
