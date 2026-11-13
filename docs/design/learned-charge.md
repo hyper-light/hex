@@ -86,6 +86,17 @@ exceed their own charge.
 charge: down at once, freeing room; up only into room no booking holds. A VM whose charge exceeds its booking for
 want of room is **over** by the difference, and it alone bears the contention (C4, C5).
 
+**The order.** Where the rule takes VMs in an order, it takes them in the order their node began them (ROOT,
+2026-11-12: never by anything random). A VM lifetime's place in its node's start order is in its record
+(`BoxRecord::started`), given by the node's store as it begins the lifetime, one past the most any record held when the
+store opened, so the order runs on across the node's restarts; a node's learners key each VM by it
+(`recorded::charges::Lifetime`), never by its scope, whose bytes are random. So within a band the room goes to the
+earliest begun first, and of two VMs rising past their bookings into the same room the later is over and bears the
+contention; of VMs equally past their budgets the last resort ends the latest begun (C5); a budget's spare bytes and a
+CPU share's spare milli-CPU go to the first. A VM of this boot that an earlier node agent began, its record holding no
+place, is given one as the store opens, in box-id order, before the node takes a create; a record of an earlier boot
+names nothing that runs, and is left as that boot wrote it for recovery to remove.
+
 **Sources.** Borg books a task's reservation, which rises fast and decays to measured use, and places work into
 what it reclaims (f21 A). Kubernetes evicts first the pods using more than they asked, never one within its ask
 while another isn't (f45 A).
@@ -171,19 +182,37 @@ on hardware (ROOT's fairness run).
   window asks the rule again. Where it would move the VM rather than end it, the move is refused typed: a Shards VM's
   awaits D176 (`Awaits(LiveMove)`, the end's `unmoved`), a Firecracker VM's would be Hex's own, through Firecracker's
   snapshot, which Hex doesn't drive yet. The why is on the box itself, where the person looks (ROOT, 2026-11-12): the node
-  writes it into the VM's record after the window (`BoxRecord::last_resort`, through the box's record turn and only
-  into the record of that VM's lifetime, a write that fails kept for the next window), and the VM's inspect and list
-  carry it (`BoxInfo::last_resort`, last on the node's wire), across the node's restarts. A node that crashes between the
-  kill and that write loses the why, not the end: the VM's exit still says `SIGKILL`. Each class's capacity answer carries
+  writes it into the VM's record before it ends the VM (`BoxRecord::last_resort`, through the box's record turn and only
+  into the record of that VM's lifetime), and the VM's inspect and list carry it (`BoxInfo::last_resort`, last on the
+  node's wire), across the node's restarts. Each class's capacity answer carries
   the VMs of the class it ended too, latest first (`Learned::ended`, fitted after the holdings), of the at most the
   machine's VM population it keeps, the oldest forgotten first.
+- **Intent first** (ROOT, 2026-11-12: "if the model allows it"; decided so). The learner writes why it ends a VM into
+  the VM's record before it ends it (`recorded::charges::LastResort` through `Reach::intend`), so a node that crashes
+  between the end and the window's writes still says why on the box. The model allows it on three conditions, each
+  held: (1) the end waits on nothing unbounded: the write waits at most the store's record turn, held only by another
+  write of that record and bounded by its learned patience (`store.turns`, twice the slowest record change, 3.136 ms
+  seeded for a release build: `crates/hex-node/src/store.rs`), and one durable write, within the window whose growth
+  the rule's margin covers (a record turn is never a lifecycle turn: those are separate); (2) the end never waits on a
+  write that fails: where the intent isn't written (its turn refused, its write failed, the record not that VM's
+  lifetime), the VM is ended all the same and why is written after the window, as before, a write that fails kept for
+  the next; (3) no record says a VM was ended when it wasn't: an end refused withdraws its intent (written after the
+  window, the latest write of a VM replacing any kept before it), and a node that restarts and meets an intent on a VM
+  that still runs carries that end out first, as it was decided, before asking the rule again (`LastResort::met`,
+  `due`), as a delete marked before a crash is finished by recovery. The VMM may still be dying when the restarted node
+  looks, which ending it again only confirms; carrying the end out after a restart acts on the evidence of the window
+  that decided it, which is why the rule decides nothing anew for it. The one case where a refused end is carried out
+  after a restart is a crash before its withdrawal is written. The cost is one record write before each end, on a path
+  that ends at most one VM a window. Not taken: ending first and writing after, as before, which loses the why to a crash
+  between the two; writing the intent somewhere of its own (a journal of the learner's), a second record the box's
+  inspect would have to read, which the box's own record already is.
 - **Bands.** A VM's band is its spec's (`BoxSpec::band`, as its submitter gives it, 0 the lowest; a spec without one
   is band 0, its record and native commitment unchanged), carried whole from the submission to the node's record:
-  the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks each
-  VM in the band its record names. So the room goes to the highest band first (C3), and the last resort ends the
-  lowest band first, of a band the VM most past its budget. The placement's demand doesn't carry it: the spec rides
-  every hop whole with it, and placement neither orders nor preempts by band on a live node, so a band there would
-  change nothing (R13).
+  the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks
+  each VM in the band its record names. So the room goes to the highest band first (C3), and the last resort ends
+  the lowest band first, of a band the VM most past its budget, of VMs equally past theirs the latest begun (C3).
+  The placement's demand doesn't carry it: the spec rides every hop whole with it, and placement neither orders nor
+  preempts by band on a live node, so a band there would change nothing (R13).
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is
@@ -275,8 +304,8 @@ reaches the view settled with goal 13 the same day:
   learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers and the
   box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS the native
   helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the node holds, as
-  its receipt's stop terminates it. Its end is then observed as any other, why goes into the VM's record after the
-  window, and its inspect says it (`Books::counted`), as Linux's does.
+  its receipt's stop terminates it. Why goes into the VM's record before its end (intent first, C5), its end is then
+  observed as any other, and its inspect says it (`Books::counted`), as Linux's does.
 
 ## Every number
 
@@ -337,3 +366,24 @@ computes, per seed:
 
 ROOT measures on hardware: density and fairness under this rule with real harness VMs (Linux on 00aad, the Mac
 Studio), the CPU violation rate per OS on recorded agent traces, and f85's memory measurements before memory pools.
+The driver is hex-cli's `charge_fleet` (ignored, ROOT's run): a real `hex node` and a fleet of VMs of one class
+(`shards-image`, Agentfile images, Linux, macOS and Windows awaiting `RunHostStdioOnly`; `shards`, Shards guests whose
+box plays the trace; `firecracker`, Linux), each replaying one recorded trace (`millis threads mib` steps, played by
+the guest's shell) and deleted once it has played, the first admitted the riser (its trace until its charge has
+warmed, SEEDABLE windows, then every vCPU and the most any trace holds, to the run's end), beside a process box asking
+its whole cap. It admits as the scheduler's ledger books (each VM at its class's prior on the node's capacity answer,
+else its receipt; C2, C6), a start retried only once the room has changed, and reads each window, the node's learner's
+as the node says it on stderr (`the charge learner's window is N ns`, or why it doesn't run, which refuses the run),
+each read at least a window after the last, each VM's CPU given (its usage over its own span), asked (its trace's over
+the same span) and booked (its holding). `hex_sim::charge::trial` reckons the windows as `sim` reckons its own: ratios
+of given over min(asked, booked) and misses in the contended windows (C4's falsifier's), Jain's index, the riser's
+windows over its booking, its neighbours' and the box's misses while it rises, and each VM's windows past its charge
+(C1's falsifier); with the most VMs at once against envelope density, the starts refused while the riser rises, the
+riser's inspect (its exit and the last resort's why), and the learner's own CPU (Linux: its `hex-charges` thread;
+macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
+not a verdict. Every number it runs with is derived, none picked (ROOT, 2026-11-12): each VM's workload from the
+traces (the most busy threads and MiB any step asks), the process box's CPU cap from kiln's CI (the median CPU of the
+build legs in bench/sched/kiln-ci-20261022-20261105.trace), and the deadline guarding the node's start and each create
+from the node's own boot bound for the class (twice it). Its traces are real harness sessions, recorded by
+bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS period, the Linux
+learner's own window.

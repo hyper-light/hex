@@ -4,7 +4,7 @@
 //! image to its return, its members started. `image_stats`: `stats(StatsScope::Run)` to its answer. `image_stop`:
 //! `stop` to its return, the run's end told and its VM gone. Each run boots the image through
 //! `shards_api::image::ImageShards` as the class does: its members alone, under `hex_runtime::grants::program`'s
-//! default deny, its run host given the home whose store holds the image, a cache and the kernel.
+//! default deny, its run host given the home whose store holds the image, a cache, and the kernel and init it boots.
 //!
 //! Each series starts as a node's first boot after an upgrade does: a cache of its own, so its first run host writes
 //! Shards' helpers out; its other runs find them there, as a node's later boots do. A series' cache goes as it ends.
@@ -18,13 +18,15 @@
 //! - `rows.tsv`: the three records.tsv rows for this host class, each its measure's slowest, rounded up to the
 //!   microsecond;
 //! - `RECORD.md`: the record's facts, for its page (bench/native/guest/image/RECORD.md): the host, its kernel and
-//!   load, Hex's revision, the `shards` binary, kernel and image, and n with each measure's min, p50, p99 and max,
-//!   and raw.tsv's SHA-256.
+//!   load, Hex's revision, the `shards` binary, the guest's kernel and init and the image, and n with each measure's
+//!   min, p50, p99 and max, and raw.tsv's SHA-256.
 //!
 //! Explicit inputs only, each by its own variable; a missing one fails by name:
 //! - `SHARDS_BIN`: the run hosts' `shards`, built at Hex's vendored Shards revision (vendor/MANIFEST.toml), so it
-//!   speaks the image channel Hex's `shards_api` does; `SHARDS_KERNEL`: the kernel its runs boot, Shards' pinned one
-//!   (its `crates/shards/src/kernel.rs`), so no run downloads one;
+//!   speaks the image channel Hex's `shards_api` does; `SHARDS_KERNEL` and `SHARDS_INIT`: the kernel its runs boot,
+//!   Shards' pinned one (its `crates/shards/src/kernel.rs`), so no run downloads one, and the shards-init that
+//!   `shards` build carries (its build.rs's `OUT_DIR/shards-init`), which a run takes only beside a kernel given so
+//!   ("--kernel and --init (or SHARDS_KERNEL and SHARDS_INIT) go together", Shards' run.rs);
 //! - `IMAGE_RECORD_HOME`: the Shards home whose store holds the image; `IMAGE_RECORD_IMAGE`: the image, pinned
 //!   (`NAME@sha256:...`), an Agentfile image that runs at least one harness;
 //! - `IMAGE_RECORD_VCPUS` and `IMAGE_RECORD_MEMORY_MIB`: each VM's size, the node's guest envelope, as an image VM's
@@ -276,6 +278,8 @@ fn image_boot_stats_and_stop() {
     let shards = PathBuf::from(input("SHARDS_BIN"));
     let kernel = PathBuf::from(input("SHARDS_KERNEL"));
     assert!(kernel.is_file(), "SHARDS_KERNEL {kernel:?} is no file");
+    let init = PathBuf::from(input("SHARDS_INIT"));
+    assert!(init.is_file(), "SHARDS_INIT {init:?} is no file");
     let home = std::path::absolute(input("IMAGE_RECORD_HOME")).unwrap();
     assert!(home.is_dir(), "IMAGE_RECORD_HOME {home:?} is no directory");
     let image = input("IMAGE_RECORD_IMAGE");
@@ -320,6 +324,7 @@ fn image_boot_stats_and_stop() {
                 OsString::from("SHARDS_KERNEL"),
                 kernel.clone().into_os_string(),
             ),
+            (OsString::from("SHARDS_INIT"), init.clone().into_os_string()),
         ];
         let spec = spec(&image, vcpus, memory_mib, &shards, env);
         for r in 1..=runs {
@@ -423,9 +428,11 @@ fn image_boot_stats_and_stop() {
     .unwrap();
     writeln!(
         page,
-        "- kernel: `{}`, sha256 `{}`",
+        "- kernel: `{}`, sha256 `{}`; init: `{}`, sha256 `{}`",
         kernel.display(),
-        sha256_of(&kernel)
+        sha256_of(&kernel),
+        init.display(),
+        sha256_of(&init)
     )
     .unwrap();
     writeln!(page, "- image: `{image}`; its members: {members}").unwrap();

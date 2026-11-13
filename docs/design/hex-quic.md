@@ -110,7 +110,10 @@ its bounds, workers, disconnect rule and program watches), each control connecti
 whole messages framed as the guest's are; an exec's stdio connections are gathered as the guest's relay gathers them
 (`hex_core::stream::Gather`) and become the program's pipes, copied to and from their lanes. A stdin connection ends
 as the relay's does (HEX-GUEST-41): the peer's End ends the program's pipe; the program's letting its stdin go resets
-the connection, so the peer's client lets its caller's pipe go. On Unix its copier waits in poll(2) for the pipe's
+the connection, so the peer's client lets its caller's pipe go. A stdout or stderr connection's client ends its own
+half once it has named it (shards-guest.md §3), so the copier's End at its program's end leaves the connection done
+both ways: the copier's connection goes with nothing open to reset, and the client's bridge closes its socket pair
+whole, which no reader sleeps through (Shards M236), never a half-close alone. On Unix its copier waits in poll(2) for the pipe's
 readers and for the connection, which writes to a pipe of the copier's own as it changes; Windows' pipes can't be
 waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. The log
 port carries the node's log lines, each counted where a slow reader makes it let one go.
@@ -221,7 +224,7 @@ Each count is derived where the endpoint is made; none is picked.
 | connections, identities, pending handshakes (node) | the node's connections bound | the peers it serves as many as the connections its socket does (`serve::limits`) |
 | connections (client) | 1 | a client's endpoint dials its one node |
 | connections an identity holds | 2 | a connection and the one replacing it after its path changed |
-| lanes a peer may open (node) | its calls in flight, its programs' streams and its gathering execs' (`programs * 3 + in_flight * 3`), one log connection, and its calls in flight again where it stages | every connection to a port that can do work at once for one peer (`hex_node::quic::shape`): a control connection past the calls the node runs has no call to run, and a second log reader reads the same lines |
+| lanes a peer may open (node) | its calls in flight twice (a control connection and a stdio connection each), one log connection, and its calls in flight again where it stages | every connection to a port that can do work at once for one peer (`hex_node::quic::shape`): a control connection past the calls the node runs has no call to run, a stdio connection past the threads the node may run (its calls in flight, `serve::limits`) has none to name and copy it, and a second log reader reads the same lines |
 | lanes a peer may open (client) | half its soft `RLIMIT_NOFILE` on Unix; on Windows half the dynamic port range's 16,384 (RFC 6335 §6, Windows' own since Vista) | each connection is bridged to a local socket pair, two descriptors on Unix, and on Windows a loopback TCP pair holding two ports of that range |
 | exchanges, streams a connection | 1 | the least the endpoint accepts: Hex opens none, and a peer's head is refused at 0 bytes |
 | window ceiling | `stream_window_ceiling()` | hyper-transport's: the largest window quinn's assembler can't be made to refuse |
@@ -232,7 +235,10 @@ Each count is derived where the endpoint is made; none is picked.
 A bound is paid for as it is used, never laid out ahead: the driver's command queue and hyper-transport's spare
 buffers and receive chunks grow to their bounds (vendor change 3). hyper-quic does lay out one row for each lane a
 peer may open as a connection starts (quinn's `StreamsState::new` inserts every remote stream up to the limit), so a
-connected peer costs that table, a node's per peer and a client's for its one node.
+connected peer costs that table, a node's per peer and a client's for its one node. The driver lays it out as the
+peer's first datagram comes and answers no peer meanwhile: counted by its programs' streams (a Windows node's
+programs are half its 2^24 handle table), jupiter's node laid out 25,330,425 lanes for 18 s of a debug build, past the
+idle timeout, and every dial to it was refused.
 
 ## Q9. `hex node` over QUIC
 

@@ -19,8 +19,10 @@
 //!   `HEX_IMAGE_CONTEXT`, an Agentfile image's build context (a harness image, which no registry need serve), built
 //!   there and pinned by the manifest digest its build says, as Shards' store finds a pinned image by content
 //!   (`Store::holding`); or else `HEX_IMAGE`, `NAME@sha256:...`, pulled there by its digest;
-//! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's or build's; `SHARDS_KERNEL`: the kernel the run
-//!   hosts boot (D231's own, as `shards run` takes it), so no first boot downloads one;
+//! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's or build's; `SHARDS_KERNEL` and `SHARDS_INIT`: the
+//!   kernel the run hosts boot (D231's own, as `shards run` takes it), so no first boot downloads one, and the
+//!   shards-init that `shards` build carries (its build.rs's `OUT_DIR/shards-init`), which a run takes only beside a
+//!   kernel given so; the node passes both to its run hosts as their environment;
 //! - the node's Shards guest configuration, as `hex node` reads it: `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
 //!   `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`, `HEX_GUEST_COST_FILE`, `HEX_GUEST_COST_SHA256` and
 //!   `HEX_GUEST_COST_EVIDENCE`;
@@ -142,6 +144,8 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     let shards = PathBuf::from(input("SHARDS_BIN"));
     let kernel = PathBuf::from(input("SHARDS_KERNEL"));
     assert!(kernel.is_file(), "SHARDS_KERNEL {kernel:?} is no file");
+    let init = PathBuf::from(input("SHARDS_INIT"));
+    assert!(init.is_file(), "SHARDS_INIT {init:?} is no file");
     let wait = Duration::from_millis(number("HEX_IMAGE_WAIT_MS"));
     assert!(!wait.is_zero(), "HEX_IMAGE_WAIT_MS is 0");
     let work = PathBuf::from(input("HEX_IMAGE_WORK"));

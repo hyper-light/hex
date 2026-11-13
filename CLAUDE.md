@@ -151,7 +151,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   and environment, and `sysctlbyname("kern.maxprocperuid")` is a box-user box's default process cap, and the
   node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`, `vm.page_free_count`,
   `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
-  and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
+  and `getloadavg` read the node's own cost for the bench and observability; and, in its tests alone,
+  `proc_pidinfo(PROC_PIDLISTFDS)` and `proc_pidfdinfo` read a process's descriptors and whether each is
+  close-on-exec (`proc_fileinfo`'s `PROC_FP_CLEXEC`), so a test proves the runtime leaves none a spawn would hand on. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
   Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
@@ -351,8 +353,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   critical. No event names a descriptor or carries a pointer. Rust can express none of these foreign calls safely.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
-no Hex change but shards-gpu's Windows arm64 packaging patch (`vendor/MANIFEST.toml`): its `unsafe` follows
-Shards' rules, not this list.
+no Hex change but those `vendor/patches` records, each offered upstream (`vendor/MANIFEST.toml`): shards-gpu's
+Windows arm64 packaging, and shards-api's start of D231's run host holding only its stdio (posix_spawn and
+CreateProcessW, `image/spawn.rs`). Its `unsafe` follows Shards' rules, not this list.
 
 ## 13. Lean code
 
