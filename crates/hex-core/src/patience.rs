@@ -151,8 +151,10 @@ impl Follow {
 
     /// The window a stall is judged over now: W* past it, else the longest gap measured, none before one is.
     fn window(&self) -> Option<Duration> {
-        self.window
-            .or_else(|| (!self.longest.is_zero()).then_some(self.longest))
+        if self.window.is_some() || self.longest.is_zero() {
+            return self.window;
+        }
+        Some(self.longest)
     }
 
     /// The party as looked at `now`: `Ok` to wait on, or why the wait is refused. An advance (more progress than at
