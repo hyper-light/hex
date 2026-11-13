@@ -990,7 +990,12 @@ impl Store {
                 .sync_all()
                 .map_err(|e| Refusal::os("flushing the record directory", e))?;
         }
-        #[cfg(not(target_os = "linux"))]
+        // Windows flushes a directory only through a handle opened as FlushFileBuffers asks
+        // (`hex_runtime::windows::sys::flush_directory`); macOS's open for reading flushes it.
+        #[cfg(windows)]
+        hex_runtime::windows::sys::flush_directory(dir)
+            .map_err(|e| Refusal::os("flushing the record directory", e))?;
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         File::open(dir)
             .and_then(|d| d.sync_all())
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
