@@ -1279,7 +1279,7 @@ mod tests {
         *owner.row.lock().unwrap() = Some(row);
         let observed = runtime.physical_observations();
         assert!(
-            matches!(observed, Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain }) if key == prepared.key)
+            matches!(observed, Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: None }) if key == prepared.key)
         );
         assert_eq!(native.attaches.load(Ordering::SeqCst), 1);
 

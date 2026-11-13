@@ -63,6 +63,12 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 /// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
 /// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
 /// Two builds talk only when theirs are the same.
+// Its evaluation visits each byte of its sources once, so their length bounds it. rustc's long_running_const_eval lint
+// takes an evaluation that long for one that may never end: on a CRLF checkout (git's core.autocrlf, on by default on
+// Windows) the loop visits every carriage return it skips too, and at main a8f6bfe4 jupiter's 673,005 bytes of
+// sources tripped it, so hex-core didn't build there; LF checkouts are close behind. The lint's own note names this
+// remedy for an evaluation long by design: allowing it here.
+#[allow(long_running_const_eval)]
 pub const IDENTITY: u64 = identity(&[
     include_bytes!("wire.rs"),
     include_bytes!("stream.rs"),
@@ -1983,8 +1989,17 @@ fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault>
 const PHYSICAL_MIN_BYTES: usize =
     size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u8>();
 const PHYSICAL_PREFIX_BYTES: usize = 2 * size_of::<u32>();
-// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags; no variable refusal data.
-const PHYSICAL_UNAVAILABLE_BYTES: usize = 3 * size_of::<u8>() + BACKING_KEY_BYTES;
+// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags, then its reason's option tag (joint plan step
+// 14): at its least, with no reason; one with a reason adds its length and bytes (`backing_why_bytes`).
+const PHYSICAL_UNAVAILABLE_BYTES: usize = 4 * size_of::<u8>() + BACKING_KEY_BYTES;
+
+/// What a Backing refusal's reason adds past its least: its length and its bytes, where it gives one.
+fn backing_why_bytes(cause: &Refusal) -> Option<usize> {
+    match cause {
+        Refusal::Backing { why: Some(why), .. } => size_of::<u32>().checked_add(why.len()),
+        _ => Some(0),
+    }
+}
 
 fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fault> {
     report
@@ -2022,6 +2037,11 @@ fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fa
             .and_then(|tail| tail.checked_add(size_of::<u32>()))
             .and_then(|tail| bytes.checked_add(tail))
             .ok_or_else(overflow)?;
+        for observation in &report.unavailable {
+            bytes = backing_why_bytes(&observation.cause)
+                .and_then(|why| bytes.checked_add(why))
+                .ok_or_else(overflow)?;
+        }
     }
     w.reserve_fixed(bytes)?;
     w.string(&report.authority)?;
@@ -2924,8 +2944,12 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             });
             Ok(())
         }
-        Refusal::Backing { key, cause } => {
-            w.reserve_fixed(1 + BACKING_KEY_BYTES + 1)?;
+        Refusal::Backing { key, cause, why } => {
+            // Its tag, key, cause and reason's option tag, and its reason, reserved whole before any of it is written.
+            let body = backing_why_bytes(refusal)
+                .and_then(|why| why.checked_add(1 + BACKING_KEY_BYTES + 1 + 1))
+                .ok_or_else(|| Fault::value("backing refusal", "encoded size overflows"))?;
+            w.reserve_fixed(body)?;
             w.u8(10);
             put_backing_key(w, *key)?;
             w.u8(match cause {
@@ -2934,7 +2958,8 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
             });
-            Ok(())
+            // Appended after its cause (joint plan step 14): its reason in the refusing site's words, absent a byte 0.
+            w.option_with(why.as_deref(), |w, why| w.string(why))
         }
         Refusal::Connect { port, failure } => {
             w.reserve_fixed(
@@ -3073,6 +3098,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 3 => LifecycleCause::Retired,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
+            why: r.option(|r| r.string("backing refusal reason"))?,
         },
         11 => Refusal::Connect {
             port: r.u32()?,

@@ -61,13 +61,13 @@ pub struct Key {
 impl Key {
     pub fn from_record(record: NativeRecord<'_>, helper: ProcId) -> Result<Self, Refusal> {
         if helper.pid == 0 || helper.start_ticks == 0 {
-            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+            return Err(record.uncertain("its native helper's pid or start is zero"));
         }
         Ok(Self {
             owner: record.owner().try_owned()?,
             scope: record
                 .scope()
-                .ok_or_else(|| record.refusal(hex_api::LifecycleCause::Uncertain))?,
+                .ok_or_else(|| record.uncertain("its record names no native scope yet"))?,
             commitment: record.commitment()?,
             helper,
         })

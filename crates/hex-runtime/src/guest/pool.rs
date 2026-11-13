@@ -29,7 +29,11 @@ pub(super) struct Receipt {
 }
 
 pub(super) fn refused(key: BackingKey, cause: LifecycleCause) -> Refusal {
-    Refusal::Backing { key, cause }
+    Refusal::Backing {
+        key,
+        cause,
+        why: None,
+    }
 }
 
 fn exhausted() -> Refusal {

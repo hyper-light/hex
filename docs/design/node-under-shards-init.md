@@ -1,14 +1,22 @@
 # Decision (2026-11-13): Hex's node under shards-init, with Hex's own PID 1 kept
 
 Joint plan step 39 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d` version 12, "Hex's node under shards-init, with
-Hex's own PID 1 kept"), AC-T7.4.1. Status: **decided; Hex's side built up to its channel**. Built:
-- init under shards-init (§2, §3; hex-cli `guest.rs`'s `Host` and `duties`);
-- the node image and its build (§4);
-- the host's boot of it to READY (§6; hex-runtime `guest::hosted`).
+Hex's own PID 1 kept"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main,
+`025aae6d`): **decided: Hex's own PID 1 is kept, and shards-init works with it, never replacing it**. Live:
+- init under shards-init (§2, §3; hex-cli `guest.rs`'s `Host` and `duties`; `7f4bda5b`);
+- the node image and its build (§4; `7f4bda5b`, `982f1a6b`);
+- the host's boot of it to READY (§6; hex-runtime `guest::hosted`; `b29e0bc3`), and Hex's PID-1 path booting again
+  (`9590d4d4`).
 
-The host's use of it stops at its channel: Shards' step 11 has no lane to a nested workload's socket, so the node
-refuses that form by type until it does (§5, `Awaits(NestedChannel)`). Its acceptance is with Shards' goal-75 agent
-(`/Users/adalundhe/.cache/hex-lead/upstream/step11-*`). The real-VM runs and the measurements are ROOT's (§9).
+Merged on Hex's main: Shards' step 11 lane to a socket of the run's own command and the run's own agent-control
+endpoint (D251, D252), vendored since `c8b4ce6b`; a guest's boot as one form, `Boot::Kernel` or `Boot::Image`, and the
+Link's lanes (`a8f6bfe4`); and the node's descriptors fitted on every OS with each hosted VM's lanes (`f2e6d8a2`,
+`885738a1`). Built: a node VM as a holder of the node's ledger in hex-sim (`9505cc1d`). In progress, the node VM's
+entry: E1, its record kind and `NodeRun`; E2, `ImageClass::boot_node`; E3, `Boot::Image` in the guest runtime; E4,
+§5 to §9 here. Until E3 lands, the node refuses that form by type (§5, `Awaits(NestedChannel)`). READY through
+shards-init against the direct boot: on Linux KVM at `8aa7c028`, n=23, p50 152.4 ms against 134.3 ms; on macOS HVF at
+`cf535152`, about 165 ms against 103 ms. Owed, ROOT's with Shards ROOT (§9): the conformance suite through shards-init
+on HVF and WHP, the host VMM's memory both ways, and every WHP run.
 
 The person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work with basically anything non-Shards.
 We are to have init work *with* that." So Hex's PID-1 path (§8) is permanent, and this step adds a second host for the

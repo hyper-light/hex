@@ -1,7 +1,7 @@
 //! The image class alone as a runtime (joint plan step 12's item B), over a model of Shards' image boot whose runs hold
 //! until their stop: what its boxes' records are, where they are kept, and what a restart of its caller finds.
 
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use hex_api::{Allocation, Bounds, BoxState, ClassSpec, ShardsImage};
 use shards_api::image::{
@@ -11,10 +11,21 @@ use shards_api::image::{
 
 use super::*;
 
-/// Shards' image boot in the model: each boot answered at once with a run that holds until its stop.
+/// Shards' image boot in the model: each boot answered at once with a run that holds until its stop, but while the
+/// test holds the model's boots, when each waits until it lets them go.
 #[derive(Default)]
 struct Model {
     asked: Mutex<Vec<ImageSpec>>,
+    held: Mutex<bool>,
+    let_go: Condvar,
+}
+
+impl Model {
+    /// Holds each boot from now on (`true`), or lets every one held go (`false`).
+    fn hold(&self, held: bool) {
+        *self.held.lock().unwrap() = held;
+        self.let_go.notify_all();
+    }
 }
 
 impl Images for Model {
@@ -24,6 +35,11 @@ impl Images for Model {
 
     fn boot(&self, spec: &ImageSpec, _: Duration) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
+        drop(
+            self.let_go
+                .wait_while(self.held.lock().unwrap(), |held| *held)
+                .unwrap(),
+        );
         Ok(Box::new(Held::default()))
     }
 }
@@ -146,14 +162,20 @@ fn runtime(dir: &Path, model: &Arc<Model>) -> Arc<ImageRuntime> {
     .unwrap()
 }
 
-/// Joint plan step 12's item B (goal 54's changes 4 and 5; AC-T7.4.1): the image class alone serves a node with no guest
-/// of Hex's. Do open an image runtime over a records directory of its own; create a box of another class; create, start,
-/// inspect and list an image VM named by kiln's largest reservation id; create, start and delete another; then end the
-/// runtime and open another over the same records, as kiln's restart does, and list. Expect the runtime to serve the
-/// Shards class alone, the other class refused; each VM booted once, the first shown Running and listed under its id
-/// byte for byte, as its record in the runtime's own store names it; the second's record gone with its delete, every call
-/// on it then NoSuchBox; and the restarted runtime to list the first under the same id, held, as an earlier process's run
-/// is until its host's reboot proves it ended.
+/// The second box shown Running once its held boot is let go: this test's fact alone.
+static SHOWN: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.image_start_shown");
+
+/// Joint plan step 12's item B (goal 54's changes 4 and 5; AC-T7.4.1; decision 9): the image class alone serves a node
+/// with no guest of Hex's. Do open an image runtime over a records directory of its own; create a box of another class;
+/// create, start, inspect and list an image VM named by kiln's largest reservation id; create another and start it, its
+/// boot slower than the first's answer (held, as a loaded host's may be), follow it as its caller does, and delete it;
+/// then end the runtime and open another over the same records, as kiln's restart does, and list. Expect the runtime to
+/// serve the Shards class alone, the other class refused; each VM booted once, the first shown Running and listed under
+/// its id byte for byte, as its record in the runtime's own store names it; the second's start Pending at W*, the first
+/// boot's answer, its boot going on, and the box shown Running once it answers; its record gone with its delete, every
+/// call on it then NoSuchBox; and the restarted runtime to list the first under the same id, held, as an earlier
+/// process's run is until its host's reboot proves it ended.
 #[test]
 fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
@@ -173,7 +195,21 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
     images.start(&id).unwrap();
     assert_eq!(images.inspect(&id).unwrap().state, BoxState::Running);
     let gone = images.create(image_box("kiln-z7-1")).unwrap().id;
-    images.start(&gone).unwrap();
+    // Its boot slower than the first's answer, as the push gate's load made one (ROOT's run at 312f4e98): its start
+    // answers Pending at W*, the boot going on (decision 9), and its caller follows the box to its run.
+    model.hold(true);
+    assert!(matches!(
+        images.start(&gone),
+        Err(Refusal::Lifecycle {
+            cause: hex_api::LifecycleCause::Pending,
+            ..
+        })
+    ));
+    model.hold(false);
+    hex_testkit::waits::until(&SHOWN, "the second box shown running", || {
+        images.inspect(&gone).unwrap().state == BoxState::Running
+    })
+    .unwrap();
     assert_eq!(model.asked.lock().unwrap().len(), 2);
     images.delete(&gone).unwrap();
     assert!(matches!(images.inspect(&gone), Err(Refusal::NoSuchBox(_))));
