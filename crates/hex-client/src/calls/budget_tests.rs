@@ -432,7 +432,7 @@ fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusa
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || finished.send(control.list()).unwrap());
     // Its send precedes its answer, so it is read once the answer has come.
-    let result = recv_on(&CAPPED, &answer);
+    let result = recv_from(&CAPPED, "the capped list's answer", &answer, &worker);
     let observed_send = request.try_recv();
     client
         .conn
@@ -2372,7 +2372,12 @@ fn absolute_bootstrap_caps_unarmed_answer_waits() {
             let _ = finished.send(result);
         });
         // Its send precedes its answer, so it is read once the answer has come.
-        let observed = recv_on(&CAPPED, &answer);
+        let observed = recv_from(
+            &CAPPED,
+            "the capped bootstrap call's answer",
+            &answer,
+            &worker,
+        );
         let observed_send = sent.try_recv();
         client.conn.shared.end(Refusal::Broken(
             "owned bootstrap observation cleanup".into(),

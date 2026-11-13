@@ -1517,6 +1517,34 @@ fn shards_connect_failures_keep_port_phase_cause_and_code() {
 const CONNECT_CAP: Duration = Duration::from_millis(25);
 const CONNECT_OBSERVE: Duration = Duration::from_millis(100);
 
+/// A connect's answer, the next message from `from`, following `connecting`, the thread that sends it, by its life
+/// (decision 9): the wait goes on while that thread lives, and fails only once it has ended with nothing sent, never at
+/// a window of the test's own.
+fn connected_by<T>(
+    wait: &hex_core::patience::Patience,
+    from: &std::sync::mpsc::Receiver<T>,
+    connecting: &std::thread::JoinHandle<()>,
+) -> Result<T, hex_testkit::waits::follow::Unmet> {
+    use hex_testkit::waits::follow::{self, Party};
+    follow::within(
+        wait,
+        "the connect's answer",
+        || {
+            if connecting.is_finished() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        |by| match by {
+            None => from.recv().ok(),
+            Some(at) => from
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+                .ok(),
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ConnectForm {
     Ordinary,
@@ -1788,7 +1816,9 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
                 let _ = finished.send((Instant::now(), result));
             });
             // No assertion may bypass this owned socket close and actor join.
-            let observed = answer.recv_timeout(CONNECT_OBSERVE);
+            static CAPPED: hex_core::patience::Patience =
+                hex_core::patience::Patience::measuring("test.hex_client.guest.connect_capped");
+            let observed = connected_by(&CAPPED, &answer, &worker);
             let stopped = peer.shutdown(Shutdown::Both);
             drop(peer);
             let joined = worker.join();
@@ -1889,7 +1919,9 @@ fn absolute_connect_completes_and_evented_retains_the_same_link() {
             });
             let _ = finished.send(result);
         });
-        let observed = answer.recv_timeout(CONNECT_OBSERVE);
+        static CONNECTED: hex_core::patience::Patience =
+            hex_core::patience::Patience::measuring("test.hex_client.guest.connect_completed");
+        let observed = connected_by(&CONNECTED, &answer, &worker);
         let stopped = peer.shutdown(Shutdown::Both);
         drop(peer);
         let joined = worker.join();
