@@ -204,6 +204,29 @@ impl ImageClass {
         }
     }
 
+    /// Whether node VM `run` still runs here: a run that ended on its own is reaped through its stop, its end kept in
+    /// its record; one booting, stopping or never run here doesn't.
+    pub fn node_runs(&self, run: NodeRun) -> Result<bool, Refusal> {
+        let image = self.image()?;
+        let guest = match image.runs.settle(run, image.waits.as_ref().ok())? {
+            Settled::Started(guest) | Settled::Running(guest) => guest,
+            Settled::Ends(end) => {
+                self.ended_node(self.authority()?.as_ref(), run, &end)?;
+                return Ok(false);
+            }
+            Settled::Booting | Settled::Stopping(..) | Settled::None => return Ok(false),
+        };
+        match guest.wait_for(Duration::ZERO) {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) | Err(ImageRefusal::Ended(_)) => {
+                drop(guest);
+                self.stop_node(run)?;
+                Ok(false)
+            }
+            Err(why) => Err(refused("reading a node VM's end", why)),
+        }
+    }
+
     /// What node VM `run` costs its host (ROOT, 2026-11-13: its HostUse readable, as an image VM's): its run's microVM
     /// part (D241), read through the same stats as an image box's, its window from its run's start to this read.
     pub fn host_use_node(&self, run: NodeRun) -> Result<HostUse, Refusal> {

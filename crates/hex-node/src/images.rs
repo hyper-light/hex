@@ -143,6 +143,9 @@ impl Books for ImageRuntime {
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.store.remove_node_vm(run)
     }
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
+        self.store.mint_node_run()
+    }
 }
 
 /// The runtime's records within one transaction: the Store's lifecycle reads and writes.

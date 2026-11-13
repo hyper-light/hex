@@ -1610,6 +1610,9 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.books.store.remove_node_vm(run)
     }
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
+        self.books.store.mint_node_run()
+    }
 }
 
 type Projection = (

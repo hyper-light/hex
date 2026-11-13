@@ -1147,6 +1147,9 @@ impl Books for Node {
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.store.remove_node_vm(run)
     }
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
+        self.store.mint_node_run()
+    }
 }
 
 pub(super) fn uncertain(id: &BoxId) -> Refusal {

@@ -1797,10 +1797,11 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
             learned: None,
         },
         &configured,
-        &kept_identity(123),
+        "guest:123:1230".to_owned(),
     )
     .unwrap();
     assert_eq!((actual.total, actual.free), (room, free));
+    assert_eq!(actual.id, "guest:123:1230");
 }
 
 #[path = "device_routing_tests.rs"]

@@ -454,9 +454,14 @@ impl GuestRuntime {
             let booted = match reservation.previous.as_ref() {
                 Some(known) => {
                     self.matches_pool(&known.booted, &record)?;
-                    let identity = known.booted.guest.identity().map_err(|why| {
-                        refusal("checking the same GPU backing publication", &why)
-                    })?;
+                    let identity = known
+                        .booted
+                        .guest
+                        .shards_for("checking the same GPU backing publication")?
+                        .identity()
+                        .map_err(|why| {
+                            refusal("checking the same GPU backing publication", &why)
+                        })?;
                     managed::same_native(NativeRecord::Pool(&record), &identity)?;
                     self.pool_alive(&known.booted, record.key)?;
                     let receipt = pool::read(&definition.path)?.ok_or_else(|| {

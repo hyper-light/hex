@@ -81,6 +81,19 @@ impl Store {
         }
     }
 
+    /// A run for a node VM about to be booked: 16 bytes from the OS's random numbers, which no row it keeps names (a
+    /// run met twice is refused, never drawn again: 2^-128 apart).
+    pub(crate) fn mint_node_run(&self) -> Result<NodeRun, Refusal> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| Refusal::os("minting a node VM's run", error))?;
+        let run = NodeRun::from_bytes(bytes);
+        if self.node_vm(&run)?.is_some() {
+            return Err(damaged("a run minted names a row already kept"));
+        }
+        Ok(run)
+    }
+
     /// Lets node VM `run`'s record go, its directory flushed after.
     pub(crate) fn remove_node_vm(&self, run: &NodeRun) -> Result<(), Refusal> {
         let _metadata = self.changing_metadata()?;

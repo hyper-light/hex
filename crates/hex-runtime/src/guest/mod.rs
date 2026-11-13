@@ -116,46 +116,48 @@ impl GuestConfig {
         Self::from_vars(|name| std::env::var_os(name))
     }
 
-    /// The guest named by `var`: `SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
-    /// `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB`, each needed (Shards is never taken from `PATH`
-    /// unasked, and the guest's vCPUs and memory are the node's to give from its budget, §1, so none is
-    /// guessed), and `HEX_GUEST_SHARES` (else [`shares::defaults`]). Every one missing is named in one
-    /// refusal, read before anything boots, so an operator fixes them in one go. Shards refuses vCPUs or
-    /// memory past the host's (its `Bounds`) when it boots.
+    /// The guest named by `var`: `SHARDS_BIN`, its form (`HEX_GUEST_KERNEL` and `HEX_GUEST_INITRD`, or
+    /// `HEX_GUEST_IMAGE`), `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB`, each needed (Shards is never taken from
+    /// `PATH` unasked, and the guest's vCPUs and memory are the node's to give from its budget, §1, so none is
+    /// guessed), and `HEX_GUEST_SHARES` (else [`shares::defaults`]). Every one missing is named in one refusal, read
+    /// before anything boots, so an operator fixes them in one go. Shards refuses vCPUs or memory past the host's (its
+    /// `Bounds`) when it boots.
     ///
-    /// A guest under shards-init ([`ENV_IMAGE`]) is refused `Awaits(NestedChannel)` before anything else is read
-    /// or booted: its host would reach its node only through a lane of Shards' agent-control endpoint to the node's
-    /// sockets, which Shards doesn't give yet (docs/design/node-under-shards-init.md §5). Named beside the kernel or
-    /// the initramfs, it is refused naming both forms.
+    /// A guest under shards-init ([`ENV_IMAGE`]) boots through the image class and is reached through its run's
+    /// agent-control endpoint (docs/design/node-under-shards-init.md §5). Named beside the kernel or the initramfs, it
+    /// is refused naming both forms; asked a GPU, it awaits D234's `gpus=` ([`hex_api::Upstream::NestedRuntime`]).
     pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self, Refusal> {
-        if var(ENV_IMAGE).is_some() {
+        let image = var(ENV_IMAGE);
+        if image.is_some() {
             let direct: Vec<&str> = [ENV_KERNEL, ENV_INITRD]
                 .into_iter()
                 .filter(|name| var(name).is_some())
                 .collect();
-            if direct.is_empty() {
-                return Err(Refusal::Awaits {
-                    needs: hex_api::Upstream::NestedChannel,
+            if !direct.is_empty() {
+                return Err(Refusal::Invalid {
+                    what: "the oci class's guest",
+                    why: format!(
+                        "{ENV_IMAGE} and {} are both set: a node boots one form of its guest, the image under \
+                         shards-init or the kernel and initramfs",
+                        direct.join(", ")
+                    ),
                 });
             }
-            return Err(Refusal::Invalid {
-                what: "the oci class's guest",
-                why: format!(
-                    "{ENV_IMAGE} and {} are both set: a node boots one form of its guest, the image under \
-                     shards-init or the kernel and initramfs",
-                    direct.join(", ")
-                ),
-            });
         }
-        let needed = [
-            ENV_SHARDS_BIN,
-            ENV_KERNEL,
-            ENV_INITRD,
-            ENV_CPUS,
-            ENV_MEMORY_MIB,
-        ];
+        let needed: &[&str] = if image.is_some() {
+            &[ENV_SHARDS_BIN, ENV_IMAGE, ENV_CPUS, ENV_MEMORY_MIB]
+        } else {
+            &[
+                ENV_SHARDS_BIN,
+                ENV_KERNEL,
+                ENV_INITRD,
+                ENV_CPUS,
+                ENV_MEMORY_MIB,
+            ]
+        };
         let missing: Vec<&str> = needed
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|name| var(name).is_none_or(|v| v.is_empty()))
             .collect();
         if !missing.is_empty() {
@@ -168,25 +170,40 @@ impl GuestConfig {
             });
         }
         let path = |name: &str| PathBuf::from(var(name).unwrap_or_default());
-        Ok(Self {
-            binary: path(ENV_SHARDS_BIN),
-            boot: Boot::Kernel {
+        let gpu = match var(ENV_GPU) {
+            None => false,
+            Some(value) if value == "false" => false,
+            Some(value) if value == "true" => true,
+            Some(_) => {
+                return Err(Refusal::Invalid {
+                    what: ENV_GPU,
+                    why: "expected true or false".to_owned(),
+                });
+            }
+        };
+        let boot = match image {
+            Some(image) => {
+                if gpu {
+                    return Err(Refusal::Awaits {
+                        needs: hex_api::Upstream::NestedRuntime,
+                    });
+                }
+                Boot::Image(image.into_string().map_err(|given| Refusal::Invalid {
+                    what: ENV_IMAGE,
+                    why: format!("{given:?} is not UTF-8, as an image's reference is"),
+                })?)
+            }
+            None => Boot::Kernel {
                 kernel: path(ENV_KERNEL),
                 initrd: path(ENV_INITRD),
             },
+        };
+        Ok(Self {
+            binary: path(ENV_SHARDS_BIN),
+            boot,
             vcpus: number(&var, ENV_CPUS)?,
             memory_mib: number(&var, ENV_MEMORY_MIB)?,
-            gpu: match var(ENV_GPU) {
-                None => false,
-                Some(value) if value == "false" => false,
-                Some(value) if value == "true" => true,
-                Some(_) => {
-                    return Err(Refusal::Invalid {
-                        what: ENV_GPU,
-                        why: "expected true or false".to_owned(),
-                    });
-                }
-            },
+            gpu,
             shares: shares::from_var(var(shares::ENV))?,
             staged: stage::STAGED.to_owned(),
         })
@@ -371,15 +388,29 @@ where
 enum GuestHandle {
     Shared(Arc<dyn shards_api::Guest>),
     Managed(shards_api::ManagedGuest),
+    /// The node's guest under shards-init: a node VM, the image class's run (joint plan step 39), whose end and stop
+    /// are the class's.
+    Node(hex_api::NodeRun),
 }
 
-impl std::ops::Deref for GuestHandle {
-    type Target = dyn shards_api::Guest;
-    fn deref(&self) -> &Self::Target {
+impl GuestHandle {
+    /// The Shards guest it is, where it is one: a node VM under shards-init is the image class's run instead.
+    fn shards(&self) -> Option<&dyn shards_api::Guest> {
         match self {
-            Self::Shared(guest) => guest.as_ref(),
-            Self::Managed(guest) => guest,
+            Self::Shared(guest) => Some(guest.as_ref()),
+            Self::Managed(guest) => Some(guest),
+            Self::Node(_) => None,
         }
+    }
+
+    /// The Shards guest `call` needs: a dedicated or shared guest's, never the node VM under shards-init, which no such
+    /// call reaches, refused by name if one did.
+    fn shards_for(&self, call: &'static str) -> Result<&dyn shards_api::Guest, Refusal> {
+        self.shards().ok_or_else(|| {
+            Refusal::Broken(format!(
+                "{call}: the node's guest under shards-init is no Shards guest"
+            ))
+        })
     }
 }
 
@@ -525,6 +556,9 @@ pub struct GuestRuntime {
     /// The lanes its guest under shards-init admits at once to its relay's sockets, as its node fitted them
     /// ([`GuestRuntime::with_lanes`]); none until given, and that guest is refused without them.
     lanes: Option<u32>,
+    /// The key it controls its guest under shards-init by (D252), made at that guest's first boot from the OS's
+    /// random numbers: its run's endpoint takes it alone.
+    control: Mutex<Option<Arc<shards_api::control::Identity>>>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -637,11 +671,12 @@ impl GuestRuntime {
             joins: Mutex::new(None),
             images,
             lanes: None,
+            control: Mutex::new(None),
         }
     }
 
     /// The lanes its guest under shards-init admits at once to its relay's sockets: what its node fitted to its
-    /// descriptors (hex-node's `serve::fit`), each a guest frame wide each way. Kept here: no such guest boots.
+    /// descriptors (hex-node's `serve::fit`), each a guest frame wide each way.
     pub fn with_lanes(mut self, lanes: u32) -> Self {
         self.lanes = Some(lanes);
         self
@@ -915,10 +950,15 @@ impl GuestRuntime {
         }
         let mut booted = self.lock()?;
         if let Some(b) = booted.as_ref() {
-            match b.guest.wait_for(Duration::ZERO) {
-                Ok(None) => return Ok(triomphe::Arc::clone(b)),
-                Ok(Some(_)) | Err(_) => *booted = None,
+            if self.still_runs(&b.guest) {
+                return Ok(triomphe::Arc::clone(b));
             }
+            *booted = None;
+        }
+        if let Boot::Image(image) = &self.config.boot {
+            let b = self.boot_image(image)?;
+            *booted = Some(triomphe::Arc::clone(&b));
+            return Ok(b);
         }
         // Refused by name before anything boots where Shards has no backend (§5).
         self.guests
@@ -992,6 +1032,109 @@ impl GuestRuntime {
         })
     }
 
+    /// Whether `guest` still runs: a Shards guest by its own word, the node VM under shards-init by its run's, which
+    /// is reaped through its stop where it ended on its own.
+    fn still_runs(&self, guest: &GuestHandle) -> bool {
+        match guest {
+            GuestHandle::Node(run) => self.images.node_runs(*run).unwrap_or(false),
+            other => other
+                .shards()
+                .is_some_and(|guest| matches!(guest.wait_for(Duration::ZERO), Ok(None))),
+        }
+    }
+
+    /// Boots the node's guest under shards-init through the image class, and connects to its node through its run's
+    /// agent-control endpoint (docs/design/node-under-shards-init.md §4, §5; ROOT, 2026-11-13: one code path).
+    /// - **Its run** is minted by the node's store, and it is charged: its receipt is the configured VM's allocation
+    ///   under its cost profile, as the direct boot's guest is charged, so no node VM runs uncharged.
+    /// - **The image class** boots it and follows it to its init's READY, its node and relay then ready.
+    /// - **Its relay** is dialed through a lane of its run's endpoint, which takes this runtime's key alone, at most
+    ///   the lanes its node fitted at once, each a guest frame wide each way; its node's hello is its answer.
+    /// - **A node that won't greet it** has its run stopped, and the boot is refused in its words.
+    fn boot_image(&self, image: &str) -> Result<triomphe::Arc<Booted>, Refusal> {
+        let lanes = self.lanes.ok_or_else(|| Refusal::Invalid {
+            what: "the oci class's guest",
+            why: "its node fitted no lanes for its guest under shards-init".to_owned(),
+        })?;
+        let cost = self.runtime_cost.ok_or_else(|| Refusal::Invalid {
+            what: "the oci class's guest",
+            why: "its guest under shards-init has no cost profile to charge it by".to_owned(),
+        })?;
+        let identity = self.control_identity()?;
+        let vm = image::NodeVm {
+            run: self.authority()?.mint_node_run()?,
+            image: image.to_owned(),
+            allocation: self.config.checked_runtime_allocation(cost)?,
+            shares: self
+                .config
+                .shares
+                .iter()
+                .map(|share| shards_api::image::ImageShare {
+                    host: share.dir.clone(),
+                    at: share.at.clone(),
+                    read_only: share.read_only,
+                })
+                .collect(),
+            controller: identity.fingerprint(),
+            lanes,
+        };
+        let booted = self.images.boot_node(&vm)?;
+        let window = u32::try_from(stream::MAX_FRAME).map_err(|_| {
+            Refusal::Broken("a guest frame is wider than a lane's window".to_owned())
+        })?;
+        let link: LinkOwner = match hex_client::guest::lanes::Lanes::dial(
+            &identity,
+            booted.control.vm,
+            booted.control.address,
+            shards_api::control::SocketAdmission { lanes, window },
+        )
+        .and_then(own_link)
+        {
+            Ok(link) => link,
+            Err(why) => return Err(self.stopped_for(vm.run, why)),
+        };
+        let client = match Client::connect(triomphe::Arc::clone(&link)) {
+            Ok(client) => client,
+            Err(why) => return Err(self.stopped_for(vm.run, why)),
+        };
+        let b = booted_owner(Booted {
+            guest: GuestHandle::Node(vm.run),
+            link,
+            client,
+            evented: Mutex::new(None),
+            owner: None,
+            backing: None,
+        })?;
+        // Its control connection joins the loop as a direct boot's does.
+        self.join(&b)?;
+        Ok(b)
+    }
+
+    /// `why` a node VM's boot failed past its READY, its run stopped first; where its stop fails too, both.
+    fn stopped_for(&self, run: hex_api::NodeRun, why: Refusal) -> Refusal {
+        match self.images.stop_node(run) {
+            Ok(_) => why,
+            Err(cleanup) => Refusal::Broken(format!("{why}; and stopping its node VM: {cleanup}")),
+        }
+    }
+
+    /// This runtime's control key, made once from the OS's random numbers.
+    fn control_identity(&self) -> Result<Arc<shards_api::control::Identity>, Refusal> {
+        let mut kept = self.control.lock().map_err(poisoned)?;
+        if let Some(identity) = kept.as_ref() {
+            return Ok(Arc::clone(identity));
+        }
+        let identity =
+            Arc::new(
+                shards_api::control::Identity::generate().map_err(|why| Refusal::Os {
+                    op: "making the key the node controls its guest under shards-init by",
+                    why: why.to_string(),
+                })?,
+            );
+        *kept = Some(Arc::clone(&identity));
+        Ok(identity)
+    }
+
     /// The guest if it is booted: a call about a box needs no boot, as there's no box before one.
     fn running(&self) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         Ok(self.lock()?.clone())
@@ -1033,7 +1176,14 @@ impl Drop for GuestRuntime {
     fn drop(&mut self) {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
-            let _ = b.guest.stop();
+            match &b.guest {
+                GuestHandle::Node(run) => drop(self.images.stop_node(*run)),
+                other => {
+                    if let Some(guest) = other.shards() {
+                        let _ = guest.stop();
+                    }
+                }
+            }
             if matches!(&b.guest, GuestHandle::Shared(_))
                 && let Some(path) = &self.record
             {
@@ -1048,7 +1198,7 @@ impl Drop for GuestRuntime {
 fn guest_capacity(
     mut capacity: hex_api::Capacity,
     config: &GuestConfig,
-    identity: &shards_api::Identity,
+    fence: String,
 ) -> Result<hex_api::Capacity, Refusal> {
     capacity.check()?;
     let cpu = u64::from(config.vcpus)
@@ -1058,7 +1208,7 @@ fn guest_capacity(
         .memory_mib
         .checked_mul(1 << 20)
         .ok_or_else(|| Refusal::Broken("guest memory bytes overflow".to_owned()))?;
-    capacity.id = format!("guest:{}:{}", identity.pid, identity.started);
+    capacity.id = fence;
     capacity.total.cpu_milli = capacity.total.cpu_milli.min(cpu);
     capacity.total.mem_bytes = capacity.total.mem_bytes.min(memory);
     capacity.free.cpu_milli = capacity.free.cpu_milli.min(capacity.total.cpu_milli);
@@ -1112,11 +1262,25 @@ impl Runtime for GuestRuntime {
         let capacity = booted.client.capacity(Class::Oci)?.ok_or_else(|| {
             Refusal::Broken("the guest node reported no resource pool".to_owned())
         })?;
-        let identity = booted
-            .guest
-            .identity()
-            .map_err(|why| refusal("reading the guest pool identity", &why))?;
-        let capacity = guest_capacity(capacity, &self.config, &identity)?;
+        // A replacement guest's pool is fenced by its boot: a Shards guest's process and its start, the node VM under
+        // shards-init's run.
+        let fence = match &booted.guest {
+            GuestHandle::Node(run) => format!(
+                "node-vm:{}",
+                run.bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
+            other => {
+                let identity = other
+                    .shards_for("reading the guest pool identity")?
+                    .identity()
+                    .map_err(|why| refusal("reading the guest pool identity", &why))?;
+                format!("guest:{}:{}", identity.pid, identity.started)
+            }
+        };
+        let capacity = guest_capacity(capacity, &self.config, fence)?;
         Ok(Some(capacity))
     }
 
