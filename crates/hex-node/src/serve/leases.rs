@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use hex_api::lease::{Lease, LeaseRefused, Lessor, Lessors};
+use hex_api::lease::{Lease, LeaseRefused, Lessor, Lessors, SignInRefused, SignInTokens, Value};
 use hex_api::{BoxId, Refusal};
 use hex_core::wire::Answer;
 
@@ -29,6 +29,10 @@ pub const MAX_ROUTES: usize = hex_runtime::MAX_BOXES;
 pub(crate) enum Reply {
     Lessor(Result<(), Refusal>),
     Leased(Result<Lease, LeaseRefused>),
+    /// A sign-in's capture (C8): the placeholders its CLI holds, or why not.
+    Captured(Result<hex_api::Captured, SignInRefused>),
+    /// A sign-in's refresh (C8): the token response its CLI is to have, or why not.
+    Refreshed(Result<Value, SignInRefused>),
     Ended,
 }
 
@@ -183,9 +187,9 @@ impl Lessors for WireLessors {
             })),
             Reply::Lessor(Err(why)) => Err(why),
             Reply::Ended => Err(unrouted(id)),
-            Reply::Leased(_) => Err(Refusal::Broken(format!(
-                "box {id}'s orchestrator answered its lessor's ask with a lease"
-            ))),
+            Reply::Leased(_) | Reply::Captured(_) | Reply::Refreshed(_) => Err(Refusal::Broken(
+                format!("box {id}'s orchestrator answered its lessor's ask with another's answer"),
+            )),
         }
     }
 }
@@ -220,16 +224,96 @@ impl Lessor for WireLessor {
         match slot.wait() {
             Reply::Leased(answer) => answer,
             Reply::Ended => Err(ended(&self.id)),
-            Reply::Lessor(_) => Err(LeaseRefused::Unavailable(format!(
-                "box {}'s orchestrator answered a lease ask with a lessor",
+            Reply::Lessor(_) | Reply::Captured(_) | Reply::Refreshed(_) => {
+                Err(LeaseRefused::Unavailable(format!(
+                    "box {}'s orchestrator answered a lease ask with another's answer",
+                    self.id
+                )))
+            }
+        }
+    }
+
+    /// Sign-in `sign_in`'s tokens handed to the orchestrator over the connection that created the box (C8), each a value
+    /// wiped as it drops, and its placeholders waited for while the connection stands.
+    fn capture(
+        &self,
+        sign_in: &str,
+        tokens: SignInTokens,
+        key: Option<[u8; 32]>,
+    ) -> Result<hex_api::Captured, SignInRefused> {
+        let asked = Answer::CaptureAsk {
+            run: self.run,
+            sign_in: sign_in.to_owned(),
+            tokens,
+            key,
+        };
+        match self.ask_sign_in(asked)? {
+            Reply::Captured(answer) => answer,
+            _ => Err(SignInRefused::Unavailable(format!(
+                "box {}'s orchestrator answered a capture with another's answer",
                 self.id
             ))),
+        }
+    }
+
+    fn refresh(&self, sign_in: &str, key: Option<[u8; 32]>) -> Result<Value, SignInRefused> {
+        let asked = Answer::RefreshAsk {
+            run: self.run,
+            sign_in: sign_in.to_owned(),
+            key,
+        };
+        match self.ask_sign_in(asked)? {
+            Reply::Refreshed(answer) => answer,
+            _ => Err(SignInRefused::Unavailable(format!(
+                "box {}'s orchestrator answered a refresh with another's answer",
+                self.id
+            ))),
+        }
+    }
+
+    fn revoked(&self, sign_in: &str, key: Option<[u8; 32]>) {
+        if let Some(line) = self.line.upgrade() {
+            let told = Answer::SignInRevoked {
+                run: self.run,
+                sign_in: sign_in.to_owned(),
+                key,
+            };
+            let _ = line.tell(self.run, &told);
         }
     }
 
     fn release(&self, lease: &str) {
         if let Some(line) = self.line.upgrade() {
             let _ = line.tell(self.run, &Answer::LeaseGiven(lease.to_owned()));
+        }
+    }
+}
+
+impl WireLessor {
+    /// `asked` sent over the run's line as an ask of its own, and its answer waited for while the connection stands; the
+    /// connection's end refuses it `Unavailable`, naming the end. Whatever it carried (a capture's tokens) is wiped as it
+    /// drops here.
+    fn ask_sign_in(&self, asked: Answer) -> Result<Reply, SignInRefused> {
+        let ended = || {
+            SignInRefused::Unavailable(format!(
+                "the connection of box {}'s orchestrator, which serves its sign-ins, has ended",
+                self.id
+            ))
+        };
+        let Some(line) = self.line.upgrade() else {
+            return Err(ended());
+        };
+        let (ask, slot) = line
+            .ask()
+            .map_err(|why| SignInRefused::Unavailable(why.to_string()))?;
+        if let Err(why) = line.tell(ask, &asked) {
+            line.forget(ask);
+            return Err(SignInRefused::Unavailable(why.to_string()));
+        }
+        drop((line, asked));
+        match slot.wait() {
+            Reply::Ended => Err(ended()),
+            reply => Ok(reply),
         }
     }
 }

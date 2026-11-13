@@ -108,6 +108,37 @@ pub enum LeaseRefused {
     Lapsed,
 }
 
+/// A sign-in's tokens as its run's injector took them from its CLI's token response (Shards' D242, step 8;
+/// docs/design/credential-grants.md C8), each wiped as it drops and never printed: its access token, its refresh token
+/// where the response had one, the access token's life in seconds where it said (RFC 6749 §5.1); and, no credential, what
+/// its CLI's own file keeps beside them: its ID token made inert (its header and claims, no signature) and the scope its
+/// access token was granted.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SignInTokens {
+    pub access: Value,
+    pub refresh: Option<Value>,
+    pub expires_in: Option<u64>,
+    pub id_token: Option<Value>,
+    pub scope: Option<String>,
+}
+
+/// Why a sign-in's ask is refused, by Shards' kinds (D242's `SignInRefusal`), each in its orchestrator's words.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SignInRefused {
+    /// Its broker refused it: a sign-in its store doesn't hold, or a refresh its provider refused.
+    #[error("its broker refused the sign-in: {0}")]
+    Denied(String),
+    /// Its broker couldn't be asked, or failed: a later ask may be answered.
+    #[error("its broker couldn't answer the sign-in: {0}")]
+    Unavailable(String),
+    /// The run has ended.
+    #[error("the run has ended")]
+    Ended,
+    /// The run's orchestrator answers no sign-in.
+    #[error("the run's orchestrator answers no sign-in")]
+    Unanswered,
+}
+
 /// One run's leases (Shards' D242): its orchestrator's, for that run alone, from its broker. Every lease it gives is
 /// given back once, as the run lets go of it or ends.
 pub trait Lessor: Send + Sync {
@@ -117,8 +148,36 @@ pub trait Lessor: Send + Sync {
     /// current; none where it binds none, its lessor's run alone asking.
     fn lease(&self, reference: &str, key: Option<[u8; 32]>) -> Result<Lease, LeaseRefused>;
     /// The lease [`lease`](Self::lease) named `lease`, given back: its run let go of it (it lapsed before it was passed
-    /// on, or came after the run released the rest) or ended. Called once for each lease given.
+    /// on, or came after the run released the rest) or ended, or the value it gave rotated (its sign-in refreshed).
+    /// Called once for each lease given.
     fn release(&self, lease: &str);
+    /// Sign-in `sign_in`'s tokens, as the run's injector took them from its CLI's token response (Shards' D242, step 8;
+    /// C8): kept outside by the orchestrator's broker, which answers the placeholders its CLI holds in their places and
+    /// the reference the run's leases name its access token by from then on. Called on a thread of its own, once for
+    /// each capture, `sign_in` one of the run's sign-in grants, `key` as [`lease`](Self::lease) is given it. An
+    /// orchestrator that serves no sign-in refuses it `Unanswered`, as this does.
+    fn capture(
+        &self,
+        sign_in: &str,
+        tokens: SignInTokens,
+        key: Option<[u8; 32]>,
+    ) -> Result<crate::Captured, SignInRefused> {
+        let _ = (sign_in, tokens, key);
+        Err(SignInRefused::Unanswered)
+    }
+    /// Sign-in `sign_in` refreshed by its broker, which alone calls its provider: the token response its CLI is to have,
+    /// its tokens the placeholders it holds. Once it answers, each lease of the access token given the run before is
+    /// given back ([`release`](Self::release)), its value rotated. Refused `Unanswered` by an orchestrator that serves no
+    /// sign-in, as by this.
+    fn refresh(&self, sign_in: &str, key: Option<[u8; 32]>) -> Result<Value, SignInRefused> {
+        let _ = (sign_in, key);
+        Err(SignInRefused::Unanswered)
+    }
+    /// The run's VM revoked sign-in `sign_in` (its CLI's logout, or a sign-in anew), answered in its network process and
+    /// its stored tokens kept: told, so its broker may say so; never a revocation outside.
+    fn revoked(&self, sign_in: &str, key: Option<[u8; 32]>) {
+        let _ = (sign_in, key);
+    }
 }
 
 /// What a node's orchestrator gives it for its Shards image VMs' credentials: a [`Lessor`] for each run of a VM with

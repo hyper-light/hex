@@ -877,14 +877,23 @@ impl<W: Waits> Transport for Stream<W> {
                 ))
             })?;
             input = input.get(took..).unwrap_or_default();
-            let Some(message) = whole else { continue };
+            let Some(mut message) = whole else { continue };
             let received = Received {
                 bytes: &message,
                 size: message.len(),
                 descriptors: 0,
                 descriptors_cut: false,
             };
-            take(&received, Vec::new())?;
+            let taken = take(&received, Vec::new());
+            // A sign-in's tokens cross in the message the core reads alone (docs/design/credential-grants.md C8).
+            if wire::carries_secret(&message) {
+                hex_api::lease::wipe(&mut message);
+            }
+            taken?;
+        }
+        // Framed into the messages handed on: what was read here wiped.
+        if let Some(held) = buf.get_mut(..n) {
+            hex_api::lease::wipe_in_place(held);
         }
         Ok(true)
     }
