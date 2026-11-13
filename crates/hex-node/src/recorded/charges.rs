@@ -81,10 +81,13 @@ pub(crate) trait Managed {
     fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, record: &BoxRecord) -> Result<HostUse, Refusal>;
-    /// The period a Shards image VM's rate holds over, its run's own (D247's `ImageGuest::rate_period`).
-    fn rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal>;
-    /// Caps the VM at `rate` milli-CPU: a managed VM through its native owner, an image VM through its rate (D247).
-    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal>;
+    /// The period the VM's rate holds over: a Shards image VM's its run's own (D247's `ImageGuest::rate_period`); a
+    /// managed VM's its governor's, as its VM process last answered (D255), none before its first answer or while its
+    /// platform's cap holds it.
+    fn rate_period(&self, record: &BoxRecord) -> Result<Option<Duration>, Refusal>;
+    /// Caps the VM at `rate` milli-CPU, and says what holds it there (D255): an image VM through its rate (D247), a
+    /// managed VM through its governor, or its platform's cap where its VM process takes no rate.
+    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<hex_api::RateHeld, Refusal>;
     /// Tells an image VM's guest its room, `room` bytes past what it holds (`Runtime::room`, D188).
     fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal>;
     /// Ends the VM: a managed VM through its receipt, an image VM's run stopped (the last resort, C5).
@@ -830,9 +833,11 @@ impl Learner {
             // its learner untouched (ROOT, 2026-11-13: never starving its neighbours by holding nothing): no sample
             // taken, its booking as it was, and the failure told ([`Learner::unread`]). One that ended since its
             // listing is ended by the next.
+            // Original (red, D255): a managed VM's governor's period isn't read.
             let reading = running_image(record)
                 .then(|| io.rate_period(record))
                 .transpose()
+                .map(Option::flatten)
                 .and_then(|period| Read::of(io, record).map(|read| (period, read)));
             let (period, read) = match reading {
                 Ok(reading) => reading,
@@ -942,7 +947,8 @@ impl Learner {
                 .iter()
                 .find(|record| scope_of(record) == Some(scope))
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-            io.set_rate(record, rate)?;
+            // Original (red, D255): what holds it is told nowhere.
+            let _held = io.set_rate(record, rate)?;
             vm.rate = rate;
         }
         // Each image VM's guest told its room as it moves (C5, C7; D188): its budget less what it holds, everything it
@@ -1160,6 +1166,8 @@ pub(crate) fn learned(
         holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
         ended,
         ceilings,
+        // Original (red, D255): what holds each managed VM's rate is told nowhere.
+        rates: Vec::new(),
     })
 }
 

@@ -4606,6 +4606,7 @@ fn learned_capacity() -> Capacity {
                 disk_bytes: Some(0),
             },
         }],
+        rates: Vec::new(),
     });
     capacity
 }
@@ -4673,6 +4674,39 @@ fn a_node_vms_learned_holding_and_end_cross_the_wire() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         offered
     );
+}
+
+/// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds each running managed VM's CPU to its rate crosses the wire
+/// on its class's capacity answer, after the ceilings, where its node tells it. Do: encode a capacity whose learned
+/// rates name a box its platform's cap holds, with why, one its governor holds under its job, and a node VM its
+/// governor holds; read it back, and write and read it as JSON. Expect it back exactly each way.
+#[test]
+fn w14_d255_what_holds_each_managed_vms_rate_crosses_the_wire() {
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.rates = vec![
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-7").unwrap()),
+                held: hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-8").unwrap()),
+                held: hex_api::RateHeld::GovernorUnderJob,
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16])),
+                held: hex_api::RateHeld::Governor,
+            },
+        ];
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let json = serde_json::to_value(&capacity).unwrap();
+    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
 }
 
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with

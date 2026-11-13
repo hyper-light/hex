@@ -2233,6 +2233,8 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         holdings,
         ended,
         ceilings,
+        // Original (red, D255): what holds each managed VM's rate isn't on the wire.
+        rates: Vec::new(),
     })
 }
 

@@ -2093,19 +2093,25 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         self.runtime.host_use(&record.spec.id)
     }
 
-    fn rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
-        self.runtime.image_rate_period(record)
+    fn rate_period(&self, record: &BoxRecord) -> Result<Option<std::time::Duration>, Refusal> {
+        // Original (red, D255): a managed VM's governor's period isn't read.
+        if !charges::running_image(record) {
+            return Ok(None);
+        }
+        self.runtime.image_rate_period(record).map(Some)
     }
 
-    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
+    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
         if charges::running_image(record) {
             return self
                 .runtime
                 .rate(&record.spec.id, std::num::NonZeroU64::new(rate))
-                .map(|_| ());
+                .map(|_| hex_api::RateHeld::Governor);
         }
+        // Original (red, D255): no managed VM's governor is asked; its platform's cap holds it.
         self.runtime
             .set_managed_rate(NativeRecord::Box(record), rate)
+            .map(|()| hex_api::RateHeld::Platform("no managed VM's governor is asked".to_owned()))
     }
 
     fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
