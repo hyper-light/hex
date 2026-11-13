@@ -145,18 +145,49 @@ pub struct Fitted {
     pub lanes: usize,
 }
 
-/// `platform`'s bounds for a node that holds `hosted` VMs. Behavior kept here: the platform's own, its descriptors the
-/// socket's connections, nothing else counted.
+/// `platform`'s bounds for a node that holds `hosted` VMs, fitted to its descriptors beside `beside` held, as Linux's
+/// node fits its own (`crate::netns::fit`): where its terms at the platform's own bounds fit, they stay; where they
+/// don't, the program places are the most whose terms fit, found by halving, and the connections and lanes follow
+/// them. `Err` carries the least node's descriptors, one place and one connection, where even those don't fit.
 pub fn fit(
     platform: &Platform,
     hosted: usize,
     own: Own,
     beside: Option<u64>,
 ) -> Result<Fitted, u64> {
-    let _ = (hosted, own, beside);
+    let hard = u64::try_from(platform.descriptors).unwrap_or(u64::MAX);
+    let at = |places: usize| Bounds {
+        descriptors: platform.descriptors,
+        places,
+        in_flight: platform.threads,
+        hosted,
+    };
+    let fits = |places: usize| descriptors(at(places), own, beside) <= hard;
+    let least = descriptors(at(1), own, beside);
+    if least > hard {
+        return Err(least);
+    }
+    let (mut low, mut high) = (1usize, platform.programs.max(1));
+    if fits(high) {
+        low = high;
+    }
+    while low < high {
+        let mid = low.saturating_add(high.saturating_sub(low).div_ceil(2));
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+    let fitted = at(low);
     Ok(Fitted {
-        limits: super::limits(platform),
-        lanes: lanes(platform.programs),
+        limits: Limits {
+            connections: fitted.connections(),
+            message_bytes: hex_core::wire::MAX_MESSAGE,
+            in_flight: fitted.in_flight,
+            programs: fitted.places,
+        },
+        lanes: lanes(fitted.places),
     })
 }
 

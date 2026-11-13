@@ -732,6 +732,13 @@ impl Node {
         self.pools.sizes
     }
 
+    /// Each hosted VM's lanes (`crate::serve::fit::lanes`) at the program places its start fitted: what a node VM under
+    /// shards-init's run grants its controller (Shards' D251), counted among the node's descriptors
+    /// ([`Runs::hosted`]).
+    pub fn hosted_lanes(&self) -> usize {
+        crate::serve::fit::lanes(crate::serve::limits(&self.pools.sizes.platform()).programs)
+    }
+
     /// The node's pools as its start fitted them to its descriptor limit (`netns::hold_descriptors`): what its own
     /// descriptors are counted at ([`crate::netns::FilesBound`]).
     pub fn pools(&self) -> Pools {

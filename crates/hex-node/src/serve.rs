@@ -106,9 +106,11 @@ pub struct Platform {
 ///   admitted has a worker that can exist;
 /// - programs watched: the programs the node can watch at once.
 ///
-/// Each is a ceiling the platform sets, not the room left under it now: what else holds the platform's room, the
-/// kernel refuses past as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission (the lead,
-/// 2026-11-09, over reading the room at each admission, which cost every exec a listing of the node's descriptors).
+/// Each is a ceiling the platform sets, which a node's start fits to its descriptors with everything else it holds
+/// ([`fit`], ROOT's one accounting of 2026-11-13; Linux's with its pools, `crate::netns::fit`), not the room left
+/// under it now: what else holds the platform's room, the kernel refuses past as the node takes it (`EMFILE`,
+/// `EAGAIN`), typed, at no cost to an admission (the lead, 2026-11-09, over reading the room at each admission, which
+/// cost every exec a listing of the node's descriptors).
 pub fn limits(platform: &Platform) -> Limits {
     Limits {
         connections: platform.descriptors,
