@@ -74,6 +74,7 @@ is wired:
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
+| `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
 alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
@@ -91,8 +92,9 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    `hex_client::guest::shards::RECORDS` takes `bench/native/guest/records.tsv` by `include_str!`; `recorded_boot`
    reads this host class's `boot_ready` row (with none, the slowest of any class's; where no class has one, refused
    "record one first"); and `hex_runtime::guest::first_dial_bound`, the larger of it and the slowest boot seen, makes
-   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (fifteen
-   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs), as `ShardsGuest::dial_before(port, None)`
+   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (nine
+   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs; the six that bounded a managed scope's stop went
+   to `managed.stop` on 2026-11-13, ROOT's (C) of joint plan step 14), as `ShardsGuest::dial_before(port, None)`
    dials until it. The design, HEX-GUEST-33's liveness-sliced dial: before the first boot, and after one that ran out,
    the budget follows the guest's VM (`Budget::following(party)` beside `Budget::new(bound)`, its deadline an
    `Option<Instant>`). The VM's liveness is its process's end, an event on every OS (a pidfd on Linux,
