@@ -1140,6 +1140,7 @@ impl<W: Waits> Stream<W> {
     }
 }
 
+pub mod bridge;
 pub mod shards;
 pub mod stage;
 
