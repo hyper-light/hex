@@ -1670,6 +1670,7 @@ fn backing_offer(r: &mut Reader<'_>) -> Result<BackingOffer, Fault> {
         _ => return Err(Fault::value("backing.phase", "unsupported tag")),
     };
     let offer = BackingOffer {
+        guest: Default::default(),
         key,
         cost,
         phase,
