@@ -321,6 +321,7 @@ impl Books for Owner {
             disk_bytes: 1 << 30,
         };
         Ok(Capacity {
+            own: Default::default(),
             id: "same-model-native-owner".into(),
             total: room,
             free: room,
@@ -982,6 +983,7 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
         arch: route::host_platform().unwrap().arch,
     };
     let native = Capacity {
+        own: Default::default(),
         id: "native-cpu-only-prefix".into(),
         total: CapacityResources {
             cpu_milli: 8000,
@@ -1314,6 +1316,7 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
     let gib = 1u64 << 30;
     let guest = |free: u64| {
         let mut capacity = hex_api::Capacity {
+            own: Default::default(),
             id: "guest".into(),
             total: CapacityResources {
                 cpu_milli: 2_000,
@@ -1336,21 +1339,203 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
         capacity.free.mem_bytes = free;
         capacity
     };
+    let boxes = |memory: u64| super::Boxes {
+        memory,
+        ..super::Boxes::default()
+    };
+    let first = super::guest_seen(super::Seen::default(), &guest(5 * gib), boxes(2 * gib));
+    assert_eq!(first.overhead.mem_bytes, Some(gib));
+    let second = super::guest_seen(first, &guest(6 * gib), boxes(3 * gib / 2));
+    assert_eq!(second.overhead.mem_bytes, Some(gib));
+    let third = super::guest_seen(second, &guest(5 * gib), boxes(4 * gib));
+    assert_eq!(third.overhead.mem_bytes, Some(gib));
+}
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2): a shared guest's own CPU is its machine's CPU time past its boxes':
+/// at its first answer over its uptime, its boot's work among it, which the first interval between answers replaces;
+/// then the most seen over the intervals. Its disk is its used bytes, its boxes' disk no usage reads. Do measure a
+/// guest of 100 GiB of disk with 40 GiB free, up 10 s with 4 s of CPU and its boxes 1 s; then 1 s on with 0.5 s more
+/// and its boxes 0.3 s more; then 1 s on with 0.1 s more and its boxes none. Expect 300 milli-CPU first (3 s over 10
+/// s), then 200 (the interval's, in the boot's place), then 200 still (100 is less), and 60 GiB of disk throughout.
+#[test]
+fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_use() {
+    let gib = 1u64 << 30;
+    let second = 1_000_000_000u64;
+    let guest = |cpu_ns: u64, uptime_ns: u64| hex_api::Capacity {
+        id: "guest".into(),
+        total: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 100 * gib,
+        },
+        free: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 40 * gib,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: hex_api::MachineTime {
+            cpu_ns: Some(cpu_ns),
+            uptime_ns: Some(uptime_ns),
+        },
+    };
+    let boxes = |cpu_ns: u64| super::Boxes {
+        cpu_ns,
+        ..super::Boxes::default()
+    };
     let first = super::guest_seen(
-        hex_api::LearnedOverhead::default(),
-        &guest(5 * gib),
-        2 * gib,
+        super::Seen::default(),
+        &guest(4 * second, 10 * second),
+        boxes(second),
     );
-    assert_eq!(
+    assert_eq!(first.overhead.cpu_milli, Some(300));
+    assert_eq!(first.overhead.disk_bytes, Some(60 * gib));
+    let next = super::guest_seen(
         first,
+        &guest(4 * second + second / 2, 11 * second),
+        boxes(second + 3 * second / 10),
+    );
+    assert_eq!(next.overhead.cpu_milli, Some(200));
+    let last = super::guest_seen(
+        next,
+        &guest(4 * second + 6 * second / 10, 12 * second),
+        boxes(second + 3 * second / 10),
+    );
+    assert_eq!(last.overhead.cpu_milli, Some(200));
+    assert_eq!(last.overhead.disk_bytes, Some(60 * gib));
+}
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2): two answers that measured a shared guest at once keep pin 2 as one
+/// does: the guest's CPU read since its boot gives way to the first interval, whichever answer stored first, and the
+/// intervals keep their most. Do merge an answer's first interval, 200 milli-CPU, with a kept boot reading of 300, each
+/// way round; an interval of 150 with a kept interval of 250; and a boot reading of 300 with a guest still cold. Expect
+/// 200 each way, no longer read from boot; 250; and 300, still from boot, which the next interval replaces.
+#[test]
+fn w14_answers_that_measured_a_shared_guest_at_once_keep_its_boot_reading_until_an_interval() {
+    let cpu = |milli: Option<u64>, from_boot: bool| super::Seen {
+        overhead: hex_api::LearnedOverhead {
+            cpu_milli: milli,
+            mem_bytes: Some(1 << 30),
+            disk_bytes: Some(0),
+        },
+        last: None,
+        cpu_from_boot: from_boot,
+    };
+    let boot = cpu(Some(300), true);
+    let interval = cpu(Some(200), false);
+    for (measured, other) in [(interval, boot), (boot, interval)] {
+        let kept = super::merged(measured, other);
+        assert_eq!(
+            (kept.overhead.cpu_milli, kept.cpu_from_boot),
+            (Some(200), false),
+            "{measured:?} after {other:?}"
+        );
+    }
+    let kept = super::merged(cpu(Some(150), false), cpu(Some(250), false));
+    assert_eq!(
+        (kept.overhead.cpu_milli, kept.cpu_from_boot),
+        (Some(250), false)
+    );
+    let kept = super::merged(boot, cpu(None, false));
+    assert_eq!(
+        (kept.overhead.cpu_milli, kept.cpu_from_boot),
+        (Some(300), true)
+    );
+    let next = super::merged(cpu(Some(100), false), kept);
+    assert_eq!(
+        (next.overhead.cpu_milli, next.cpu_from_boot),
+        (Some(100), false)
+    );
+}
+
+/// Joint plan step 14 (C7; AC-T7.4.1; ROOT, 2026-11-13, pin 1): a shared backing goes Live only measured: its runtime
+/// takes its guest's first measurement from its agent's capacity answer before its record says Live, and leaves it
+/// Granted, saying why, without one. Do grant a backing whose launch published its controller and whose guest runs (a
+/// node that restarted with it up takes it back), its agent answering no capacity; then again, its agent answering 8
+/// GiB with 7 free and 100 GiB of disk with 40 free, up 10 s with 4 s of CPU, no box on it. Expect the first refused,
+/// the backing Granted; the second Live, its offer's guest measured: 1 GiB, 60 GiB of disk, and 400 milli-CPU read
+/// since its boot.
+#[test]
+fn w14_a_shared_backing_goes_live_only_measured() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    // The model's launch refuses after its intent; the row and receipt then say what a launch that published its
+    // controller leaves, the backing still Granted.
+    assert!(runtime.initialize_backing(grant(&offer)).is_err());
+    let identity = shards_api::Identity {
+        pid: 41,
+        started: 43,
+        vsock: runtime.pool_socket(offer.key).unwrap(),
+    };
+    let mut row = owner.row();
+    row.init = Some(controller(&identity));
+    Transaction::put_pool(owner.as_ref(), &row).unwrap();
+    let path = dir.path().join("@guest");
+    let mut receipt = pool::read(&path).unwrap().unwrap();
+    receipt.phase = Phase::Running(copy_identity(&identity).unwrap());
+    pool::write(&path, &receipt).unwrap();
+    let binding = super::Binding {
+        key: offer.key,
+        commitment: owner.row().native_commitment().unwrap(),
+    };
+    *runtime.booted.lock().unwrap() = Some(super::super::tests::running_guest(None, Some(binding)));
+    let refused = runtime.initialize_backing(grant(&offer));
+    assert!(
+        matches!(
+            &refused,
+            Err(Refusal::Backing {
+                cause: LifecycleCause::Uncertain,
+                why: Some(why),
+                ..
+            }) if why.contains("measured")
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(owner.row().phase, BackingPhase::Granted);
+    let gib = 1u64 << 30;
+    let answer = Capacity {
+        id: "guest".into(),
+        total: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 100 * gib,
+        },
+        free: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 7 * gib,
+            disk_bytes: 40 * gib,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: hex_api::MachineTime {
+            cpu_ns: Some(4_000_000_000),
+            uptime_ns: Some(10_000_000_000),
+        },
+    };
+    *runtime.booted.lock().unwrap() = Some(super::super::tests::running_guest(
+        Some(answer),
+        Some(binding),
+    ));
+    let live = runtime.initialize_backing(grant(&offer)).unwrap();
+    assert_eq!(live.phase, BackingPhase::Live);
+    assert_eq!(
+        live.guest,
         hex_api::LearnedOverhead {
-            cpu_milli: None,
+            cpu_milli: Some(400),
             mem_bytes: Some(gib),
-            disk_bytes: None,
+            disk_bytes: Some(60 * gib),
         }
     );
-    let second = super::guest_seen(first, &guest(6 * gib), 3 * gib / 2);
-    assert_eq!(second.mem_bytes, Some(gib));
-    let third = super::guest_seen(second, &guest(5 * gib), 4 * gib);
-    assert_eq!(third.mem_bytes, Some(gib));
 }

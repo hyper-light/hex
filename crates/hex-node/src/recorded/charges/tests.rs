@@ -930,6 +930,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         .window(&io, &records, res(24_000, 64 * GIB), Instant::now())
         .unwrap();
     let mut capacity = hex_api::Capacity {
+        own: Default::default(),
         id: "shards".into(),
         total: res(32_000, 64 * GIB),
         free: CapacityResources::default(),
