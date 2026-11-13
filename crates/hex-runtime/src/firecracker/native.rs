@@ -171,17 +171,6 @@ impl FirecrackerRuntime {
         })
     }
 
-    /// The RLIMIT_MEMLOCK the VMM of a VM given a device whole, its guest's RAM `ram` bytes, runs under, under this
-    /// process's own limit and capabilities ([`vfio::dma_memlock`]). A VM given none maps no RAM for DMA, and its VMM
-    /// runs under the node's own.
-    fn dma_memlock(ram: u64) -> Result<Option<rustix::process::Rlimit>, Refusal> {
-        vfio::dma_memlock(
-            ram,
-            rustix::process::getrlimit(rustix::process::Resource::Memlock),
-            vfio::vmm_holds_ipc_lock()?,
-        )
-    }
-
     fn vm_program(&self, paths: &Paths) -> Result<Program, Refusal> {
         let mut program = Program::default();
         program
@@ -464,7 +453,7 @@ impl FirecrackerRuntime {
                 .machine_memory(&spec)?
                 .checked_mul(1 << 20)
                 .ok_or_else(|| invalid("guest memory overflow"))?;
-            Self::dma_memlock(ram)?
+            self.host.dma_memlock(ram)?
         };
         let id = spec.id.try_clone()?;
         // The optional handoff already persisted this SAME scope before stopping its observer.
@@ -2862,6 +2851,9 @@ mod single_use_tests {
         (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
         config.state_dir = dir.join("state");
         fs::create_dir(&config.state_dir).unwrap();
+        // Its VMMs may pin the RAM of the VMs these tests create (`spec`'s, one RAM whatever the name) and no more,
+        // whatever this machine's own limit (AC-T7.4.1).
+        let ram = config.machine_memory(&spec(&config, "vm")).unwrap() * (1 << 20);
         FirecrackerRuntime {
             config,
             catalog: triomphe::Arc::try_new(Catalog::parse(catalog).unwrap()).unwrap(),
@@ -2871,6 +2863,7 @@ mod single_use_tests {
                 sys: host.join("sys"),
                 dev: host.join("dev"),
                 open: vfio::stand_in::opened,
+                memlock: vfio::stand_in::memlock(ram),
             },
             marks: single_use::MarksAt {
                 dir: runtime.to_path_buf(),
@@ -2885,8 +2878,8 @@ mod single_use_tests {
 
     const GPU: &[u8] = b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n";
 
-    /// A VM given the stand-in GPU on `node`.
-    fn spec(node: &FirecrackerRuntime, name: &str) -> BoxSpec {
+    /// A VM given the stand-in GPU on a node configured with `config`.
+    fn spec(config: &Config, name: &str) -> BoxSpec {
         BoxSpec {
             id: BoxId::new(name).unwrap(),
             bounds: hex_api::Bounds {
@@ -2908,7 +2901,7 @@ mod single_use_tests {
                 key: 256,
             }],
             allocation: Some(
-                node.config
+                config
                     .cost
                     .allocate(CapacityResources {
                         cpu_milli: 1000,
@@ -2937,7 +2930,7 @@ mod single_use_tests {
         let until = Instant::now() + std::time::Duration::from_secs(30);
         node.create_or_cleanup(
             &BoxId::new(name).unwrap(),
-            spec(node, name),
+            spec(&node.config, name),
             None,
             books,
             until,
