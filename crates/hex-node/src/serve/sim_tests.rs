@@ -1534,12 +1534,11 @@ fn original_a_client_reading_a_list_slower_than_any_before_is_followed_past_w_st
 }
 
 /// Decision 9 (the person's ruling of 2026-11-13: W* is a bound only while answers come within it; past it the wait
-/// follows its party, the client, by its life alone for now, the messages it takes too coarse a progress to judge a
-/// stall at W*'s scale): a list's client that took nothing over a whole W* window past W* had its connection closed,
-/// though it was there to read. Do: a server whose reads have learned a W* of 1 ms; a client with no room asks for a
-/// list of three parts or more; once the next part's wait has run out (told), the client makes no room for a hundred
-/// windows of W*, or until its connection closes; then it makes room. Expect: the connection standing; once the client
-/// reads, every part.
+/// follows its party, the client, by its life alone, as at every local site): a list's client that took nothing over a
+/// whole W* window past W* had its connection closed, though it was there to read. Do: a server whose reads have
+/// learned a W* of 1 ms; a client with no room asks for a list of three parts or more; once the next part's wait has
+/// run out (told), the client makes no room for a hundred windows of W*, or until its connection closes; then it makes
+/// room. Expect: the connection standing; once the client reads, every part.
 #[test]
 fn a_client_past_w_star_is_followed_by_its_life_however_long_it_takes_nothing() {
     static READS: Patience = Patience::measuring("test.serve.reads.life");

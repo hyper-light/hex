@@ -1535,9 +1535,9 @@ impl<O: Os> Shared<O> {
     /// Waits for a connection's waiting answers to go, before a list's next part, as decision 9 waits (the person's
     /// ruling of 2026-11-13) on the server's reads' wait ([`Shared::reads`], [`READS`]):
     /// - **Within W***, the slowest such wait this process has seen, the answers going end it.
-    /// - **Past W*** the run-out is told to the census, no sample, and the wait follows its client by its life alone
-    ///   for now (the messages it takes are too coarse a progress to judge a stall at W*'s scale): the answers going,
-    ///   or the connection's close, ends it, however long that takes.
+    /// - **Past W*** the run-out is told to the census, no sample, and the wait follows its client by its life alone,
+    ///   as at every local site (docs/research/runtime/learned-waits.md): the answers going, or the connection's close,
+    ///   ends it, however long that takes.
     /// - **With no W*** (before the first such wait, and from a run-out to the next answer) it follows the client from
     ///   its start.
     /// - **The connection's close** ends it at any time: the part then goes to no one.
