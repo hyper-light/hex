@@ -314,14 +314,14 @@ fn hex_quic_20_the_conformance_suite_passes_over_quic() {
     )));
 }
 
-/// HEX-QUIC-26 (Q8; joint plan step 4): a client holds itself to the lanes its node grants a peer, whatever the node's
+/// HEX-QUIC-27 (Q8; joint plan step 4): a client holds itself to the lanes its node grants a peer, whatever the node's
 /// connections bound. Do: serve a simulator node over QUIC whose connections bound (64) is past what it grants one peer
 /// (its calls in flight, 2: a control and a stdio connection each, and its log's: 5 lanes, `hex_node::quic::shape`);
 /// connect a client (`link::connect`), then beside its control connection open stdio connections up to the grant, and
 /// one more. Expect the one past the grant refused here, typed (`Why::Lanes`), and the client's calls still answered:
 /// a connection the node's stream limit can't take is never opened, so none waits for a lane that never comes.
 #[test]
-fn hex_quic_26_a_client_holds_itself_to_the_lanes_its_node_grants() {
+fn hex_quic_27_a_client_holds_itself_to_the_lanes_its_node_grants() {
     use hex_api::Runtime as _;
     let ca = SimCa::new().unwrap();
     let enrolled = |name: &str| {

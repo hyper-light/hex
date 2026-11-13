@@ -219,11 +219,11 @@ mod tests {
         }
     }
 
-    /// HEX-QUIC-26 (Q8): one derivation for both ends. Expect a node of 16 calls in flight to grant a peer 33 lanes (a
+    /// HEX-QUIC-27 (Q8): one derivation for both ends. Expect a node of 16 calls in flight to grant a peer 33 lanes (a
     /// control and a stdio connection a call, and its log's), 49 where it stages; a client toward it to ask that, or what
     /// it can bridge where that is less; and calls in flight past `u32` to grant `u32`'s most, never wrapping.
     #[test]
-    fn hex_quic_26_the_lanes_a_node_grants_are_the_lanes_its_client_asks() {
+    fn hex_quic_27_the_lanes_a_node_grants_are_the_lanes_its_client_asks() {
         assert_eq!(peer_lanes(16, false), 33);
         assert_eq!(peer_lanes(16, true), 49);
         assert_eq!(client_lanes(16, false), 33.min(bridgeable()));
