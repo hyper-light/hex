@@ -1162,6 +1162,18 @@ impl Books for Node {
     ) -> Result<(), Refusal> {
         self.book_transaction(BookOwner::Handoff { id, source }, full_conflicts, callback)
     }
+    fn node_vm(
+        &self,
+        run: &hex_api::NodeRun,
+    ) -> Result<Option<hex_core::record::NodeVmRecord>, Refusal> {
+        self.store.node_vm(run)
+    }
+    fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
+        self.store.put_node_vm(record)
+    }
+    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
+        self.store.remove_node_vm(run)
+    }
 }
 
 pub(super) fn uncertain(id: &BoxId) -> Refusal {

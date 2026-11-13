@@ -1659,6 +1659,18 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         let _method = self.books.lifecycle.try_take_pool(key, devices)?;
         self.native_transaction(TransactionOwner::Pool(key), devices, callback)
     }
+    fn node_vm(
+        &self,
+        run: &hex_api::NodeRun,
+    ) -> Result<Option<hex_core::record::NodeVmRecord>, Refusal> {
+        self.books.store.node_vm(run)
+    }
+    fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
+        self.books.store.put_node_vm(record)
+    }
+    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
+        self.books.store.remove_node_vm(run)
+    }
 }
 
 type Projection = (
