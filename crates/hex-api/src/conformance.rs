@@ -1436,10 +1436,17 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ];
     for grant in invalid {
         let got = rt.create(granted(vec![grant.clone()], None)?);
-        ensure(
-            matches!(&got, Err(Refusal::Invalid { what: "grants", .. })),
-            || format!("create granted {grant:?}: {got:?}"),
-        )?;
+        // Refused naming the grants: by the class, or before it by a client, whose wire writes no request whose grants
+        // its check refuses (hex-core's wire; ROOT's r558 through a real node).
+        let named = match &got {
+            Err(Refusal::Invalid { what: "grants", .. }) => true,
+            Err(Refusal::Invalid {
+                what: "message",
+                why,
+            }) => why.starts_with("grants isn't valid"),
+            _ => false,
+        };
+        ensure(named, || format!("create granted {grant:?}: {got:?}"))?;
         let left = rt.inspect(&id);
         ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
             format!("a refused create ({grant:?}) made {left:?}")
