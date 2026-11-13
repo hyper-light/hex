@@ -223,6 +223,12 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Plug(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a plug ({cause:?}): {why}"))
         }
+        // Only a room (D241), a rate (D247) or a terminal's resize (D244) is refused so, and this class asks none.
+        ImageRefusal::Room(why) => Refusal::Broken(format!("Shards refused {op} as a room: {why}")),
+        ImageRefusal::Rate(why) => Refusal::Broken(format!("Shards refused {op} as a rate: {why}")),
+        ImageRefusal::Terminal(why) => {
+            Refusal::Broken(format!("Shards refused {op} as a terminal's size: {why}"))
+        }
     }
 }
 
@@ -586,6 +592,8 @@ impl GuestRuntime {
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
+            // No credential granted by reference (D242): a box's spec names none.
+            credentials: Vec::new(),
             binary: Some(self.config.binary.clone()),
             env,
         })

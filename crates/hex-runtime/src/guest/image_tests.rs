@@ -256,8 +256,31 @@ impl ImageGuest for ModelGuest {
     fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
-            None => Ok(*self.run.stats.lock().unwrap()),
+            None => Ok(self.run.stats.lock().unwrap().clone()),
         }
+    }
+    // The model holds no budget (D241), rate (D247) or terminal (D244) of a run: each refused as unsupported.
+    fn room(&self, _: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's room",
+            why: "it holds no budget".to_owned(),
+        })
+    }
+    fn rate(
+        &self,
+        _: Option<std::num::NonZeroU64>,
+        _: Duration,
+    ) -> Result<Option<std::num::NonZeroU64>, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's rate",
+            why: "it holds no rate".to_owned(),
+        })
+    }
+    fn resize(&self, _: &MemberName, _: u16, _: u16, _: Duration) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's terminals",
+            why: "it gives no member a terminal".to_owned(),
+        })
     }
     // As Shards refuses them for a run that asks no nesting grant (D234) and of a model with no plugs (D235).
     fn wait_ready(
@@ -1333,7 +1356,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     );
     assert_eq!(
         boot.egress.members,
-        Some(vec![shards_api::image::wire::MemberReach {
+        Some(vec![shards_api::image::MemberReach {
             kind: shards_api::image::MemberKind::Harness,
             name: "codex".to_owned(),
             destinations: vec![

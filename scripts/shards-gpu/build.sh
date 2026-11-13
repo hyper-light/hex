@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Rebuilds Hex's `shards`, the binary a node boots its Shards guests and image VMs with (SHARDS_BIN): its GPU VM
 # process carrying the Venus renderer that renders a GPU guest on the host's driver, and its `shards api-run` hosting
-# an image's boot with Hex's recorded changes, from Hex's main alone (AC-T7.4.1; joint plan step 15):
+# an image's boot at the image channel version the node's vendored API speaks, from Hex's main alone (AC-T7.4.1;
+# joint plan steps 12 and 15):
 #   scripts/shards-gpu/build.sh OUT [FROM] [--no-gpu]
 # Upstream at vendor/MANIFEST.toml's [projects.shards-gpu] commit, the same as [projects.shards], which holds the
 # physical-GPU filter, selector transport, native identity bridge and the managed launch and report the node's
-# vendored API speaks to (D232, D233); then each vendor/patches/shards change (the API the run host and the node both
-# speak, so the run host reads what the node writes), then each vendor/patches/shards-gpu change (Windows on arm64's
-# GPU VM process; the run host's hold of each member to its reach of the destinations kept), each in name order as
-# scripts/vendor.py replays them; built as upstream's release builds it: upstream's scripts/gpu-libs builds the
-# renderer from its pinned sources into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
+# vendored API speaks to (D232, D233), and the run host the node's image boot speaks to (D231 to D249); then each
+# vendor/patches/shards change (the API the run host and the node both speak, so the run host reads what the node
+# writes; none at this commit), then each vendor/patches/shards-gpu change (Windows on arm64's GPU VM process), each
+# in name order as scripts/vendor.py replays them; built as upstream's release builds it: upstream's scripts/gpu-libs
+# builds the renderer from its pinned sources into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
 # `cargo build --release --locked -p shards`, with the Rust toolchain upstream's rust-toolchain.toml names, for this
 # host's own target. With --no-gpu no renderer is built, and `shards` carries no GPU VM process and refuses a GPU, as
 # upstream's build does without SHARDS_GPU_LIBS: what an image VM's run host needs alone.
