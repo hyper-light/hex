@@ -82,10 +82,12 @@ pub enum BoxKind {
     ExecStreams,
     Run,
     Capacity,
+    /// A member of a Shards image box handed over (`Call::Member`, joint plan step 17).
+    Member,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Capacity as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Member as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -113,7 +115,8 @@ macro_rules! class_wait {
 }
 
 /// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
-/// name per (kind, class)); `measuring` makes every one of them so.
+/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) has no
+/// census row for any class, so it measures in every table.
 macro_rules! class_waits {
     ($prefix:literal, $class:literal, measuring) => {
         $crate::calls::class_waits!(
@@ -143,6 +146,7 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".exec_streams.", $class), $exec_streams),
             $crate::calls::class_wait!(concat!($prefix, ".run.", $class), $run),
             $crate::calls::class_wait!(concat!($prefix, ".capacity.", $class), $capacity),
+            $crate::calls::class_wait!(concat!($prefix, ".member.", $class), measuring),
         ]
     };
 }
@@ -186,7 +190,8 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Kill { .. }
             | Call::ExecStreams { .. }
             | Call::Run { .. }
-            | Call::Capacity(_) => return None,
+            | Call::Capacity(_)
+            | Call::Member { .. } => return None,
         },
         Request::Release | Request::Taken | Request::StreamsReady => return None,
     };
@@ -218,6 +223,7 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::ExecStreams { id, .. } => (BoxKind::ExecStreams, Timed::Box(id)),
         Call::Run { spec, .. } => (BoxKind::Run, Timed::Class(spec.class.class())),
         Call::Capacity(class) => (BoxKind::Capacity, Timed::Class(*class)),
+        Call::Member { id, .. } => (BoxKind::Member, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -302,7 +308,9 @@ impl Known {
                 self.started(id, class);
             }
             (
-                Call::Exec { id: of, .. } | Call::ExecStreams { id: of, .. },
+                Call::Exec { id: of, .. }
+                | Call::ExecStreams { id: of, .. }
+                | Call::Member { id: of, .. },
                 Answer::Started { .. } | Answer::Given { .. },
             ) => {
                 if let Some(class) = self.boxes.get(of).copied() {
@@ -2075,11 +2083,12 @@ impl<T: Transport> Core<T> {
         ended: Ended,
     ) -> Result<u64, Refusal> {
         let deadline = ReplyDeadline::caller(self.conn.shared.transport.reply_budget())?;
-        let (launch, program) = match call {
+        let launch = match call {
             Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
-                (Launch::Exec(id), program)
+                Launch::Exec(id, program)
             }
-            Call::Run { spec, program, .. } => (Launch::Run(spec), program),
+            Call::Run { spec, program, .. } => Launch::Run(spec, program),
+            Call::Member { id, member, .. } => Launch::Member(id, member),
             call => {
                 return self.begun(&Request::Call(call), |_| Ok(NONE), then, None, deadline);
             }
@@ -2093,9 +2102,9 @@ impl<T: Transport> Core<T> {
                     why: "the event form copies no stream: ask for each of a guest program's streams, whose ends are the caller's".to_owned(),
                 });
             }
-            (launch.call(program, asked, Streams::default()), asked)
+            (launch.call(asked, Streams::default()), asked)
         } else {
-            (launch.call(program, carried, asked), Streams::default())
+            (launch.call(carried, asked), Streams::default())
         };
         let lent = lend(&stdio);
         let shared = &*self.conn.shared;
@@ -2118,7 +2127,7 @@ impl<T: Transport> Core<T> {
     pub fn defer(&self, call: Call, then: Then, ended: Ended) -> Result<Deferred<T>, Refusal> {
         let program = matches!(
             call,
-            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. }
+            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } | Call::Member { .. }
         )
         .then(|| Watching::Then(ended));
         self.deferred(&Request::Call(call), then, program)
@@ -2442,15 +2451,10 @@ impl<T: Transport> Core<T> {
         }
     }
 
-    /// Starts `program` where `launch` says, an exec or a run, with `stdio` as [`Runtime::exec`] takes it: the
-    /// program's `Proc`, whose end comes later as a message.
-    fn spawn(
-        &self,
-        launch: Launch,
-        program: Program,
-        stdio: Stdio,
-    ) -> Result<Box<dyn Proc>, Refusal> {
-        self.spawn_before(launch, program, stdio, None)
+    /// Starts what `launch` says, an exec, a run or a member's hand-over, with `stdio` as [`Runtime::exec`] takes it:
+    /// the program's `Proc`, whose end comes later as a message.
+    fn spawn(&self, launch: Launch, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.spawn_before(launch, stdio, None)
     }
 
     fn run_with_cap(
@@ -2460,20 +2464,19 @@ impl<T: Transport> Core<T> {
         stdio: Stdio,
         cap: Option<ReplyDeadline>,
     ) -> Result<Box<dyn Proc>, Refusal> {
-        self.spawn_before(Launch::Run(Box::new(spec)), program, stdio, cap)
+        self.spawn_before(Launch::Run(Box::new(spec), program), stdio, cap)
     }
 
     fn spawn_before(
         &self,
         launch: Launch,
-        program: Program,
         stdio: Stdio,
         caller: Option<ReplyDeadline>,
     ) -> Result<Box<dyn Proc>, Refusal> {
         if let Some(caller) = caller {
             caller.remaining("starting a program operation")?;
         }
-        program.fits(&WIRE_EXEC_LIMIT)?;
+        launch.fits()?;
         stdio.check()?;
         let name = launch.name();
         // What a failed setup names when its kill can't confirm the program's end; the call takes `launch`.
@@ -2492,8 +2495,7 @@ impl<T: Transport> Core<T> {
         // The streams whose cut the program's end tells (docs/design/hex-quic.md Q11).
         let mut cuts = Vec::new();
         let (exec, answer, kept) = if T::MAKES_ASKED {
-            let request =
-                Request::Call(launch.call(program, union(carried, asked), Streams::default()));
+            let request = Request::Call(launch.call(union(carried, asked), Streams::default()));
             let Stdio {
                 stdin,
                 stdout,
@@ -2534,7 +2536,7 @@ impl<T: Transport> Core<T> {
             };
             (exec, answer, kept)
         } else {
-            let request = Request::Call(launch.call(program, carried, asked));
+            let request = Request::Call(launch.call(carried, asked));
             let (exec, answer) = {
                 let lent = lend(&stdio);
                 match caller {
@@ -2603,50 +2605,66 @@ impl<T: Transport> Core<T> {
     }
 }
 
-/// Where a call that starts a program starts it: in a box there is (an exec), or in a `process` box made for its
-/// life (a run, decision 7).
+/// What a call that starts a program starts: `program` in a box there is (an exec), in a `process` box made for its
+/// life (a run, decision 7), or a member of a Shards image box handed over (joint plan step 17).
 enum Launch {
-    Exec(BoxId),
-    Run(Box<BoxSpec>),
+    Exec(BoxId, Program),
+    Run(Box<BoxSpec>, Program),
+    Member(BoxId, hex_api::Member),
 }
 
 impl Launch {
-    /// The call that starts `program` here, the streams `streams` names carried and those `ask` names asked for.
-    fn call(self, program: Program, streams: Streams, ask: Streams) -> Call {
+    /// The call that starts it here, the streams `streams` names carried and those `ask` names asked for.
+    fn call(self, streams: Streams, ask: Streams) -> Call {
         match self {
-            Self::Exec(id) if ask == Streams::default() => Call::Exec {
+            Self::Exec(id, program) if ask == Streams::default() => Call::Exec {
                 id,
                 program,
                 streams,
             },
-            Self::Exec(id) => Call::ExecStreams {
+            Self::Exec(id, program) => Call::ExecStreams {
                 id,
                 program,
                 streams,
                 ask,
             },
-            Self::Run(spec) => Call::Run {
+            Self::Run(spec, program) => Call::Run {
                 spec,
                 program,
                 streams,
                 ask,
             },
+            Self::Member(id, member) => Call::Member {
+                id,
+                member,
+                streams,
+                ask,
+            },
+        }
+    }
+
+    /// Whether its program crosses to the node agent ([`WIRE_EXEC_LIMIT`]); a member's hand-over carries none.
+    fn fits(&self) -> Result<(), Refusal> {
+        match self {
+            Self::Exec(_, program) | Self::Run(_, program) => program.fits(&WIRE_EXEC_LIMIT),
+            Self::Member(..) => Ok(()),
         }
     }
 
     /// What its refusals name it.
     fn name(&self) -> &'static str {
         match self {
-            Self::Exec(_) => "exec",
-            Self::Run(_) => "run",
+            Self::Exec(..) => "exec",
+            Self::Run(..) => "run",
+            Self::Member(..) => "member",
         }
     }
 
     /// The box it starts its program in.
     fn id(&self) -> &BoxId {
         match self {
-            Self::Exec(id) => id,
-            Self::Run(spec) => &spec.id,
+            Self::Exec(id, _) | Self::Member(id, _) => id,
+            Self::Run(spec, _) => &spec.id,
         }
     }
 }
@@ -2898,7 +2916,7 @@ impl<T: Transport> Runtime for Core<T> {
     /// agent's answer gives its end. The one copy left is this client's, the caller's, never the node's (native
     /// plan step 8).
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        self.spawn(Launch::Exec(id.clone()), program, stdio)
+        self.spawn(Launch::Exec(id.clone(), program), stdio)
     }
 
     /// One request, [`Call::Run`], its stdio as an exec's; its program's end comes once the agent has removed the box.
@@ -2920,14 +2938,56 @@ impl<T: Transport> Runtime for Core<T> {
         self.info(Call::Inspect(id.clone()), "inspect")
     }
 
-    /// A member's streams are taken in the process that holds its image box's run (joint plan step 17): the node's
-    /// wire carries no member call yet, so a caller over it is refused, typed, rather than told the box has none.
+    /// [`Call::Member`] (joint plan step 17): the member's stdin, stdout and stderr asked for as an exec's streams
+    /// are, the node giving the member's own ends with its answer, or, where the transport makes the connections
+    /// (a QUIC client's lanes), those carried for the node to join to them; its end comes later as a program's.
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        let all = hex_api::Ask {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
+        self.spawn(
+            Launch::Member(id.clone(), member.clone()),
+            Stdio {
+                ask: all,
+                ..Stdio::null()
+            },
+        )
+    }
+
+    // Joint plan step 14: a box's room, rate and host use are told and read in the node's own process, by its charge
+    // learner and by a runtime made in its caller's process; the node's wire carries none of them yet.
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        let _ = room;
         Err(Refusal::Invalid {
-            what: "member",
+            what: "room",
             why: format!(
-                "{member} of box {id}: the node's wire carries no member call yet; a member's streams are taken \
-                 in the node's own process"
+                "box {id}: the node's wire carries no room call yet; a box's room is told in the node's own process"
+            ),
+        })
+    }
+
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(Refusal::Invalid {
+            what: "rate",
+            why: format!(
+                "box {id}: the node's wire carries no rate call yet; a box's rate is told in the node's own process"
+            ),
+        })
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        Err(Refusal::Invalid {
+            what: "host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet; a box's host use is read in the node's own \
+                 process"
             ),
         })
     }

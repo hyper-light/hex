@@ -1,10 +1,14 @@
 # Decision (2026-11-13): Hex's node under shards-init, with Hex's own PID 1 kept
 
 Joint plan step 39 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d` version 12, "Hex's node under shards-init, with
-Hex's own PID 1 kept"), AC-T7.4.1. Status: **decided; Hex's side built**. Built: init under shards-init (§2, §3;
-hex-cli `guest.rs`'s `Host` and `duties`), and the node image and its build (§4). The host's boot through
-shards-init stops at its channel: Shards' step 11 has no lane to a nested workload's socket, so the node refuses that
-form by type until it does (§5, `Awaits(NestedChannel)`). The real-VM runs and the measurements are ROOT's (§9).
+Hex's own PID 1 kept"), AC-T7.4.1. Status: **decided; Hex's side built up to its channel**. Built:
+- init under shards-init (§2, §3; hex-cli `guest.rs`'s `Host` and `duties`);
+- the node image and its build (§4);
+- the host's boot of it to READY (§6; hex-runtime `guest::hosted`).
+
+The host's use of it stops at its channel: Shards' step 11 has no lane to a nested workload's socket, so the node
+refuses that form by type until it does (§5, `Awaits(NestedChannel)`). Its acceptance is with Shards' goal-75 agent
+(`/Users/adalundhe/.cache/hex-lead/upstream/step11-*`). The real-VM runs and the measurements are ROOT's (§9).
 
 The person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work with basically anything non-Shards.
 We are to have init work *with* that." So Hex's PID-1 path (§8) is permanent, and this step adds a second host for the
@@ -172,10 +176,9 @@ same way (`shards-image-class.md` §1). No success is stubbed. A node VM asked a
 ## 6. Waits
 
 The person's rule, 2026-11-13, applies to every wait: no record seeds, no chosen multiples. A cold start follows its
-party while that party lives, and after it the bound is the slowest answer seen. The host's waits below come with
-its boot through shards-init, which waits on the channel (§5). Until then only `node_hosted_real` makes them, each for
-its fact (`Duration::MAX`). Inside the VM, init's own waits are those of its PID-1 path, held to the deadline its host
-told it.
+party while that party lives, and after it the bound is the slowest answer seen. The host's waits below are
+`guest::hosted::Hosted::boot`'s. A node makes them once its channel is given (§5); until then `node_hosted_real` makes
+them. Inside the VM, init's own waits are those of its PID-1 path, held to the deadline its host told it.
 - **`guest.hosted.ready`**: the node VM's READY, through `ImageGuest::wait_ready`, on time or late.
   - At its cold start it follows the run, with no deadline: the run's end refuses it (`ImageRefusal::Ended`).
   - After that it is bounded by the slowest READY this node has seen (`hex_core::patience::Patience::measuring`).

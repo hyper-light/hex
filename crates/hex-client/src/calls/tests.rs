@@ -1152,13 +1152,13 @@ mod release_frame {
 
 /// AC-T7.4.1: the plain kinds' waits keep their order, the scheduler's and a physical report's after a hello, a list
 /// and the network namespaces' counts; a call naming a box or a class is no plain kind's, its box kind's wait its
-/// class's ([`BoxKind`]). Do: map each plain kind and each box kind's request. Expect: each plain kind at its place
-/// in a table of 18, the person's release of a capacity holder appended last; each box kind's none there, and its own
-/// kind and class.
+/// class's ([`BoxKind`]), a member's hand-over (joint plan step 17) appended last among them. Do: map each plain kind
+/// and each box kind's request. Expect: each plain kind at its place in a table of 18, the person's release of a
+/// capacity holder appended last; each box kind's none there, and its own kind and class.
 #[test]
 fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!((KINDS, BOX_KINDS, CLASSES), (18, 11, 4));
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (18, 12, 4));
     for (request, index) in [
         (
             Request::Hello {
@@ -1213,6 +1213,18 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
             Request::Call(Call::Capacity(Class::Shards)),
             BoxKind::Capacity,
         ),
+        (
+            Request::Call(Call::Member {
+                id: b.clone(),
+                member: hex_api::Member {
+                    kind: hex_api::MemberKind::Harness,
+                    name: "claude".to_owned(),
+                },
+                streams: hex_core::wire::Streams::default(),
+                ask: hex_core::wire::Streams::default(),
+            }),
+            BoxKind::Member,
+        ),
     ] {
         assert!(kind_of(waits, &request).is_none(), "{request:?}");
         assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));
@@ -1243,6 +1255,7 @@ fn every_kind_and_class_has_its_own_census_name() {
             "exec_streams",
             "run",
             "capacity",
+            "member",
         ];
         for wait in T::answers() {
             assert!(seen.insert(wait.name()), "{} twice", wait.name());

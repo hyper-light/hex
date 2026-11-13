@@ -349,14 +349,18 @@ impl<N: Os> Quic<N> {
         Recv::WouldBlock
     }
 
-    /// A whole message: an exec or a run with streams waits for them; anything else is ready as it came.
+    /// A whole message: an exec, a run or a member's hand-over with streams waits for them; anything else is ready as it
+    /// came.
     fn route(&self, control: &Control, message: Vec<u8>) {
         let streams = match wire::read_request_apart(&message, wire::MAX_MESSAGE) {
-            Ok((header, Request::Call(Call::Exec { streams, .. } | Call::Run { streams, .. })))
-                if streams != Streams::default() =>
-            {
-                Some((header.id, streams))
-            }
+            Ok((
+                header,
+                Request::Call(
+                    Call::Exec { streams, .. }
+                    | Call::Run { streams, .. }
+                    | Call::Member { streams, .. },
+                ),
+            )) if streams != Streams::default() => Some((header.id, streams)),
             _ => None,
         };
         let ready = match streams {

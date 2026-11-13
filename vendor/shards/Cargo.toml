@@ -1,6 +1,6 @@
-# Four-crate API workspace; upstream package/dependency/lint settings retained.
+# Six-crate API workspace; upstream package/dependency/lint settings retained.
 [workspace]
-members = ["crates/abi", "crates/api", "crates/afunix", "crates/testdir"]
+members = ["crates/abi", "crates/api", "crates/afunix", "crates/dns", "crates/ipc", "crates/testdir"]
 resolver = "3"
 
 [workspace.package]

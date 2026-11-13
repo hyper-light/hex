@@ -126,11 +126,12 @@ pub fn limits(platform: &Platform) -> Limits {
 /// the supervisor's 65,536 pidfds). Past it, a connection's calls and programs share what the budgets leave.
 pub const KEPT: usize = 1;
 
-/// Whether `call` starts a program, which takes a place among the programs as it is read ([`Limits::programs`]).
+/// Whether `call` starts a program, which takes a place among the programs as it is read ([`Limits::programs`]): a
+/// member handed over is one, its end told as a program's.
 fn starts_program(call: &Call) -> bool {
     matches!(
         call,
-        Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. }
+        Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } | Call::Member { .. }
     )
 }
 
@@ -759,6 +760,129 @@ impl Launch {
             Self::Run(spec, _) => spec.id.clone(),
         }
     }
+}
+
+/// A member handed over through the node's wire ([`Shared::member`]), as the node holds it while its caller waits for
+/// its end: told by the thread that waits for it unless its caller let it go first.
+struct MemberEnd<O: Os> {
+    shared: std::sync::Weak<Shared<O>>,
+    token: u64,
+    /// Its caller let it go: its end goes to no one. Taken for its end's telling and for its release alike, so a
+    /// release either comes first, and nothing is told, or after, and clears what was told before its start was
+    /// registered ([`Table::early`]).
+    released: Mutex<bool>,
+}
+
+impl<O: Os> MemberEnd<O> {
+    /// Its end, told as a remote program's ([`Shared::remote_ended`]) while its caller still waits for it.
+    fn told(&self, ended: Result<Exit, Refusal>) {
+        let Ok(released) = self.released.lock() else {
+            return;
+        };
+        if *released {
+            return;
+        }
+        if let Some(shared) = self.shared.upgrade() {
+            let _ = shared.remote_ended(self.token, ended);
+        }
+    }
+}
+
+impl<O: Os> Remote for MemberEnd<O> {
+    /// A member's own kill awaits Shards' agent-control endpoint (joint plan step 11), as the `Proc`
+    /// `Runtime::member` gives refuses it in process: refused by type, its box's KILL or delete ending it with its VM.
+    fn kill(&self, done: Killed) {
+        done(Err(Refusal::Awaits {
+            needs: hex_api::Upstream::MemberSignal,
+        }));
+    }
+
+    /// No one waits for its end any longer: it runs on, its end told no one, and an end told before its start was
+    /// registered no longer kept for it.
+    fn release(&self) {
+        let Ok(mut released) = self.released.lock() else {
+            return;
+        };
+        *released = true;
+        if let Some(shared) = self.shared.upgrade()
+            && let Ok(mut table) = shared.table()
+        {
+            table.early.remove(&self.token);
+        }
+    }
+}
+
+/// A member's own ends ([`Shared::member`]): given for those `stdio` asks, joined to those it carries, each by a copy
+/// on a thread of its own to the source's end (std's `io::copy`), its destination closed then so the far side reads
+/// the end. A stream neither asked for nor carried is let go: the member's stdin then ends, and what it writes to the
+/// other has no reader.
+fn joined(own: hex_api::Given, stdio: Stdio) -> Result<Option<hex_api::Given>, Refusal> {
+    stdio.check()?;
+    let hex_api::Given {
+        stdin,
+        stdout,
+        stderr,
+    } = own;
+    let mut given = hex_api::Given::default();
+    match (stdio.ask.stdin, stdio.stdin) {
+        (true, _) => given.stdin = stdin,
+        (false, Some(carried)) => {
+            if let Some(to) = stdin {
+                join(
+                    "hex-node member stdin",
+                    carried,
+                    hex_api::OwnedStream::from(to),
+                )?;
+            }
+        }
+        (false, None) => {}
+    }
+    match (stdio.ask.stdout, stdio.stdout) {
+        (true, _) => given.stdout = stdout,
+        (false, Some(carried)) => {
+            if let Some(from) = stdout {
+                join(
+                    "hex-node member stdout",
+                    hex_api::OwnedStream::from(from),
+                    carried,
+                )?;
+            }
+        }
+        (false, None) => {}
+    }
+    match (stdio.ask.stderr, stdio.stderr) {
+        (true, _) => given.stderr = stderr,
+        (false, Some(carried)) => {
+            if let Some(from) = stderr {
+                join(
+                    "hex-node member stderr",
+                    hex_api::OwnedStream::from(from),
+                    carried,
+                )?;
+            }
+        }
+        (false, None) => {}
+    }
+    if stdio.ask == hex_api::Ask::default() {
+        Ok(None)
+    } else {
+        Ok(Some(given))
+    }
+}
+
+/// Copies `from` to `to` on a thread named `name` until `from` ends or either fails, then lets both go.
+fn join(
+    name: &str,
+    mut from: impl std::io::Read + Send + 'static,
+    mut to: impl std::io::Write + Send + 'static,
+) -> Result<(), Refusal> {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let _ = std::io::copy(&mut from, &mut to);
+        })
+        .map(drop)
+        .map_err(|e| Refusal::os("starting a thread that joins a member's stream", e))
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -1931,9 +2055,9 @@ impl<O: Os> Shared<O> {
             self.answer(conn, header.id, &answer)
         };
         let starts = match &call {
-            Call::Exec { id, streams, .. } | Call::ExecStreams { id, streams, .. } => {
-                Some((id, *streams))
-            }
+            Call::Exec { id, streams, .. }
+            | Call::ExecStreams { id, streams, .. }
+            | Call::Member { id, streams, .. } => Some((id, *streams)),
             Call::Run { spec, streams, .. } => Some((&spec.id, *streams)),
             _ => None,
         };
@@ -1947,7 +2071,10 @@ impl<O: Os> Shared<O> {
                         return reply(Answer::Refused(r));
                     }
                 };
-                if let Call::ExecStreams { ask, .. } | Call::Run { ask, .. } = &call {
+                if let Call::ExecStreams { ask, .. }
+                | Call::Run { ask, .. }
+                | Call::Member { ask, .. } = &call
+                {
                     stdio.ask = hex_api::Ask {
                         stdin: ask.stdin,
                         stdout: ask.stdout,
@@ -2058,14 +2185,20 @@ impl<O: Os> Shared<O> {
                 ((Call::Run { spec, program, .. }, stdio), Some((token, _))) => {
                     return self.exec(conn, header, token, Launch::Run(spec, program), stdio);
                 }
+                ((Call::Member { id, member, .. }, stdio), Some((token, _))) => {
+                    return self.member(conn, header, token, id, member, stdio);
+                }
                 ((call, _), _) => call,
             },
         };
         let host = &self.host;
         let answer = match call {
-            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } => Err(
-                Refusal::Broken("an exec came back from its host without its place".to_owned()),
-            ),
+            Call::Exec { .. }
+            | Call::ExecStreams { .. }
+            | Call::Run { .. }
+            | Call::Member { .. } => Err(Refusal::Broken(
+                "an exec came back from its host without its place".to_owned(),
+            )),
             Call::Kill { exec } => return self.kill(conn, header, exec),
             Call::List => {
                 let listed = host.list();
@@ -2369,6 +2502,68 @@ impl<O: Os> Shared<O> {
             watch: Some(watch),
         };
         self.started(table, conn, header, start, run)
+    }
+
+    /// Member `member` of box `id` handed to its caller ([`Call::Member`], joint plan step 17), from its runtime's
+    /// `Runtime::member`: its own ends given with the answer for those the call asks ([`Answer::Given`]), or joined to
+    /// those it carried (a QUIC client's lanes, [`joined`]). It is its guest's, with no pid here for an OS watch, so a
+    /// thread of its own waits for its end and tells it as a remote program's ([`MemberEnd`]).
+    fn member(
+        self: &Arc<Self>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        token: u64,
+        id: BoxId,
+        member: hex_api::Member,
+        stdio: Stdio,
+    ) -> Result<(), Refusal> {
+        let reply = |answer: Answer| -> Result<(), Refusal> {
+            self.done(conn)?;
+            self.answer(conn, header.id, &answer)
+        };
+        let mut proc = match self.host.member(&id, &member) {
+            Ok(proc) => proc,
+            Err(r) => {
+                self.unreserve(conn)?;
+                return reply(Answer::Refused(r));
+            }
+        };
+        let given = match proc.streams().and_then(|own| joined(own, stdio)) {
+            Ok(given) => given,
+            Err(r) => {
+                self.unreserve(conn)?;
+                return reply(Answer::Refused(r));
+            }
+        };
+        let end = Arc::new(MemberEnd {
+            shared: Arc::downgrade(self),
+            token,
+            released: Mutex::new(false),
+        });
+        let telling = Arc::clone(&end);
+        let waited = std::thread::Builder::new()
+            .name("hex-node member end".to_owned())
+            .spawn(move || {
+                let ended = proc.wait_for(Duration::MAX).and_then(|ended| {
+                    ended.ok_or_else(|| Refusal::Broken("a member's end came as none".to_owned()))
+                });
+                telling.told(ended);
+            });
+        if let Err(e) = waited {
+            self.unreserve(conn)?;
+            return reply(Answer::Refused(Refusal::os(
+                "starting the thread that waits for a member's end",
+                e,
+            )));
+        }
+        let table = self.table()?;
+        let start = Start {
+            token,
+            box_id: id,
+            pid: 0,
+            given,
+        };
+        self.started(table, conn, header, start, Run::Remote(end))
     }
 
     /// A program that had ended and been reaped before it could be watched: a run's, whose node reaps it to remove

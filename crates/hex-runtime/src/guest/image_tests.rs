@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
-use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName, Receiving};
+use shards_api::image::{
+    Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
+    Receiving, VcpuTime,
+};
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
@@ -177,6 +180,9 @@ struct ModelRun {
     end: Mutex<Option<RunEnd>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
+    rooms: Mutex<Vec<Option<i64>>>,
+    rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
     /// Each member's end, as the test sets it, by name: none until it does.
     member_ends: Mutex<std::collections::BTreeMap<String, MemberEnd>>,
     /// Each member a boot asked the stdin of, by name, with its own ends of its stdin, stdout and stderr: the
@@ -256,8 +262,34 @@ impl ImageGuest for ModelGuest {
     fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
-            None => Ok(*self.run.stats.lock().unwrap()),
+            None => Ok(self.run.stats.lock().unwrap().clone()),
         }
+    }
+    // The model keeps each room (D241) and rate (D247) it is told and holds the run as told: the room within none
+    // where it is short; it gives no member a terminal (D244), refused as unsupported.
+    fn room(&self, room: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
+        if let Some(end) = self.run.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(end));
+        }
+        self.run.rooms.lock().unwrap().push(room);
+        Ok(room.map(|room| u64::try_from(room.max(0)).unwrap()))
+    }
+    fn rate(
+        &self,
+        rate: Option<std::num::NonZeroU64>,
+        _: Duration,
+    ) -> Result<Option<std::num::NonZeroU64>, ImageRefusal> {
+        if let Some(end) = self.run.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(end));
+        }
+        self.run.rates.lock().unwrap().push(rate);
+        Ok(rate)
+    }
+    fn resize(&self, _: &MemberName, _: u16, _: u16, _: Duration) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's terminals",
+            why: "it gives no member a terminal".to_owned(),
+        })
     }
     // As Shards refuses them for a run that asks no nesting grant (D234) and of a model with no plugs (D235).
     fn wait_ready(
@@ -810,21 +842,53 @@ fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
     );
 }
 
-/// Joint plan steps 12 and 14: do read a running VM's usage, then one whose stats lack a line. Expect:
-/// its run's CPU in microseconds, memory, processes and I/O, guest time per vCPU Awaits
-/// (GuestCpuTimePerVcpu), never a number; a missing line refused naming it; before its start
-/// NotRunning.
+/// What a run's microVM ran of its guest, as D241's run host reads it: `vcpus` vCPUs by index, vCPU `n` having run
+/// `1_000 * (n + 1)` ns, and none departed.
+fn guest_times(vcpus: u32) -> GuestTimes {
+    GuestTimes {
+        vcpus: (0..vcpus)
+            .map(|index| VcpuTime {
+                index,
+                guest_ns: 1_000 * u64::from(index + 1),
+                unread: None,
+            })
+            .collect(),
+        departed_ns: 0,
+    }
+}
+
+/// A run's microVM part (D241): its VM process's use of the host, and `guest`.
+fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
+    Some(Microvm {
+        host: Ok(HostUse {
+            cpu_ns: 9_000_000,
+            resident_bytes: 1 << 20,
+            footprint_bytes: 1 << 20,
+        }),
+        guest,
+    })
+}
+
+/// Joint plan steps 12 and 14, HEX-IMG-4's contract (AC-T7.4.1): do read a running VM's usage, its run's stats
+/// carrying what each of its vCPUs ran of its guest (D241's `Stats::microvm`); then its usage where the run host
+/// read no microVM part, read no guest time, missed a vCPU, told one vCPU more than the VM's size or guest time of
+/// vCPUs the VM no longer has; then where its stats lack a line. Expect: its run's CPU in microseconds, memory,
+/// processes and I/O, and each vCPU's guest time by index, one for each vCPU of its size; each part not read
+/// refused, naming why, never read as none (D241); a missing line refused naming it; before its start NotRunning.
 #[test]
-fn usage_reads_the_runs_stats_and_guest_time_awaits_shards() {
+fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     let images = ModelImages::new();
-    *images.run.stats.lock().unwrap() = Stats {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let stats = Stats {
         cpu_ns: Some(7_000_999),
         memory_bytes: Some(64 << 20),
         pids: Some(5),
         read_bytes: Some(11),
         write_bytes: Some(13),
+        microvm: microvm(Ok(guest_times(vcpus))),
         ..Stats::default()
     };
+    *images.run.stats.lock().unwrap() = stats.clone();
     let (runtime, _owner) = model_runtime(&images, waits());
     let id = runtime.create(spec("image-usage", None)).unwrap().id;
     assert!(matches!(
@@ -845,12 +909,103 @@ fn usage_reads_the_runs_stats_and_guest_time_awaits_shards() {
     );
     assert_eq!(
         usage.guest,
-        Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu))
+        Some(GuestTime::PerVcpuNs(
+            (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect()
+        ))
     );
+    let mut missed = guest_times(vcpus);
+    missed.vcpus[0].unread = Some("its vCPU fd answered EBADF".to_owned());
+    let mut departed = guest_times(vcpus);
+    departed.departed_ns = 5;
+    for (microvm, says) in [
+        (None, "microVM"),
+        (
+            microvm(Err("GUEST_TIME went unanswered".to_owned())),
+            "GUEST_TIME went unanswered",
+        ),
+        (microvm(Ok(missed)), "EBADF"),
+        (microvm(Ok(guest_times(vcpus + 1))), "vCPUs"),
+        (microvm(Ok(departed)), "no longer has"),
+    ] {
+        *images.run.stats.lock().unwrap() = Stats {
+            microvm,
+            ..stats.clone()
+        };
+        assert!(
+            matches!(runtime.usage(&id), Err(Refusal::Os { ref why, .. }) if why.contains(says)),
+            "{says}: {:?}",
+            runtime.usage(&id)
+        );
+    }
+    *images.run.stats.lock().unwrap() = stats;
     images.run.stats.lock().unwrap().pids = None;
     assert!(matches!(
         runtime.usage(&id),
         Err(Refusal::Os { why, .. }) if why.contains("pids")
+    ));
+}
+
+/// Joint plan step 14 (C7, C4, C1; AC-T7.4.1): a running image VM is told its room, held to its rate and read for its
+/// host cost through its runtime, the one call each of the node's charge learner and a caller's own runtime (goal 12's
+/// item B) make. Do tell a VM rooms of 32 MiB, -8 MiB (its budget short of what it holds) and none, hold it at 250
+/// milli-CPU then none, and read its host use, its run's microVM part carrying its VM process's use and each vCPU's guest
+/// time; then each before its start, and its host use where its run host read no host part. Expect each room and rate
+/// asked of its run as told and its answer returned; the host use its VM process's CPU, footprint and resident memory
+/// and its guest time by vCPU; before its start each refused NotRunning, naming the call; the unread host part refused,
+/// naming why, never read as none.
+#[test]
+fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-charge", None)).unwrap().id;
+    let rate = std::num::NonZeroU64::new(250);
+    assert!(matches!(
+        runtime.room(&id, Some(1)),
+        Err(Refusal::NotRunning(_, "room"))
+    ));
+    assert!(matches!(
+        runtime.rate(&id, rate),
+        Err(Refusal::NotRunning(_, "rate"))
+    ));
+    assert!(matches!(
+        runtime.host_use(&id),
+        Err(Refusal::NotRunning(_, "host_use"))
+    ));
+    runtime.start(&id).unwrap();
+    assert_eq!(runtime.room(&id, Some(32 << 20)).unwrap(), Some(32 << 20));
+    assert_eq!(runtime.room(&id, Some(-(8 << 20))).unwrap(), Some(0));
+    assert_eq!(runtime.room(&id, None).unwrap(), None);
+    assert_eq!(
+        *images.run.rooms.lock().unwrap(),
+        [Some(32 << 20), Some(-(8 << 20)), None]
+    );
+    assert_eq!(runtime.rate(&id, rate).unwrap(), rate);
+    assert_eq!(runtime.rate(&id, None).unwrap(), None);
+    assert_eq!(*images.run.rates.lock().unwrap(), [rate, None]);
+    assert_eq!(
+        runtime.host_use(&id).unwrap(),
+        hex_api::HostUse {
+            cpu_ns: 9_000_000,
+            footprint_bytes: 1 << 20,
+            resident_bytes: 1 << 20,
+            guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
+        }
+    );
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: Some(Microvm {
+            host: Err("its VM process's use went unread".to_owned()),
+            guest: Ok(guest_times(vcpus)),
+        }),
+        ..Stats::default()
+    };
+    assert!(matches!(
+        runtime.host_use(&id),
+        Err(Refusal::Os { why, .. }) if why.contains("went unread")
     ));
 }
 
@@ -1333,7 +1488,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     );
     assert_eq!(
         boot.egress.members,
-        Some(vec![shards_api::image::wire::MemberReach {
+        Some(vec![shards_api::image::MemberReach {
             kind: shards_api::image::MemberKind::Harness,
             name: "codex".to_owned(),
             destinations: vec![
