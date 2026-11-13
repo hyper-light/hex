@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Follow, Party, Patience};
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
@@ -145,11 +145,11 @@ pub const PROGRAMS: &str = "programs watched by the node agent's connections tog
 const READS_PER_WAKE: usize = 64;
 /// Most events one wake takes; more come on the next.
 pub const EVENTS: usize = 256;
-/// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
-/// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
-/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: the record to come is
-/// `bench/competitive/probes/waits_census.md`'s `serve.reads` row, which then seeds it. Until then the first part
-/// waited for is waited out.
+/// How long a list's worker waits for its client to read the parts before the one it sends next: the slowest such wait
+/// this process has seen (decision 9), a bound only while the reads come within it. Past it the run-out is told to the
+/// census and the wait follows its client by the messages it takes; one that takes none over a whole W* window has
+/// stopped reading, and its connection is closed, the other calls on it refused by the close ([`Shared::drained`]).
+/// No record is read: `bench/competitive/probes/waits_census.md`'s `serve.reads` row is evidence.
 static READS: Patience = Patience::measuring("serve.reads");
 
 /// The first token a connection or program takes: below it are the listener's and the wake's.
@@ -508,6 +508,8 @@ struct Shared<O: Os> {
     limits: Limits,
     workers: usize,
     path: PathBuf,
+    /// How long a list's next part waits for the parts before it to go: [`READS`], or a test's own.
+    reads: &'static Patience,
     stopping: AtomicBool,
     /// Calls in flight on every connection together. With `idle_calls`, at most `limits.in_flight`: what is
     /// in flight and what is kept for the open connections that have none in flight never pass the budget.
@@ -606,6 +608,10 @@ struct Out {
     given: BTreeMap<u64, Vec<hex_api::End>>,
     /// Of `given`, those whose programs it no longer watches: each a place of its own.
     kept: usize,
+    /// Its messages gone into its socket, counted: the client's taken count. Once its socket is full, as it is while
+    /// answers wait in `backlog`, a message goes only as its client reads, so the count rises only while it reads: the
+    /// progress a list's next part follows past [`READS`]' bound (decision 9).
+    gone: u64,
     /// Whether its requests are read ([`Interest::Read`]) or only its backlog written.
     reading: bool,
 }
@@ -620,9 +626,10 @@ impl Out {
             .saturating_add(self.kept)
     }
 
-    /// A message has gone with `ends` riding as its descriptors: a given answer's (`given`, its exec's id) kept until
-    /// its client says it took them, any other's let go.
+    /// A message has gone with `ends` riding as its descriptors: counted ([`Out::gone`]), and a given answer's ends
+    /// (`given`, its exec's id) kept until its client says it took them, any other's let go.
     fn sent(&mut self, ends: Vec<hex_api::End>, given: Option<u64>) {
+        self.gone = self.gone.saturating_add(1);
         if let Some(slot) = given.and_then(|exec| self.given.get_mut(&exec)) {
             *slot = ends;
         }
@@ -935,6 +942,18 @@ impl<O: Os> Server<O> {
         workers: usize,
         path: &Path,
     ) -> Result<Self, Refusal> {
+        Self::serving(os, host, limits, workers, path, &READS)
+    }
+
+    /// [`Server::with_os`], a list's next part waiting as `reads` has learned.
+    fn serving(
+        os: O,
+        host: Arc<dyn Host>,
+        limits: Limits,
+        workers: usize,
+        path: &Path,
+        reads: &'static Patience,
+    ) -> Result<Self, Refusal> {
         check_limits(&limits, workers)?;
         os.accepting(true)?;
         let shared = Arc::new(Shared {
@@ -944,6 +963,7 @@ impl<O: Os> Server<O> {
             limits,
             workers,
             path: path.to_owned(),
+            reads,
             stopping: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
             idle_calls: AtomicUsize::new(0),
@@ -1225,6 +1245,7 @@ impl<O: Os> Shared<O> {
                     backlog: VecDeque::new(),
                     given: BTreeMap::new(),
                     kept: 0,
+                    gone: 0,
                     reading: true,
                 }),
                 drained: hex_wait::Condvar::new(),
@@ -1476,9 +1497,8 @@ impl<O: Os> Shared<O> {
 
     /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait, `fds` riding as its
     /// descriptors: a given answer's (`given`, its exec's id) kept once it has gone until its client says it took
-    /// them ([`Out::given`]). With an `after_read` (a list's next part), first waits for the waiting ones to go,
-    /// closing the connection once the wait passes [`READS`]' bound. Sending on a closed connection does nothing: its
-    /// client is gone.
+    /// them ([`Out::given`]). With an `after_read` (a list's next part), first waits for the waiting ones to go
+    /// ([`Shared::drained`]). Sending on a closed connection does nothing: its client is gone.
     fn send(
         &self,
         conn: &Conn<O>,
@@ -1489,30 +1509,10 @@ impl<O: Os> Shared<O> {
     ) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         if after_read {
-            let began = Instant::now();
-            let deadline = READS.deadline().and_then(|wait| began.checked_add(wait));
-            let waited = out.open && !out.backlog.is_empty();
-            while out.open && !out.backlog.is_empty() {
-                out = match deadline {
-                    None => conn.drained.wait(out).map_err(wait_refused)?,
-                    Some(deadline) => {
-                        let left = deadline.saturating_duration_since(Instant::now());
-                        if left.is_zero() {
-                            drop(out);
-                            // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample.
-                            self.os.shutdown(&conn.sock);
-                            return Ok(());
-                        }
-                        conn.drained
-                            .wait_timeout(out, left)
-                            .map_err(wait_refused)?
-                            .0
-                    }
-                };
-            }
-            if waited && out.open {
-                READS.answered(began.elapsed());
-            }
+            out = match self.drained(conn, out)? {
+                Some(out) => out,
+                None => return Ok(()),
+            };
         }
         if !out.open {
             return Ok(());
@@ -1539,6 +1539,71 @@ impl<O: Os> Shared<O> {
                 .map_err(|e| Refusal::os("waiting for room in a connection", e))?;
         }
         Ok(())
+    }
+
+    /// Waits for a connection's waiting answers to go, before a list's next part, as decision 9 waits (the person's
+    /// ruling of 2026-11-13) on the server's reads' wait ([`Shared::reads`], [`READS`]):
+    /// - **Within W***, the slowest such wait this process has seen, the answers going end it.
+    /// - **Past W*** the run-out is told to the census, no sample, and the wait follows its client by the messages it
+    ///   takes ([`Out::gone`]): it goes on while the client takes one within each W* window. Once a whole window
+    ///   passes with none taken, the client has stopped reading: its connection is closed, the other calls on it
+    ///   refused by the close, and the part goes nowhere (`None`).
+    /// - **With no W*** (before the first such wait, and from a run-out to the next answer) it follows the client from
+    ///   its start ([`Patience::follow`]).
+    /// - **The connection's close** ends it at any time: the part then goes to no one.
+    ///
+    /// Its answer, however long it took, is the sample W* rises to.
+    fn drained<'a>(
+        &self,
+        conn: &'a Conn<O>,
+        mut out: hex_wait::MutexGuard<'a, Out>,
+    ) -> Result<Option<hex_wait::MutexGuard<'a, Out>>, Refusal> {
+        if !out.open || out.backlog.is_empty() {
+            return Ok(Some(out));
+        }
+        let began = Instant::now();
+        let bound = self.reads.deadline();
+        let mut following = bound.is_none().then(|| self.reads.follow());
+        while out.open && !out.backlog.is_empty() {
+            let now = began.elapsed();
+            if following.is_none()
+                && let Some(bound) = bound
+                && now >= bound
+            {
+                // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on.
+                self.reads.ran_out(bound);
+                following = Some(Follow::past(bound));
+            }
+            let until = match following.as_mut() {
+                Some(follow) => {
+                    if follow
+                        .look(Party::Alive { progress: out.gone }, now)
+                        .is_err()
+                    {
+                        drop(out);
+                        // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample: a
+                        // client taken for stopped says nothing of how long a read takes.
+                        self.os.shutdown(&conn.sock);
+                        return Ok(None);
+                    }
+                    follow.stalls_after()
+                }
+                None => bound,
+            };
+            out = match until {
+                None => conn.drained.wait(out).map_err(wait_refused)?,
+                Some(until) => {
+                    conn.drained
+                        .wait_timeout(out, until.saturating_sub(now))
+                        .map_err(wait_refused)?
+                        .0
+                }
+            };
+        }
+        if out.open {
+            self.reads.answered(began.elapsed());
+        }
+        Ok(Some(out))
     }
 
     /// Writes a connection's waiting answers while there is room; once all are out its requests are

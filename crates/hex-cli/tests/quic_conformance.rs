@@ -271,7 +271,7 @@ fn exercise(host: Arc<dyn Host>) {
         .unwrap(),
     );
     // No deadline of the test's own: the dial until the driver tells it, the hello on its kind's learned wait
-    // (`client.quic.answer.hello`, measuring until a census over QUIC records it).
+    // (`client.quic.answer.hello`, following the node until its first answer: decision 9).
     let (client, peer) = hex_quic::link::connect(
         Arc::clone(&client_end),
         "node.quic.test",

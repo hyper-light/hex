@@ -1158,11 +1158,9 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    // A link's bound names a finite deadline (HEX-GUEST-33): the first dial's, as the node gives it
-    // (`first_dial_bound`), twice the guest's recorded boot to ready, the boot and listen it waits on.
-    let bound = shards::recorded_boot()
-        .unwrap()
-        .saturating_mul(hex_core::patience::TIMES_SLOWEST);
+    // A link's bound names a finite deadline (HEX-GUEST-33): the first dial's, as the node gives it before any boot
+    // (`first_dial_bound`), the guest's recorded boot to ready, the boot and listen it waits on (decision 9).
+    let bound = shards::recorded_boot().unwrap();
     let transport =
         Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), bound)).unwrap()).unwrap();
     let given = transport
@@ -1519,6 +1517,34 @@ fn shards_connect_failures_keep_port_phase_cause_and_code() {
 const CONNECT_CAP: Duration = Duration::from_millis(25);
 const CONNECT_OBSERVE: Duration = Duration::from_millis(100);
 
+/// A connect's answer, the next message from `from`, following `connecting`, the thread that sends it, by its life
+/// (decision 9): the wait goes on while that thread lives, and fails only once it has ended with nothing sent, never at
+/// a window of the test's own.
+fn connected_by<T>(
+    wait: &hex_core::patience::Patience,
+    from: &std::sync::mpsc::Receiver<T>,
+    connecting: &std::thread::JoinHandle<()>,
+) -> Result<T, hex_testkit::waits::follow::Unmet> {
+    use hex_testkit::waits::follow::{self, Party};
+    follow::within(
+        wait,
+        "the connect's answer",
+        || {
+            if connecting.is_finished() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        |by| match by {
+            None => from.recv().ok(),
+            Some(at) => from
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+                .ok(),
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ConnectForm {
     Ordinary,
@@ -1790,7 +1816,9 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
                 let _ = finished.send((Instant::now(), result));
             });
             // No assertion may bypass this owned socket close and actor join.
-            let observed = answer.recv_timeout(CONNECT_OBSERVE);
+            static CAPPED: hex_core::patience::Patience =
+                hex_core::patience::Patience::measuring("test.hex_client.guest.connect_capped");
+            let observed = connected_by(&CAPPED, &answer, &worker);
             let stopped = peer.shutdown(Shutdown::Both);
             drop(peer);
             let joined = worker.join();
@@ -1891,7 +1919,9 @@ fn absolute_connect_completes_and_evented_retains_the_same_link() {
             });
             let _ = finished.send(result);
         });
-        let observed = answer.recv_timeout(CONNECT_OBSERVE);
+        static CONNECTED: hex_core::patience::Patience =
+            hex_core::patience::Patience::measuring("test.hex_client.guest.connect_completed");
+        let observed = connected_by(&CONNECTED, &answer, &worker);
         let stopped = peer.shutdown(Shutdown::Both);
         drop(peer);
         let joined = worker.join();
@@ -2022,10 +2052,12 @@ mod token_end {
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::Instant;
 
     use hex_core::patience::Patience;
-    use hex_testkit::waits::{answered, within};
+    use hex_testkit::waits::answered;
+    use hex_testkit::waits::follow::{self, Party, Thread};
     use rustix::event::{PollFd, PollFlags, Timespec};
 
     use super::*;
@@ -2034,7 +2066,7 @@ mod token_end {
     // (hex-testkit's rule).
     /// The token's first byte taken by the connect: the relay's end writable again.
     static TAKEN: Patience = Patience::measuring("test.hex_client.guest.token_taken");
-    /// The connect's answer once the relay has ended its half.
+    /// The connect's answer once the relay has ended its half, the connecting thread its party.
     static ANSWERED: Patience = Patience::measuring("test.hex_client.guest.token_end");
 
     /// The rounds, and the spread of the half-close's spin, of Shards' race harness for its M236 (Shards
@@ -2073,7 +2105,9 @@ mod token_end {
     /// round's share of M236's spread and end the relay's half (SHUT_WR), keeping it open. Expect the connect refused,
     /// typed, naming the token, every round. On macOS a read that waits in recv(2) on a Unix stream socket sleeps through
     /// a half-close landing as XNU's `uipc_rcvd` lets go of the reader's lock (M236: 360 of 50,000 readers asleep), so
-    /// the token's read waits in poll(2), which sees it.
+    /// the token's read waits in poll(2), which sees it. The answer's wait follows the connecting thread (decision 9):
+    /// past W* it goes on while that thread runs or works, and fails only once it has slept through a whole window, as
+    /// one asleep through the relay's end would.
     #[test]
     fn ac_t7_4_1_a_relay_that_ends_mid_token_refuses_the_connect() {
         for round in 0..ROUNDS {
@@ -2082,7 +2116,12 @@ mod token_end {
             relay.set_nonblocking(true).unwrap();
             let link = own_link(Paired(Mutex::new(Some(ours)))).unwrap();
             let (told, answer) = std::sync::mpsc::sync_channel(1);
+            let connecting = Arc::new(OnceLock::new());
+            let named = Arc::clone(&connecting);
             std::thread::spawn(move || {
+                if let Ok(thread) = Thread::current() {
+                    let _ = named.set(thread);
+                }
                 let _ = told.send(Stream::<Guest>::dial(link).map(drop));
             });
             relay.write_all(&TOKEN.to_le_bytes()[..1]).unwrap();
@@ -2096,14 +2135,19 @@ mod token_end {
                 std::hint::spin_loop();
             }
             relay.shutdown(Shutdown::Write).unwrap();
-            let connected = within(&ANSWERED, |by| match by {
-                None => answer.recv().ok(),
-                Some(at) => answer
-                    .recv_timeout(at.saturating_duration_since(Instant::now()))
-                    .ok(),
-            });
+            let connected = follow::within(
+                &ANSWERED,
+                "the connect's answer",
+                || connecting.get().map_or(Party::Live, Thread::party),
+                |by| match by {
+                    None => answer.recv().ok(),
+                    Some(at) => answer
+                        .recv_timeout(at.saturating_duration_since(Instant::now()))
+                        .ok(),
+                },
+            );
             assert!(
-                matches!(&connected, Some(Err(Refusal::Os { op, .. })) if op.contains("token")),
+                matches!(&connected, Ok(Err(Refusal::Os { op, .. })) if op.contains("token")),
                 "round {round}: {connected:?}"
             );
         }

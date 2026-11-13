@@ -187,9 +187,8 @@ impl CreatePool {
         )
     }
 
-    /// A pool with `limits`, every slot from the start, its waits seeded from the seeds' own record for this build, as
-    /// a node's are (decision 9, by build profile): a test's wait for a seed takes the record of the seeds' answers,
-    /// never another fact's.
+    /// A pool with `limits`, every slot from the start, its waits following its seeds until their first answers, as a
+    /// node's do (decision 9: no record is read).
     #[cfg(test)]
     pub fn with_limits(
         exe: PathBuf,
@@ -438,7 +437,8 @@ impl CreatePool {
         // The claim is taken at the init's first word on its sync pipe, with no answer before it (the lead's (A) of
         // 2026-11-09), within the claim's own patience: its pid and pidfd are the park's.
         let began = Instant::now();
-        match claim_round(socket.as_fd(), sync, &create, &fds, CLAIMS.deadline()) {
+        let patience = CLAIMS.deadline();
+        match claim_round(socket.as_fd(), sync, &create, &fds, patience) {
             Ok(made) => {
                 CLAIMS.answered(began.elapsed());
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
@@ -451,6 +451,12 @@ impl CreatePool {
             }
             Err(trip) => {
                 self.shared.claim_failed(&trip);
+                // An init silent past the claim's patience is taken for hung: no sample, nothing for the census, but
+                // the next claim's wait follows its init (decision 9), so an init slower than the slowest ready is
+                // waited for while it lives rather than taken for hung at that bound for ever.
+                if matches!(trip, Trip::Hung(_)) {
+                    CLAIMS.expired();
+                }
                 let (Trip::Refused(e) | Trip::Broken(e) | Trip::Hung(e)) = trip;
                 // Refused, the init ends itself; ended either way, and reaped, so none is left.
                 drop(socket);
@@ -509,8 +515,8 @@ impl Parker {
                 // Held from here, so ended and reaped if it never says it is parked, which it does within
                 // the hang bound the seeds' answers taught.
                 let parked = Parked::new(pid, pidfd, ours, flags);
-                // The hang bound, seeded from the record, is armed; were it measuring with nothing seen, the
-                // wait would be unbounded.
+                // The hang bound once a seed has answered; before (or after a hang) the wait follows the init,
+                // ending at its word or its end (decision 9).
                 let patience = shared.lock()?.seeds.deadlines().1;
                 parked.wait_parked(patience.unwrap_or(Duration::MAX))?;
                 Ok(parked)
@@ -1038,16 +1044,12 @@ fn round_trip(
 
 /// A claim's wait for its parked init's first word on its sync pipe, from the claim's send (the lead's (A) of
 /// 2026-11-09: no early answer): the init's ready on a root node's pruned path, its ask for its user namespace's maps
-/// on a rootless node's classic one. Seeded by build profile from the `parked.ready` rows of
-/// `bench/competitive/probes/waits_census.md` run 5 (decision 9): release, the largest max of the release arms,
-/// 12.896 ms (adacachy2, its tmpfs arm, of 29,007); debug, the largest answer of the debug-build arms, the debug arm and
-/// the suites', 652.431 ms (the suites', of 190,580). An init that ends or refuses is caught at once, its claim socket
-/// closed or carrying the refusal; one that says nothing within the claim's patience falls back to a seed's clone.
-static CLAIMS: hex_core::patience::Patience = hex_core::patience::Patience::by_profile(
-    "parked.ready",
-    std::time::Duration::from_nanos(12_896_493),
-    Some(std::time::Duration::from_nanos(652_430_750)),
-);
+/// on a rootless node's classic one. The slowest such word this node has seen (decision 9); before the first, and after
+/// a claim taken for hung, it follows the init: an init that ends or refuses is caught at once, its claim socket closed
+/// or carrying the refusal, and one that says nothing within the claim's patience falls back to a seed's clone. The
+/// waits census's `parked.ready` rows are the evidence the rule is held to, never a seed.
+static CLAIMS: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("parked.ready");
 
 /// Sends a parked init its claim and waits, within `patience` (`None` while the claim's wait measures: unbounded), for
 /// the claim to be taken or not: how the init makes its mount namespace, or why not. A claimed init says nothing on its
@@ -1188,11 +1190,7 @@ mod tests {
     /// A create's wait in line for a seed, on the line's own record for this build: the seeds' answers'
     /// (`hex_core::seeds`, decision 9), as the pool's line wait starts from.
     fn in_line() -> Patience {
-        Patience::by_profile(
-            "test.createpool.in_line",
-            hex_core::seeds::CLONE_SLOWEST,
-            Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
-        )
+        Patience::seeded("test.createpool.in_line", hex_testkit::waits::SEEDS)
     }
 
     /// Goal 5 plan step 2 (AC-T7.1.4; CLAUDE.md §10): classic-path creates are counted by a fixed set
@@ -1245,7 +1243,7 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
+    /// seed under the node's own bounds and waits (following its seeds: no record is read, decision 9). Expect: the create is refused by
     /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming the
     /// failed start's cause, not the seeds' bound (no bound was reached); never left waiting, never sent
     /// another way.
@@ -1469,12 +1467,8 @@ mod tests {
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         let config = open();
-        let before = Patience::by_profile(
-            "test.createpool.claim_before",
-            hex_core::seeds::CLONE_SLOWEST,
-            Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
-        )
-        .deadline();
+        let before =
+            Patience::seeded("test.createpool.claim_before", hex_testkit::waits::SEEDS).deadline();
         // A claim of a stand-in that does `then` with its claim's sync pipe end and its end of the claim socket, or,
         // with none, holds its claim unread: what came of it, and what is left on the sync pipe.
         let claim = |then: Option<fn(OwnedFd, OwnedFd)>, patience: Option<Duration>| {
@@ -1559,7 +1553,7 @@ mod tests {
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
     /// hand-off and not by its wait's end. Do: open a pool of one slot, whose waits are seeded from the test's
-    /// patience, so a create in it is refused only past twice that; take its seed; ask for another from a thread of the test's, and
+    /// patience, so a create in it is refused only past that; take its seed; ask for another from a thread of the test's, and
     /// once that create waits in line, give the first back. Expect: the waiting create is handed the seed
     /// given back within the test's patience (a hand-off that woke no one fails).
     #[test]

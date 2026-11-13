@@ -42,7 +42,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
-use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
@@ -216,22 +215,19 @@ impl Store {
             disk_fd: Arc::new(open_directory(disk)?),
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
-            // A change waits for the change of the same box before it: that one's write and its fsyncs.
-            // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
-            // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. Seeded by build profile from the `store.turns` rows of
-            // `bench/competitive/probes/waits_census.md`: release, run 4's largest max of the release arms, 3.136 ms
-            // (adacachy2, its tmpfs arm, of 138,598); debug, run 5's largest answer of the debug-build arms, the debug
-            // arm and the suites' (adacachy2), 367.733 ms (the suites', of 4,109,178).
+            // A change waits for the change of the same box before it: that one's write and its fsyncs, made by
+            // this process's own thread. The slowest hold is learned from the changes made (decision 9); a hold
+            // past it is a run-out, told to the census, and the wait follows the holder until it lets go, as before
+            // the first change is let go: a live holder is waited for, so changes of one box made at once all land
+            // (HEX-SOCK-6). A disk that has stopped answering holds its writer in the kernel; refusing that wait,
+            // typed, takes the hold's progress, owed (`docs/research/runtime/learned-waits.md`'s sites). No record
+            // is read (the `store.turns` rows of `bench/competitive/probes/waits_census.md` are evidence, never a
+            // seed).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::by_profile(
-                    "store.turns",
-                    Duration::from_nanos(3_135_674),
-                    Some(Duration::from_nanos(367_732_601)),
-                ),
+                Patience::measuring("store.turns"),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
@@ -252,8 +248,8 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past the wait the store's changes taught it, or past [`TURNS`] boxes
-    /// changed at once.
+    /// another box's, bounded by the slowest hold the store's changes taught it and following the holder
+    /// past it ([`Turns::take`]); refused past [`TURNS`] boxes changed at once.
     fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.turns.take(id)
     }
@@ -1486,14 +1482,13 @@ mod tests {
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by twice the
+    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by the
     /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
     /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
-    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
-    /// (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
+    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half.
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
-        let write = STORE_TURN.saturating_mul(2);
+        let write = STORE_TURN;
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
         let held = record("held");
