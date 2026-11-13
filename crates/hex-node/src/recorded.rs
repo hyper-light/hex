@@ -1357,6 +1357,12 @@ fn native_metadata(
 }
 
 impl<R: Recover> Recorded<R> {
+    /// Its image VMs' credentials leased over its wire (docs/design/credential-grants.md C7): not built yet.
+    pub fn lease_over_wire(&self, lessors: Arc<crate::serve::WireLessors>) -> Result<(), Refusal> {
+        drop(lessors);
+        Ok(())
+    }
+
     /// The retained records past the whole-owner barrier, and apart from them the torn ones
     /// ([`Store::take_torn`]), which no barrier can check: [`Recorded::recover`] proves their boxes gone or
     /// holds them. A record in the state directory that can't be read is refused, naming its file.

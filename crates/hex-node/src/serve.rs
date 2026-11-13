@@ -59,8 +59,10 @@ use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
+pub use leases::WireLessors;
 
 pub mod fit;
+pub mod leases;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -283,6 +285,10 @@ pub trait Host: Runtime {
     /// Counts in box `id` a program exec'd in it that the node ended because the connection watching
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
+    /// The node's lessors over its wire (docs/design/credential-grants.md C7): none yet.
+    fn lessors(&self) -> Option<Arc<WireLessors>> {
+        None
+    }
 
     /// The node's network namespace counts (decision 4).
     fn netns(&self) -> Result<netns::Counts, Refusal>;

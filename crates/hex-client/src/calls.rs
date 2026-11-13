@@ -2299,6 +2299,13 @@ impl<T: Transport> Core<T> {
     /// negotiated (docs/design/hex-quic.md Q12), gathered from as many parts as the node sends. A node without a QUIC
     /// listener refuses (`Refusal::Invalid` naming `links`); a report whose parts carry more links than the node's
     /// hello said it holds connections is refused `Refusal::Exhausted`.
+    /// This connection leases the credentials of the Shards image VMs it creates, through `lessors`
+    /// (docs/design/credential-grants.md C7): not built yet, so nothing is leased over it.
+    pub fn with_lessors(self, lessors: Arc<dyn hex_api::lease::Lessors>) -> Result<Self, Refusal> {
+        drop(lessors);
+        Ok(self)
+    }
+
     pub fn links(&self) -> Result<Vec<wire::Link>, Refusal> {
         match self
             .call(&Request::Call(Call::Links), |_| Ok(NONE), None)?
