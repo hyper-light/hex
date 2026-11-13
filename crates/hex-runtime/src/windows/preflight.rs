@@ -1,7 +1,7 @@
 //! Read-only retained native metadata, before the keeper or any recovery cleanup is entered.
 use std::path::Path;
 
-use hex_api::{BoxId, Class, ClassSpec, LifecycleCause, Refusal};
+use hex_api::{BoxId, Class, ClassSpec, Refusal};
 use hex_core::hcs;
 use hex_core::record::{BoxRecord, NativeRecord, NativeStage, OwnerRef, PoolRecord};
 
@@ -579,7 +579,7 @@ mod tests {
             .reserve(OwnerRef::Box(&record.spec.id), &[], None, None)
             .unwrap();
         assert!(
-            matches!(native.preflight_unsubmitted(&record), Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == record.spec.id)
+            matches!(native.preflight_unsubmitted(&record), Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }) if id == record.spec.id)
         );
         assert_eq!(native.boxes().unwrap().len(), 1);
 

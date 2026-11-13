@@ -54,16 +54,21 @@ pub struct ImageWaits {
     /// the boot's answer, its run started or its host ended. Past its W*, its run-out is told under its own name, the
     /// boot it ends still under way, and the delete waits on, refused only where the boot's thread ends with no answer.
     delete_boot: Patience,
+    /// A `started` call's wait for the boot of the box it asks (kiln's HexVms adapter, ROOT 2026-11-13): from its ask to
+    /// the boot's answer. Past its W*, its run-out is told under its own name, the boot it follows still under way, and
+    /// the call waits on, refused only where the boot's thread ends with no answer.
+    started: Patience,
 }
 
 impl ImageWaits {
-    /// The four waits, each following its party until its first answer.
+    /// The five waits, each following its party until its first answer.
     pub const fn new() -> Self {
         Self {
             boot: Patience::measuring("hex.image.boot"),
             stats: Patience::measuring("hex.image.stats"),
             stop: Patience::measuring("hex.image.stop"),
             delete_boot: Patience::measuring("hex.image.delete_boot"),
+            started: Patience::measuring("hex.image.started"),
         }
     }
 }
@@ -252,6 +257,36 @@ enum Past {
     Follow,
 }
 
+/// Who follows a box's boot to its answer ([`ImageClass::follow_boot`]): a delete of the box (kiln's choice (b)) or a
+/// `started` call (kiln's HexVms adapter), each by a wait of its own, each saying where the boot's thread ends with no
+/// answer which boot it is that is still under way.
+#[derive(Clone, Copy)]
+enum Follower {
+    Delete,
+    Started,
+}
+
+impl Follower {
+    fn wait(self, waits: &ImageWaits) -> &Patience {
+        match self {
+            Self::Delete => &waits.delete_boot,
+            Self::Started => &waits.started,
+        }
+    }
+
+    /// Its refusal where the boot's thread ended with no answer, in its own words.
+    fn gone(self, id: &BoxId) -> Refusal {
+        let (boot, record) = match self {
+            Self::Delete => ("the boot it ends", ", and its record is kept, deleting"),
+            Self::Started => ("the boot it follows", ""),
+        };
+        Refusal::Broken(format!(
+            "box {id}: {boot} is still under way: its boot's thread ended with no answer, so neither its run's start \
+             nor its run host's end is known{record}"
+        ))
+    }
+}
+
 /// A Shards image box, as its record and this process's run say.
 enum State {
     Created,
@@ -404,6 +439,10 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Rate(why) => Refusal::Broken(format!("Shards refused {op} as a rate: {why}")),
         ImageRefusal::Terminal(why) => {
             Refusal::Broken(format!("Shards refused {op} as a terminal's size: {why}"))
+        }
+        // Only a save (D259) is refused so, and this class asks none.
+        ImageRefusal::Save(cause, why) => {
+            Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
         }
     }
 }
@@ -1648,39 +1687,51 @@ impl ImageClass {
         self.delete_run(record, false).map(|_| ())
     }
 
-    /// Box `id`'s boot followed to its answer, for its delete (kiln's choice (b)): D231's boot gives no stop for a boot
-    /// under way (`Images::boot` blocks until its run starts or its host ends, its host the caller's only then), so the
-    /// delete waits for the boot, as decision 9 has a wait follow its party, by a wait of its own, `delete_boot`, from
-    /// its ask. Past that wait's W*, its run-out is told under its name, the boot it ends still under way, and it waits
-    /// on, refused only where the boot's thread ends with no answer: a boot that neither starts nor ends holds the delete
-    /// with it. The boot's answer is taken as any later call takes it, its time the boot's own sample.
-    fn follow_boot(&self, id: &BoxId) -> Result<State, Refusal> {
+    /// Box `id`'s boot followed to its answer, for its delete (kiln's choice (b)) or a `started` call (kiln's HexVms
+    /// adapter): D231's boot gives no stop for a boot under way (`Images::boot` blocks until its run starts or its host
+    /// ends, its host the caller's only then), so `follower` waits for the boot, as decision 9 has a wait follow its
+    /// party, by a wait of its own (`delete_boot`, `started`), from its ask. Past that wait's W*, its run-out is told
+    /// under its name, the boot it follows still under way, and it waits on, refused only where the boot's thread ends
+    /// with no answer: a boot that neither starts nor ends holds its follower with it. The boot's answer is taken as any
+    /// later call takes it, its time the boot's own sample.
+    fn follow_boot(&self, id: &BoxId, follower: Follower) -> Result<State, Refusal> {
         let image = self.image()?;
-        let waits = image.waits()?;
+        let wait = follower.wait(image.waits()?);
         let booting = match image.runs()?.get(id) {
             Some(Run::Booting(slot)) => Some(Arc::clone(slot)),
             _ => None,
         };
         if let Some(slot) = booting {
             let asked = Instant::now();
-            let bound = waits.delete_boot.deadline();
+            let bound = wait.deadline();
             let mut told = slot.told_within(bound)?;
             if let (Told::NotYet, Some(bound)) = (&told, bound) {
-                // The boot it ends is still under way.
-                waits.delete_boot.ran_out(bound);
+                // The boot it follows is still under way.
+                wait.ran_out(bound);
                 told = slot.told_within(None)?;
             }
             match told {
-                Told::Came => waits.delete_boot.answered(asked.elapsed()),
-                Told::Gone | Told::NotYet => {
-                    return Err(Refusal::Broken(format!(
-                        "box {id}: the boot it ends is still under way: its boot's thread ended with no answer, so \
-                         neither its run's start nor its run host's end is known, and its record is kept, deleting"
-                    )));
-                }
+                Told::Came => wait.answered(asked.elapsed()),
+                Told::Gone | Told::NotYet => return Err(follower.gone(id)),
             }
         }
         self.settle(&record_now(self, id)?)
+    }
+
+    /// Box `record` once its start has come to its end (`Runtime::started`; kiln's HexVms adapter, ROOT 2026-11-13): one
+    /// still booting is followed to its boot's answer ([`Self::follow_boot`]). A box whose run failed, as it started or
+    /// since (its command never started, or its VM, host or guest failed: D249), is answered its failure in its
+    /// runtime's words, as `start` answers such a run; any other as inspect answers it, at once where it wasn't booting.
+    pub(super) fn started_image(&self, record: BoxRecord) -> Result<BoxInfo, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let state = match self.settle(&record)? {
+            State::Booting => self.follow_boot(&id, Follower::Started)?,
+            state => state,
+        };
+        match state {
+            State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
+            _ => self.inspect_image(record_now(self, &id)?),
+        }
     }
 
     /// Deletes image box `record`, and where `used` answers its VM's final use of its host ([`Self::delete_image_used`]).
@@ -1701,7 +1752,7 @@ impl ImageClass {
                     t.put(&current)
                 })?;
                 if matches!(state, State::Booting) {
-                    state = self.follow_boot(&id)?;
+                    state = self.follow_boot(&id, Follower::Delete)?;
                 }
                 match state {
                     State::Running(_) => {
@@ -1899,6 +1950,16 @@ impl hex_api::Runtime for ImageClass {
             .image_record(id)?
             .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
         self.delete_image_used(record)
+    }
+
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if record.retired {
+            return record.retired_info();
+        }
+        self.started_image(record)
     }
 }
 
