@@ -308,6 +308,89 @@ fn hex_quic_20_the_conformance_suite_passes_over_quic() {
     )));
 }
 
+/// HEX-QUIC-26 (Q8; joint plan step 4): a client holds itself to the lanes its node grants a peer, whatever the node's
+/// connections bound. Do: serve a simulator node over QUIC whose connections bound (64) is past what it grants one peer
+/// (its calls in flight, 2: a control and a stdio connection each, and its log's: 5 lanes, `hex_node::quic::shape`);
+/// connect a client (`link::connect`), then beside its control connection open stdio connections up to the grant, and
+/// one more. Expect the one past the grant refused here, typed (`Why::Lanes`), and the client's calls still answered:
+/// a connection the node's stream limit can't take is never opened, so none waits for a lane that never comes.
+#[test]
+fn hex_quic_26_a_client_holds_itself_to_the_lanes_its_node_grants() {
+    use hex_api::Runtime as _;
+    let ca = SimCa::new().unwrap();
+    let enrolled = |name: &str| {
+        ca.admit(name, name.as_bytes());
+        enroll::enroll(&ca, name, name.as_bytes().to_vec()).unwrap()
+    };
+    let limits = Limits {
+        connections: 64,
+        message_bytes: hex_core::wire::MAX_MESSAGE,
+        in_flight: 2,
+        programs: 4,
+    };
+    let grant = hex_node::quic::shape(&limits, false).lanes;
+    let node = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled("node.lanes.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: true,
+            serves: hex_node::quic::ports(false),
+            shape: hex_node::quic::shape(&limits, false),
+        })
+        .unwrap(),
+    );
+    let dir = scratch("ln-");
+    let socket = dir.path().join("node.sock");
+    let quic = Quic::new(
+        Native::bind(&socket).unwrap(),
+        Arc::clone(&node),
+        QuicBounds::of(&limits),
+        None,
+    )
+    .unwrap();
+    let host: Arc<dyn Host> = Arc::new(hosted::Hosted(hex_api::sim::SimRuntime::new()));
+    let server = Server::with_os(quic, host, limits, limits.in_flight, &socket).unwrap();
+    let client_end = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled("client.lanes.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: false,
+            serves: Vec::new(),
+            shape: Shape {
+                connections: 1,
+                lanes: hex_quic::limits::client_lanes(),
+            },
+        })
+        .unwrap(),
+    );
+    let (client, peer) =
+        hex_quic::link::connect(Arc::clone(&client_end), "node.lanes.test", node.local_addr(), None)
+            .unwrap();
+    // Its control connection holds one of the grant's lanes.
+    let held: Vec<_> = (1..grant)
+        .map(|_| {
+            client_end
+                .open(peer, hex_core::stream::STDIO_PORT)
+                .unwrap()
+        })
+        .collect();
+    let past = client_end.open(peer, hex_core::stream::STDIO_PORT);
+    assert!(
+        matches!(
+            past,
+            Err(hex_quic::Refused::Conn {
+                why: hex_quic::Why::Lanes
+            })
+        ),
+        "an open past the node's grant of {grant}: {past:?}"
+    );
+    drop(held);
+    let listed = client.list();
+    assert!(listed.is_ok(), "a call after the refused open: {listed:?}");
+    drop(client);
+    drop(server);
+}
+
 /// The `hex` binary of this build.
 fn hex() -> &'static str {
     env!("CARGO_BIN_EXE_hex")
