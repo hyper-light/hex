@@ -2460,9 +2460,9 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   is judged: one judged over W*, or at the slowest gap seen, refuses healthy parties (`learned-waits.md`, decision 9's
   bound), so a VM's boot alone, whose progress is continuous work at a scale its window sees, is judged so, by
   Shards' Part B. No time is picked and none is recorded.
-- **After a run-out**: a wait that ran out is no sample (Karn's point), nor is a party taken for dead or hung, and the
-  tail it ran into is unknown, the cold start's case: the next wait follows its party again (`Patience::ran_out`, which
-  tells the census, and `Patience::expired`, which doesn't), its answer comes in uncensored, and the bound rises to it.
+- **After a run-out**: a wait that ran out is no sample (Karn's point), and the tail it ran into is unknown, the cold
+  start's case: the next wait follows its party again (`Patience::ran_out`, which tells the census), its answer comes
+  in uncensored, and the bound rises to it.
   No factor: RFC 6298's back-off doubles by a cited number, and the following wait measures how long to wait instead.
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not

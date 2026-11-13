@@ -1728,12 +1728,11 @@ impl Node {
         }
     }
 
-    /// How many claims of a parked init failed and fell back to a seed's clone since the seed pool opened, by why:
-    /// (hung, refused or broken). What a pass reads to see how often a parked init cost its create a clone.
-    pub fn parked_claims_failed(&self) -> (u64, u64) {
-        self.create_seeds
-            .get()
-            .map_or((0, 0), CreatePool::claims_failed)
+    /// How many claims of a parked init failed and fell back to a seed's clone since the seed pool opened: refused,
+    /// or broken or ended before the init's first word. What a pass reads to see how often a parked init cost its
+    /// create a clone.
+    pub fn parked_claims_failed(&self) -> u64 {
+        self.create_seeds.get().map_or(0, CreatePool::claims_failed)
     }
 
     /// How many of the node's creates were made through the shim since its seed pool opened: those a
