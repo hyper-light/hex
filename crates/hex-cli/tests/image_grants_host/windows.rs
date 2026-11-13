@@ -42,9 +42,11 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// The JSON `script` writes, run by one `powershell`, its output UTF-8.
+/// The JSON `script` writes, run by one `powershell`, its output UTF-8 with no byte-order mark (one written anyway is
+/// read past).
 fn powershell(script: &str) -> serde_json::Value {
-    let script = format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{script}");
+    let script =
+        format!("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false\n{script}");
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let out = Command::new("powershell")
         .args([
@@ -61,7 +63,11 @@ fn powershell(script: &str) -> serde_json::Value {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+    let json = out
+        .stdout
+        .strip_prefix(b"\xEF\xBB\xBF")
+        .unwrap_or(&out.stdout);
+    serde_json::from_slice(json).unwrap_or_else(|e| {
         panic!(
             "powershell's JSON: {e}: {}",
             String::from_utf8_lossy(&out.stdout)
