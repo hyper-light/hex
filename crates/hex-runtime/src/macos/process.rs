@@ -463,6 +463,18 @@ impl State {
         member: Stopped,
         signal: sys::MemberSignal,
     ) -> Result<Option<Stopped>, Refusal> {
+        self.signal_stopped_by(member, signal, sys::signal_member)
+    }
+
+    /// [`Self::signal_stopped`], a managed member signalled by its token through `send`, the kernel's
+    /// (`sys::signal_member`): a test ends the member inside it, between the scope's check and the signal, the
+    /// race no test can stop inside otherwise.
+    fn signal_stopped_by(
+        &self,
+        member: Stopped,
+        signal: sys::MemberSignal,
+        mut send: impl FnMut(&sys::MemberToken, sys::MemberSignal) -> Result<(), sys::TokenFailure>,
+    ) -> Result<Option<Stopped>, Refusal> {
         if let Some(scope) = &self.vm {
             self.validate_vm_scope()?;
             let token = member.native.ok_or_else(|| self.uncertain())?;
@@ -478,7 +490,7 @@ impl State {
             if !self.in_scope(scope, member.pid, token.birth(), group)? {
                 return Ok(None);
             }
-            match sys::signal_member(&token, signal) {
+            match send(&token, signal) {
                 Ok(()) => return Ok(Some(member)),
                 Err(failure) if !failure.unresolved() => {
                     return Err(scope.control_failed(failure, self.id.as_ref()));
@@ -492,7 +504,7 @@ impl State {
             if !self.in_scope(scope, member.pid, token.birth(), group)? {
                 return Ok(None);
             }
-            sys::signal_member(&fresh, signal)
+            send(&fresh, signal)
                 .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
             return Ok(Some(Stopped {
                 pid: member.pid,
