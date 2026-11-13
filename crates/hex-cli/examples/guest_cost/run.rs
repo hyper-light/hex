@@ -879,7 +879,7 @@ pub fn produce<D: Driver>(
         patience.source
     ));
     line(format!(
-        "overhead {} at RAM {} bytes (the envelope's: a cost is per envelope) (the census maximum of each ready guest's: its VMM's own CPU in one window from its readiness on, its guest's left out, rounded up; its VMM's own memory, as the memory source says; the bytes held in its own folders at a reading, there during its life and neither before it nor after it)",
+        "overhead {} at RAM {} bytes (the envelope's: a cost is per envelope) (the census maximum of each ready guest's: its VMM's own CPU in one window from its readiness on, its guest's left out, rounded up; its VMM's own memory, as the memory source says; the bytes held in its own folders at a reading, there during its life and neither before it nor after it) (evidence alone, not in the cost: a node learns a VM's overhead from its windows, decision 9)",
         resources(overhead),
         envelope.resources.mem_bytes
     ));
@@ -909,7 +909,7 @@ pub fn produce<D: Driver>(
         ));
     }
     line(format!(
-        "guest_overhead {} (the census maximum of the envelope less what the guest's agent reported free)",
+        "guest_overhead {} (the census maximum of the envelope less what the guest's agent reported free) (evidence alone, not in the cost: a node learns a guest's own from its backing's windows, decision 9)",
         resources(inside)
     ));
     line(format!(
@@ -943,13 +943,15 @@ pub fn produce<D: Driver>(
     let mut evidence = Vec::with_capacity(prefix.len().saturating_add(body.len()));
     evidence.extend_from_slice(prefix);
     evidence.extend_from_slice(body.as_bytes());
+    // The measured overhead and guest allowance are evidence alone, never a number a node starts from (joint plan step
+    // 14; ROOT, 2026-11-13, by decision 9's rule): the cost is the envelope alone, and its id names the evidence.
     let cost = RuntimeCost {
         id: Sha256::digest(&evidence).into(),
         floor: envelope.resources,
         ceiling: envelope.resources,
         quantum,
-        guest_overhead: inside,
-        overhead,
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources::default(),
     };
     cost.check().map_err(|e| e.to_string())?;
     cost.allocate(CapacityResources::default())
