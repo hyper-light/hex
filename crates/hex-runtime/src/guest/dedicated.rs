@@ -1889,7 +1889,7 @@ impl GuestRuntime {
         }
         // The native transaction names the original scope even before publication.
         // PID exit/Gone/observer error never substitutes for complete scope release.
-        let terminal = managed::stop(transaction, id, identity, self.first_dial_bound()?)?;
+        let terminal = managed::stop(transaction, id, identity)?;
         let released_identity = identity
             .map(|identity| -> Result<_, Refusal> {
                 Ok(shards_api::Identity {

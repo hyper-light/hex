@@ -949,7 +949,6 @@ impl GuestRuntime {
                     managed::stop_scope(
                         transaction,
                         identity.as_ref(),
-                        self.first_dial_bound()?,
                         refused(key, LifecycleCause::Uncertain),
                     )?
                 }
@@ -1671,7 +1670,6 @@ impl GuestRuntime {
                 let terminal = managed::stop_scope(
                     transaction,
                     identity.as_ref(),
-                    self.first_dial_bound()?,
                     refused(key, LifecycleCause::Uncertain),
                 )?;
                 receipt.phase = Phase::Released {
