@@ -40,17 +40,28 @@ is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
-| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd (`Seeds::died`) | its CPU time | liveness; progress owed |
-| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds | a seed freed | yes |
+| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | its CPU time | liveness alone past W*, never taken for hung (`Seeds::past_hang`); progress owed |
+| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | a seed freed, too coarse at W*'s scale | liveness alone past W* |
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup | members gone | owed (`Duration::MAX` meanwhile) |
-| `serve.reads` | a client reading a list | its connection | messages it takes (`Out::gone`) | yes |
+| `serve.reads` | a client reading a list | its connection | messages it takes, too coarse at W*'s scale | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*`, `guest.stage` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
+
+**Life alone past W*, for now (2026-11-13, ROOT's (1) and (2)).** A whole W* window with no progress is a stall only
+where progress comes at least as often as W*. Where W* is the slowest answer seen, microseconds, and the party advances
+in milliseconds, it is not: a seed freed (oci_reuse's creates refused "Exhausted create seeds"), a message a client
+takes and a seed's CPU time each stood still over a µs window while their parties worked, and the hang bound, judging
+no progress at all, killed a seed still answering ("a create seed did not answer within 1.16752ms", oci_box). So
+past W* these waits follow their parties by their life alone, the run-out told: a seed past its hang bound is waited
+for until it answers or its pidfd says it ended; a create in line until a seed is handed to it, refused only when no
+seed is up, starting or asked for (`Seeds::none_can_come`); an exec until a seed frees or a slot opens; a list's part
+until the client reads or its connection closes. The stall window each will judge by is the one its party's own gaps
+teach (the next step), not W*.
 
 ## Owed (2026-11-13)
 

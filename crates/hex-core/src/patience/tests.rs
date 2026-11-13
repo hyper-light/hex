@@ -258,9 +258,9 @@ fn after_a_run_out_the_next_wait_follows_and_learns_its_uncensored_answer() {
     assert_eq!(dead.look(Party::Ended, ms(2)), Err(Stopped::Ended));
 }
 
-/// A party taken for dead or hung at the bound (a seed's hang bound): no sample, nothing for the census, but the next
-/// wait follows its party. Do: answer a wait in 5 ms, then take its party for hung. Expect: no bound, the slowest still
-/// 5 ms; the next answer, 1 ms, bounding it at the slowest seen, 5 ms, again.
+/// A party taken for dead or hung at the bound (a parked init's silence): no sample, nothing for the census, but the
+/// next wait follows its party. Do: answer a wait in 5 ms, then take its party for hung. Expect: no bound, the slowest
+/// still 5 ms; the next answer, 1 ms, bounding it at the slowest seen, 5 ms, again.
 #[test]
 fn a_party_taken_for_hung_makes_the_next_wait_follow_without_a_sample() {
     let p = Patience::measuring("test");

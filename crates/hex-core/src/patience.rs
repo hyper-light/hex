@@ -268,7 +268,7 @@ impl Patience {
         }
     }
 
-    /// The wait's bound passed and its party was taken for dead or hung (a seed's hang bound, a parked init's silence):
+    /// The wait's bound passed and its party was taken for dead or hung (a parked init's silence past its claim's W*):
     /// no sample and nothing for the census, a hung party saying nothing of how long an answer takes, but the next
     /// wait follows its party, so a slow party past the slowest seen is waited for while it lives and advances.
     pub fn expired(&self) {
