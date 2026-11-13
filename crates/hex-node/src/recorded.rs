@@ -1972,29 +1972,42 @@ impl<R: Recover> Recorded<R> {
     }
 }
 
-/// The charge learner's reads and writes of the node's managed VMs, through their native owner.
-struct Managed<'a, R>(&'a R);
+/// The charge learner's reads and writes of the node's managed VMs, through their native owner, and of their records.
+struct Managed<'a, R> {
+    runtime: &'a R,
+    store: &'a Store,
+}
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
     fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
-        self.0.managed_usage(NativeRecord::Box(record))
+        self.runtime.managed_usage(NativeRecord::Box(record))
     }
 
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
-        self.0.set_managed_rate(NativeRecord::Box(record), rate)
+        self.runtime
+            .set_managed_rate(NativeRecord::Box(record), rate)
     }
 
     fn stop(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        self.0.stop_managed(NativeRecord::Box(record))
+        self.runtime.stop_managed(NativeRecord::Box(record))
+    }
+
+    fn intend(
+        &self,
+        id: &BoxId,
+        scope: charges::Scope,
+        end: &hex_api::LearnedEnd,
+    ) -> Result<bool, Refusal> {
+        charges::record_last_resort(self.store, id, scope, Some(end))
     }
 }
 
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's managed VMs, a thread that runs a window
-    /// each time the platform's window passes, until the node is gone, and says what of the rule the platform can't
-    /// hold, typed: each VM's memory budget. Refused, typed, where the platform derives no window
+    /// each time the platform's window passes, until the node is gone, and says its window and what of the rule the
+    /// platform can't hold, typed: each VM's memory budget. Refused, typed, where the platform derives no window
     /// (`Recover::charge_window`): the node runs on, its VMs booked whole, as before.
-    pub fn start_charges(self: &Arc<Self>) -> Result<Vec<Refusal>, Refusal> {
+    pub fn start_charges(self: &Arc<Self>) -> Result<(std::time::Duration, Vec<Refusal>), Refusal> {
         let window = self.runtime.charge_window()?;
         let learner = charges::Learner::new(window, self.machine()?)?;
         let mut unheld = Vec::new();
@@ -2041,7 +2054,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 }
             })
             .map_err(|e| Refusal::os("starting the charge learner", e))?;
-        Ok(unheld)
+        Ok((window, unheld))
     }
 
     /// The machine's resources, as its facts say them.
@@ -2090,12 +2103,11 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             disk_bytes: machine.disk_bytes,
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(
-            &Managed(&self.runtime),
-            &running,
-            budget,
-            std::time::Instant::now(),
-        );
+        let io = Managed {
+            runtime: &self.runtime,
+            store: &self.books.store,
+        };
+        let _ = learner.window(&io, &running, budget, std::time::Instant::now());
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
         let ends = learner.unrecorded();
