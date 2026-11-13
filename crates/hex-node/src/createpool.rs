@@ -479,7 +479,7 @@ impl Parker {
                 // The hang bound once a seed has answered; before, and from a run-out to the next, the wait follows
                 // the init, ending at its word or its end (decision 9).
                 let patience = shared.lock()?.seeds.deadlines().1;
-                parked.wait_parked(patience.unwrap_or(Duration::MAX))?;
+                parked.wait_parked(patience, || {})?;
                 Ok(parked)
             }
             Ok((Answer::Refused { failed, why }, _)) => {

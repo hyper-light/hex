@@ -655,8 +655,14 @@ impl Parked {
     }
 
     /// Waits up to `patience` for the init to say on its socket that it is parked: its effective capabilities
-    /// emptied, waiting for its claim (`seed::parked`).
-    pub fn wait_parked(&self, patience: std::time::Duration) -> Result<(), OciError> {
+    /// emptied, waiting for its claim (`seed::parked`). Behavior kept here: `past` is unused, and none waits until
+    /// the word.
+    pub fn wait_parked(
+        &self,
+        patience: Option<std::time::Duration>,
+        _past: impl FnOnce(),
+    ) -> Result<(), OciError> {
+        let patience = patience.unwrap_or(std::time::Duration::MAX);
         let Some((_, _, socket)) = &self.held else {
             return Err(OciError::Broken("a parked init no longer held".to_owned()));
         };
@@ -2743,6 +2749,49 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a
+    /// park's wait for its init's word that it is parked ended at the seeds' hang W*, and the park failed, its init
+    /// killed, though the init went on to say it. Do: a parked stand-in, a sleeping child of the test's, whose word
+    /// comes on its socket only once the wait has passed its bound, a nanosecond, and told its run-out. Expect: the
+    /// wait answered.
+    #[test]
+    fn original_a_parks_wait_past_its_bound_follows_its_init_to_its_word() {
+        use std::sync::mpsc::channel;
+        #[expect(
+            clippy::zombie_processes,
+            reason = "reaped by its pidfd through the Parked made of it, dropped at the test's end"
+        )]
+        let sleeper = std::process::Command::new("sleep")
+            .arg("infinity")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(sleeper.id()).unwrap();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_child(&sleeper),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let (ours, theirs) = super::super::seed::socketpair().unwrap();
+        let parked = Parked::new(pid, pidfd, ours, 0);
+        let (told, heard) = channel::<()>();
+        // It says it is parked once told, a descriptor riding with its word as an init's does; a wait that never tells
+        // drops `told`, and the stand-in says nothing.
+        let init = std::thread::spawn(move || {
+            if heard.recv().is_ok() {
+                let (rides, _kept) = super::super::seed::socketpair().unwrap();
+                let parked = hex_core::seed::Answer::Started { pid: 1 };
+                super::super::seed::send_answer(theirs.as_fd(), &parked, Some(rides.as_fd()))
+                    .unwrap();
+            }
+            theirs
+        });
+        let got = parked.wait_parked(Some(std::time::Duration::from_nanos(1)), move || {
+            let _ = told.send(());
+        });
+        let _theirs = init.join().unwrap();
+        assert!(got.is_ok(), "the park refused at its bound: {got:?}");
+    }
 
     // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
     // that could name another place is refused before anything is touched; `delete ../../x` would
