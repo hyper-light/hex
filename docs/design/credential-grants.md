@@ -234,6 +234,38 @@ What would falsify it:
 - A leased value in a node's files, records or answers (`s33_a_leased_value_is_kept_nowhere_on_the_node`).
 - A run of a box created on a connection that gave no lessors given any lease.
 
+## C8. Sign-ins: a CLI's own sign-in passed through to its orchestrator
+
+Joint plan step 33 (kiln #74 item 2), on Shards `3114e082f` (image channel v24, D242's step 8). A harness's CLI (Claude
+Code, Codex) may sign in as itself in its VM. Shards' injector takes the CLI's token response outside the microVM, hands
+its tokens to the run's orchestrator, and gives the CLI placeholders in their places; refreshes and revocations are
+answered outside too. Hex passes each through, adding none:
+
+- **The grant.** `ShardsImage::sign_ins` (after the credentials, append-only): each a `hex_api::SignInGrant` of its
+  member, the sign-in's name in its orchestrator's store, its CLI (`SignInCli`), the hosts its access token is filled in
+  toward, and an earlier capture's placeholders (`Captured`), so a later run's CLI holds the same ones. None by default.
+- **One check** (`hex_api::check_sign_ins`, beside `check_credentials`, wherever a spec enters: the class spec's check,
+  the node's wire both ways, the lowering): each field refused by name. A name or a captured reference no store could
+  hold; a sign-in named twice, or a second sign-in of one CLI (Shards: one sign-in of a CLI a run); no host, a host
+  twice, or one its member's egress doesn't reach by name, by TCP (C2's rule); a captured placeholder that isn't a
+  b64token; and a placeholder standing for two tokens, its own two, two sign-ins', or a sign-in's and a credential's.
+  A placeholder is a capability: `Captured`'s `Debug` says its lengths alone.
+- **The lessor.** `hex_api::lease::Lessor` gains `capture(sign_in, tokens, key)` (the placeholders and the access
+  token's reference), `refresh(sign_in, key)` (the token response the CLI is to have) and `revoked(sign_in, key)` (told).
+  Each defaults to `SignInRefused::Unanswered`, which Shards' guest sees as a 503, as Shards' own defaults do. Tokens
+  are `SignInTokens` of `lease::Value`s, wiped as they drop and never printed.
+- **The image class** lowers each grant run-wide into its boot's `ImageSpec::sign_ins`, and a run with any sign-in has a
+  lessor, as one with a credential does (C3): a node given no lessors refuses its create `Unconfigured`. Its `RunLeases`
+  forwards each ask, its tokens moved whole into `Value`s, each refusal kind for kind.
+- **Over the node's wire** (C7's connection): `Answer::CaptureAsk { run, sign_in, tokens, key }` (`0x8015`),
+  `RefreshAsk` (`0x8016`) and `SignInRevoked` (`0x8017`, not answered), answered `Request::Captured` (`0x001c`) and
+  `Request::Refreshed` (`0x001d`); appended, the wire's `IDENTITY` moving. A capture's ask, and the captured and
+  refreshed answers, carry secrets (`wire::carries_secret`): wiped where Hex held them, on both sides, as a lease is.
+  A create granting a sign-in on a connection that sent no `Lessors` is refused `Unconfigured` (default deny).
+
+Not built: an inspect's report of a box's sign-ins (its record holds them); kiln's broker answering captures and
+refreshes (kiln's).
+
 ## Tests
 
 - `crates/hex-api/src/credentials/tests.rs`: a harness's credential toward its own egress hosts taken; each malformed
@@ -280,6 +312,15 @@ What would falsify it:
   `s33_a_leased_value_is_kept_nowhere_on_the_node` (every file under a recorded node's state and run folders, and every
   answer about the box, read after a run to its stop and delete: the value nowhere; the census holds wait names and
   times alone, by its type).
+
+- C8, `crates/hex-api/src/credentials/tests.rs`: `s33_a_sign_in_is_checked_by_its_fields_beside_the_runs_credentials`.
+  `crates/hex-runtime/src/guest/leases/tests.rs`: `s33_a_runs_sign_ins_answer_shards_run_host_from_its_own_lessor`
+  (red at `9e3617b6`). `crates/hex-runtime/src/guest/image_tests.rs`:
+  `s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor` (red at `9e3617b6`). `crates/hex-core/src/wire/tests.rs`:
+  the capture's and refresh's asks and answers read back as written, and only those carrying secrets say so.
+  `crates/hex-node/src/serve/unix_tests.rs`:
+  `s33_a_remote_harnesss_sign_in_is_captured_refreshed_and_revoked_through_the_wire`, and the default-deny test refusing
+  a sign-in too.
 
 ## Owed
 
