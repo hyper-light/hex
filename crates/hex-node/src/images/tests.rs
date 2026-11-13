@@ -12,12 +12,13 @@ use shards_api::image::{
 use super::*;
 
 /// Shards' image boot in the model: each boot answered at once with a run that holds until its stop, but while the
-/// test holds the model's boots, when each waits until it lets them go.
+/// test holds the model's boots, when each waits until it lets them go, and where the test has it refuse the next.
 #[derive(Default)]
 struct Model {
     asked: Mutex<Vec<ImageSpec>>,
     held: Mutex<bool>,
     let_go: Condvar,
+    refuse: Mutex<Option<ImageRefusal>>,
 }
 
 impl Model {
@@ -40,6 +41,9 @@ impl Images for Model {
                 .wait_while(self.held.lock().unwrap(), |held| *held)
                 .unwrap(),
         );
+        if let Some(why) = self.refuse.lock().unwrap().take() {
+            return Err(why);
+        }
         Ok(Box::new(Held::default()))
     }
 }
@@ -112,6 +116,9 @@ impl ImageGuest for Held {
         Err(unasked())
     }
     fn unplug(&self, _: &str, _: Duration) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
+    fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
     fn stop(&self) -> Result<(), ImageRefusal> {
@@ -233,6 +240,41 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
         .map(|info| (info.id.as_str().to_owned(), info.state))
         .collect();
     assert_eq!(after, vec![(RESERVED.to_owned(), BoxState::Running)]);
+}
+
+/// Kiln's HexVms adapter (ROOT, 2026-11-13; joint plan step 12, decision 9): kiln drives the image runtime in process,
+/// and a start past its boot's W* answers Pending, so kiln waits for the box with `started` rather than polling, and
+/// the runtime answers it as its class does. Do: boot one VM, teaching the boot's W*; create another and start it, its
+/// boot held past that W* (its start Pending); have its boot refuse, ask `started` and let the boot go. Expect:
+/// `started` answering the run's own failure in its runtime's words, `Refusal::Failed`, never the box as it stood.
+#[test]
+fn w12_the_image_runtime_answers_started_as_its_class_follows_the_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = Arc::new(Model::default());
+    let images = runtime(dir.path(), &model);
+    let first = images.create(image_box("kiln-r1-1")).unwrap().id;
+    images.start(&first).unwrap();
+    let held = images.create(image_box("kiln-r1-2")).unwrap().id;
+    model.hold(true);
+    assert!(matches!(
+        images.start(&held),
+        Err(Refusal::Lifecycle {
+            cause: hex_api::LifecycleCause::Pending,
+            ..
+        })
+    ));
+    *model.refuse.lock().unwrap() = Some(ImageRefusal::Boot(
+        "its image's members never started".to_owned(),
+    ));
+    let answered = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| images.started(&held));
+        model.hold(false);
+        asking.join().unwrap()
+    });
+    assert!(
+        matches!(&answered, Err(Refusal::Failed { why, .. }) if why.contains("its image's members never started")),
+        "{answered:?}"
+    );
 }
 
 /// An allocation of `vcpus` vCPUs and `memory_mib` MiB, its cost's quantum Hex's own (whole vCPUs, MiB).
