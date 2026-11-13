@@ -1012,11 +1012,11 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
             .map(|r| r.spec.id.as_str().to_owned())
             .collect()
     };
-    let unmanaged = sort(records(), false).unwrap();
+    let unmanaged = sort(records(), |_| false).unwrap();
     assert_eq!(ids(&unmanaged), ["img-1"]);
     assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
     assert_eq!(unmanaged.native, res(2_000, GIB));
-    let both = sort(records(), true).unwrap();
+    let both = sort(records(), |_| true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
@@ -1437,6 +1437,74 @@ fn w14_d255_what_holds_each_managed_vms_rate_is_told_on_its_classs_capacity_answ
         [
             ("vm-2", &hex_api::RateHeld::Platform(unsupported)),
             ("vm-3", &hex_api::RateHeld::GovernorUnderJob),
+            ("vm-1", &hex_api::RateHeld::Governor),
+        ]
+    );
+}
+
+/// Joint plan step 14 (D255; ROOT, 2026-11-13): on a platform with no window (Windows today), the learner's first sight
+/// of a managed VM asks its governor at the VM's ceiling, which holds nothing below its vCPUs: one whose governor answers
+/// a period is learned over it and capped at its learned rate; one whose process takes no rate stays booked whole, told.
+/// Do, on a learner with no platform window, see two Shards VMs of 16-CPU allocations, the first's governor answering a
+/// 100 ms period and the second's process taking no rate; sort them, run a window of what it learns in a 6-CPU budget,
+/// and answer the class's capacity. Expect both asked at their 16-CPU ceilings; the first learned and the second booked
+/// whole; the first capped below its ceiling; its 100 ms the window; and the rates told: the second's platform and why,
+/// then the first's governor.
+#[test]
+fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_period() {
+    let io = Record::default();
+    let vms = vec![vm("vm-1", 1), vm("vm-2", 2)];
+    for name in ["vm-1", "vm-2"] {
+        io.set(name, 0, GIB);
+    }
+    io.governed
+        .borrow_mut()
+        .insert("vm-1".to_owned(), Duration::from_millis(100));
+    let unsupported = "its VM process takes no rate".to_owned();
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform(unsupported.clone()),
+    );
+    let mut learner = Learner::new(None, res(32_000, 64 * GIB)).unwrap();
+    learner.govern(&io, &vms).unwrap();
+    assert_eq!(
+        *io.rates.borrow(),
+        vec![("vm-1".to_owned(), 16_000), ("vm-2".to_owned(), 16_000)]
+    );
+    let sorted = sort(vms.clone(), |record| learner.learns(record)).unwrap();
+    let learned: Vec<&str> = sorted
+        .learned
+        .iter()
+        .map(|record| record.spec.id.as_str())
+        .collect();
+    assert_eq!(learned, ["vm-1"]);
+    assert_eq!(sorted.whole.cpu_milli, 16_000, "the second's receipt");
+    io.rates.borrow_mut().clear();
+    learner
+        .window(&io, &sorted.learned, res(6_000, 64 * GIB), Instant::now())
+        .unwrap();
+    let rates = io.rates.borrow().clone();
+    assert!(
+        matches!(rates.as_slice(), [(id, rate)] if id == "vm-1" && *rate < 16_000),
+        "{rates:?}"
+    );
+    assert_eq!(learner.next_window(), Some(Duration::from_millis(100)));
+    let answer = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    let told: Vec<(&str, &hex_api::RateHeld)> = answer
+        .rates
+        .iter()
+        .map(|rate| match &rate.id {
+            hex_api::LearnedHolder::Box(id) => (id.as_str(), &rate.held),
+            hex_api::LearnedHolder::Node(run) => panic!("a node VM's rate, {run:?}"),
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("vm-2", &hex_api::RateHeld::Platform(unsupported)),
             ("vm-1", &hex_api::RateHeld::Governor),
         ]
     );

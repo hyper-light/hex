@@ -2261,9 +2261,19 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 return learner.next_window();
             }
         };
+        let records: Vec<BoxRecord> = records.into_values().flatten().collect();
+        let io = Managed {
+            runtime: &self.runtime,
+            store: &self.books.store,
+        };
+        // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
+        if let Err(why) = learner.govern(&io, &records) {
+            learner.failed(why);
+            return learner.next_window();
+        }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let sorted = match charges::sort(records.into_values().flatten(), learner.manages()) {
+        let sorted = match charges::sort(records, |record| learner.learns(record)) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
@@ -2280,10 +2290,6 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         let running = sorted.learned;
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let io = Managed {
-            runtime: &self.runtime,
-            store: &self.books.store,
-        };
         let _ = learner.window(&io, &running, budget, std::time::Instant::now());
         let next = learner.next_window();
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails

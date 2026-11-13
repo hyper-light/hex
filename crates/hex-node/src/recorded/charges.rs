@@ -142,11 +142,11 @@ pub(crate) struct Sorted {
 }
 
 /// Sorts `records` for a window of a learner ([`Sorted`]): it learns each VM whose cap's period it reads over (C1), a
-/// managed VM where its platform has a window (`managed`, [`crate::recorded::Recover::charge_window`]) and every image
-/// VM, its cap's period its run's own ([`crate::recorded::Recover::image_rate_period`]).
+/// managed VM where `learns` says so ([`Learner::learns`]) and every image VM, its cap's period its run's own
+/// ([`crate::recorded::Recover::image_rate_period`]).
 pub(crate) fn sort(
     records: impl IntoIterator<Item = BoxRecord>,
-    managed: bool,
+    learns: impl Fn(&BoxRecord) -> bool,
 ) -> Result<Sorted, Refusal> {
     let overflow = || Refusal::Invalid {
         what: "a node's boxes' bookings",
@@ -155,7 +155,7 @@ pub(crate) fn sort(
     let mut sorted = Sorted::default();
     for record in records {
         let kind = if running(&record) {
-            Some(managed)
+            Some(learns(&record))
         } else if running_image(&record) {
             Some(true)
         } else {
@@ -763,6 +763,23 @@ impl Learner {
     /// Whether it learns managed VMs: where their platform has a window (C1).
     pub(crate) fn manages(&self) -> bool {
         self.managed.is_some()
+    }
+
+    /// Whether it learns managed VM `record` (C1, D255). Original (red): only where its platform has a window.
+    pub(crate) fn learns(&self, record: &BoxRecord) -> bool {
+        let _ = record;
+        self.manages()
+    }
+
+    /// Asks the governor of each managed VM among `running` it hasn't seen, on a platform with no window (D255).
+    /// Original (red): none is asked.
+    pub(crate) fn govern(
+        &mut self,
+        io: &impl Managed,
+        running: &[BoxRecord],
+    ) -> Result<(), Refusal> {
+        let _ = (io, running);
+        Ok(())
     }
 
     /// The window it reads over next (C1): the longest of its platform's and the periods of the image VMs it holds,
