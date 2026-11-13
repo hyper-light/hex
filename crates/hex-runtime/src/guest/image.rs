@@ -1321,6 +1321,9 @@ impl ImageClass {
             // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
             // spec grants them, run-wide as Shards keeps them; their lessor is its run's, as its credentials' is.
             sign_ins: super::leases::sign_ins(image)?,
+            // No upstream root of its own (Shards' D242, image channel v26): its run's injector trusts its host's roots
+            // alone.
+            upstream_roots: Vec::new(),
         })
     }
 
