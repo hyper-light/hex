@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `f176b3e61cabf377f436bfe967b4df88c3085236` (main).
+Revision: `743c5b321c4592fda44fe6f6e9135c3cea7d3dfa` (main).
 
 The API, ABI, IPC, DNS-name, AF_UNIX transport and test-directory crates, license, formatting,
 lint configuration and binding policy are copied exactly from this revision, with
@@ -19,7 +19,9 @@ member's stdin, the room its orchestrator's budget leaves the run and its microV
 vCPU's guest time among it (D241), credential grants by reference (D242), a member's terminal
 (D244), each member held to its reach of the names kept (D246), the run's CPU rate (D247), its
 run host started holding its three standard streams alone through `shards_ipc`'s spawn (D248),
-and a run whose own command never started ending failed in its VM's words (D249); and an
+a run whose own command never started ending failed in its VM's words (D249), and a run that keeps
+nothing past the microVM keeping the network its image links its members to, nothing let past
+(D250), with shards-ipc's start test holding a child to its parent's start tick (743c5b32); and an
 AF_UNIX read on Windows that waits in WSAPoll, which sees a peer's end that a waiting recv can
 sleep through (shards-afunix, 7ea3ce27, D140, PM M536). shards-api depends on `crates/ipc` (the
 run host's spawn) and `crates/dns` (a credential grant's host names, checked as DNS names, D242),
