@@ -1088,6 +1088,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         published: Vec::new(),
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     };
     with_last_resort(&mut info, &ended).unwrap();
     assert_eq!(info.last_resort.as_ref(), Some(&end));

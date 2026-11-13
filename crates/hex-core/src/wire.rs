@@ -45,14 +45,15 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
-    DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
-    ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedCeiling, LearnedEnd,
-    LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse, LifecycleCause, MAX_DEVICES,
-    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
-    Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver,
-    Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal,
-    StartedFrom, Upstream, Usage, User, check_grants, check_published,
+    ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
+    DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
+    GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
+    LearnedCeiling, LearnedEnd, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse,
+    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
+    Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
+    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
+    check_published,
 };
 
 use crate::netns;
@@ -74,6 +75,7 @@ pub const IDENTITY: u64 = identity(&[
     include_bytes!("../../hex-api/src/devices.rs"),
     include_bytes!("../../hex-api/src/runtime.rs"),
     include_bytes!("../../hex-api/src/grants.rs"),
+    include_bytes!("../../hex-api/src/credentials.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
@@ -2328,7 +2330,8 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
 /// its variables, an option of its working directory (joint plan step 17) and its run-time arguments (D256, after
 /// the working directory), then its shares (kiln's step 18), each its host directory, where its guest sees it and
-/// whether read-only, as a mount's. Fields a later step adds go after the shares (append-only).
+/// whether read-only, as a mount's, then its credential grants (joint plan step 33, [`put_credentials`]). Fields a later
+/// step adds go after the credentials (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
@@ -2349,11 +2352,12 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
         w.string(&m.destination)?;
         w.bool(m.read_only);
         Ok(())
-    })
+    })?;
+    put_credentials(w, &image.credentials, &image.grants)
 }
 
 fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
-    Ok(ShardsImage {
+    let mut image = ShardsImage {
         image: r.string("shards image")?,
         command: r.option(|r| r.list(|r| r.string("shards image command")))?,
         grants: grants(r)?,
@@ -2372,7 +2376,40 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 read_only: r.bool("read_only")?,
             })
         })?,
+        credentials: Vec::new(),
+    };
+    image.credentials = credentials(r, &image.grants)?;
+    Ok(image)
+}
+
+// Joint plan step 33 (Shards' D242): credential grants, a Shards image VM's after its shares and an inspect's after its
+// run's words. Each its member as a grant's, its reference, and its hosts. Both sides run `check_credentials` over the
+// network grants beside them, so a list the check refuses is neither sent nor read.
+fn put_credentials(
+    w: &mut Writer,
+    credentials: &[CredentialGrant],
+    grants: &[Grant],
+) -> Result<(), Fault> {
+    check_credentials(credentials, grants)
+        .map_err(|e| Fault::value("credentials", e.to_string()))?;
+    w.list(credentials, |w, grant| {
+        put_member(w, &grant.member)?;
+        w.string(&grant.reference)?;
+        w.list(&grant.toward, |w, host| w.string(host))
     })
+}
+
+fn credentials(r: &mut Reader<'_>, grants: &[Grant]) -> Result<Vec<CredentialGrant>, Fault> {
+    let credentials = r.list(|r| {
+        Ok(CredentialGrant {
+            member: member(r)?,
+            reference: r.string("credential reference")?,
+            toward: r.list(|r| r.string("credential host"))?,
+        })
+    })?;
+    check_credentials(&credentials, grants)
+        .map_err(|e| Fault::value("credentials", e.to_string()))?;
+    Ok(credentials)
 }
 
 /// A microVM's guest time per vCPU: tag 0 and a list of nanoseconds, at most
@@ -2714,11 +2751,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
     // Joint plan step 14 (C5): why its node's last resort ended it, after every older field.
     w.option_with(info.last_resort.as_ref(), put_learned_end)?;
     // Joint plan step 12: why its run ended where it failed, in its runtime's words, after every older field.
-    w.option_with(info.ended.as_ref(), |w, words| w.string(words))
+    w.option_with(info.ended.as_ref(), |w, words| w.string(words))?;
+    // Joint plan step 33: the record's credential grants, after every older field.
+    put_credentials(w, &info.credentials, &info.grants)
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
-    let info = BoxInfo {
+    let mut info = BoxInfo {
         membership: None,
         id: box_id(r)?,
         class: class(r)?,
@@ -2758,7 +2797,9 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         })?,
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
+        credentials: Vec::new(),
     };
+    info.credentials = credentials(r, &info.grants)?;
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)
         .map_err(|e| Fault::value("published", e.to_string()))?;
@@ -2905,6 +2946,12 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.string(id.as_str())?;
             w.string(why)
         }
+        // Joint plan step 33: what the node isn't configured to serve, after every older refusal.
+        Refusal::Unconfigured { what, why } => {
+            w.u8(15);
+            w.string(what)?;
+            w.string(why)
+        }
     }
 }
 
@@ -3027,6 +3074,10 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         },
         14 => Refusal::Failed {
             id: box_id(r)?,
+            why: r.string("refusal reason")?,
+        },
+        15 => Refusal::Unconfigured {
+            what: name(&r.string("refusal name")?)?,
             why: r.string("refusal reason")?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),

@@ -474,6 +474,7 @@ impl MacRuntime {
             allocation: None,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         })
     }
 }
@@ -608,6 +609,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         allocation: None,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 

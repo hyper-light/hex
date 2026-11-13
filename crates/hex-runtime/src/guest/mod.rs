@@ -14,6 +14,7 @@ mod gpu_pool;
 pub mod held;
 pub mod hosted;
 mod image;
+mod leases;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
