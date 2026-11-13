@@ -321,6 +321,83 @@ fn round_trip(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    /// Longest a test waits for a fact it needs: a bound, so a pool that never makes it true fails the test instead
+    /// of hanging it.
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    /// A seed for the tests: descriptors that are no seed's, which the pool only holds, hands out and ends.
+    fn stand_in() -> Seed {
+        let null = || OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        Seed {
+            socket: null(),
+            pidfd: null(),
+            since: Instant::now(),
+        }
+    }
+
+    /// A pool of one seed, out with an exec, whose wait has learned a W* of `learned`: the next exec waits for a seed
+    /// freed.
+    fn busy_pool(learned: Duration) -> Arc<SeedPool> {
+        let pool = SeedPool::with_budget(PathBuf::from("/nonexistent/hex-for-the-test"), 1);
+        pool.answers.answered(learned);
+        pool.inner.lock().unwrap().total = 1;
+        Arc::new(pool)
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): an
+    /// exec waiting for a busy seed was refused at W*, the slowest hold seen, though its seed was still serving. Do: a
+    /// pool of one seed out with an exec, W* 200 ms; an exec waits, and once its wait has run out (told) or it was
+    /// refused, the seed is freed. Expect: the exec handed the seed.
+    #[test]
+    fn original_an_exec_waiting_past_the_exec_seeds_w_star_waits_on_for_a_seed_freed() {
+        let pool = busy_pool(Duration::from_millis(200));
+        let waiter = {
+            let pool = Arc::clone(&pool);
+            std::thread::spawn(move || pool.acquire().map(drop))
+        };
+        let asked = Instant::now();
+        while pool.answers.deadline().is_some() && !waiter.is_finished() {
+            assert!(
+                asked.elapsed() < PATIENCE,
+                "the exec's wait neither ran out nor ended"
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        pool.release(stand_in());
+        let got = waiter.join().unwrap();
+        assert!(got.is_ok(), "the exec was refused at W*: {got:?}");
+    }
+
+    /// Decision 9 (the person's ruling of 2026-11-13): past W* an exec follows the busy seeds by the seeds freed, and
+    /// one that sees none freed over a whole window is refused. Do: a pool of one seed out with an exec, W* 200 ms, no
+    /// seed freed. Expect: refused by type, the run-out told, never before a whole window past W* (400 ms after the
+    /// ask). W* is long enough that a loaded host's late wake-up doesn't carry a refusal at W* past twice W*.
+    #[test]
+    fn an_exec_that_sees_no_seed_freed_over_a_whole_window_past_w_star_is_refused() {
+        let learned = Duration::from_millis(200);
+        let pool = busy_pool(learned);
+        let asked = Instant::now();
+        let got = pool.acquire().map(drop);
+        let waited = asked.elapsed();
+        assert!(
+            matches!(
+                got,
+                Err(Refusal::Exhausted {
+                    what: "exec seeds",
+                    ..
+                })
+            ),
+            "{got:?}"
+        );
+        assert_eq!(pool.answers.deadline(), None, "the run-out wasn't told");
+        assert!(
+            waited >= learned.saturating_mul(2),
+            "refused {waited:?} after the ask, before a whole window past W* ({learned:?})"
+        );
+    }
+
     /// Decision 9 (no record is read; AC-T7.1.3): an exec's wait for a busy seed to free follows the busy seeds until
     /// an exec has held one. Do: open an exec seed pool and ask its wait before any exec. Expect: no bound, no picked
     /// 30 s and no record.
