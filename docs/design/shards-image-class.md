@@ -38,7 +38,7 @@ Sources, read at the revisions named:
   which `shards_api::image::Images::boot` boots under shards-init. shards-init applies the image's Agentfile: each
   member (agent or harness) starts in its confined domain from its own `harness.json`/`agent.json` (D54, D59).
 - Hex's other Shards form, `ClassSpec::Shards(OciSpec)`, keeps booting Hex's own guest (`hex` as PID 1, its node
-  inside; `shards-guest.md`), and so does the `oci` class on macOS and Windows. Both stay unchanged until step 39.
+  inside; `shards-guest.md`), and so does the `oci` class on macOS and Windows. Hex's PID 1 is kept for good (§7).
 - **Size.** `Allocation::vm_size`: the admitted guest envelope in whole vCPUs (1,000 CPU milli each) and MiB, as the
   dedicated Shards guest's receipt is sized. It is never a field of the spec, and never Shards' own sizing (D231's
   0): users set budgets and VM sizes, the scheduler admits them, and the VM is what was admitted. A VM may have more
@@ -214,11 +214,10 @@ read and stopped n times through D231 as this class does, each series' first boo
 rows and page written for records.tsv. `crates/hex-cli/tests/image_real.rs` runs the class's cases (`IMAGE_CASES`)
 through a real `hex node` in the census, with each wait's answers printed.
 
-## 7. What step 39 removes
+## 7. Hex's PID 1 is kept
 
-Step 39 runs Hex's node as the workload of a Shards VM booted through shards-init, with step 38's grants (a delegated
-cgroup subtree, CAP_SYS_ADMIN for its boxes' namespaces, DRM render nodes), reached over step 11's endpoint. Once
-Hex's oci class passes its conformance suite that way on macOS and Windows, it removes:
+Hex's own guest path is permanent (the person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work
+with basically anything non-Shards. We are to have init work *with* that."). Nothing of it is retired:
 
 - `hex` as PID 1: `crates/hex-cli/src/guest.rs`'s init and the relay (`hex guest relay`, `crates/hex-node/src/relay.rs`);
 - the guest image Hex builds (`scripts/guest/build.sh`, its initramfs) and `GuestConfig`'s kernel and initrd;
@@ -226,7 +225,11 @@ Hex's oci class passes its conformance suite that way on macOS and Windows, it r
   into the guest (`hex_client::guest::stage`, `rewrite`);
 - `ClassSpec::Shards(OciSpec)`'s route through Hex's own guest node, the shared and dedicated guests alike.
 
-This class stays: it is how every Shards VM boots, once Hex's own node boots the same way.
+Step 39 makes shards-init work with it: Hex's node under shards-init, with Hex's own PID 1 kept
+(`node-under-shards-init.md`). Its acceptance is Hex's conformance suite passing through shards-init on macOS and
+Windows with Hex's PID 1 intact, and Hex's own PID-1 path still passing on its own.
+
+This class stays beside both: it is how a box boots an Agentfile image's members under shards-init.
 
 ## 8. Owed
 
