@@ -321,15 +321,23 @@ pub struct ImageMember {
     /// its image's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// Its run-time arguments (Shards' D256, `MemberSpec::args`; kiln's step 17), in their order: its command line
+    /// is its image's command for it (its startup descriptor's), then these, as a harness takes its session's own
+    /// flags (Claude Code's `--resume`, `--model`) on the host. None: its image's command alone. No argument holds a
+    /// NUL. A command line is no secret, read by whatever sees the member's processes: a credential goes in `env`.
+    /// After the working directory (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
 }
 
 impl ImageMember {
-    /// `member`, given nothing over its image's, in its image's working directory.
+    /// `member`, given nothing over its image's, in its image's working directory, its image's command alone.
     pub fn new(member: crate::Member) -> Self {
         Self {
             member,
             env: Vec::new(),
             workdir: None,
+            args: Vec::new(),
         }
     }
 
@@ -1264,8 +1272,9 @@ mod tests {
 
     /// AC-T7.4.1 (joint plan step 17): do check an image VM naming the members its caller drives, a harness with a
     /// variable and a working directory and an agent with neither; expect it passes. Do name a member twice, give
-    /// one a key with `=`, a value with a NUL, a relative, `..` or empty-component directory, and a name Shards'
-    /// parser refuses; expect each refused as Invalid, naming the member's field.
+    /// one a key with `=`, a value with a NUL, a relative, `..` or empty-component directory, a run-time argument
+    /// holding a NUL (D256), and a name Shards' parser refuses; expect each refused as Invalid, naming the member's
+    /// field, an argument by its place and never its bytes.
     #[test]
     fn the_members_an_image_vms_caller_drives_are_named_once_and_checked() {
         let harness = crate::Member {
@@ -1276,6 +1285,11 @@ mod tests {
             member: harness.clone(),
             env: vec![("TZ".to_owned(), "UTC".to_owned())],
             workdir: Some("/home/me/project".to_owned()),
+            args: vec![
+                "--model".to_owned(),
+                String::new(),
+                "claude-opus-4".to_owned(),
+            ],
         };
         let agent = ImageMember::new(crate::Member {
             kind: crate::MemberKind::Agent,
@@ -1310,6 +1324,20 @@ mod tests {
             ..driven.clone()
         };
         assert!(refused(bad_value).1.contains("members[0].env"));
+        let bad_arg = ImageMember {
+            args: vec!["--resume".to_owned(), "s-1\0--model".to_owned()],
+            ..driven.clone()
+        };
+        let (what, why) = refused(bad_arg);
+        assert_eq!(
+            (
+                what,
+                why.contains("members[0].args[1]"),
+                why.contains("s-1")
+            ),
+            ("shards image", true, false),
+            "{why}"
+        );
         for dir in [
             "relative/dir",
             "/home/../etc",

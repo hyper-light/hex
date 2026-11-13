@@ -2338,6 +2338,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 member: member(r)?,
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
+                args: Vec::new(),
             })
         })?,
     })

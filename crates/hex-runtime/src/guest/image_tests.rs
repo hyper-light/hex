@@ -807,6 +807,48 @@ fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
     assert_eq!(alike, first);
 }
 
+/// Joint plan step 12 for kiln's step 17 (D256, image channel v18): a member its caller drives takes its run-time
+/// arguments after its image's command, as a harness takes its session's flags on the host. Do boot a VM whose driven
+/// harness is given `--resume s-1`, an empty argument and `--model claude-opus-4`, and one whose driven harness is given
+/// none. Expect the first boot to ask Shards for that member with exactly those arguments, in their order, the empty
+/// one kept; the second for its member with none, its image's command alone.
+#[test]
+fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let args = vec![
+        "--resume".to_owned(),
+        "s-1".to_owned(),
+        String::new(),
+        "--model".to_owned(),
+        "claude-opus-4".to_owned(),
+    ];
+    for given in [args.clone(), Vec::new()] {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut boxed = spec("image-args", None);
+        if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+            image.members.push(ImageMember {
+                args: given.clone(),
+                ..ImageMember::new(Member {
+                    kind: MemberKind::Harness,
+                    name: "claude".to_owned(),
+                })
+            });
+        }
+        let id = runtime.create(boxed).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        let [member] = boot.members.as_slice() else {
+            panic!("the boot's members: {:?}", boot.members);
+        };
+        assert_eq!(member.member, MemberName::harness("claude"));
+        assert_eq!(member.args, given);
+    }
+}
+
 /// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
 /// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
 /// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
@@ -970,6 +1012,7 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
             member: claude.clone(),
             env: vec![("TZ".to_owned(), "UTC".to_owned())],
             workdir: Some("/work/project".to_owned()),
+            args: Vec::new(),
         });
     }
     let id = runtime.create(boxed).unwrap().id;

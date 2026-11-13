@@ -4875,8 +4875,9 @@ fn unknown_grant_tags_are_refused_by_name() {
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create a Shards image VM whose spec names the members its caller drives, one
-/// with variables and a working directory and one with neither; expect it read back whole, its members after its
-/// grants.
+/// with variables, a working directory and run-time arguments (D256, kiln's step 17; an empty one among them) and one
+/// with none of them; expect it read back whole, its members after its grants, each member's arguments after its
+/// working directory.
 #[test]
 fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
     let members = vec![
@@ -4887,6 +4888,13 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
             },
             env: vec![("LANG".to_owned(), "C.UTF-8".to_owned())],
             workdir: Some("/home/me/project".to_owned()),
+            args: vec![
+                "--resume".to_owned(),
+                "s-1".to_owned(),
+                String::new(),
+                "--model".to_owned(),
+                "claude-opus-4".to_owned(),
+            ],
         },
         hex_api::ImageMember::new(Member {
             kind: MemberKind::Agent,
