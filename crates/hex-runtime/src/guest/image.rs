@@ -534,18 +534,28 @@ impl ImageBoot {
     }
 
     /// Stops `guest` on a thread of its own: D231's stop returns once its run's end is told, its VM gone;
-    /// the guest goes with the thread, and its run host then exits on its own.
-    fn stop(&self, guest: Arc<dyn ImageGuest>) -> Result<Arc<Slot<RunEnd>>, Refusal> {
+    /// the guest goes with the thread, and its run host then exits on its own. Its answer is `seen`, the end its run
+    /// reached on its own before the stop where one was seen ([`Self::settle_running`]'s, the stop then its host's
+    /// reaping): shards-api's stop of a run host that exited without its run's end answers `Stopped`, where its end
+    /// before was `Failed` in what the host said last. Else the end its stop leaves.
+    fn stop(
+        &self,
+        guest: Arc<dyn ImageGuest>,
+        seen: Option<RunEnd>,
+    ) -> Result<Arc<Slot<RunEnd>>, Refusal> {
         let slot = Arc::new(Slot::new());
         let answer = Arc::clone(&slot);
         std::thread::Builder::new()
             .name("hex-image-stop".to_owned())
             .spawn(move || {
                 let stopped = guest.stop();
-                let end = match (stopped, guest.wait_for(Duration::ZERO)) {
-                    (_, Ok(Some(end))) => end,
-                    (Err(why), _) | (Ok(()), Err(why)) => RunEnd::Failed(why.to_string()),
-                    (Ok(()), Ok(None)) => {
+                let end = match (seen, stopped, guest.wait_for(Duration::ZERO)) {
+                    (Some(seen), _, _) => seen,
+                    (None, _, Ok(Some(end))) => end,
+                    (None, Err(why), _) | (None, Ok(()), Err(why)) => {
+                        RunEnd::Failed(why.to_string())
+                    }
+                    (None, Ok(()), Ok(None)) => {
                         RunEnd::Failed("its stop returned with no end of its run".to_owned())
                     }
                 };
@@ -800,20 +810,20 @@ impl GuestRuntime {
     }
 
     /// A running VM whose run may have ended on its own: its host is then reaped through its stop, so no
-    /// run is let go of before its host has exited.
+    /// run is let go of before its host has exited, and the box's end is the one its run reached, in its words.
     fn settle_running(
         &self,
         image: &ImageBoot,
         id: &BoxId,
         guest: Arc<dyn ImageGuest>,
     ) -> Result<State, Refusal> {
-        let ended = guest
+        let Some(ended) = guest
             .wait_for(Duration::ZERO)
-            .map_err(|why| refused(id, "reading a Shards image VM's end", why))?;
-        if ended.is_none() {
+            .map_err(|why| refused(id, "reading a Shards image VM's end", why))?
+        else {
             return Ok(State::Running(guest));
-        }
-        let slot = image.stop(guest)?;
+        };
+        let slot = image.stop(guest, Some(ended))?;
         let mut runs = image.runs()?;
         // Another call may have moved it on first: then its stop is that call's, and this one's thread
         // returns with the same end.
@@ -971,7 +981,7 @@ impl GuestRuntime {
         let waits = image.waits()?;
         let slot = match state {
             State::Running(guest) => {
-                let slot = image.stop(guest)?;
+                let slot = image.stop(guest, None)?;
                 let mut runs = image.runs()?;
                 if let Some(run) = runs.get_mut(id) {
                     *run = Run::Stopping(Arc::clone(&slot));
