@@ -1272,18 +1272,16 @@ impl Runtime for GuestRuntime {
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let routed = self.routed(id)?;
+        self.inspect_routed(routed, id)
+    }
+
+    /// An image box followed to its start's end as its class follows it (kiln's HexVms adapter); every other box as its
+    /// inspect answers it, its one read of the node's records carried on.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match self.routed(id)? {
-            // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
-            books::Routed::Retired(record) => record.retired_info(),
-            books::Routed::Image(record) => self.images.inspect_image(record),
-            books::Routed::Other(snapshot) => {
-                let snapshot = snapshot.as_ref();
-                self.call_recorded(snapshot, id, false, || {
-                    self.with(snapshot, id, |b| {
-                        self.project_info(b, b.client.inspect(id)?)
-                    })
-                })
-            }
+            books::Routed::Image(record) => self.images.started_image(record),
+            routed => self.inspect_routed(routed, id),
         }
     }
 
@@ -1365,6 +1363,23 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
+    /// Box `id` as its route says it is, its record read once by the caller.
+    fn inspect_routed(&self, routed: books::Routed, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        match routed {
+            // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
+            books::Routed::Retired(record) => record.retired_info(),
+            books::Routed::Image(record) => self.images.inspect_image(record),
+            books::Routed::Other(snapshot) => {
+                let snapshot = snapshot.as_ref();
+                self.call_recorded(snapshot, id, false, || {
+                    self.with(snapshot, id, |b| {
+                        self.project_info(b, b.client.inspect(id)?)
+                    })
+                })
+            }
+        }
+    }
+
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
             return Err(Refusal::Broken(

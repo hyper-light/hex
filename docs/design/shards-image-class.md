@@ -204,8 +204,13 @@ its stop to its end however long past the stop's W*, then removes the box's diag
 never started (kiln charges nothing then); a delete retried then is NoSuchBox. D231's boot gives no stop for a boot
 under way (`Images::boot` blocks until its run starts or its host ends, the host its caller's only then), so the delete
 can't end a boot early, and a boot that neither starts nor ends holds the delete with it: Shards' stop for a boot under
-way is owed (§8), which the delete then asks. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's
-adoption among them, and is listed running: Hex can't prove it isn't.
+way is owed (§8), which the delete then asks. A caller waits for a start past W* with `Runtime::started` rather than
+polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed to its boot's answer as a delete
+follows it, by a wait of its own, `hex.image.started` (refused only where the boot's thread ends with no answer, the
+boot it follows still under way), then answered as inspect answers it, Running, or as its run's own failure in its
+runtime's words (`Refusal::Failed`), as `start` answers a run that failed; a box not booting is answered at once. A Held
+box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among them, and is listed running: Hex
+can't prove it isn't.
 
 ## 4. Usage
 
