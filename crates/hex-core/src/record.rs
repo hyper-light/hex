@@ -215,6 +215,7 @@ impl BoxRecord {
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,
                 cause: hex_api::LifecycleCause::Retired,
+                why: None,
             },
         })
     }

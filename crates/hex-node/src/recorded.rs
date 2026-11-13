@@ -157,13 +157,19 @@ pub trait Recover: Runtime {
     /// never scope termination, permission to adopt a Guest, or release from absence alone.
     fn handoff_unsubmitted(&self, record: &BoxRecord, pool: &PoolRecord) -> Result<(), Refusal> {
         let _ = pool;
-        Err(uncertain(&record.spec.id))
+        Err(uncertain(
+            &record.spec.id,
+            "this runtime holds no native backing to hand it to",
+        ))
     }
 
     /// Native half of the same pending no-Intent check. Concrete owners must prove that no
     /// conflicting submission receipt is retained; missing cold proof remains typed uncertainty.
     fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        Err(uncertain(&record.spec.id))
+        Err(uncertain(
+            &record.spec.id,
+            "this runtime holds no native backing to prove it unsubmitted",
+        ))
     }
 
     /// Read-only initialized configuration and retained metadata validation, before ANY owner is
@@ -171,7 +177,10 @@ pub trait Recover: Runtime {
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         record.spec.check()?;
         if !self.classes().contains(&record.spec.backend_class()?) {
-            return Err(uncertain(&record.spec.id));
+            return Err(uncertain(
+                &record.spec.id,
+                "this node serves no runtime of its record's class",
+            ));
         }
         Ok(())
     }
@@ -380,7 +389,10 @@ pub trait Recover: Runtime {
     /// Deletes orphan `id` ([`Recover::orphans`]) through its guest. A runtime with no guest has none to
     /// delete, so it refuses.
     fn delete_orphan(&self, id: &BoxId) -> Result<(), Refusal> {
-        Err(uncertain(id))
+        Err(uncertain(
+            id,
+            "its delete found no record, and only a record's cleanup is proved",
+        ))
     }
     /// The core's loop, for connections of its own ([`Host::attach`]). By default it has none.
     fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
@@ -479,11 +491,13 @@ pub(crate) struct Native<'a> {
     pub unsubmitted_pool: &'a NativeUnsubmittedPool<'a>,
 }
 
-fn uncertain(id: &BoxId) -> Refusal {
+/// Box `id`'s lifecycle uncertain, in the refusing site's own words (joint plan step 12).
+fn uncertain(id: &BoxId, why: &str) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
             id,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: Some(why.to_owned()),
         },
         Err(error) => error,
     }
@@ -525,13 +539,18 @@ pub(crate) fn check_backing_reference(
     record: &BoxRecord,
     pool: &PoolRecord,
 ) -> Result<(), Refusal> {
-    let bad = || uncertain(&record.spec.id);
-    let route = record.spec.route.ok_or_else(bad)?;
+    let bad = |why: &str| uncertain(&record.spec.id, why);
+    let route = record
+        .spec
+        .route
+        .ok_or_else(|| bad("its record routes it on no backing"))?;
     if route.backing != Some(pool.key)
         || route.key.backend_class() != NativeRecord::Pool(pool).class()?
         || pool.phase == hex_api::BackingPhase::Prepared
     {
-        return Err(bad());
+        return Err(bad(
+            "its route names another backing, another class, or one still only prepared",
+        ));
     }
     route.check_backing_parts(
         record.spec.allocation.map(|allocation| allocation.cost),
@@ -555,7 +574,9 @@ pub(crate) fn check_backing_reference(
         hex_api::BackingPhase::Released if pool.allocation.is_some() && pool.exit.is_some() => {
             Ok(())
         }
-        _ => Err(bad()),
+        _ => Err(bad(
+            "its record's phase, init, run or end disagrees with its backing's phase",
+        )),
     }
 }
 
@@ -570,9 +591,14 @@ pub(crate) fn check_single_consumer(
         return Err(Refusal::Full(crate::store::TURNS));
     }
     for (other, row) in records {
-        let row = row.as_ref().map_err(|_| uncertain(other))?;
+        let row = row
+            .as_ref()
+            .map_err(|_| uncertain(other, "a record beside it can't be read"))?;
         if row.version != hex_core::record::RECORD_VERSION || row.spec.id != *other {
-            return Err(uncertain(other));
+            return Err(uncertain(
+                other,
+                "a record beside it is of another version or names another box",
+            ));
         }
         row.spec.check()?;
         if other != id
@@ -611,7 +637,7 @@ pub(crate) fn preflight_handoff_turns<'a>(
     }
     let pool = store
         .read_pool(&source.pool)?
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| uncertain(&record.spec.id, "its backing has no record"))?;
     check_backing_reference(record, &pool)?;
     if !matches!(
         pool.phase,
@@ -620,13 +646,16 @@ pub(crate) fn preflight_handoff_turns<'a>(
         return Ok(None);
     }
     let keys = catalog
-        .ok_or_else(|| uncertain(&record.spec.id))?
+        .ok_or_else(|| uncertain(&record.spec.id, "no device catalog holds its devices"))?
         .conflict_ids(&pool.devices)?;
     let held = turns.try_take_handoff(&record.spec.id, &source, &keys)?;
     if store.read_pool(&source.pool)?.as_ref() != Some(&pool)
         || store.read_lifecycle(&record.spec.id)?.as_ref() != Some(record)
     {
-        return Err(uncertain(&record.spec.id));
+        return Err(uncertain(
+            &record.spec.id,
+            "its record or its backing changed while its handoff's turns were taken",
+        ));
     }
     Ok(Some(held))
 }
@@ -717,9 +746,14 @@ pub(crate) fn preflight_records(
         }
     }
     for (id, result) in records {
-        let record = result.as_ref().map_err(|_| uncertain(id))?;
+        let record = result
+            .as_ref()
+            .map_err(|_| uncertain(id, "its record can't be read"))?;
         if record.version != hex_core::record::RECORD_VERSION || record.spec.id != *id {
-            return Err(uncertain(id));
+            return Err(uncertain(
+                id,
+                "its record is of another version or names another box",
+            ));
         }
         record.spec.check()?;
         if [record.init, record.run]
@@ -727,7 +761,7 @@ pub(crate) fn preflight_records(
             .flatten()
             .any(|process| process.pid == 0)
         {
-            return Err(uncertain(id));
+            return Err(uncertain(id, "its record names a process with no pid"));
         }
         // A retired box (joint plan step 14) runs nothing, holds no device and names no backing any more: its record is
         // kept for its owner's delete alone.
@@ -746,7 +780,7 @@ pub(crate) fn preflight_records(
                 || record.init.is_some_and(|init| init.start_ticks == 0)
                 || (record.phase == Phase::Ready && record.init.is_none()))
         {
-            return Err(uncertain(id));
+            return Err(uncertain(id, "its record's phase and its init disagree"));
         }
         if let Some(scope) = record.native_scope {
             scopes.push(*scope.bytes());
@@ -765,7 +799,10 @@ pub(crate) fn preflight_records(
                 }
             } else {
                 // Every immutable route reference retains its source row through Box removal.
-                return Err(uncertain(id));
+                return Err(uncertain(
+                    id,
+                    "its route names a backing with no record, which its removal would leave",
+                ));
             }
         }
         add_claims(&record.spec.devices)?;
@@ -807,8 +844,8 @@ pub(crate) fn preflight_records(
 }
 
 impl Transaction<'_> {
-    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
-    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan steps 14 and 12): a pool's
+    /// backing refusal and a box's Lifecycle refusal carry them alike.
     fn uncertain(&self, why: &str) -> Refusal {
         match self.owner {
             TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => {
@@ -816,6 +853,7 @@ impl Transaction<'_> {
                     Ok(id) => Refusal::Lifecycle {
                         id,
                         cause: hex_api::LifecycleCause::Uncertain,
+                        why: Some(why.to_owned()),
                     },
                     Err(error) => error,
                 }
@@ -906,16 +944,20 @@ impl Transaction<'_> {
                 if record.spec.devices.is_empty() {
                     return Ok(());
                 }
-                let catalog = self
-                    .native
-                    .catalog
-                    .ok_or_else(|| uncertain(&record.spec.id))?;
+                let catalog = self.native.catalog.ok_or_else(|| {
+                    uncertain(&record.spec.id, "no device catalog holds its devices")
+                })?;
                 let boxes = self.store.all()?;
                 let pools = self.store.all_pools()?;
                 for id in &record.spec.devices {
                     match catalog.holder(*id, &boxes, &pools)? {
                         Some(hex_api::DeviceHolder::Box(id)) if id == record.spec.id => {}
-                        _ => return Err(uncertain(&record.spec.id)),
+                        _ => {
+                            return Err(uncertain(
+                                &record.spec.id,
+                                "a device it claims is held by another box, or by none",
+                            ));
+                        }
                     }
                 }
                 if let Some(route) = record.spec.route
@@ -1297,7 +1339,12 @@ pub(crate) fn handoff_transaction(
     let records = store.retained_records()?;
     check_single_consumer(&records, *source, id)?;
     if let Some(current) = records.get(id) {
-        check_backing_reference(current.as_ref().map_err(|_| uncertain(id))?, &pool)?;
+        check_backing_reference(
+            current
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?,
+            &pool,
+        )?;
     }
     callback(&Transaction {
         store,
@@ -1345,7 +1392,8 @@ fn check_box_claims(
     if spec.devices.is_empty() {
         return Ok(());
     }
-    let catalog = catalog.ok_or_else(|| uncertain(&spec.id))?;
+    let catalog =
+        catalog.ok_or_else(|| uncertain(&spec.id, "no device catalog holds its devices"))?;
     catalog.prepare(spec, &store.all()?, &store.all_pools()?)?;
     Ok(())
 }
@@ -1447,7 +1495,9 @@ impl<R: Recover> Recorded<R> {
         // Configuration validation is a complete second read-only pass. Native observations and
         // cleanup are deliberately deferred until every sibling and backing passes both passes.
         for (id, record) in &records {
-            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let record = record
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             let handoff = preflight_handoff_turns(
                 &self.books.lifecycle,
                 &self.books.store,
@@ -1459,12 +1509,12 @@ impl<R: Recover> Recorded<R> {
                     .spec
                     .route
                     .and_then(|route| route.backing)
-                    .ok_or_else(|| uncertain(id))?;
+                    .ok_or_else(|| uncertain(id, "its record routes it on no backing"))?;
                 let pool = pools
                     .binary_search_by_key(&source, |pool| pool.key)
                     .ok()
                     .and_then(|at| pools.get(at))
-                    .ok_or_else(|| uncertain(id))?;
+                    .ok_or_else(|| uncertain(id, "its backing has no record"))?;
                 self.runtime.handoff_unsubmitted(record, pool)?;
             } else {
                 self.runtime.preflight_record(record)?;
@@ -1700,7 +1750,10 @@ fn project_info(info: &mut BoxInfo, expected: &Projection) -> Result<(), Refusal
         || (info.allocation != *allocation && !(inner && info.allocation.is_none()))
         || (info.route.is_some() && info.route != *route)
     {
-        return Err(uncertain(id));
+        return Err(uncertain(
+            id,
+            "its runtime's view of it isn't its record's: another id, class, allocation or route",
+        ));
     }
     info.class = *class;
     info.allocation = *allocation;
@@ -1826,7 +1879,7 @@ impl<R: Recover> Recorded<R> {
         let turn = self.books.lifecycle.try_take_devices(id, devices)?;
         let after = self.books.store.read_lifecycle(id)?;
         if before.as_ref().map(|r| &r.spec) != after.as_ref().map(|r| &r.spec) {
-            return Err(uncertain(id));
+            return Err(uncertain(id, "its record's spec changed during its call"));
         }
         Ok(Some(turn))
     }
@@ -1914,7 +1967,12 @@ impl<R: Recover> Recorded<R> {
         for (id, record) in &records {
             // Without a readable class/identity this owner cannot choose a cleanup backend.
             // Retain the row and its claims rather than run native host cleanup by guesswork.
-            let r = record.as_ref().map_err(|_| uncertain(id))?;
+            let r = record.as_ref().map_err(|_| {
+                uncertain(
+                    id,
+                    "its record can't be read, so no cleanup backend can be chosen",
+                )
+            })?;
             // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14).
             if r.retired {
                 continue;
@@ -1983,7 +2041,9 @@ impl<R: Recover> Recorded<R> {
                 }
                 Decision::Remove(why) => {
                     if managed {
-                        let r = record.ok_or_else(|| uncertain(&id))?;
+                        let r = record.ok_or_else(|| {
+                            uncertain(&id, "its recovery has no record to delete it by")
+                        })?;
                         match self.runtime.runtime_for(&r.spec)?.delete(&id) {
                             Ok(()) => {}
                             Err(Refusal::Awaits {
@@ -2003,7 +2063,7 @@ impl<R: Recover> Recorded<R> {
                         self.runtime.discard(&r.spec)?;
                         self.books.store.remove(&id)?;
                     } else {
-                        return Err(uncertain(&id));
+                        return Err(uncertain(&id, "its recovery has no record to remove it by"));
                     }
                     summary.removed.push((id, why_text(&why)));
                 }
@@ -2430,7 +2490,7 @@ impl Books {
                 project_info(&mut info, &projection(record.spec)?)?;
                 abandoned
             }
-            Some(Err(_)) => return Err(uncertain(&info.id)),
+            Some(Err(_)) => return Err(uncertain(&info.id, "its record can't be read")),
             None => 0,
         };
         info.abandoned = recorded.saturating_add(self.abandoned.unrecorded(&info.id)?);
@@ -3090,9 +3150,9 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             let record = records
                 .get(&id)
                 .and_then(|record| record.as_ref().ok())
-                .ok_or_else(|| uncertain(&id))?;
+                .ok_or_else(|| uncertain(&id, "its record can't be read"))?;
             if self.route_for(&record.spec)? != hex_runtime::guest::Side::Guest {
-                return Err(uncertain(&id));
+                return Err(uncertain(&id, "its record routes it outside the guest"));
             }
         }
         Ok(())
@@ -3705,7 +3765,7 @@ mod macos_unsubmitted_tests {
             .unwrap();
         assert!(matches!(
             Recover::preflight_unsubmitted(&native, &record),
-            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == record.spec.id
+            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain, .. }) if id == record.spec.id
         ));
         assert_eq!(native.list().unwrap().len(), 1, "the check removed nothing");
         native.delete(&record.spec.id).unwrap();

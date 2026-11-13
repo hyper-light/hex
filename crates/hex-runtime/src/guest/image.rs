@@ -797,6 +797,7 @@ fn pending(id: &BoxId) -> Result<Refusal, Refusal> {
     Ok(Refusal::Lifecycle {
         id: id.try_clone()?,
         cause: LifecycleCause::Pending,
+        why: None,
     })
 }
 
@@ -1521,7 +1522,10 @@ impl ImageClass {
                 || current.exit.is_some()
                 || current.spec != record.spec
             {
-                return Err(super::books::uncertain(&id)?);
+                return Err(super::books::uncertain(
+                    &id,
+                    "its record isn't Creating, has an end, or isn't the spec its start read",
+                )?);
             }
             current.phase = Phase::Ready;
             current.diagnostics = Some(diagnostics.clone());
@@ -1598,7 +1602,10 @@ impl ImageClass {
                         Some(why) => Err(Refusal::Failed { id, why }),
                         None => Ok(()),
                     },
-                    State::Created | State::Held => Err(super::books::uncertain(&id)?),
+                    State::Created | State::Held => Err(super::books::uncertain(
+                        &id,
+                        "its start answered, yet its record says neither a run nor its end",
+                    )?),
                 }
             }
             Err(why) => {
@@ -1649,7 +1656,10 @@ impl ImageClass {
         // Its answer, and its time the sample, is taken as the record is settled.
         match self.settle(&record_now(self, id)?)? {
             State::Ended(end) => Ok(end.exit),
-            _ => Err(super::books::uncertain(id)?),
+            _ => Err(super::books::uncertain(
+                id,
+                "its stop answered, yet its record holds no end",
+            )?),
         }
     }
 
@@ -1666,7 +1676,10 @@ impl ImageClass {
             State::Created => devices::with_transaction(self.image_books()?, &id, &[], |t| {
                 let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                 if current.phase != Phase::Creating || current.exit.is_some() {
-                    return Err(super::books::uncertain(&id)?);
+                    return Err(super::books::uncertain(
+                        &id,
+                        "its record isn't Creating, or has an end, so its kill can't end it unbooted",
+                    )?);
                 }
                 current.phase = Phase::Ready;
                 current.exit = Some(Exit::Signal(Signal::KILL.number()));
@@ -1964,7 +1977,10 @@ impl ImageClass {
                     // Its boot refused, its run never started: its end recorded as the boot's answer was taken.
                     State::Ended(_) => {}
                     State::Created | State::Booting | State::Held => {
-                        return Err(super::books::uncertain(&id)?);
+                        return Err(super::books::uncertain(
+                            &id,
+                            "its boot answered, yet its record says neither a run nor its end",
+                        )?);
                     }
                 }
             }
@@ -1977,7 +1993,10 @@ impl ImageClass {
         devices::with_transaction(self.image_books()?, &id, &[], |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if current.phase != Phase::Creating && current.exit.is_none() {
-                return Err(super::books::uncertain(&id)?);
+                return Err(super::books::uncertain(
+                    &id,
+                    "its record has no end, so its run's end isn't proved",
+                )?);
             }
             current.phase = Phase::Deleting;
             t.put(&current)?;
@@ -2026,7 +2045,10 @@ impl ImageClass {
             .image_record(&spec.id)?
             .ok_or(Refusal::NoSuchBox(spec.id.try_clone()?))?;
         if record.spec != *spec {
-            return Err(super::books::uncertain(&spec.id)?);
+            return Err(super::books::uncertain(
+                &spec.id,
+                "its record's spec isn't the one asked",
+            )?);
         }
         match self.settle(&record)? {
             State::Held => Err(held()),

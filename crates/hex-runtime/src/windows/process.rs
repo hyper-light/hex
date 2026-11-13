@@ -378,14 +378,15 @@ impl JobBox {
         Ok(())
     }
 
-    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
-    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan steps 14 and 12): a pool's
+    /// backing refusal and a box's Lifecycle refusal carry them alike.
     fn uncertain(&self, why: &str) -> Refusal {
         match self.owner() {
             OwnerRef::Box(id) => match id.try_clone() {
                 Ok(id) => Refusal::Lifecycle {
                     id,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: Some(why.to_owned()),
                 },
                 Err(error) => error,
             },

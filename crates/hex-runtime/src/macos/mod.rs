@@ -445,7 +445,9 @@ impl MacRuntime {
     fn get(&self, id: &BoxId) -> Result<NativeArc<ProcessBox>, Refusal> {
         let boxes = self.boxes()?;
         let at = native_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
-        let (_, boxed) = boxes.get(at).ok_or_else(|| managed::uncertain(id))?;
+        let (_, boxed) = boxes.get(at).ok_or_else(|| {
+            managed::uncertain(id, "its native slot is gone from where its index found it")
+        })?;
         if boxed.is_managed() {
             return Err(Refusal::NoSuchBox(id.try_clone()?));
         }
@@ -581,10 +583,15 @@ fn remove_user_box(
 /// `list` is safe.
 fn remove_process_box(boxes: &NativeBoxes, id: &BoxId) -> Result<(), Refusal> {
     let b = {
-        let mut boxes = boxes.lock().map_err(|_| managed::uncertain(id))?;
+        let mut boxes = boxes
+            .lock()
+            .map_err(|_| managed::uncertain(id, "its node's native boxes' lock is poisoned"))?;
         let at = native_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
         if boxes.get(at).is_some_and(|(_, boxed)| boxed.is_managed()) {
-            return Err(managed::uncertain(id));
+            return Err(managed::uncertain(
+                id,
+                "its box is a managed VM's, which only its own scope's stop removes",
+            ));
         }
         boxes.remove(at).1
     };

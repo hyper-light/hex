@@ -1013,14 +1013,17 @@ fn refusals() -> Vec<Refusal> {
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Pending,
+            why: None,
         },
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Uncertain,
+            why: Some("its record names another native scope".to_owned()),
         },
         Refusal::Lifecycle {
             id: id("retained-box"),
             cause: LifecycleCause::Busy,
+            why: None,
         },
         Refusal::Uncertain {
             id: id("unclean-box"),
@@ -1630,28 +1633,73 @@ fn retained_box_allocations_survive_inspect_and_mixed_list_messages() {
     ));
 }
 
+/// Joint plan step 12 (ROOT, 2026-11-13: every Lifecycle Uncertain gets its reason, as a Backing one does): do answer a
+/// box's Lifecycle refusal with its refusing site's words, and one with none. Expect each read back whole, the words
+/// after the cause as an option, and the message ending ": <words>", or at its cause where there are none.
+#[test]
+fn w12_a_lifecycle_refusal_carries_its_reason() {
+    let words = "its record names another native scope";
+    let worded = Refusal::Lifecycle {
+        id: id("retained-box"),
+        cause: LifecycleCause::Uncertain,
+        why: Some(words.to_owned()),
+    };
+    let bare = Refusal::Lifecycle {
+        id: id("retained-box"),
+        cause: LifecycleCause::Uncertain,
+        why: None,
+    };
+    for refused in [&worded, &bare] {
+        let answered = Answer::Refused(refused.clone());
+        let bytes = answer(42, &answered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            answered
+        );
+    }
+    assert!(
+        worded.to_string().ends_with(&format!(": {words}")),
+        "{worded}"
+    );
+    assert!(
+        bare.to_string()
+            .ends_with("physical termination or absence has not been proved"),
+        "{bare}"
+    );
+}
+
 /// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
 /// an unknown cause cannot become absence, success or a default retry decision.
 #[test]
 fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
-    for cause in [
-        LifecycleCause::Pending,
-        LifecycleCause::Uncertain,
-        LifecycleCause::Busy,
+    for (cause, why) in [
+        (LifecycleCause::Pending, None),
+        (
+            LifecycleCause::Uncertain,
+            Some("its record names another native scope".to_owned()),
+        ),
+        (LifecycleCause::Busy, None),
     ] {
+        let worded = why.is_some();
         let refused = Answer::Refused(Refusal::Lifecycle {
             id: id("retained-box"),
             cause,
+            why,
         });
         let bytes = answer(41, &refused, MAX_MESSAGE).unwrap();
         assert_eq!(
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             refused
         );
-        // 3 is Retired (joint plan step 14); the next tag is unknown.
+        if worded {
+            continue;
+        }
+        // 3 is Retired (joint plan step 14); the next tag is unknown. The cause is the byte before its reason's
+        // option, a 0 where it gives none (joint plan step 12).
         for tag in [4, u8::MAX] {
             let mut invalid = bytes.clone();
-            *invalid.last_mut().unwrap() = tag;
+            let at = invalid.len() - 2;
+            invalid[at] = tag;
             let error = read_answer(&received(&invalid, 0), MAX_MESSAGE).unwrap_err();
             assert!(matches!(
                 error,
@@ -2502,9 +2550,10 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
                 LifecycleCause::Pending,
                 LifecycleCause::Uncertain,
                 LifecycleCause::Busy
-            ])
+            ]),
+            proptest::option::of(any_text())
         )
-            .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
+            .prop_map(|(id, cause, why)| Refusal::Lifecycle { id, cause, why }),
         (any::<u32>(), any_connect_failure())
             .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
         proptest::sample::select(Upstream::ALL.to_vec())

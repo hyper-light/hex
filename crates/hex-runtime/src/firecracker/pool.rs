@@ -233,14 +233,18 @@ impl FirecrackerRuntime {
             .try_reserve_exact(records.len())
             .map_err(|_| exhausted("observer consuming references", records.len()))?;
         for (id, boxed) in records {
-            let boxed = boxed.as_ref().map_err(|_| uncertain(id))?;
+            let boxed = boxed
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             boxed.spec.check()?;
             let Some(route) = boxed.spec.route.filter(|route| {
                 route.key.execution == Execution::Firecracker && route.backing.is_some()
             }) else {
                 continue;
             };
-            let key = route.backing.ok_or_else(|| uncertain(id))?;
+            let key = route
+                .backing
+                .ok_or_else(|| uncertain(id, "its record routes it on no backing"))?;
             let source = family
                 .binary_search_by_key(&key, |pool| pool.key)
                 .ok()
@@ -591,7 +595,7 @@ impl FirecrackerRuntime {
         // After observer handoff a retained GPU Box is the actual current driver provider. Read
         // each through its same method/device turns and managed receipt; never repick or cache.
         for (id, record) in self.authority()?.records()? {
-            let record = record.map_err(|_| uncertain(&id))?;
+            let record = record.map_err(|_| uncertain(&id, "its record can't be read"))?;
             if record.spec.backend_class()? != Class::Firecracker
                 || record.phase != Phase::Ready
                 || !record
@@ -854,7 +858,7 @@ impl FirecrackerRuntime {
     pub fn retire_census(&self) -> Result<(), Refusal> {
         self.retire_census_observers()?;
         for (id, record) in self.authority()?.records()? {
-            let record = record.map_err(|_| uncertain(&id))?;
+            let record = record.map_err(|_| uncertain(&id, "its record can't be read"))?;
             if record.retired || !matches!(record.spec.class, ClassSpec::Firecracker(_)) {
                 continue;
             }
@@ -899,7 +903,8 @@ impl FirecrackerRuntime {
                     )
                 })?;
                 for (id, boxed) in transaction.records()? {
-                    let mut boxed = boxed.map_err(|_| uncertain(&id))?;
+                    let mut boxed =
+                        boxed.map_err(|_| uncertain(&id, "its record can't be read"))?;
                     if boxed.retired
                         || boxed.spec.route.and_then(|route| route.backing) != Some(key)
                     {
@@ -944,7 +949,7 @@ impl FirecrackerRuntime {
             }
             let released = record.offer()?;
             for (id, boxed) in transaction.records()? {
-                let boxed = boxed.map_err(|_| uncertain(&id))?;
+                let boxed = boxed.map_err(|_| uncertain(&id, "its record can't be read"))?;
                 boxed.spec.check()?;
                 if boxed.spec.route.and_then(|route| route.backing) == Some(*key) {
                     // Parent metadata remains the immutable source for its sole Box S lifetime.

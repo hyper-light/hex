@@ -297,7 +297,10 @@ impl Node {
                 }
                 Some(
                     ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_),
-                ) => Err(backends::uncertain(id)),
+                ) => Err(backends::uncertain(
+                    id,
+                    "its VM class has no backend on this node to exec in it",
+                )),
             },
         }
     }
@@ -991,16 +994,18 @@ impl Node {
 
     fn info(&self, record: &BoxRecord, adopted: bool) -> Result<BoxInfo, Refusal> {
         let id = &record.spec.id;
-        if let Some(backend) = self
-            .backend(record.spec.backend_class()?)
-            .map_err(|_| backends::uncertain(id))?
-        {
+        if let Some(backend) = self.backend(record.spec.backend_class()?).map_err(|_| {
+            backends::uncertain(id, "this node has no backend for its record's class")
+        })? {
             let mut info = backend.inspect(id)?;
             if info.class != record.spec.class.class()
                 || info.allocation != record.spec.allocation
                 || info.route != record.spec.route
             {
-                return Err(backends::uncertain(id));
+                return Err(backends::uncertain(
+                    id,
+                    "its backend's VM's class, allocation or route isn't its record's",
+                ));
             }
             info.adopted = adopted;
             crate::recorded::charges::with_last_resort(&mut info, record)?;
@@ -1024,7 +1029,10 @@ impl Node {
                 }
             }
             ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
-                return Err(backends::uncertain(id));
+                return Err(backends::uncertain(
+                    id,
+                    "its VM class has no backend on this node to say its state",
+                ));
             }
         };
         let exit = match record.spec.class {
@@ -1032,7 +1040,10 @@ impl Node {
             // Read after the state, so an init that ended since is reaped here and reported.
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => self.init_exit(record, state)?,
             ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
-                return Err(backends::uncertain(id));
+                return Err(backends::uncertain(
+                    id,
+                    "its VM class has no backend on this node to say its end",
+                ));
             }
         };
         Ok(BoxInfo {
@@ -1879,7 +1890,9 @@ impl Runtime for Node {
         }
         if spec.route.is_some() {
             self.capacity(spec.class.class())?
-                .ok_or_else(|| backends::uncertain(&spec.id))?
+                .ok_or_else(|| {
+                    backends::uncertain(&spec.id, "this node has no capacity of its routed class")
+                })?
                 .validate_route(&spec)?;
         }
         if !spec.devices.is_empty() && !matches!(&spec.class, ClassSpec::Oci(_)) {
@@ -1908,7 +1921,10 @@ impl Runtime for Node {
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
             ClassSpec::Oci(oci) => self.render(&spec, oci)?,
             ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
-                return Err(backends::uncertain(&spec.id));
+                return Err(backends::uncertain(
+                    &spec.id,
+                    "its VM class has no backend on this node to make it",
+                ));
             }
         };
         let id = spec.id.clone();
@@ -1972,7 +1988,10 @@ impl Runtime for Node {
                 }
                 Some(
                     ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_),
-                ) => Err(backends::uncertain(id)),
+                ) => Err(backends::uncertain(
+                    id,
+                    "its VM class has no backend on this node to start it",
+                )),
             },
             Err(e) => Err(e.into()),
         }

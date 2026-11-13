@@ -958,7 +958,7 @@ fn check_completed_metadata(
             hex_core::record::OwnerRef::Box(id) => match records.get(id) {
                 None => continue,
                 Some(Ok(record)) => NativeRecord::Box(record),
-                Some(Err(_)) => return Err(super::uncertain(id)),
+                Some(Err(_)) => return Err(super::uncertain(id, "its record can't be read")),
             },
             hex_core::record::OwnerRef::Pool(pool) => {
                 match pools.iter().find(|record| record.key.pool == *pool) {
@@ -1013,7 +1013,7 @@ fn check_restart(
             hex_core::record::OwnerRef::Box(id) => match records.get(id) {
                 None => continue,
                 Some(Ok(record)) => NativeRecord::Box(record),
-                Some(Err(_)) => return Err(super::uncertain(id)),
+                Some(Err(_)) => return Err(super::uncertain(id, "its record can't be read")),
             },
             hex_core::record::OwnerRef::Pool(pool) => {
                 match pools.iter().find(|record| record.key.pool == *pool) {
@@ -1852,7 +1852,7 @@ pub(in crate::macos) fn preflight_retained(
                 records
                     .get(id)
                     .and_then(|row| row.as_ref().ok())
-                    .ok_or_else(|| super::uncertain(id))?,
+                    .ok_or_else(|| super::uncertain(id, "its record is gone or can't be read"))?,
             ),
             hex_core::record::OwnerRef::Pool(pool) => {
                 let at = pools

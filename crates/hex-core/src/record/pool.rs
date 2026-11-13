@@ -455,21 +455,26 @@ impl<'a> NativeRecord<'a> {
     pub fn refusal(self, cause: LifecycleCause) -> Refusal {
         match self {
             Self::Box(record) => match record.spec.id.try_clone() {
-                Ok(id) => Refusal::Lifecycle { id, cause },
+                Ok(id) => Refusal::Lifecycle {
+                    id,
+                    cause,
+                    why: None,
+                },
                 Err(error) => error,
             },
             Self::Pool(record) => refused(record.key, cause),
         }
     }
 
-    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14): a backing's
-    /// refusal carries them; a box's, once `Refusal::Lifecycle` has its reason (goal 12's), will too.
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan steps 14 and 12): a backing's
+    /// refusal and a box's carry them alike.
     pub fn uncertain(self, why: &str) -> Refusal {
         match self {
             Self::Box(record) => match record.spec.id.try_clone() {
                 Ok(id) => Refusal::Lifecycle {
                     id,
                     cause: LifecycleCause::Uncertain,
+                    why: Some(why.to_owned()),
                 },
                 Err(error) => error,
             },

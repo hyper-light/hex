@@ -51,7 +51,7 @@ impl Recover for MetadataRecovery {
         self.checked.fetch_add(1, Ordering::SeqCst);
         let bytes = std::fs::read(self.metadata.join(record.spec.id.as_str())).unwrap();
         if bytes != b"same initialized metadata" {
-            return Err(NativeRecord::Box(record).refusal(hex_api::LifecycleCause::Uncertain));
+            return Err(NativeRecord::Box(record).uncertain("its initialized metadata changed"));
         }
         Ok(())
     }
@@ -68,7 +68,7 @@ impl Recover for MetadataRecovery {
         for entry in std::fs::read_dir(&self.metadata).unwrap() {
             let id = BoxId::new(entry.unwrap().file_name().to_str().unwrap()).unwrap();
             if !matches!(records.get(&id), Some(Ok(_))) {
-                return Err(uncertain(&id));
+                return Err(uncertain(&id, "its metadata names no retained box"));
             }
         }
         Ok(())
@@ -185,6 +185,7 @@ fn native_metadata_no_retained_box_names_is_refused_before_initialization() {
         Err(Refusal::Lifecycle {
             id: BoxId::new("zz-orphan").unwrap(),
             cause: hex_api::LifecycleCause::Uncertain,
+            why: Some("its metadata names no retained box".to_owned()),
         })
     );
     assert_eq!(checked.load(Ordering::SeqCst), 1);
