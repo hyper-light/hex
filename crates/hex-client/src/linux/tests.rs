@@ -7,6 +7,7 @@ use hex_core::wire::{Answer, Call, Header, Limits, Request, Streams};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::time::Duration;
 
 /// A stand-in agent's listening socket, in a directory of its own.
 fn agent_socket() -> (tempfile::TempDir, std::path::PathBuf, OwnedFd) {
