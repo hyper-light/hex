@@ -86,6 +86,8 @@ struct Record {
     host: RefCell<BTreeMap<String, HostUse>>,
     /// Each image VM's run's rate period, as the test sets it: the platform's window for a VM it sets none for.
     periods: RefCell<BTreeMap<String, Duration>>,
+    /// The image VMs whose run's period the test has made unreadable.
+    unread_periods: RefCell<Vec<String>>,
     rooms: RefCell<Vec<(String, i64)>>,
     rates: RefCell<Vec<(String, u64)>>,
     refuse_rates: std::cell::Cell<bool>,
@@ -114,6 +116,14 @@ impl Managed for Record {
     }
 
     fn rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+        if self
+            .unread_periods
+            .borrow()
+            .iter()
+            .any(|name| name == record.spec.id.as_str())
+        {
+            return Err(Refusal::Broken("its run's period unread".into()));
+        }
         Ok(self
             .periods
             .borrow()
@@ -1272,6 +1282,69 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     assert!(!held.contains(&"vm-3"), "{held:?}");
     io.rates.borrow_mut().clear();
     io.set("vm-3", 0, GIB);
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert!(learner.unread().is_empty());
+    let caps: Vec<u64> = vms
+        .iter()
+        .map(|r| learner.rate(&Scope::of(r).unwrap()).unwrap())
+        .collect();
+    assert_eq!(caps, [4_000, 4_000, 16_000]);
+}
+
+/// Joint plan step 14 (C1; AC-T7.4.1; ROOT, 2026-11-13): an image VM whose run's period can't be read counts whole, at
+/// its receipt, against the fleet's budget until it reads, its learner untouched and the failure told, as one whose use
+/// can't be read does. Do run a window of three image VMs of 16 vCPUs, each booked at 4 CPUs, in a 24-CPU fleet budget,
+/// the third's period unreadable, and answer the class's capacity; then one in which it reads. Expect the first two
+/// capped at their bookings, the 16 CPUs of the third's receipt taken from the budget, the third named among the unread
+/// with its period's refusal and carrying no holding on the answer; then none unread, the third, which has run no
+/// window, at its 16-CPU ceiling and the two idle at their bookings.
+#[test]
+fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until_it_reads() {
+    let io = Record::default();
+    let vms = vec![
+        image_vm("img-1", 1),
+        image_vm("img-2", 2),
+        image_vm("img-3", 3),
+    ];
+    for name in ["img-1", "img-2", "img-3"] {
+        unused(&io, name, GIB);
+    }
+    io.unread_periods.borrow_mut().push("img-3".to_owned());
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    assert_eq!(
+        *io.rates.borrow(),
+        vec![("img-1".to_owned(), 4_000), ("img-2".to_owned(), 4_000)]
+    );
+    let unread: Vec<(&str, String)> = learner
+        .unread()
+        .iter()
+        .map(|(id, why)| (id.as_str(), why.to_string()))
+        .collect();
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert!(
+        unread
+            .iter()
+            .all(|(id, why)| *id == "img-3" && why.contains("period")),
+        "{unread:?}"
+    );
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    let held: Vec<&str> = learned
+        .holdings
+        .iter()
+        .map(|h| match &h.id {
+            hex_api::LearnedHolder::Box(id) => id.as_str(),
+            hex_api::LearnedHolder::Node(run) => panic!("a node VM's holding, {run:?}"),
+        })
+        .collect();
+    assert!(!held.contains(&"img-3"), "{held:?}");
+    io.rates.borrow_mut().clear();
+    io.unread_periods.borrow_mut().clear();
     learner.window(&io, &vms, budget, start + WINDOW).unwrap();
     assert!(learner.unread().is_empty());
     let caps: Vec<u64> = vms
