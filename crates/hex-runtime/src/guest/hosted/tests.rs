@@ -4,16 +4,36 @@
 use std::sync::{Arc, Mutex};
 
 use shards_api::image::{
-    Bound, Channel, MemberEnd, MemberInfo, MemberName, RunEnd, Stats, StatsScope,
+    Bound, Channel, GuestTimes, HostUse, MemberEnd, MemberInfo, MemberName, Microvm, RunEnd, Stats,
+    StatsScope,
 };
 
 use super::*;
 
-/// What the test's run does when its readiness is asked: says it, or ends first.
+/// One answer of the test's run to a readiness wait: its readiness as it stands (none yet, as at a timeout), or its
+/// end.
 #[derive(Debug, Clone)]
 enum Says {
-    Ready(Ready),
+    Stands(Option<Ready>),
     Ends(RunEnd),
+}
+
+/// What the test's run answers, in order: each readiness wait's answer, and each stats read's VM process CPU time (its
+/// host's count, D241's `Microvm`), none where its run host says none. Past its script a wait has its last answer.
+#[derive(Debug, Clone)]
+struct Script {
+    readies: Vec<Says>,
+    progress: Vec<Option<u64>>,
+}
+
+impl Script {
+    /// A run whose readiness is `says` at the first wait.
+    fn says(says: Says) -> Self {
+        Script {
+            readies: vec![says],
+            progress: Vec::new(),
+        }
+    }
 }
 
 /// Every call the test's Shards took.
@@ -23,11 +43,13 @@ struct Calls {
     boots: Vec<(ImageSpec, Duration)>,
     /// Each readiness wait's `seen` and timeout.
     waits: Vec<(Option<Ready>, Duration)>,
+    /// Each stats read's scope and patience.
+    stats: Vec<(StatsScope, Duration)>,
     stops: usize,
 }
 
 struct Shards {
-    says: Says,
+    script: Script,
     calls: Arc<Mutex<Calls>>,
 }
 
@@ -47,15 +69,15 @@ impl Images for Shards {
             .boots
             .push((spec.clone(), patience));
         Ok(Box::new(Run {
-            says: self.says.clone(),
+            script: self.script.clone(),
             calls: Arc::clone(&self.calls),
         }))
     }
 }
 
-/// The test's run of the node image: no member, its readiness as `says` says.
+/// The test's run of the node image: no member, its readiness and progress as its script says.
 struct Run {
-    says: Says,
+    script: Script,
     calls: Arc<Mutex<Calls>>,
 }
 
@@ -87,8 +109,28 @@ impl ImageGuest for Run {
         Err(unasked())
     }
 
-    fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
-        Err(unasked())
+    fn stats(&self, scope: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+        let mut calls = self.calls.lock().unwrap();
+        let read = calls.stats.len();
+        calls.stats.push((scope, patience));
+        let cpu_ns = self
+            .script
+            .progress
+            .get(read)
+            .or(self.script.progress.last())
+            .copied()
+            .flatten();
+        Ok(Stats {
+            microvm: cpu_ns.map(|cpu_ns| Microvm {
+                host: Ok(HostUse {
+                    cpu_ns,
+                    resident_bytes: 0,
+                    footprint_bytes: 0,
+                }),
+                guest: Ok(GuestTimes::default()),
+            }),
+            ..Stats::default()
+        })
     }
 
     fn room(&self, _: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
@@ -112,10 +154,18 @@ impl ImageGuest for Run {
         seen: Option<Ready>,
         timeout: Duration,
     ) -> Result<Option<Ready>, ImageRefusal> {
-        self.calls.lock().unwrap().waits.push((seen, timeout));
-        match &self.says {
-            Says::Ready(ready) => Ok(Some(*ready)),
-            Says::Ends(end) => Err(ImageRefusal::Ended(end.clone())),
+        let mut calls = self.calls.lock().unwrap();
+        let asked = calls.waits.len();
+        calls.waits.push((seen, timeout));
+        match self
+            .script
+            .readies
+            .get(asked)
+            .or(self.script.readies.last())
+        {
+            Some(Says::Stands(ready)) => Ok(*ready),
+            Some(Says::Ends(end)) => Err(ImageRefusal::Ended(end.clone())),
+            None => Ok(None),
         }
     }
 
@@ -172,13 +222,27 @@ fn config() -> HostedConfig {
     }
 }
 
-fn hosted(says: Says) -> (Hosted, Arc<Mutex<Calls>>) {
+/// The node's guest under shards-init, its first boot to come (nothing learned), over a Shards whose run follows
+/// `script`.
+fn hosted(script: Script) -> (Hosted, Arc<Mutex<Calls>>) {
     let calls = Arc::new(Mutex::new(Calls::default()));
     let shards = Shards {
-        says,
+        script,
         calls: Arc::clone(&calls),
     };
     (Hosted::new(Arc::new(shards), config()), calls)
+}
+
+/// The same, once its node has seen a READY: its wait bounded by the slowest seen (W*). Any learned bound does, the
+/// cases' runs being at or past it as their scripts say.
+fn learned(script: Script) -> (Hosted, Arc<Mutex<Calls>>) {
+    let calls = Arc::new(Mutex::new(Calls::default()));
+    let shards = Shards {
+        script,
+        calls: Arc::clone(&calls),
+    };
+    let ready = Patience::seeded("guest.hosted.ready", Duration::from_millis(1));
+    (Hosted::with_ready(Arc::new(shards), config(), ready), calls)
 }
 
 /// AC-T7.4.1, joint plan step 39 (original; docs/design/node-under-shards-init.md §4): the node VM boots under
@@ -193,7 +257,7 @@ fn hosted(says: Says) -> (Hosted, Arc<Mutex<Calls>>) {
 /// Then READY waited for before the boot returns: none seen yet, following its run, its answer the guest's.
 #[test]
 fn original_the_node_vm_boots_under_shards_init_with_hexs_own_init_and_waits_for_its_ready() {
-    let (hosted, calls) = hosted(Says::Ready(Ready::OnTime));
+    let (hosted, calls) = hosted(Script::says(Says::Stands(Some(Ready::OnTime))));
     let booted = hosted.boot().unwrap();
     assert_eq!(booted.ready, Ready::OnTime);
     let calls = calls.lock().unwrap();
@@ -256,7 +320,7 @@ fn original_a_node_vm_whose_run_ends_before_ready_is_refused_and_stopped() {
         RunEnd::Exited(1),
         RunEnd::Failed("its VM failed".to_owned()),
     ] {
-        let (hosted, calls) = hosted(Says::Ends(end.clone()));
+        let (hosted, calls) = hosted(Script::says(Says::Ends(end.clone())));
         match hosted.boot() {
             Err(Refusal::Os { why, .. }) => {
                 assert!(
@@ -271,16 +335,87 @@ fn original_a_node_vm_whose_run_ends_before_ready_is_refused_and_stopped() {
     }
 }
 
-/// AC-T7.4.1 (§6): READY's deadline passed with none is a run-out. Do: boot on a Shards whose run says its deadline
-/// passed. Expect: refused, typed, and its run stopped; READY late, past its deadline, is still READY and its guest.
+/// AC-T7.4.1, decision 9 (original; the person's rule of 2026-11-13): a boot slower than every earlier one is not
+/// stopped. Its node's slowest READY seen (W*) is a bound only while READYs come within it. Do: boot with W* learned on
+/// a Shards whose run is still starting at W*, its VM's CPU time advancing over the next window, then says READY.
+/// Expect:
+/// - the run given no deadline, as Hex's init would end the boot at one;
+/// - READY waited for to W*, then on past it, following the run, a window at a time;
+/// - the run's progress read between windows, its VM process's CPU time;
+/// - the guest returned, its run never stopped.
 #[test]
-fn a_passed_deadline_is_refused_and_a_late_ready_is_ready() {
-    let (hosted_passed, calls) = hosted(Says::Ready(Ready::Passed(7)));
-    assert!(matches!(hosted_passed.boot(), Err(Refusal::Os { .. })));
+fn original_a_boot_slower_than_every_earlier_one_is_not_stopped() {
+    let (hosted, calls) = learned(Script {
+        readies: vec![
+            Says::Stands(None),
+            Says::Stands(None),
+            Says::Stands(Some(Ready::OnTime)),
+        ],
+        progress: vec![Some(100), Some(200), Some(300)],
+    });
+    let booted = hosted.boot().unwrap();
+    assert_eq!(booted.ready, Ready::OnTime);
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.boots[0].0.ready_by, None,
+        "a learned bound is never the run's deadline"
+    );
+    assert_eq!(
+        calls.stops, 0,
+        "a boot slower than the slowest seen was stopped"
+    );
+    assert_eq!(calls.waits.len(), 3, "{:?}", calls.waits);
+    assert!(
+        calls
+            .waits
+            .iter()
+            .all(|(_, timeout)| *timeout < Duration::MAX),
+        "past W* each window is W*: {:?}",
+        calls.waits
+    );
+    assert!(
+        !calls.stats.is_empty(),
+        "past W* its run's progress was never read"
+    );
+}
+
+/// AC-T7.4.1, decision 9 (original): past W*, a run that shows no progress over a whole W* window is refused, and only
+/// then. Do: boot with W* learned on a Shards whose run is still starting at W*, its VM's CPU time standing still over
+/// the next window. Expect: the boot refused, typed, naming the progress that stood, and its run stopped.
+#[test]
+fn original_a_boot_with_no_progress_over_a_whole_window_past_its_bound_is_refused() {
+    let (hosted, calls) = learned(Script {
+        readies: vec![Says::Stands(None)],
+        progress: vec![Some(100), Some(100)],
+    });
+    match hosted.boot() {
+        Err(Refusal::Os { why, .. }) => assert!(why.contains("no progress"), "{why}"),
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("a stalled run's guest was returned"),
+    }
     assert_eq!(calls.lock().unwrap().stops, 1);
-    let (hosted_late, calls) = hosted(Says::Ready(Ready::Late(7)));
-    assert_eq!(hosted_late.boot().unwrap().ready, Ready::Late(7));
-    assert_eq!(calls.lock().unwrap().stops, 0);
+}
+
+/// AC-T7.4.1, decision 9: a deadline passed is waited past. A run that carries one (Hex gives none) says its ready-by
+/// passed, then READY late. Do: boot on a Shards whose run says its deadline passed, then READY late. Expect: the late
+/// READY is the guest's, its run never stopped.
+#[test]
+fn a_passed_deadline_is_waited_past_to_its_late_ready() {
+    let (hosted, calls) = hosted(Script {
+        readies: vec![
+            Says::Stands(Some(Ready::Passed(7))),
+            Says::Stands(Some(Ready::Late(9))),
+        ],
+        progress: Vec::new(),
+    });
+    assert_eq!(hosted.boot().unwrap().ready, Ready::Late(9));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.stops, 0);
+    assert_eq!(
+        calls.waits[1].0,
+        Some(Ready::Passed(7)),
+        "the wait went on past what it had seen"
+    );
 }
 
 /// AC-T7.4.1 (§4): Shards' refusals are typed by what they refused. Do: map an image the store lacks, a grant the

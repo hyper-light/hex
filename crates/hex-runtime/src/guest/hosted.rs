@@ -110,6 +110,20 @@ impl Hosted {
         }
     }
 
+    /// The same, its READY's wait as `ready` has learned it: a node that has seen READYs.
+    #[cfg(test)]
+    pub(crate) fn with_ready(
+        images: Arc<dyn Images>,
+        config: HostedConfig,
+        ready: Patience,
+    ) -> Self {
+        Self {
+            images,
+            config,
+            ready,
+        }
+    }
+
     /// Boots the node VM and follows it to READY.
     /// - **The boot** waits on its run host: `Duration::MAX`, until the run starts or its host ends.
     /// - **READY** is waited for to the learned deadline, and the run is given that deadline too, so Hex's init holds
