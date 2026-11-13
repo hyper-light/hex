@@ -594,8 +594,9 @@ impl GuestRuntime {
 
     /// Takes back the guest a node before this one recorded, if there is one: attached, dialed and
     /// greeted as a boot's is, its boxes then the node's. One gone or ended is forgotten, and the node boots
-    /// its own; one that runs and won't answer is stopped first, so none is left beside the next. A guest
-    /// that can't be told gone or taken back refuses the node by type, naming why, rather than boot
+    /// its own: Shards' take-back (D215, on every host) proves it by its process seen to have exited or its
+    /// pid another start's. One that runs and won't answer is stopped first, so none is left beside the next.
+    /// A guest that can't be told gone or taken back refuses the node by type, naming why, rather than boot
     /// another beside one that may run.
     fn attach_recorded(&self) -> Result<(), Refusal> {
         let Some(path) = &self.record else {
@@ -607,7 +608,16 @@ impl GuestRuntime {
         let guest: Arc<dyn shards_api::Guest> =
             match self.guests.attach(&identity, &self.cpu_spec()) {
                 Ok(guest) => guest.into(),
-                Err(shards_api::Refusal::Gone { .. } | shards_api::Refusal::Ended(_)) => {
+                Err(
+                    shards_api::Refusal::Gone { .. }
+                    | shards_api::Refusal::Ended(_)
+                    | shards_api::Refusal::Process {
+                        failure:
+                            shards_api::ProcessFailure::Exited
+                            | shards_api::ProcessFailure::DifferentStart { .. },
+                        ..
+                    },
+                ) => {
                     return held::remove(path);
                 }
                 Err(why) => return Err(refusal("taking back the node's guest", &why)),
