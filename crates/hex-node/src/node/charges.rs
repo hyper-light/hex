@@ -183,7 +183,8 @@ fn vcpus(allocation: Allocation) -> Result<u32, Refusal> {
     })
 }
 
-/// Writes what `bounds` holds that `written` doesn't, in the order the kernel needs, and keeps it as written.
+/// Writes what `bounds` holds that `written` doesn't, in the order the kernel needs, and keeps it as written; a file
+/// written before that `bounds` sets no more goes back to the kernel's default.
 fn rewrite(
     io: &impl Cgroups,
     cgroup: &BoxCgroup,
@@ -191,6 +192,17 @@ fn rewrite(
     written: &mut Vec<Write>,
 ) -> Result<(), Refusal> {
     let writes = hex_core::cgroup::writes(bounds, &[])?;
+    // A file written before that `bounds` sets no more goes back to the kernel's default first, before any bound is
+    // raised past it: a VM's `memory.max` its create wrote is lifted, with the `memory.swap.max` it came with (C5).
+    let defaults = hex_core::cgroup::writes_all(bounds, &[])?;
+    for before in written.iter() {
+        if writes.iter().any(|write| write.file == before.file) {
+            continue;
+        }
+        if let Some(default) = defaults.iter().find(|default| default.file == before.file) {
+            io.write(cgroup, default)?;
+        }
+    }
     for write in &writes {
         if !written.contains(write) {
             io.write(cgroup, write)?;

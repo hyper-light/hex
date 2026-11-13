@@ -153,8 +153,8 @@ guarantee needs a VM's siblings to be VMs booked by this rule, and their parent 
   a parent's `memory.high` would reclaim from VMs within their budgets whenever one passed its own, where C5 holds
   that one alone.
 
-`charge::Node::placement` gives these bounds: the parent's, and each VM's `cpu.weight` by booking, `cpu.max` and
-`memory.max` its ceiling, `memory.high` its budget at most its ceiling.
+`charge::Node::placement` gives these bounds: the parent's, and each VM's `cpu.weight` by booking, `cpu.max` its
+ceiling and `memory.high` its budget. No VM has a `memory.max` (C5).
 
 **One scale for every child of the node's cgroup** (ROOT, 2026-11-12). A process or OCI box is booked at its
 allocation until it is learned: the native classes offer no runtime cost (`facts::capacity`), so a native box's
@@ -192,8 +192,13 @@ on hardware (ROOT's fairness run).
 - **Each VM's budget** is its booking plus a share of the fleet's slack (`budget - sum(booking)`) in proportion to
   its booking, so the budgets sum to the fleet's budget exactly and no two VMs grow into one byte of slack in one
   window. Its room, what D188 tells its guest, is its budget less what it holds. On Linux its VMM's cgroup
-  `memory.high` is its budget (throttled past it, never OOM-killed: cgroup-v2.rst, `memory.high`) and `memory.max`
-  its ceiling.
+  `memory.high` is its budget (throttled past it, never OOM-killed: cgroup-v2.rst, `memory.high`).
+- **No hard memory cap** (ROOT, 2026-11-13): a VM has no `memory.max`, cold or warm, and Linux lifts the one its
+  create wrote (with the `memory.swap.max` it came with) at its first window. Hex can't read a VMM's own memory apart
+  from its guest's touched RAM (D241's footprint and `memory.stat` both count them together), so a hard cap there
+  would be a chosen bound, and one at the most its windows have shown would kill a VMM the first time it needs more:
+  a kill can't follow its party as a wait does after a run-out. Its budget's hold, the last resort and the fleet's own
+  budget hold it instead. Its CPU keeps its cap at its ceiling (C4): a CPU cap only throttles.
 - **An over VM** is held at its budget; its booking rises into slack as other VMs' bookings fall or end.
 - **Last**, when what the fleet's VMs hold plus the fastest growth on record in one window passes the fleet's
   budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
@@ -314,10 +319,11 @@ reaches the view settled with goal 13 the same day:
 - The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
   cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
-  (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
-  parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each process and OCI box's and `.oci`'s `cpu.weight`
-  on the same scale (C4). Each Shards guest's room is refused `Awaits(GuestRoom)` (C7). A failed window is kept, and the
-  capacity answers then carry nothing learned, so the class's VMs are booked whole until a window passes.
+  (`BoxCgroup::set`; a VM's create already wrote its ceiling, whose `memory.max` the first window lifts, C5): each
+  VM's `cpu.weight` and `memory.high`, the fleet's parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each
+  process and OCI box's and `.oci`'s `cpu.weight` on the same scale (C4). Each Shards guest's room is refused
+  `Awaits(GuestRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so the
+  class's VMs are booked whole until a window passes.
 - `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
   Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
   message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,

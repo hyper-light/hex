@@ -413,9 +413,10 @@ pub struct Placement<K> {
     /// The fleet's parent: `cpu.max` the fleet's CPU budget, `cpu.weight` that budget on the machine's scale
     /// ([`fleet_weight`]). No memory bound of its own: its VMs' budgets sum to the fleet's (C5).
     pub fleet: hex_api::Bounds,
-    /// Each VM: `cpu.weight` by its booking ([`Node::weights`]), `cpu.max` and `memory.max` its ceiling, and
-    /// `memory.high` its budget ([`Node::budgets`]), at most its ceiling, as the kernel holds `memory.high` under
-    /// `memory.max`.
+    /// Each VM: `cpu.weight` by its booking ([`Node::weights`]), `cpu.max` its ceiling, and `memory.high` its budget
+    /// ([`Node::budgets`]). No `memory.max` (ROOT, 2026-11-13): Hex can't read a VMM's own memory apart from its guest's
+    /// touched RAM, so a hard cap there would be a chosen bound, and a VM whose VMM first needs more than its windows
+    /// have shown would be killed at it; its budget's hold and the last resort take it instead (C5).
     pub vms: Vec<(K, hex_api::Bounds)>,
 }
 
@@ -1003,7 +1004,7 @@ impl<K: Ord + Copy> Node<K> {
 
     /// The bounds that hold the rule (C4, C5) on a machine of `machine_milli` CPU: the fleet's parent, its CPU
     /// budget its cap (at least the kernel's least quota, `hex_api::MIN_CPU_MILLI`) and its weight among its
-    /// siblings ([`fleet_weight`]); each VM by its weight, budget and ceiling.
+    /// siblings ([`fleet_weight`]); each VM by its weight, its CPU ceiling and its memory budget.
     pub fn placement(&self, machine_milli: u64) -> Result<Placement<K>, ChargeError> {
         let milli =
             |what: &'static str, n: u64| u32::try_from(n).map_err(|_| ChargeError::Overflow(what));
@@ -1024,14 +1025,13 @@ impl<K: Ord + Copy> Node<K> {
             })?;
         let each = self.vms.iter().zip(self.weights()?).zip(self.budgets()?);
         for (((id, vm), (_, weight)), (_, budget)) in each {
-            let [cpu, mem, _] = ceiling_of(&self.classes, &vm.class);
+            let [cpu, _, _] = ceiling_of(&self.classes, &vm.class);
             vms.push((
                 *id,
                 hex_api::Bounds {
                     cpu_weight: Some(weight),
                     cpu_max_milli: Some(milli("a VM's ceiling", cpu)?),
-                    memory_max: Some(mem),
-                    memory_high: Some(budget.bytes.min(mem)),
+                    memory_high: Some(budget.bytes),
                     ..hex_api::Bounds::default()
                 },
             ));
