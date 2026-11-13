@@ -91,9 +91,10 @@ Every member operation D231 doesn't give (stdin, a terminal, exec, signals) is r
 status, 128 plus a signal's number where one ended it, kept as the number it is rather than guessed back into a
 signal), `Stopped` is `Exit::Signal(9)` (HEX-RT-12's KILL), `Failed` is `Exit::Unknown`.
 
-**Grants (goal 15).** The boot's `publish` and `egress` come from goal 15's `program(&grants)`. Until it lands, the
-boot publishes nothing and keeps none of the image's grants (`Keep::Only` empty for egress and MCP, no DNS): default
-deny. D231 can only narrow the image's own grants, never widen them.
+**Grants (goal 15).** The boot's `publish` and `egress` come from goal 15's `program(&grants)`
+(docs/design/network-grants.md N4): the publishes its grants name, and none of the image's own grants past the VM
+(`Keep::Only` empty for egress, MCP and destinations, no DNS): default deny. D231 can only narrow the image's own
+grants, never widen them.
 
 ## 3. States
 
