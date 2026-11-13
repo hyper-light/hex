@@ -201,6 +201,7 @@ impl Runtime for Callback {
                     return Err(Refusal::Backing {
                         key,
                         cause: LifecycleCause::Uncertain,
+                        why: None,
                     });
                 }
                 CleanupReply::WrongGeneration => observed.key.generation = [99; 16],
@@ -282,6 +283,7 @@ fn driver_reserves_the_exact_backing_before_unlocked_native_callback() {
         if wrong_generation {
             assert!(matches!(result, Err(Error::Runtime(Refusal::Backing {
                 key: actual, cause: LifecycleCause::Uncertain,
+                why: None,
             })) if actual == key));
             assert!(driver.state.lock().unwrap().admission.is_some());
         } else {

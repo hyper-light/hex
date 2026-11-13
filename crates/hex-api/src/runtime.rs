@@ -14,6 +14,7 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: *key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -23,12 +24,14 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: grant.key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
     fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
         Err(Refusal::Backing {
             key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -139,6 +142,24 @@ pub trait Runtime: Send + Sync {
     /// plan steps 12 and 14, C1): counters since the VM booted, so a reader's window is between two of its reads.
     /// Refused, typed, for a part its run host didn't read, never read as none, for a box not running, and by a class
     /// whose boxes run no VM process of their own, naming the class.
+    /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run, read as its
+    /// run ended (goal 54's change 3: a Shards image VM's final [`HostUse`], its window the whole run): `None` where the
+    /// box has no VM process of its own, or where none could be read at its end (its run had ended before its delete, or
+    /// its last read failed). A box already gone is refused `NoSuchBox`, never answered with a use made up.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
+        self.delete(id).map(|()| None)
+    }
+
+    /// Box `id` once its start has come to its end: a box still booting is followed to its boot's answer as decision 9
+    /// has a wait follow its party (its W* told when passed, refused only at the party's end, no timer), then answered as
+    /// [`Runtime::inspect`] answers it, its run started; or its run's own failure, [`Refusal::Failed`] in its runtime's
+    /// words, where it never started. A box not booting is answered at once, as `inspect` answers it, as is every box of
+    /// a class whose start answers only once its box runs (kiln's HexVms adapter, ROOT 2026-11-13: a start past W*
+    /// answers Pending, and its caller waits here rather than polling).
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.inspect(id)
+    }
+
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         Err(Refusal::Invalid {
             what: "host_use",
@@ -162,6 +183,9 @@ pub struct HostUse {
     pub resident_bytes: u64,
     /// Nanoseconds each vCPU has run the guest, by vCPU index, one for each vCPU of the VM's size.
     pub guest_ns: Vec<u64>,
+    /// The time these counters span: from the VM's run's start, as its boot answered, to this read (goal 54's change
+    /// 3: kiln learns the overhead a VM costs its host over its window, at usage and at its delete).
+    pub window: Duration,
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
@@ -319,6 +343,25 @@ impl RouteKey {
             ));
         }
         Ok(())
+    }
+}
+
+/// A node VM's run (joint plan step 39): a VM the node runs for itself, its `oci` class's guest under shards-init, never
+/// a box. Minted by the node's store as the VM is booked, it names the VM's record and its receipt among the node's
+/// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one, so no
+/// box API can name the node's VM; the wire carries one only as the holder a node's learned capacity names
+/// ([`LearnedHolder`]), which no call reads back as a box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeRun([u8; 16]);
+
+impl NodeRun {
+    /// The run `bytes` name, as its node's store minted it.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn bytes(&self) -> &[u8; 16] {
+        &self.0
     }
 }
 
@@ -1002,12 +1045,33 @@ pub struct LearnedPrior {
 /// equal by a test in hex-node), so a node never has more running VMs to report than this.
 pub const MAX_LEARNED_HOLDINGS: usize = 1 << u16::BITS;
 
-/// Joint plan step 14 (C3, C8): one running microVM's holding, by its box: its booking and the memory and disk it
-/// holds past it. The scheduler books the VM at it in the machine's capacity view (goal 13's `Driver::rebook`).
+/// Who holds room among a node's learned holdings and ends (joint plan steps 14 and 39, ROOT's ruling of 2026-11-13): a
+/// box, or a node VM the node runs for itself, a holder of its own in its ledger beside the boxes. Written as a box's id
+/// alone, as a box's record named the box its last resort ended before node VMs held room, so those records read as
+/// they were written (append-only); a node VM's as its run's bytes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LearnedHolder {
+    Box(BoxId),
+    Node(NodeRun),
+}
+
+impl LearnedHolder {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(match self {
+            Self::Box(id) => Self::Box(id.try_clone()?),
+            Self::Node(run) => Self::Node(*run),
+        })
+    }
+}
+
+/// Joint plan step 14 (C3, C8): one running microVM's holding, by its holder (a box's, a node VM's): its booking and
+/// the memory and disk it holds past it. The scheduler books the VM at it in the machine's capacity view (goal 13's
+/// `Driver::rebook`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedHolding {
-    pub id: BoxId,
+    pub id: LearnedHolder,
     pub holding: CapacityResources,
 }
 
@@ -1017,7 +1081,7 @@ pub struct LearnedHolding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedEnd {
-    pub id: BoxId,
+    pub id: LearnedHolder,
     /// What it held, and its memory budget, in bytes.
     pub held: u64,
     pub budget: u64,
@@ -1190,10 +1254,10 @@ impl Learned {
         }
         let mut ids = std::collections::BTreeSet::new();
         for holding in &self.holdings {
-            if !ids.insert(holding.id.as_str()) {
+            if !ids.insert(&holding.id) {
                 return Err(Refusal::Invalid {
                     what: "learned holdings",
-                    why: "a box's holding repeats".to_owned(),
+                    why: "a holder's holding repeats".to_owned(),
                 });
             }
         }
@@ -1520,6 +1584,7 @@ impl Capacity {
                 return Err(Refusal::Backing {
                     key,
                     cause: LifecycleCause::Pending,
+                    why: None,
                 });
             }
         }
@@ -1909,6 +1974,10 @@ pub struct BoxInfo {
     /// none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
+    /// Its credential grants as its record holds them (joint plan step 33, Shards' D242; docs/design/credential-grants.md
+    /// C4): a Shards image VM's, none for any other class. After `ended`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<crate::CredentialGrant>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -1934,6 +2003,30 @@ pub struct Usage {
     /// the wire means `None` (append-only, CLAUDE.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<GuestTime>,
+    /// How a Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started,
+    /// which the box's record keeps too: `None` for a box with no Shards image run. Added after `guest`, so absent on
+    /// the wire means `None` (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<StartedFrom>,
+}
+
+/// How a Shards image VM's microVM started (D253), as its run host says it as the run starts: Shards' own five
+/// (shards-api's `image::StartedFrom`), so Hex can say how a box came up. The node's wire tags each by its place here,
+/// so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartedFrom {
+    /// Booted, with no template to restore or save: a guest its node gave (`SHARDS_KERNEL`, `SHARDS_INIT`), or a host
+    /// whose hypervisor restores no snapshot.
+    Booted,
+    /// Booted, saving its image's template on the way, none being saved.
+    Saved,
+    /// Restored from its image's template.
+    Restored,
+    /// Booted, saving another, its image's template having failed to restore: that one removed.
+    Replaced,
+    /// A warm run host's, its microVM ready before its run asked (D253's pools).
+    Warm,
 }
 
 /// A microVM's guest time per vCPU, or what its backend awaits to read it.
@@ -1964,13 +2057,29 @@ fn per_vcpu<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u64
     )
 }
 
+/// A refusal's reason as its message gives it: `: why` after the rest, or nothing where it gives none.
+struct Said<'a>(&'a Option<String>);
+
+impl std::fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(why) => write!(f, ": {why}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("native backing {key:?}: {cause:?}")]
+    /// Native backing `key` refused for `cause`, and `why` in the refusing site's own words where it gives them (joint
+    /// plan step 14; ROOT, 2026-11-13: an `Uncertain` with no reason is a CLAUDE.md §3 gap). Appended (the wire IDENTITY
+    /// moves); `None` where a site has no reason to give past its cause.
+    #[error("native backing {key:?}: {cause:?}{}", Said(.why))]
     Backing {
         key: BackingKey,
         cause: LifecycleCause,
+        why: Option<String>,
     },
 
     #[error("{what} isn't valid: {why}")]
@@ -2029,6 +2138,12 @@ pub enum Refusal {
     /// (append-only).
     #[error("box {id}'s run failed: {why}")]
     Failed { id: BoxId, why: String },
+    /// What its node isn't configured to serve, `what`, and why it's needed (joint plan step 33): a Shards image VM's
+    /// credential grants on a node its orchestrator gave no lessors ([`crate::lease::Lessors`]), whose values it could
+    /// lease from no one. Its configuration's, not its platform's or its revision's: the same node given lessors serves
+    /// it. After `Failed` (append-only).
+    #[error("this node is configured with no {what}: {why}")]
+    Unconfigured { what: &'static str, why: String },
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's
@@ -2944,7 +3059,7 @@ mod route_tests {
         c.routes[0].backing = Some(backing.key);
         spec.route.as_mut().unwrap().backing = Some(backing.key);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause:LifecycleCause::Pending }) if key == backing.key)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == backing.key)
         );
         c.backings[0].phase = BackingPhase::Live;
         c.validate_route(&spec).unwrap();
@@ -3048,7 +3163,7 @@ mod route_tests {
         assert_eq!(c.validate_route(&spec).unwrap(), fresh);
         spec.route.as_mut().unwrap().backing = Some(parent);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending }) if key == parent)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == parent)
         );
         spec.route.as_mut().unwrap().backing = Some(BackingKey {
             generation: [9; 16],

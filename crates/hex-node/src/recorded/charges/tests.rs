@@ -6,6 +6,14 @@ use super::*;
 use hex_api::{Allocation, BoxId, BoxSpec, ClassSpec, OciSpec};
 use hex_core::record::{NativeScope, ProcId};
 
+/// The box a learned holding or end names: this learner holds boxes alone.
+fn box_of(holder: &hex_api::LearnedHolder) -> &str {
+    match holder {
+        hex_api::LearnedHolder::Box(id) => id.as_str(),
+        hex_api::LearnedHolder::Node(run) => panic!("a box's learner named a node VM, {run:?}"),
+    }
+}
+
 const GIB: u64 = 1 << 30;
 
 fn res(cpu_milli: u64, mem_bytes: u64) -> CapacityResources {
@@ -345,7 +353,7 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
         .iter()
         .map(|end| {
             (
-                end.id.as_str(),
+                box_of(&end.id),
                 end.held,
                 end.budget < end.held,
                 (end.fleet_held, end.fleet_growth, end.fleet_budget),
@@ -427,7 +435,7 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
     assert_eq!(
         learned.ended,
         vec![LearnedEnd {
-            id: BoxId::new("vm-second").unwrap(),
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-second").unwrap()),
             held: 7 * GIB,
             budget: 5 * GIB,
             band: 0,
@@ -470,7 +478,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
     books.store.begin(&made).unwrap();
     books.store.made(&made).unwrap();
     let end = hex_api::LearnedEnd {
-        id: spec.id.clone(),
+        id: hex_api::LearnedHolder::Box(spec.id.clone()),
         held: 7 * GIB,
         budget: 6 * GIB,
         band: 0,
@@ -505,6 +513,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             published: Vec::new(),
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         })
         .unwrap();
     assert_eq!(info.last_resort, Some(end));
@@ -549,7 +558,7 @@ fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
             .unwrap()
             .ended
             .iter()
-            .map(|end| end.id.as_str().to_owned())
+            .map(|end| box_of(&end.id).to_owned())
             .collect()
     };
     assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
@@ -609,7 +618,7 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
         .unwrap()
         .last_resort;
     let end = end.expect("vm-2's why, written before its end");
-    assert_eq!((end.id.as_str(), end.held), ("vm-2", 12 * GIB));
+    assert_eq!((box_of(&end.id), end.held), ("vm-2", 12 * GIB));
     for other in [&vms[0], &vms[2]] {
         let record = store.get(&other.spec.id).unwrap().unwrap().unwrap();
         assert_eq!(record.last_resort, None);
@@ -629,7 +638,7 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
     let made = recorded_three(&store);
     let scope = Scope::Native(*made[1].native_scope.unwrap().bytes());
     let intent = LearnedEnd {
-        id: made[1].spec.id.clone(),
+        id: hex_api::LearnedHolder::Box(made[1].spec.id.clone()),
         held: 7 * GIB,
         budget: 6 * GIB,
         band: 0,
@@ -710,7 +719,7 @@ fn w14_a_capping_learner_holds_its_machines_population_of_vms_of_as_many_classes
 #[test]
 fn w14_the_last_resorts_queues_are_kept_to_its_bound() {
     let end = |n: u8| LearnedEnd {
-        id: BoxId::new(&format!("vm-{n}")).unwrap(),
+        id: hex_api::LearnedHolder::Box(BoxId::new(&format!("vm-{n}")).unwrap()),
         held: 2 * GIB,
         budget: GIB,
         band: 0,
@@ -732,8 +741,12 @@ fn w14_the_last_resorts_queues_are_kept_to_its_bound() {
         })
     );
     for n in 1..=3 {
-        last.write(end(n).id, Scope::Native([n; 16]), Some(end(n)))
-            .unwrap();
+        last.write(
+            super::boxed(&end(n)).unwrap(),
+            Scope::Native([n; 16]),
+            Some(end(n)),
+        )
+        .unwrap();
     }
     let kept: Vec<String> = last
         .unrecorded()
@@ -781,6 +794,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         footprint_bytes: held,
         resident_bytes: held,
         guest_ns: vec![each_ns; usize::try_from(vcpus).unwrap()],
+        window: std::time::Duration::ZERO,
     };
     io.host
         .borrow_mut()
@@ -892,6 +906,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
             footprint_bytes: GIB,
             resident_bytes: GIB,
             guest_ns: vec![0; 16],
+            window: std::time::Duration::ZERO,
         },
     );
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
@@ -920,7 +935,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         .unwrap()
         .holdings
         .iter()
-        .map(|holding| holding.id.as_str().to_owned())
+        .map(|holding| box_of(&holding.id).to_owned())
         .collect();
     held.sort();
     assert_eq!(held, ["img-1", "vm-1"]);
@@ -1011,7 +1026,14 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
         .learned(Class::Shards, &[cost()], &vms)
         .unwrap()
         .unwrap();
-    let held: Vec<&str> = learned.holdings.iter().map(|h| h.id.as_str()).collect();
+    let held: Vec<&str> = learned
+        .holdings
+        .iter()
+        .map(|h| match &h.id {
+            hex_api::LearnedHolder::Box(id) => id.as_str(),
+            hex_api::LearnedHolder::Node(run) => panic!("a node VM's holding, {run:?}"),
+        })
+        .collect();
     assert!(!held.contains(&"vm-3"), "{held:?}");
     io.rates.borrow_mut().clear();
     io.set("vm-3", 0, GIB);

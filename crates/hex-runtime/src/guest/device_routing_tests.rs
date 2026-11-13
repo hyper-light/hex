@@ -167,7 +167,7 @@ fn every_supported_host_reaches_its_existing_shards_backend() {
 #[test]
 fn conformance_accepts_every_supported_host_backend() {
     let guests = shards_api::sim::SimGuests::new(|_| shards_api::End::PowerOff);
-    let serving = config().spec();
+    let serving = config().spec().unwrap();
     let subject = shards_api::conformance::Subject {
         guests: &guests,
         serving: serving.clone(),

@@ -29,6 +29,7 @@ impl Endpoint {
             return Err(Refusal::Backing {
                 key: self.key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             });
         }
         Ok(())
@@ -58,6 +59,7 @@ impl Runtime for Endpoint {
         Err(Refusal::Backing {
             key: *key,
             cause: LifecycleCause::Uncertain,
+            why: None,
         })
     }
     fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
@@ -67,6 +69,7 @@ impl Runtime for Endpoint {
         Err(Refusal::Backing {
             key,
             cause: LifecycleCause::Uncertain,
+            why: None,
         })
     }
     fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
@@ -610,6 +613,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
     let expected = Refusal::Backing {
         key,
         cause: LifecycleCause::Uncertain,
+        why: None,
     };
     assert_eq!(refreshed.unwrap(), vec![expected.clone()]);
     let reply = service.command(dto::Command::Retry).unwrap();
@@ -640,7 +644,11 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
         LifecycleCause::Busy,
         LifecycleCause::Uncertain,
     ] {
-        let why = Refusal::Backing { key, cause };
+        let why = Refusal::Backing {
+            key,
+            cause,
+            why: None,
+        };
         assert_eq!(drain_failure(key, why.clone()).unwrap(), why);
         let text = cleanup_report(&why).unwrap();
         assert!(text.contains(&"ff".repeat(key.pool.len())));
@@ -661,6 +669,7 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
         Refusal::Backing {
             key: foreign,
             cause: LifecycleCause::Uncertain,
+            why: None,
         },
         Refusal::Invalid {
             what: "native authority",

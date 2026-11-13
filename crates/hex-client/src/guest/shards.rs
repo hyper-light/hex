@@ -105,8 +105,11 @@ impl Write for ShardsStream {
 
 impl Duplex for ShardsStream {
     fn try_clone(&self) -> io::Result<DuplexOwner> {
-        own_duplex(Self(self.0.try_clone()?))
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+        let clone = self.0.try_clone()?;
+        // Winsock's duplicate is inheritable (hex_afunix::no_inherit).
+        #[cfg(windows)]
+        hex_afunix::no_inherit(clone.handle())?;
+        own_duplex(Self(clone)).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {

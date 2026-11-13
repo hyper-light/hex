@@ -8,6 +8,14 @@ use hex_api::{LearnedEnd, LearnedPrior, LearnedUse};
 use hex_core::record::BoxRecord;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
+/// The box a learned holding or end names: this learner holds boxes alone.
+fn box_of(holder: &hex_api::LearnedHolder) -> &str {
+    match holder {
+        hex_api::LearnedHolder::Box(id) => id.as_str(),
+        hex_api::LearnedHolder::Node(run) => panic!("a box's learner named a node VM, {run:?}"),
+    }
+}
+
 const GIB: u64 = 1 << 30;
 
 /// A VM's first read: its class, its receipt and its band, no place in a start order nor intent on its record.
@@ -325,7 +333,14 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
         )
         .unwrap();
     let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
-    let ids: Vec<&str> = learned.holdings.iter().map(|h| h.id.as_str()).collect();
+    let ids: Vec<&str> = learned
+        .holdings
+        .iter()
+        .map(|h| match &h.id {
+            hex_api::LearnedHolder::Box(id) => id.as_str(),
+            hex_api::LearnedHolder::Node(run) => panic!("a node VM's holding, {run:?}"),
+        })
+        .collect();
     assert_eq!(ids, ["vm-2", "vm-1"], "most past its receipt first");
     assert_eq!(learned.holdings[0].holding.mem_bytes, 2 * GIB);
     assert_eq!(
@@ -604,7 +619,7 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
     assert_eq!(
         learned.ended,
         vec![LearnedEnd {
-            id: BoxId::new("vm-2").unwrap(),
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
             held: 7 * GIB,
             budget: why.budget,
             band: 0,
@@ -692,7 +707,7 @@ fn w14_the_last_resort_ends_the_lowest_band_first() {
     let ends: Vec<_> = learned
         .ended
         .iter()
-        .map(|end| (end.id.as_str(), end.band, end.held, end.budget))
+        .map(|end| (box_of(&end.id), end.band, end.held, end.budget))
         .collect();
     assert_eq!(ends, [("vm-3", 1, 8 * GIB, 4 * GIB)]);
 }
@@ -744,7 +759,7 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
     assert_eq!(
         learned.ended,
         vec![LearnedEnd {
-            id: BoxId::new("vm-second").unwrap(),
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-second").unwrap()),
             held: 7 * GIB,
             budget: 5 * GIB,
             band: 0,
@@ -889,7 +904,7 @@ fn w14_why_survives_a_crash_between_the_end_and_the_windows_writes() {
     let end = store.get(&vms[1].0).unwrap().unwrap().unwrap().last_resort;
     let end = end.expect("vm-2's why, written before its end");
     assert_eq!(
-        (end.id.as_str(), end.held, end.budget),
+        (box_of(&end.id), end.held, end.budget),
         ("vm-2", 12 * GIB, 8 * GIB)
     );
     for other in [&vms[0].0, &vms[2].0] {
@@ -913,7 +928,7 @@ fn w14_a_restarted_node_carries_out_the_end_its_intent_names() {
     let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
     let vms = recorded_three(&store);
     let intent = LearnedEnd {
-        id: vms[1].0.clone(),
+        id: hex_api::LearnedHolder::Box(vms[1].0.clone()),
         held: 12 * GIB,
         budget: 8 * GIB,
         band: 0,
@@ -1061,7 +1076,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     let store = open();
     let ended = store.get(&vms[1].0).unwrap().unwrap().unwrap();
     let end = ended.last_resort.clone().unwrap();
-    assert_eq!(end.id.as_str(), "vm-2");
+    assert_eq!(box_of(&end.id), "vm-2");
     assert_eq!((end.held, end.budget), (12 * GIB, 8 * GIB));
     assert_eq!(
         (end.fleet_held, end.fleet_growth, end.fleet_budget),
@@ -1088,6 +1103,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         published: Vec::new(),
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     };
     with_last_resort(&mut info, &ended).unwrap();
     assert_eq!(info.last_resort.as_ref(), Some(&end));

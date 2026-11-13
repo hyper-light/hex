@@ -72,8 +72,10 @@ fn native_evidence_joins_same_cost_and_real_preparation_without_rewriting() {
     assert!(images.vmm(true).is_err());
     let config = GuestConfig {
         binary: dir.path().join("cli"),
-        kernel: dir.path().join("kernel"),
-        initrd: dir.path().join("init"),
+        boot: crate::guest::Boot::Kernel {
+            kernel: dir.path().join("kernel"),
+            initrd: dir.path().join("init"),
+        },
         vcpus: 1,
         memory_mib: 256,
         gpu: false,
@@ -84,7 +86,7 @@ fn native_evidence_joins_same_cost_and_real_preparation_without_rewriting() {
         }],
         staged: "/run/hex/staged".into(),
     };
-    std::fs::write(&config.kernel, b"kernel").unwrap();
+    std::fs::write(config.direct().unwrap().0, b"kernel").unwrap();
     let paths =
         shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home")).unwrap();
     let runtime = GuestRuntime::new(Arc::new(shards_api::Shards::new()), config.clone())
@@ -102,11 +104,11 @@ fn native_evidence_joins_same_cost_and_real_preparation_without_rewriting() {
         .join("native-model.v");
     let budget = crate::guest::managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
     let plan = runtime
-        .managed_plan(&config.spec(), &socket, budget)
+        .managed_plan(&config.spec().unwrap(), &socket, budget)
         .unwrap();
     let view = plan.native_startup().unwrap();
     assert_eq!(view.images(), images);
-    assert_eq!(view.kernel(), config.kernel);
+    assert_eq!(view.kernel(), config.direct().unwrap().0);
     assert_eq!(view.console_pin(), images.kernel().sha256());
     assert_eq!(view.shares().len(), 1);
     assert_eq!(

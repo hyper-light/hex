@@ -374,6 +374,8 @@ pub trait Recover: Runtime {
 pub struct Recorded<R> {
     runtime: R,
     books: Arc<Books>,
+    /// Its lessors over its wire, where its image VMs lease through them ([`Recorded::lease_over_wire`]).
+    wire_lessors: std::sync::OnceLock<Arc<crate::serve::WireLessors>>,
 }
 
 /// The node's records of its boxes, shared with the completions of calls its guest answers.
@@ -546,6 +548,7 @@ pub(crate) fn check_single_consumer(
             return Err(Refusal::Backing {
                 key: source,
                 cause: hex_api::LifecycleCause::Busy,
+                why: None,
             });
         }
     }
@@ -738,6 +741,7 @@ pub(crate) fn preflight_records(
         return Err(Refusal::Backing {
             key: duplicate,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         });
     }
     scopes.sort_unstable();
@@ -774,7 +778,11 @@ impl Transaction<'_> {
                     Err(error) => error,
                 }
             }
-            TransactionOwner::Pool(key) => Refusal::Backing { key: *key, cause },
+            TransactionOwner::Pool(key) => Refusal::Backing {
+                key: *key,
+                cause,
+                why: None,
+            },
         }
     }
     fn box_id(&self) -> Result<&BoxId, Refusal> {
@@ -832,6 +840,7 @@ impl Transaction<'_> {
                     return Err(Refusal::Backing {
                         key,
                         cause: hex_api::LifecycleCause::Pending,
+                        why: None,
                     });
                 }
                 operation(native)
@@ -879,11 +888,13 @@ impl Transaction<'_> {
                             .ok_or(Refusal::Backing {
                                 key,
                                 cause: hex_api::LifecycleCause::Uncertain,
+                                why: None,
                             })?;
                     if pool.phase != hex_api::BackingPhase::Released || pool.exit.is_none() {
                         return Err(Refusal::Backing {
                             key,
                             cause: hex_api::LifecycleCause::Pending,
+                            why: None,
                         });
                     }
                     route.check_backing_parts(
@@ -1198,6 +1209,7 @@ pub(crate) fn handoff_transaction(
     let refused = || Refusal::Backing {
         key: *source,
         cause: hex_api::LifecycleCause::Uncertain,
+        why: None,
     };
     let pool = store.read_pool(&source.pool)?.ok_or_else(refused)?;
     pool.check()?;
@@ -1288,6 +1300,7 @@ fn check_pool_claims(
     let refused = || Refusal::Backing {
         key: record.key,
         cause: hex_api::LifecycleCause::Busy,
+        why: None,
     };
     let catalog = catalog.ok_or_else(refused)?;
     let boxes = store.all()?;
@@ -1346,6 +1359,18 @@ fn native_metadata(
 }
 
 impl<R: Recover> Recorded<R> {
+    /// Its image VMs' credentials leased over its wire (joint plan step 33; docs/design/credential-grants.md C7):
+    /// `lessors`, which its guest runtime's image class was built with, each box's route kept by its socket as the box is
+    /// created. Given once.
+    pub fn lease_over_wire(&self, lessors: Arc<crate::serve::WireLessors>) -> Result<(), Refusal> {
+        self.wire_lessors
+            .set(lessors)
+            .map_err(|_| Refusal::Invalid {
+                what: "lessors over the node's wire",
+                why: "the node was given them already".to_owned(),
+            })
+    }
+
     /// The retained records past the whole-owner barrier, and apart from them the torn ones
     /// ([`Store::take_torn`]), which no barrier can check: [`Recorded::recover`] proves their boxes gone or
     /// holds them. A record in the state directory that can't be read is refused, naming its file.
@@ -1653,6 +1678,7 @@ mod projection_tests {
             route: None,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         }
     }
 
@@ -1753,6 +1779,7 @@ impl<R: Recover> Recorded<R> {
         let last_boot = store.take_boot_marker()?;
         Ok(Self {
             runtime,
+            wire_lessors: std::sync::OnceLock::new(),
             books: Arc::new(Books {
                 store,
                 prober,
@@ -2337,6 +2364,7 @@ impl<R: Recover> Runtime for Recorded<R> {
             .ok_or(Refusal::Backing {
                 key: *key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             })?;
         let mut result = None;
         hex_runtime::devices::Books::with_pool_transaction(
@@ -2551,6 +2579,10 @@ impl<R: Recover> Runtime for Recorded<R> {
 impl<R: Recover> Host for Recorded<R> {
     fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
         self.runtime.attach(lp)
+    }
+
+    fn lessors(&self) -> Option<Arc<crate::serve::WireLessors>> {
+        self.wire_lessors.get().cloned()
     }
 
     /// The calls its runtime answers later go there: an inspect's answer counted as any inspect's is

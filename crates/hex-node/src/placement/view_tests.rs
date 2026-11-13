@@ -10,7 +10,7 @@ use hex_api::capacity::{
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Refusal, Runtime};
 use hex_sim::index::Pick;
 use hex_sim::model::{Ask, Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
-use hex_sim::peer::{Budget, Stop};
+use hex_sim::peer::{self, Budget, Stop};
 
 use super::View;
 use crate::placement::{Driver, Notice, Payload, Runtimes, Step};
@@ -291,7 +291,12 @@ fn a_falling_learned_holding_frees_room_while_the_physical_room_stays() {
         talk(&driver, &mut kiln, vec![msg]),
         vec![Event::Refused(early, Why::Room)]
     );
-    assert_eq!(driver.rebook(&[(vm, holding(1000))]).unwrap(), 1);
+    assert_eq!(
+        driver
+            .rebook(&[(peer::Holder::Box(vm), holding(1000))])
+            .unwrap(),
+        1
+    );
     let view = driver.view().unwrap();
     assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 1000));
     let (late, msg) = kiln.reserve(cpu(2000)).unwrap();
@@ -327,7 +332,9 @@ fn a_box_ending_mid_window_lets_nothing_past_the_physical_room() {
     let (d, p) = demand_of(3000);
     let (vm, step) = driver.submit(d, p).unwrap();
     assert!(started(&quiesce(&driver, step)));
-    driver.rebook(&[(vm, holding(1000))]).unwrap();
+    driver
+        .rebook(&[(peer::Holder::Box(vm), holding(1000))])
+        .unwrap();
     let (first, msg) = kiln.reserve(cpu(2500)).unwrap();
     assert_eq!(
         talk(&driver, &mut kiln, vec![msg]),
@@ -369,7 +376,9 @@ fn a_holding_past_the_room_blocks_the_nodes_admission_typed() {
     let (d, p) = demand_of(1000);
     let (vm, step) = driver.submit(d, p).unwrap();
     assert!(started(&quiesce(&driver, step)));
-    driver.rebook(&[(vm, holding(5000))]).unwrap();
+    driver
+        .rebook(&[(peer::Holder::Box(vm), holding(5000))])
+        .unwrap();
     assert_eq!(driver.view().unwrap().over().cpu_milli, 1000);
     let (d, p) = demand_of(1000);
     let (_, step) = driver.submit(d, p).unwrap();
@@ -392,7 +401,9 @@ fn a_holding_past_the_room_blocks_the_nodes_admission_typed() {
         talk(&driver, &mut kiln, vec![msg]),
         vec![Event::Refused(early, Why::Room)]
     );
-    driver.rebook(&[(vm, holding(1000))]).unwrap();
+    driver
+        .rebook(&[(peer::Holder::Box(vm), holding(1000))])
+        .unwrap();
     assert!(started(&quiesce(&driver, driver.retry().unwrap())));
     let (late, msg) = kiln.reserve(cpu(1000)).unwrap();
     assert_eq!(

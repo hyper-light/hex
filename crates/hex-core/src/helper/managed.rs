@@ -61,13 +61,13 @@ pub struct Key {
 impl Key {
     pub fn from_record(record: NativeRecord<'_>, helper: ProcId) -> Result<Self, Refusal> {
         if helper.pid == 0 || helper.start_ticks == 0 {
-            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+            return Err(record.uncertain("its native helper's pid or start is zero"));
         }
         Ok(Self {
             owner: record.owner().try_owned()?,
             scope: record
                 .scope()
-                .ok_or_else(|| record.refusal(hex_api::LifecycleCause::Uncertain))?,
+                .ok_or_else(|| record.uncertain("its record names no native scope yet"))?,
             commitment: record.commitment()?,
             helper,
         })
@@ -1024,6 +1024,7 @@ fn read_usage(input: &mut Reader<'_>) -> Result<Usage, Fault> {
         io_read_bytes: input.u64()?,
         io_write_bytes: input.u64()?,
         guest: None,
+        started_from: None,
     })
 }
 pub fn read_answer(bytes: &[u8], fds: usize) -> Result<(u16, u64, Answer), Fault> {

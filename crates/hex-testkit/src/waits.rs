@@ -3,8 +3,8 @@
 //! it, its record or the slowest answer seen for that fact, the run-out is told to the census, once, and the wait goes
 //! on to its fact, whose answer is the sample its W* rises to. A party to follow, so a fact that will never come fails
 //! its test, is [`follow`]'s; these waits follow their fact alone. What each patience is:
-//! - a fact a census row records takes that row's record, here; a program's end through a `Proc` takes the suites'
-//!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end);
+//! - a fact a census row records takes that row's record, here; a program's end through a `Proc` is followed to it,
+//!   as the suites follow one (`hex_api::conformance::end_of`);
 //! - a fact one node operation makes within itself takes that operation's record, the relation stated where it is
 //!   waited for and tested there (a hook holding a create is bounded by the create's answer);
 //! - a fact no recorded operation makes is waited for measuring, named `test.<crate>.<fact>`: for the fact alone until
@@ -29,8 +29,8 @@ use hex_core::patience::Patience;
 
 /// `lifecycle.exec`: a program's run to its end (18.262 ms: `oci_box`'s program run in the suites, of 272, above the
 /// debug arm's 18.003 ms of 10,000), here for a program a test runs as a child of its own (`std::process::Child`)
-/// rather than through a `Proc`: its end, and what it does on its way there. (A `Proc`'s end takes the suites' record,
-/// `hex_api::conformance::PATIENCE`, which on Linux is the first-run record above it.)
+/// rather than through a `Proc`: its end, and what it does on its way there. (A `Proc`'s end is followed to it,
+/// `hex_api::conformance::end_of`.)
 pub const PROGRAM: Duration = Duration::from_nanos(18_262_060);
 /// `node.emptying`: a box's kill to its cgroup's `populated 0` (904.705 ms: the suites', of 14,977, where run 3's
 /// record ran out at 255.505 ms), what a test waits on for a killed box's processes to end, its emptying or the end of

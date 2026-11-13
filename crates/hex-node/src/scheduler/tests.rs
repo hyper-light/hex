@@ -1256,6 +1256,7 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
         Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         },
     )
     .unwrap();

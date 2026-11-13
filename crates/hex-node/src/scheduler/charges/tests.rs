@@ -133,7 +133,7 @@ fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
         seq,
     };
     let holding = |id: &str, gib: u64| hex_api::LearnedHolding {
-        id: BoxId::new(id).unwrap(),
+        id: hex_api::LearnedHolder::Box(BoxId::new(id).unwrap()),
         holding: CapacityResources {
             cpu_milli: 100,
             mem_bytes: gib * GIB,
@@ -162,8 +162,59 @@ fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
     assert_eq!(
         booked,
         vec![
-            (key(1), holding("vm-a", 2).holding),
-            (key(2), holding("vm-b", 1).holding),
+            (
+                hex_sim::peer::Holder::Box(key(1)),
+                holding("vm-a", 2).holding
+            ),
+            (
+                hex_sim::peer::Holder::Box(key(2)),
+                holding("vm-b", 1).holding
+            ),
+        ]
+    );
+}
+
+/// Joint plan step 39 (ROOT's ruling of 2026-11-13; goal 14's learner, goal 13's ledger): a node VM's learned holding
+/// reaches the ledger as its run's, a holder beside the boxes. Do: take an answer holding a box the node runs and a node
+/// VM. Expect: the box booked against its key, the node VM against its run.
+#[test]
+fn a_node_vms_learned_holding_reaches_the_ledger_as_its_runs() {
+    let key = hex_sim::peer::Key {
+        owner: 0,
+        epoch: 1,
+        seq: 1,
+    };
+    let run = hex_api::NodeRun::from_bytes([4; 16]);
+    let resources = CapacityResources {
+        cpu_milli: 300,
+        mem_bytes: 2 * GIB,
+        disk_bytes: 0,
+    };
+    let learned = vec![(
+        Class::Shards,
+        Learned {
+            priors: Vec::new(),
+            used: LearnedUse::default(),
+            holdings: vec![
+                hex_api::LearnedHolding {
+                    id: hex_api::LearnedHolder::Box(BoxId::new("vm-a").unwrap()),
+                    holding: resources,
+                },
+                hex_api::LearnedHolding {
+                    id: hex_api::LearnedHolder::Node(run),
+                    holding: resources,
+                },
+            ],
+            ended: Vec::new(),
+            ceilings: Vec::new(),
+        },
+    )];
+    let ids = BTreeMap::from([(BoxId::new("vm-a").unwrap(), key)]);
+    assert_eq!(
+        holds(&learned, &ids).unwrap(),
+        vec![
+            (hex_sim::peer::Holder::Box(key), resources),
+            (hex_sim::peer::Holder::Node(run), resources),
         ]
     );
 }

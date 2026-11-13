@@ -519,7 +519,7 @@ pub(super) fn observe(
         &mut Receipt::Pool(receipt),
         path,
         budget,
-        &|| crate::guest::pool::refused(key, hex_api::LifecycleCause::Uncertain),
+        &|why| crate::guest::pool::uncertain(key, why),
     )
 }
 
@@ -538,7 +538,8 @@ pub(super) fn observe_selected(
         &mut Receipt::Selected(receipt),
         path,
         budget,
-        &|| crate::guest::books::uncertain(&id).unwrap_or_else(std::convert::identity),
+        // A box's Lifecycle refusal takes its reason once goal 12 gives it the field.
+        &|_| crate::guest::books::uncertain(&id).unwrap_or_else(std::convert::identity),
     )
 }
 
@@ -548,13 +549,17 @@ fn observe_receipt(
     receipt: &mut Receipt<'_>,
     path: &std::path::Path,
     budget: crate::guest::managed::Budget,
-    uncertain: &dyn Fn() -> Refusal,
+    uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
     use hex_api::{Ask, BoxId, BoxSpec, ClassSpec, Exit, Stdio};
     use std::fmt::Write as _;
-    let scope = receipt.scope().ok_or_else(uncertain)?;
+    let scope = receipt
+        .scope()
+        .ok_or_else(|| uncertain("its receipt names no native scope to observe"))?;
     if receipt.attempt().is_some() || receipt.readiness().is_some() {
-        return Err(uncertain());
+        return Err(uncertain(
+            "its receipt already holds a boot attempt or readiness",
+        ));
     }
     let count = receipt.count();
     let output = configured.output_bytes(count)?;
@@ -617,19 +622,25 @@ fn observe_receipt(
         .checked_add(
             receipt
                 .attempt()
-                .ok_or_else(uncertain)?
+                .ok_or_else(|| {
+                    uncertain("its receipt lost its boot attempt as its room was measured")
+                })?
                 .additional_receipt_room()?,
         )
         .and_then(|bytes| bytes.checked_add(digits))
         .and_then(|bytes| receipt.bound().checked_sub(bytes))
         .and_then(|bytes| bytes.checked_div(2))
         .ok_or_else(|| exhausted(receipt.bound()))?;
-    receipt.attempt_mut().ok_or_else(uncertain)?.stderr =
-        Captured::new(configured.stderr_bytes().min(held))?;
+    receipt
+        .attempt_mut()
+        .ok_or_else(|| {
+            uncertain("its receipt lost its boot attempt before its stderr was bounded")
+        })?
+        .stderr = Captured::new(configured.stderr_bytes().min(held))?;
     let initial = receipt.encode()?;
     let extra = receipt
         .attempt()
-        .ok_or_else(uncertain)?
+        .ok_or_else(|| uncertain("its receipt lost its boot attempt as its room was checked"))?
         .additional_receipt_room()?;
     if initial
         .len()
@@ -666,27 +677,41 @@ fn observe_receipt(
     let result = (|| {
         let given = process.streams()?;
         let mut streams = io::Streams::new(given)?;
-        receipt.attempt_mut().ok_or_else(uncertain)?.phase = AttemptPhase::Draining;
+        receipt
+            .attempt_mut()
+            .ok_or_else(|| {
+                uncertain("its receipt lost its boot attempt as its output began draining")
+            })?
+            .phase = AttemptPhase::Draining;
         receipt.write(path)?;
-        let attempt = receipt.attempt_mut().ok_or_else(uncertain)?;
+        let attempt = receipt.attempt_mut().ok_or_else(|| {
+            uncertain("its receipt lost its boot attempt while its output drained")
+        })?;
         streams.drain(&mut attempt.stdout, &mut attempt.stderr, budget)?;
         attempt.phase = AttemptPhase::Waiting;
         receipt.write(path)?;
         let exit = process
             .wait_for(budget.remaining()?)?
-            .ok_or_else(uncertain)?;
+            .ok_or_else(|| uncertain("its GPU observer didn't end within its boot's budget"))?;
         facts_mut(receipt, uncertain)?.exited(exit)?;
         receipt.write(path)?;
         if exit != Exit::Code(0) {
-            let attempt = receipt.attempt().ok_or_else(uncertain)?;
+            let attempt = receipt.attempt().ok_or_else(|| {
+                uncertain("its receipt lost its boot attempt as its observer's failure was read")
+            })?;
             return Err(exited(attempt.stderr.bytes()?));
         }
         budget.remaining()?;
-        receipt.attempt_mut().ok_or_else(uncertain)?.phase = AttemptPhase::Deleting;
+        receipt
+            .attempt_mut()
+            .ok_or_else(|| uncertain("its receipt lost its boot attempt before its cleanup"))?
+            .phase = AttemptPhase::Deleting;
         receipt.write(path)?;
         cleanup(booted, receipt, path, &id, budget, uncertain)?;
         budget.remaining()?;
-        let attempt = receipt.attempt().ok_or_else(uncertain)?;
+        let attempt = receipt
+            .attempt()
+            .ok_or_else(|| uncertain("its receipt lost its boot attempt as its report was read"))?;
         let report = Report::parse(attempt.stdout.bytes()?, count, configured.queues())?;
         budget.remaining()?;
         receipt.set_readiness(Evidence {
@@ -695,7 +720,10 @@ fn observe_receipt(
             max_queues: configured.queues(),
             report,
         });
-        receipt.attempt_mut().ok_or_else(uncertain)?.phase = AttemptPhase::Complete;
+        receipt
+            .attempt_mut()
+            .ok_or_else(|| uncertain("its receipt lost its boot attempt as it completed"))?
+            .phase = AttemptPhase::Complete;
         receipt.write(path)?;
         receipt.checked_readiness()?;
         Ok(())
@@ -710,12 +738,12 @@ fn observe_receipt(
 
 fn facts_mut<'a>(
     receipt: &'a mut Receipt<'_>,
-    uncertain: &dyn Fn() -> Refusal,
+    uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<&'a mut facts::Facts, Refusal> {
     receipt
         .attempt_mut()
         .and_then(|attempt| attempt.facts.as_mut())
-        .ok_or_else(uncertain)
+        .ok_or_else(|| uncertain("its boot attempt holds no observation facts"))
 }
 
 fn cleanup(
@@ -724,7 +752,7 @@ fn cleanup(
     path: &std::path::Path,
     id: &hex_api::BoxId,
     budget: crate::guest::managed::Budget,
-    uncertain: &dyn Fn() -> Refusal,
+    uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
     facts_mut(receipt, uncertain)?.cleaning();
     receipt.write(path)?;
@@ -757,9 +785,12 @@ fn failed(
     path: &std::path::Path,
     id: &hex_api::BoxId,
     budget: crate::guest::managed::Budget,
-    uncertain: &dyn Fn() -> Refusal,
+    uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
-    let phase = receipt.attempt().ok_or_else(uncertain)?.phase;
+    let phase = receipt
+        .attempt()
+        .ok_or_else(|| uncertain("its receipt lost its boot attempt as its failure was recorded"))?
+        .phase;
     // Save the original failed stage/cause before cleanup can produce another
     // error. A codec/write failure still allows the same bounded cleanup attempt;
     // it never manufactures a fact or changes the native grant.
@@ -780,7 +811,9 @@ fn failed(
         if !facts_mut(receipt, uncertain)?.failed_cleanup_recorded() {
             cleanup?;
         }
-        Err(uncertain())
+        Err(uncertain(
+            "its GPU observer failed, and its guest box's cleanup wasn't proven",
+        ))
     }
 }
 

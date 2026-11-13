@@ -8,3 +8,6 @@ vendor/shards/** -text
 vendor/shards-gpu/** -text
 vendor/patches/shards/** -text
 vendor/patches/shards-gpu/** -text
+# The in-tree harness context (crates/hex-cli/tests/image_harness), byte for byte on every host, so the image built from
+# it holds the same bytes everywhere: core.autocrlf would add a carriage return to its Agentfile's and descriptor's lines.
+crates/hex-cli/tests/image_harness/** -text

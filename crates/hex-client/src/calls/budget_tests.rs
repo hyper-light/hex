@@ -1219,8 +1219,8 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             .send(ControlPhase::Delete)
             .map_err(|error| Refusal::os("announcing pending fixture delete", error))?;
         client.delete(&id)?;
-        // A program's end through a Proc takes the suites' program-end record (hex_testkit::waits).
-        let ended = proc.wait_for(hex_api::conformance::PATIENCE)?;
+        // A program's end through a Proc is followed to it, as the suites follow one.
+        let ended = hex_api::conformance::end_of(&mut proc)?;
         drop(proc);
         let clean = {
             let state = client.conn.shared.state()?;
@@ -1270,7 +1270,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     );
     assert_eq!(pending, None);
     assert_eq!(&bytes, b"late");
-    assert_eq!(ended, Some(Exit::Code(0)));
+    assert_eq!(ended, Exit::Code(0));
     assert!(clean);
     assert_eq!(names.len(), 3);
     assert!(
@@ -1364,6 +1364,7 @@ impl Transport for Offers {
                         stdin: true,
                         ..Streams::default()
                     },
+                    setup: None,
                 }),
             ),
             Request::Call(Call::Start(_)) => self.queue(header.id, Answer::Done),
@@ -2314,6 +2315,7 @@ impl BootstrapCall {
                     route: None,
                     last_resort: None,
                     ended: None,
+                    credentials: Vec::new(),
                 })
             }
         }

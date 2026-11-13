@@ -43,8 +43,9 @@ pub mod exec;
 pub mod unix;
 pub use crate::tls::Negotiated;
 pub use drive::{
-    Controller, Dialed, Exec, ExecControl, Execs, Fault, Got, Hangup, Input, Link, Linked, McpConnection,
-    Output, Socket, SocketReader, SocketWriter, Sockets, Subscriptions,
+    Controller, Dialed, Exec, ExecControl, Execs, Fault, Got, Granted, Hangup, Input, Link, Linked, Log,
+    Logged, McpConnection, Member, MemberControl, MemberEnd, MemberSteering, Output, Socket, SocketReader,
+    SocketWriter, Sockets, Subscriptions,
 };
 pub use unix::Admission as SocketAdmission;
 
@@ -293,8 +294,9 @@ pub fn read_refused(bytes: &[u8]) -> Result<Option<Reason>, Option<Tag>> {
 
 /// How many connections of its controller the endpoint holds: the one it serves, and the one
 /// that replaces it. A newer connection's handshake closes the older ([`Lanes::connected`]),
-/// which the driver keeps until its close has drained (RFC 9000 §10.2); a third, until then,
-/// is refused at its first packet, and its controller dials again.
+/// whose place, while its close drains (RFC 9000 §10.2), the driver frees for the next to come
+/// (`DriverLimits::connections`); a third is refused at its first packet only while both are
+/// open, the newer's handshake not yet done, and its controller dials again.
 const CONNECTIONS: usize = 2;
 
 /// What one microVM's endpoint serves: each member stream, with what its caller admitted for
@@ -322,6 +324,9 @@ pub struct Served {
     /// Each exec a controller asks for, for the host to start ([`exec::Start`]), where
     /// [`Streams::execs`] admitted them.
     pub execs: Option<std::sync::mpsc::Receiver<exec::Start>>,
+    /// Each lane a controller opens to a member itself, for the host to serve
+    /// ([`exec::MemberStart`]), where [`Streams::execs`] admitted execs: one host serves both.
+    pub members: Option<std::sync::mpsc::Receiver<exec::MemberStart>>,
     /// Each socket lane a controller asks for, for the host to connect ([`unix::Connect`]),
     /// where [`Streams::sockets`] admitted them.
     pub sockets: Option<std::sync::mpsc::Receiver<unix::Connect>>,
@@ -368,8 +373,8 @@ impl std::fmt::Debug for Endpoint {
 impl Endpoint {
     /// Binds at `at` the endpoint of the microVM whose key is `vm`, which `controller` alone
     /// reaches, serving `streams`. Every value of its transport is its streams' (D238): each
-    /// lane's windows as its endpoint of one stream's, summed, the connection's patience the
-    /// least they admitted and its handshake and datagrams the most.
+    /// lane's windows as its endpoint of one stream's, summed, and its handshake and datagrams
+    /// the most they admitted; its liveness judged at use, as D180's links are.
     pub fn bind(
         vm: &Identity,
         controller: Fingerprint,
@@ -391,7 +396,8 @@ impl Endpoint {
             .checked_add(u64::try_from(NEGOTIATED_BYTES + REFUSED_BYTES).map_err(|_| window())?)
             .ok_or_else(window)?;
         if streams.execs.is_some() {
-            // One ask's lane at a time, read through a stream's window, and what it is told.
+            // One ask's lane at a time, read through a stream's window, and what it is told: its
+            // longest a log lane's `Rotated`.
             windows.streams = windows.streams.checked_add(1).ok_or_else(window)?;
             windows.connection = windows
                 .connection
@@ -399,7 +405,7 @@ impl Endpoint {
                 .ok_or_else(window)?;
             windows.send = windows
                 .send
-                .checked_add(u64::try_from(exec::TOLD_BYTES + REFUSED_BYTES).map_err(|_| window())?)
+                .checked_add(u64::try_from(exec::TOLD_MOST + REFUSED_BYTES).map_err(|_| window())?)
                 .ok_or_else(window)?;
         }
         if let Some(admission) = streams.sockets {
@@ -428,7 +434,7 @@ impl Endpoint {
             receive: u64::try_from(windows.connection).unwrap_or(u64::MAX),
             send: windows.send,
         };
-        let (execs, handed) = exec::Execs::new(streams.execs, base);
+        let (execs, (handed, members)) = exec::Execs::new(streams.execs, base);
         let (sockets, connects) = unix::Carried::new(streams.sockets);
         let lanes = Lanes::new(controller, streams, windows.streams, execs, sockets)?;
         let (mut driver, sender) = Driver::bind_bounded(
@@ -441,7 +447,6 @@ impl Endpoint {
                 // (Lanes::turn): one pending covers them all.
                 command_slots: 1,
                 queued_datagram_bytes: link.datagram_bytes,
-                handshake_patience: link.patience,
             },
         )?;
         let address = driver.local()?;
@@ -473,6 +478,7 @@ impl Endpoint {
                 inputs,
                 revoke: Revoke { sender },
                 execs: handed,
+                members,
                 sockets: connects,
             },
         ))
@@ -539,7 +545,6 @@ fn admitted(streams: Streams<'_>) -> Result<(Admitted, Windows), managed::Error>
             Some(link) => Admitted {
                 handshake_bytes: link.handshake_bytes.max(admitted.handshake_bytes),
                 datagram_bytes: link.datagram_bytes.max(admitted.datagram_bytes),
-                patience: link.patience.min(admitted.patience),
                 ..link
             },
         });
@@ -814,8 +819,9 @@ impl Lanes {
             self.begin_socket(io, conn, stream, came.unwrap_or_default(), len, ended);
             return;
         }
-        // An exec's ask, or an MCP connection's (D254): read on as long as it is (exec.rs).
-        if let Ok(Some((Tag::MemberExec | Tag::Mcp, len))) = frame::peek(head) {
+        // An exec's ask, an MCP connection's (D254), a member's own lane's or a log lane's:
+        // read on as long as it is (exec.rs).
+        if let Ok(Some((Tag::MemberExec | Tag::Mcp | Tag::Member | Tag::Log, len))) = frame::peek(head) {
             let mut came = [0; LANE_MOST];
             let came = came.get_mut(..head.len()).map(|c| {
                 c.copy_from_slice(head);
@@ -1102,8 +1108,7 @@ mod tests {
     use super::*;
     use crate::handshake::{Side, connect};
 
-    /// How long a test waits for what it awaits: a patience of its own, shorter than
-    /// [`tls::QUIET`].
+    /// How long a test waits for what it awaits: a patience of its own.
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn transport(serves: bool) -> TransportConfig {
@@ -1187,7 +1192,7 @@ mod tests {
         let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (endpoint, client) = connect(
             endpoint(&vm, kiln.fingerprint(), transport(true)).unwrap(),
-            tls::client(&kiln, vm.fingerprint(), tls::Rtt::Unmeasured).unwrap(),
+            tls::client(&kiln, vm.fingerprint(), tls::Known::Never).unwrap(),
         );
         assert!(!endpoint.connected && !client.connected);
         assert_eq!(why(&endpoint), Ended::Protocol(By::This));
@@ -1404,12 +1409,19 @@ mod tests {
                 // RFC 8446 §4: a handshake message's uint24 length and its four-byte head.
                 handshake_bytes: (1 << 24) - 1 + 4,
                 datagram_bytes: managed::DATAGRAM_BYTES,
-                patience: PATIENCE,
             }
         }
 
         fn loopback() -> SocketAddr {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+        }
+
+        /// What each exec's streams are admitted, as the run's own are.
+        fn exec_admissions() -> exec::Admissions {
+            exec::Admissions {
+                output: admitted(RECORD, RECORD + DATA_HEAD),
+                input: admitted(RECORD, input::TAKEN_BYTES),
+            }
         }
 
         /// An endpoint serving member 0's three streams on a thread of its own; its stdin
@@ -1430,19 +1442,28 @@ mod tests {
 
             /// As [`Serving::bind`], its execs admitted as its streams are, and handed here.
             fn with_execs(vm: &Identity, controller: Fingerprint) -> (Serving, mpsc::Receiver<exec::Start>) {
-                let execs = exec::Admissions {
-                    output: admitted(RECORD, RECORD + DATA_HEAD),
-                    input: admitted(RECORD, input::TAKEN_BYTES),
-                };
-                let (serving, starts) = Serving::bind_with(vm, controller, Some(execs));
+                let (serving, starts, _) = Serving::bind_with(vm, controller, Some(exec_admissions()));
                 (serving, starts.unwrap())
+            }
+
+            /// As [`Serving::with_execs`], its members' own lanes handed here.
+            fn with_members(
+                vm: &Identity,
+                controller: Fingerprint,
+            ) -> (Serving, mpsc::Receiver<exec::MemberStart>) {
+                let (serving, _, members) = Serving::bind_with(vm, controller, Some(exec_admissions()));
+                (serving, members.unwrap())
             }
 
             fn bind_with(
                 vm: &Identity,
                 controller: Fingerprint,
                 execs: Option<exec::Admissions>,
-            ) -> (Serving, Option<mpsc::Receiver<exec::Start>>) {
+            ) -> (
+                Serving,
+                Option<mpsc::Receiver<exec::Start>>,
+                Option<mpsc::Receiver<exec::MemberStart>>,
+            ) {
                 let out = admitted(RECORD, RECORD + DATA_HEAD);
                 let (endpoint, served) = Endpoint::bind(
                     vm,
@@ -1466,6 +1487,7 @@ mod tests {
                     mut inputs,
                     revoke,
                     execs: starts,
+                    members,
                     sockets: _,
                 } = served;
                 let (relay, control) = inputs.pop().unwrap();
@@ -1500,6 +1522,7 @@ mod tests {
                         driver: Some(driver),
                     },
                     starts,
+                    members,
                 )
             }
 
@@ -1692,7 +1715,6 @@ mod tests {
                         connections: 1,
                         command_slots: 16,
                         queued_datagram_bytes: managed::DATAGRAM_BYTES,
-                        handshake_patience: PATIENCE,
                     },
                 )
                 .unwrap();
@@ -2057,14 +2079,11 @@ mod tests {
 
         /// The endpoint's windows are its streams' own: each lane's as its endpoint of one
         /// stream bounds it, summed, the per-stream window the largest; one stream each; a
-        /// refusal's frame for each stream; the least patience and the largest handshake.
+        /// refusal's frame for each stream; the largest handshake.
         #[test]
         fn its_windows_are_its_streams_own_summed() {
             let out = admitted(100, 100 + DATA_HEAD);
-            let slow = Admitted {
-                patience: tls::QUIET,
-                ..admitted(50, input::TAKEN_BYTES)
-            };
+            let slow = admitted(50, input::TAKEN_BYTES);
             let (link, windows) = super::super::admitted(Streams {
                 outputs: &[(output(Channel::Stdout), out), (output(Channel::Stderr), out)],
                 inputs: &[(stdin(), slow)],
@@ -2082,7 +2101,6 @@ mod tests {
                     streams: 3,
                 }
             );
-            assert_eq!(link.patience, PATIENCE);
             assert_eq!(link.handshake_bytes, out.handshake_bytes);
             // An endpoint of no stream still has its control lane (D252): the cited link, and
             // no stream's window; it binds, serving its control lane alone.
@@ -2093,10 +2111,7 @@ mod tests {
                 sockets: None,
             })
             .unwrap();
-            assert_eq!(
-                (bare.handshake_bytes, bare.patience),
-                (unix::HANDSHAKE_MOST, tls::QUIET)
-            );
+            assert_eq!(bare.handshake_bytes, unix::HANDSHAKE_MOST);
             assert_eq!(
                 nothing,
                 Windows {
@@ -2567,6 +2582,249 @@ mod tests {
             host.join().unwrap();
         }
 
+        /// An exec its host says started and exited before the endpoint's next turn, its
+        /// outputs finished with nothing written, is told `Started` and then its `Exit`, in
+        /// order: no frame of a lane is staged over one that has not gone whole.
+        #[test]
+        fn an_exec_that_starts_and_exits_at_once_is_told_both_in_order() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, starts) = Serving::with_execs(&vm, kiln.fingerprint());
+            let mut live = Live::dial(&kiln, vm.fingerprint(), serving.address);
+            let ask = exec::Ask {
+                run: run(),
+                generation: GENERATION,
+                member: 0,
+                kind: exec::Kind::Exec(Box::new(shards_abi::run::Spec {
+                    argv: vec![b"true".to_vec()],
+                    ..shards_abi::run::Spec::default()
+                })),
+            };
+            live.open(0, &ask.frame().unwrap());
+            let exec::Start {
+                stdout,
+                stderr,
+                steer,
+                replies,
+                ..
+            } = starts.recv_timeout(PATIENCE).unwrap();
+            let (_errors, stderr) = stderr.unwrap();
+            stdout.1.finish().unwrap();
+            stderr.finish().unwrap();
+            replies.tell(exec::Reply::Started);
+            replies.tell(exec::Reply::Exited(0));
+            assert_eq!(live.take(0, told), exec::Told::Started(0));
+            assert_eq!(live.take(0, told), exec::Told::Exit(0));
+            assert_eq!(live.end(0), Heard::End(0));
+            assert_eq!(
+                steer.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+            assert_eq!(live.lost, None);
+        }
+
+        fn member_ask(run: RunId, generation: u64, member: u32) -> Vec<u8> {
+            exec::Ask {
+                run,
+                generation,
+                member,
+                kind: exec::Kind::Member,
+            }
+            .frame()
+            .unwrap()
+        }
+
+        /// A member's own lane: its host says the member runs, and the lane says so, naming it;
+        /// each steer reaches its host in turn and its answer is told, a refusal typed; an end
+        /// its host says while a steer it was handed awaits its answer is told after that
+        /// answer; then the lane ends, and its host's steering with it.
+        #[test]
+        fn a_members_lane_tells_it_runs_answers_each_steer_and_tells_its_end() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, members) = Serving::with_members(&vm, kiln.fingerprint());
+            let mut live = Live::dial(&kiln, vm.fingerprint(), serving.address);
+            live.open(0, &member_ask(run(), GENERATION, 0));
+            let start = members.recv_timeout(PATIENCE).unwrap();
+            assert_eq!(
+                start.ask,
+                exec::Ask {
+                    run: run(),
+                    generation: GENERATION,
+                    member: 0,
+                    kind: exec::Kind::Member,
+                }
+            );
+            start.replies.tell(exec::Reply::Running);
+            assert_eq!(live.take(0, told), exec::Told::Running(0));
+            let size = shards_abi::run::Size { rows: 40, cols: 120 };
+            for (steer, answer) in [
+                (exec::Steer::Signal(15), Ok(())),
+                (exec::Steer::Resize(size), Err(exec::Unsteered::Terminal)),
+            ] {
+                live.send(0, &exec::steering(steer).unwrap());
+                assert_eq!(start.steer.recv_timeout(PATIENCE), Ok(steer));
+                start.replies.tell(exec::Reply::Steered(answer));
+                assert_eq!(live.take(0, told), exec::Told::Steered(answer));
+            }
+            live.send(0, &exec::steering(exec::Steer::Signal(2)).unwrap());
+            assert_eq!(start.steer.recv_timeout(PATIENCE), Ok(exec::Steer::Signal(2)));
+            start.replies.tell(exec::Reply::Exited(130));
+            start
+                .replies
+                .tell(exec::Reply::Steered(Err(exec::Unsteered::Ended)));
+            assert_eq!(
+                live.take(0, told),
+                exec::Told::Steered(Err(exec::Unsteered::Ended))
+            );
+            assert_eq!(live.take(0, told), exec::Told::Exit(130));
+            assert_eq!(live.end(0), Heard::End(0));
+            assert_eq!(
+                start.steer.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+            assert_eq!(live.lost, None);
+        }
+
+        /// A member's lane asked for another member, generation or run is refused alone, typed;
+        /// one whose member ended before is told its end at once; one its host serves none of is
+        /// told why, typed; and an endpoint that runs no exec refuses one, `Scope`.
+        #[test]
+        fn a_members_lane_asked_amiss_is_refused_and_one_ended_is_told_its_end() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, members) = Serving::with_members(&vm, kiln.fingerprint());
+            let mut live = Live::dial(&kiln, vm.fingerprint(), serving.address);
+            for (lane, (frame, why)) in [
+                (member_ask(run(), GENERATION, 9), Reason::Scope),
+                (member_ask(run(), GENERATION + 1, 0), Reason::Stale),
+                (member_ask(RunId([8; 32]), GENERATION, 0), Reason::Scope),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                live.open(lane, &frame);
+                assert_eq!(live.take(lane, refusal), why, "lane {lane}");
+                assert_eq!(live.end(lane), Heard::End(lane));
+            }
+            live.open(3, &member_ask(run(), GENERATION, 0));
+            let ended = members.recv_timeout(PATIENCE).unwrap();
+            ended.replies.tell(exec::Reply::Exited(137));
+            assert_eq!(live.take(3, told), exec::Told::Exit(137));
+            assert_eq!(live.end(3), Heard::End(3));
+            live.open(4, &member_ask(run(), GENERATION, 0));
+            let unserved = members.recv_timeout(PATIENCE).unwrap();
+            unserved
+                .replies
+                .tell(exec::Reply::Unstarted(exec::Unstarted::Failed));
+            assert_eq!(live.take(4, told), exec::Told::Unstarted(exec::Unstarted::Failed));
+            assert_eq!(live.end(4), Heard::End(4));
+            assert_eq!(live.lost, None);
+
+            let plain = Serving::bind(&vm, kiln.fingerprint());
+            let mut live = Live::dial(&kiln, vm.fingerprint(), plain.address);
+            live.open(0, &member_ask(run(), GENERATION, 0));
+            assert_eq!(live.take(0, refusal), Reason::Scope);
+            assert_eq!(live.end(0), Heard::End(0));
+        }
+
+        /// A member's lane whose controller's connection is gone is let go: its host's steering
+        /// closes, and nothing ends its member.
+        #[test]
+        fn a_members_lane_gone_with_its_connection_closes_its_steering() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, members) = Serving::with_members(&vm, kiln.fingerprint());
+            let mut live = Live::dial(&kiln, vm.fingerprint(), serving.address);
+            live.open(0, &member_ask(run(), GENERATION, 0));
+            let start = members.recv_timeout(PATIENCE).unwrap();
+            start.replies.tell(exec::Reply::Running);
+            assert_eq!(live.take(0, told), exec::Told::Running(0));
+            let newer = Live::dial(&kiln, vm.fingerprint(), serving.address);
+            assert_eq!(
+                start.steer.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+            drop(newer);
+        }
+
+        /// The production controller controls a member: its lane says it runs; a signal and a
+        /// resize each reach its host and are answered, a refusal typed; a signal no guest has
+        /// is refused before it is sent; its end reaches its end's handle while its steering
+        /// waits on nothing, and its steering refuses every steer from then on, `Ended`; a
+        /// member that ended before is said so with its status; one its host serves none of,
+        /// typed; and one the endpoint serves no stream of is refused, `Scope`.
+        #[test]
+        fn the_controller_controls_a_member_its_state_steering_and_end() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, members) = Serving::with_members(&vm, kiln.fingerprint());
+            let (outputs, inputs) = all(0);
+            let (dialed, _driver) = drive(
+                &kiln,
+                vm.fingerprint(),
+                serving.address,
+                Subscriptions {
+                    outputs: &outputs,
+                    inputs: &inputs,
+                    execs: Some(exec_admissions()),
+                    sockets: None,
+                },
+            );
+            let execs = dialed.execs.as_ref().unwrap();
+            let size = shards_abi::run::Size { rows: 50, cols: 132 };
+            let host = std::thread::spawn(move || {
+                let running = members.recv_timeout(PATIENCE).unwrap();
+                running.replies.tell(exec::Reply::Running);
+                assert_eq!(running.steer.recv_timeout(PATIENCE), Ok(exec::Steer::Signal(15)));
+                running.replies.tell(exec::Reply::Steered(Ok(())));
+                assert_eq!(
+                    running.steer.recv_timeout(PATIENCE),
+                    Ok(exec::Steer::Resize(size))
+                );
+                running
+                    .replies
+                    .tell(exec::Reply::Steered(Err(exec::Unsteered::Terminal)));
+                running.replies.tell(exec::Reply::Exited(143));
+                assert_eq!(
+                    running.steer.recv_timeout(PATIENCE),
+                    Err(mpsc::RecvTimeoutError::Disconnected)
+                );
+                let ended = members.recv_timeout(PATIENCE).unwrap();
+                ended.replies.tell(exec::Reply::Exited(0));
+                let unserved = members.recv_timeout(PATIENCE).unwrap();
+                unserved
+                    .replies
+                    .tell(exec::Reply::Unstarted(exec::Unstarted::Failed));
+            });
+            let crate::control::Member::Running(crate::control::MemberControl {
+                mut steering,
+                mut end,
+            }) = execs.member(0).unwrap()
+            else {
+                panic!("member 0 runs");
+            };
+            assert_eq!(steering.signal(15), Ok(()));
+            assert_eq!(steering.signal(0), Err(Fault::Refused(Reason::Protocol)));
+            assert_eq!(
+                steering.signal(shards_abi::run::NSIG + 1),
+                Err(Fault::Refused(Reason::Protocol))
+            );
+            assert_eq!(
+                steering.resize(size),
+                Err(Fault::Unsteered(exec::Unsteered::Terminal))
+            );
+            assert_eq!(end.wait(), Ok(143));
+            assert_eq!(end.wait(), Ok(143));
+            assert_eq!(steering.signal(9), Err(Fault::Unsteered(exec::Unsteered::Ended)));
+            assert_eq!(
+                steering.resize(size),
+                Err(Fault::Unsteered(exec::Unsteered::Ended))
+            );
+            assert!(matches!(execs.member(0), Ok(crate::control::Member::Ended(0))));
+            assert_eq!(
+                execs.member(0).map(|_| ()),
+                Err(Fault::Unstarted(exec::Unstarted::Failed))
+            );
+            assert_eq!(execs.member(9).map(|_| ()), Err(Fault::Refused(Reason::Scope)));
+            host.join().unwrap();
+        }
+
         /// The production controller (`drive.rs`), dialed at `to` for `subscriptions`, its
         /// driver on a thread of its own.
         fn drive(
@@ -2987,6 +3245,337 @@ mod tests {
             );
         }
 
+        /// A stand-in for the daemon's log host (D238's log lane), its log `kept` and its oldest
+        /// segment `oldest`: refuses a member past 0 `Unknown` and a place older than its oldest
+        /// `Rotated`, naming the oldest kept; else serves the records of the channels asked, each
+        /// from its place (an output its place falls inside from there on), each within the
+        /// lane's record; then, followed, each record `more` brings until it closes; finishes,
+        /// and says it exited, keeping its stream's control until its steering closes. Whether
+        /// its stream was let go under it.
+        fn log_stand_in(
+            start: exec::Start,
+            kept: &[exec::LogRecord],
+            oldest: u64,
+            more: Option<mpsc::Receiver<exec::LogRecord>>,
+        ) -> bool {
+            use exec::{LogPos, LogRecord};
+            let exec::Start {
+                ask,
+                stdout,
+                steer,
+                replies,
+                ..
+            } = start;
+            let exec::Kind::Log(asked) = ask.kind else {
+                replies.tell(exec::Reply::Unstarted(exec::Unstarted::Failed));
+                return false;
+            };
+            let first = LogPos {
+                seq: oldest,
+                no: 0,
+                byte: 0,
+            };
+            let rotated = [Channel::Stdout, Channel::Stderr]
+                .into_iter()
+                .filter(|c| asked.channels.reads(*c))
+                .any(|c| asked.cursor.of(c).is_some_and(|at| at < first));
+            let unlogged = match asked.source {
+                exec::LogSource::Member(member) if member > 0 => Some(exec::Unlogged::Unknown),
+                _ if rotated => Some(exec::Unlogged::Rotated { oldest: first }),
+                _ => None,
+            };
+            if let Some(why) = unlogged {
+                replies.tell(exec::Reply::Unlogged(why));
+                while steer.recv().is_ok() {}
+                return false;
+            }
+            replies.tell(exec::Reply::Started);
+            let (producer, control) = stdout;
+            let room = RECORD - exec::LOG_OUTPUT_HEAD;
+            // Each piece of what `record` has past its channel's place, within a record.
+            let pieces = |record: &LogRecord| -> Vec<LogRecord> {
+                let LogRecord::Output {
+                    channel,
+                    pos,
+                    at,
+                    bytes,
+                } = record
+                else {
+                    let LogRecord::Gap { channel, pos, .. } = record else {
+                        return vec![record.clone()];
+                    };
+                    let from = asked.cursor.of(*channel);
+                    let read = asked.channels.reads(*channel) && from.is_none_or(|f| *pos >= f);
+                    return if read { vec![record.clone()] } else { Vec::new() };
+                };
+                if !asked.channels.reads(*channel) {
+                    return Vec::new();
+                }
+                let skip = match asked.cursor.of(*channel) {
+                    Some(f) if f.seq == pos.seq && f.no == pos.no => (f.byte - pos.byte) as usize,
+                    Some(f) if f > *pos => bytes.len(),
+                    _ => 0,
+                };
+                bytes[skip.min(bytes.len())..]
+                    .chunks(room)
+                    .enumerate()
+                    .map(|(i, piece)| LogRecord::Output {
+                        channel: *channel,
+                        pos: pos.after((skip + i * room) as u64).unwrap(),
+                        at: *at,
+                        bytes: piece.to_vec(),
+                    })
+                    .collect()
+            };
+            let send = |record: &LogRecord| -> bool {
+                if producer.wait_capacity().is_err() {
+                    return false;
+                }
+                let Ok(Some(mut bytes)) = producer.take_buffer() else {
+                    return false;
+                };
+                record.write_to(&mut bytes).unwrap();
+                producer.submit(bytes).is_ok()
+            };
+            let mut let_go = !kept.iter().flat_map(&pieces).all(|piece| send(&piece));
+            if let (false, Some(more)) = (let_go, more) {
+                while let Ok(record) = more.recv() {
+                    if !pieces(&record).iter().all(&send) {
+                        let_go = true;
+                        break;
+                    }
+                }
+            }
+            if !let_go {
+                control.finish().unwrap();
+                replies.tell(exec::Reply::Exited(0));
+            }
+            while steer.recv().is_ok() {}
+            drop((producer, control));
+            let_go
+        }
+
+        /// The controller reads a log lane (D238's log lane): each record exact, typed and at
+        /// its own place, in the log's order, a long output in records of the lane's room, then
+        /// its end; a later lane from its cursor reads only what it had not, from inside a
+        /// record; a place older than the oldest kept is refused `Rotated`, naming it, and a
+        /// member the run has not `Unknown`; a followed lane reads what comes as it comes and
+        /// ends at its source's end; and a lane let go before its end lets its host go.
+        #[test]
+        fn the_controller_reads_a_log_lane_exactly_and_goes_on_from_its_cursor() {
+            use exec::{Gapped, LogChannels, LogCursor, LogPos, LogRecord, LogSource, Unlogged};
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, starts) = Serving::with_execs(&vm, kiln.fingerprint());
+            let (outputs, inputs) = all(0);
+            let (dialed, _driver) = drive(
+                &kiln,
+                vm.fingerprint(),
+                serving.address,
+                Subscriptions {
+                    outputs: &outputs,
+                    inputs: &inputs,
+                    execs: Some(exec::Admissions {
+                        output: out_admitted(),
+                        input: in_admitted(),
+                    }),
+                    sockets: None,
+                },
+            );
+            let execs = dialed.execs.as_ref().unwrap();
+            let at = |seq, no, byte| LogPos { seq, no, byte };
+            let long: Vec<u8> = (0..50u8).map(|i| i.wrapping_mul(37)).collect();
+            let kept = vec![
+                LogRecord::Output {
+                    channel: Channel::Stdout,
+                    pos: at(1, 0, 0),
+                    at: 11,
+                    bytes: b"line one\n".to_vec(),
+                },
+                LogRecord::Output {
+                    channel: Channel::Stderr,
+                    pos: at(1, 1, 0),
+                    at: 12,
+                    bytes: b"\x00\xff err".to_vec(),
+                },
+                LogRecord::Gap {
+                    channel: Channel::Stdout,
+                    pos: at(1, 2, 0),
+                    at: 13,
+                    lost: 4096,
+                    why: Gapped::Behind,
+                },
+                LogRecord::Output {
+                    channel: Channel::Stdout,
+                    pos: at(2, 0, 0),
+                    at: 14,
+                    bytes: long.clone(),
+                },
+            ];
+            let room = RECORD - exec::LOG_OUTPUT_HEAD;
+            let (more_tx, more) = mpsc::channel();
+            let served = kept.clone();
+            let host = std::thread::spawn(move || {
+                let mut let_go = Vec::new();
+                for _ in 0..4 {
+                    let start = starts.recv_timeout(PATIENCE).unwrap();
+                    assert!(start.stderr.is_none() && start.stdin.is_none());
+                    let_go.push(log_stand_in(start, &served, 1, None));
+                }
+                let start = starts.recv_timeout(PATIENCE).unwrap();
+                let_go.push(log_stand_in(start, &served, 1, Some(more)));
+                let start = starts.recv_timeout(PATIENCE).unwrap();
+                let_go.push(log_stand_in(start, &served, 1, None));
+                let_go
+            });
+            let read_all = |log: &mut Log| {
+                let mut got = Vec::new();
+                loop {
+                    match log.next_record().unwrap() {
+                        Logged::Record(record) => got.push(record),
+                        Logged::Finished => return got,
+                    }
+                }
+            };
+            // Every record from the oldest kept, the long one in two of the lane's room.
+            let mut whole = execs
+                .log(LogSource::Member(0), LogChannels::BOTH, LogCursor::OLDEST, false)
+                .unwrap();
+            let mut expected = kept[..3].to_vec();
+            expected.push(LogRecord::Output {
+                channel: Channel::Stdout,
+                pos: at(2, 0, 0),
+                at: 14,
+                bytes: long[..room].to_vec(),
+            });
+            expected.push(LogRecord::Output {
+                channel: Channel::Stdout,
+                pos: at(2, 0, room as u64),
+                at: 14,
+                bytes: long[room..].to_vec(),
+            });
+            assert_eq!(read_all(&mut whole), expected);
+            assert_eq!(whole.next_record(), Ok(Logged::Finished));
+            let end = at(2, 0, long.len() as u64);
+            assert_eq!(
+                whole.cursor(),
+                LogCursor {
+                    stdout: Some(end),
+                    stderr: Some(end),
+                }
+            );
+            // From inside the long record, stdout alone: its rest, and stderr's place kept.
+            let from = LogCursor {
+                stdout: Some(at(2, 0, room as u64)),
+                stderr: None,
+            };
+            let stdout = LogChannels {
+                stdout: true,
+                stderr: false,
+            };
+            let mut rest = execs.log(LogSource::Member(0), stdout, from, false).unwrap();
+            assert_eq!(read_all(&mut rest), expected[4..].to_vec());
+            assert_eq!(
+                rest.cursor(),
+                LogCursor {
+                    stdout: Some(end),
+                    stderr: None,
+                }
+            );
+            // A place older than the oldest kept, and a member the run has not.
+            let older = LogCursor {
+                stdout: Some(at(0, 5, 0)),
+                stderr: None,
+            };
+            assert_eq!(
+                execs
+                    .log(LogSource::Member(0), LogChannels::BOTH, older, false)
+                    .map(|_| ()),
+                Err(Fault::Unlogged(Unlogged::Rotated { oldest: at(1, 0, 0) }))
+            );
+            assert_eq!(
+                execs
+                    .log(LogSource::Member(1), LogChannels::BOTH, LogCursor::OLDEST, false)
+                    .map(|_| ()),
+                Err(Fault::Unlogged(Unlogged::Unknown))
+            );
+            // Followed from where the first got to: what comes, as it comes, then the end.
+            let mut followed = execs
+                .log(LogSource::Command, LogChannels::BOTH, whole.cursor(), true)
+                .unwrap();
+            let late = LogRecord::Output {
+                channel: Channel::Stderr,
+                pos: at(3, 0, 0),
+                at: 15,
+                bytes: b"late\n".to_vec(),
+            };
+            more_tx.send(late.clone()).unwrap();
+            assert_eq!(followed.next_record(), Ok(Logged::Record(late)));
+            drop(more_tx);
+            assert_eq!(followed.next_record(), Ok(Logged::Finished));
+            // Let go after its first record: its host's stream goes under it.
+            let mut dropped = execs
+                .log(LogSource::Command, LogChannels::BOTH, LogCursor::OLDEST, true)
+                .unwrap();
+            assert_eq!(dropped.next_record(), Ok(Logged::Record(kept[0].clone())));
+            drop(dropped);
+            assert_eq!(host.join().unwrap(), [false, false, false, false, false, true]);
+        }
+
+        /// What a controller was granted as it dialed is named as Shards names its lanes (goal
+        /// 60's `lanes`): its control lane, then each subscription's stream in its order; an
+        /// exec's, a socket's and an MCP bridge's names where they are granted.
+        #[test]
+        fn a_dials_lanes_are_named_as_granted() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let serving = Serving::bind(&vm, kiln.fingerprint());
+            let (outputs, inputs) = all(0);
+            let (dialed, _driver) = drive(
+                &kiln,
+                vm.fingerprint(),
+                serving.address,
+                Subscriptions {
+                    outputs: &outputs,
+                    inputs: &inputs,
+                    execs: None,
+                    sockets: None,
+                },
+            );
+            let names: Vec<String> = dialed.lanes().iter().map(Granted::name).collect();
+            assert_eq!(names, ["control", "stdout:0", "stderr:0", "stdin:0"]);
+            let others = [
+                Granted::Execs,
+                Granted::Sockets,
+                Granted::Mcp(2),
+                Granted::Log(exec::LogSource::Command),
+                Granted::Log(exec::LogSource::Member(2)),
+            ]
+            .map(|g| g.name());
+            assert_eq!(others, ["exec", "socket", "mcp:2", "log:run", "log:2"]);
+            // Where execs are granted, so are logs: the run's command's, and each member's its
+            // subscriptions name, once.
+            let (with_execs, _driver) = drive(
+                &kiln,
+                vm.fingerprint(),
+                serving.address,
+                Subscriptions {
+                    outputs: &outputs,
+                    inputs: &inputs,
+                    execs: Some(exec::Admissions {
+                        output: out_admitted(),
+                        input: in_admitted(),
+                    }),
+                    sockets: None,
+                },
+            );
+            let names: Vec<String> = with_execs.lanes().iter().map(Granted::name).collect();
+            assert_eq!(
+                names,
+                [
+                    "control", "stdout:0", "stderr:0", "stdin:0", "exec", "log:run", "log:0"
+                ]
+            );
+        }
+
         /// A revoked output ends its lane alone, `Revoked`; an aborted stdin ends with its
         /// errno as the member's init tells it; the connection and other lanes go on, until
         /// the controller hangs up, which every lane left hears as its own close.
@@ -3022,14 +3611,11 @@ mod tests {
 
         /// The controller's windows are its lanes' own, from the endpoint's admissions, the
         /// control lane's among them: what the endpoint sends on each before it is read,
-        /// summed; what it sends on each, summed; no stream the endpoint may open; the least
-        /// patience and the largest handshake.
+        /// summed; what it sends on each, summed; no stream the endpoint may open; the largest
+        /// handshake.
         #[test]
         fn the_controllers_windows_are_its_lanes_own_summed() {
-            let slow = Admitted {
-                patience: tls::QUIET,
-                ..admitted(50, input::TAKEN_BYTES)
-            };
+            let slow = admitted(50, input::TAKEN_BYTES);
             let (link, windows) = super::super::drive::windows(Subscriptions {
                 outputs: &[
                     (output(Channel::Stdout), out_admitted(), 0),
@@ -3057,7 +3643,7 @@ mod tests {
                     streams: 0,
                 }
             );
-            assert_eq!(link.patience, PATIENCE);
+            assert_eq!(link.handshake_bytes, slow.handshake_bytes);
             // A controller of no stream still opens its control lane (D252), on the cited link.
             let (bare, control) = super::super::drive::windows(Subscriptions {
                 outputs: &[],
@@ -3066,10 +3652,7 @@ mod tests {
                 sockets: None,
             })
             .unwrap();
-            assert_eq!(
-                (bare.handshake_bytes, bare.patience),
-                (unix::HANDSHAKE_MOST, tls::QUIET)
-            );
+            assert_eq!(bare.handshake_bytes, unix::HANDSHAKE_MOST);
             assert!(control.connection > 0 && control.send > 0, "{control:?}");
         }
     }

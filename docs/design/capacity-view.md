@@ -11,6 +11,15 @@ how both admit against one view, so neither oversubscribes the other, and how a 
 on either side reconciles without double-booking. Each decision has its sources, the alternatives and
 what would falsify it (CLAUDE.md §5; Shards R02).
 
+Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): proposed 2026-11-12. Live: the
+cores, their seam and simulator (`1cd01f67`), the node's keeper (`6ade789a`), hex-sim's nemesis (`8e0ee510`), the QUIC
+lane (`41b3c4c7`) hearing the holders it names alone (`f6d0ef7d`), the person's release (`25d848d3`), and CV12's
+credit withdrawn with the stand-in holder, HEX-CV-L1 and HEX-CV-2H (`90c5c108`, `80db559a`). HEX-CV-2H passed between
+Linux and macOS at `90c5c108`, with each host as the keeper in turn. Merged on Hex's main: a Windows node's process
+route in its `oci` form and hex-sim's settling bounded by what is in flight (`54a896cc`), and the waits under decision
+9 (`8c5197be`); HEX-CV-L1 passes at both on Linux, macOS and Windows. Owed: kiln's runner shell holding over
+`CAPACITY_PORT` (kiln goal 54), then ROOT's HEX-CV-2K; and ROOT's HEX-CV-2H partition phase between Linux and Windows.
+
 Acceptance (the plan's): on one machine, Hex placements and kiln runs never together exceed its room; a
 dropped link or a crash on either side reconciles without double-booking. Tests: hex-sim and kiln-ci's
 simulator, then ROOT on two real machines; passes when no oversubscription across crash seeds and the

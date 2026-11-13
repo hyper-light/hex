@@ -474,6 +474,7 @@ impl MacRuntime {
             allocation: None,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         })
     }
 }
@@ -551,6 +552,7 @@ impl BoxUser {
             io_read_bytes: 0,
             io_write_bytes: 0,
             guest: None,
+            started_from: None,
         })
     }
 
@@ -607,6 +609,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         allocation: None,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 

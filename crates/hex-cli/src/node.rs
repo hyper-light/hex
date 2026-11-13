@@ -165,6 +165,7 @@ const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--quic <addr
 fn descriptors(state: &Path) -> u8 {
     let runs = hex_node::Runs {
         vms: guest_requested() || std::env::var_os("HEX_FIRECRACKER_CONFIG").is_some(),
+        hosted: 0,
     };
     let needed = hex_node::netns::needed_on_this_host(state, runs);
     match needed {
@@ -515,6 +516,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     // Its start counts what it runs past its own boxes among its own descriptors: VM boxes where a backend is configured.
     let runs = hex_node::Runs {
         vms: guest_config.is_some() || firecracker_config.is_some(),
+        hosted: 0,
     };
     // Made before the node's start, so the GPU handles it holds are among what the start counts as held.
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
@@ -538,13 +540,18 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     }
     let node = Arc::new(node);
     node.bind_prober(prober).map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let shards = configured_guest(
         guest_config,
         &args.state,
         node.device_catalog(),
         node.shards_native_paths().map_err(failed)?,
+        Arc::clone(&lessors),
     )?
     .map(Arc::new);
+    if shards.is_some() {
+        node.lease_over_wire(lessors).map_err(failed)?;
+    }
     let firecracker = firecracker_config
         .map(|config| {
             hex_runtime::firecracker::FirecrackerRuntime::open(
@@ -648,11 +655,13 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         &backend_path(&args.state, "devices").map_err(failed)?,
     )
     .map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let host: Arc<dyn Host> = match configured_guest(
         guest_config,
         &args.state,
         catalog,
         runtime_paths(&args.state).map_err(failed)?,
+        Arc::clone(&lessors),
     )? {
         Some(guest) => {
             let (control, cost) = managed.ok_or_else(|| {
@@ -671,6 +680,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.lease_over_wire(lessors).map_err(failed)?;
             node.bind_guest_books().map_err(failed)?;
             // Joint plan step 14: what this node recorded under a census cost is retired first.
             node.retire_census().map_err(failed)?;
@@ -692,9 +702,13 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         }
     };
     let platform = hex_node::serve::macos::platform().map_err(failed)?;
+    // Every descriptor the node holds for its life beside its bounds is open now: its store's, its keeper's and its
+    // guest's.
+    let beside = hex_node::serve::macos::open_descriptors().map_err(failed)?;
+    let fitted = fitted(&platform, 0, hex_node::serve::fit::MACOS, Some(beside)).map_err(failed)?;
     Ok(Hosted {
         host,
-        limits: hex_node::serve::limits(&platform),
+        limits: fitted.limits,
         workers: platform.threads,
     })
 }
@@ -781,17 +795,20 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         .map_err(failed)?;
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
         .map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let host: Arc<dyn Host> = match configured_guest(
         guest_config,
         &args.state,
         catalog,
         runtime_paths(&args.state).map_err(failed)?,
+        Arc::clone(&lessors),
     )? {
         Some(guest) => {
             let routed =
                 hex_runtime::guest::WithGuest::configured(runtime, guest, WinRuntime::oci_side);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.lease_over_wire(lessors).map_err(failed)?;
             node.bind_guest_books().map_err(failed)?;
             // Joint plan step 14: what this node recorded under a census cost is retired first.
             node.retire_census().map_err(failed)?;
@@ -813,10 +830,36 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         }
     };
     let platform = hex_node::serve::windows::platform().map_err(failed)?;
+    // Every handle the node holds for its life beside its bounds is open now: its store's, its keeper's and its
+    // guest's.
+    let beside = hex_node::serve::windows::open_descriptors().map_err(failed)?;
+    let fitted =
+        fitted(&platform, 0, hex_node::serve::fit::WINDOWS, Some(beside)).map_err(failed)?;
     Ok(Hosted {
         host,
-        limits: hex_node::serve::limits(&platform),
+        limits: fitted.limits,
         workers: platform.threads,
+    })
+}
+
+/// The node's socket bounds fitted to its platform's descriptors with everything else it holds, as Linux's node fits
+/// its own (ROOT's one accounting of 2026-11-13; `hex_node::serve::fit`), or its start refused by type where its limit
+/// can't hold the least node. Before, a macOS or Windows node's connections were its raw descriptor limit.
+#[cfg(any(target_os = "macos", windows))]
+fn fitted(
+    platform: &hex_node::serve::Platform,
+    hosted: usize,
+    own: hex_node::serve::fit::Own,
+    beside: Option<u64>,
+) -> Result<hex_node::serve::fit::Fitted, Refusal> {
+    hex_node::serve::fit::fit(platform, hosted, own, beside).map_err(|least| Refusal::Platform {
+        what: "a node within its descriptor limit",
+        platform: std::env::consts::OS,
+        why: format!(
+            "the least node, one program place and one connection, holds {least} descriptors, past the {} its \
+             platform gives",
+            platform.descriptors
+        ),
     })
 }
 
@@ -854,6 +897,7 @@ fn configured_guest(
     state: &Path,
     catalog: hex_runtime::devices::SharedCatalog,
     paths: (PathBuf, PathBuf),
+    lessors: Arc<hex_node::serve::WireLessors>,
 ) -> Result<Option<hex_runtime::guest::GuestRuntime>, (u8, String)> {
     use hex_runtime::guest::{GuestInputs, GuestRuntime};
     let Some(GuestInputs {
@@ -889,9 +933,13 @@ fn configured_guest(
         .with_images(
             hex_runtime::guest::host_images(),
             Ok(hex_runtime::guest::ImageWaits::new()),
+            backend_path(state, "image-diagnostics").map_err(failed)?,
         )
         .with_runtime_cost(cost)
-        .map_err(failed)?;
+        .map_err(failed)?
+        // Its image VMs' credentials leased from the connection that created each (joint plan step 33): the socket
+        // keeps each box's route (docs/design/credential-grants.md C7).
+        .with_lessors(lessors);
     if let Some(images) = native_images {
         guest = guest.with_native_images(images).map_err(failed)?;
     }

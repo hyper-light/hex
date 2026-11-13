@@ -34,6 +34,8 @@ tempfile.workspace = true
 # tests/shards_borrowed_contract.rs, Hex's campaign over shards-api's borrowed connector: its directories,
 # and on Windows the AF_UNIX listener and the process calls it counts handles with, as when Shards' API carried it.
 shards-testdir = { path = "../../vendor/shards/crates/testdir" }
+# src/guest/lanes/tests.rs: a run's real agent-control endpoint (D251, D252) on loopback, its run host the test's.
+shards-remote = { path = "../../vendor/shards/crates/remote" }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc.workspace = true

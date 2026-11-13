@@ -321,10 +321,11 @@ impl Driver for Shards {
 
     fn describe(&self) -> Result<Lines, String> {
         let mut lines = Vec::new();
+        let (kernel, initrd) = self.config.direct().map_err(|e| e.to_string())?;
         for (name, path) in [
-            ("SHARDS_BIN", &self.config.binary),
-            ("HEX_GUEST_KERNEL", &self.config.kernel),
-            ("HEX_GUEST_INITRD", &self.config.initrd),
+            ("SHARDS_BIN", self.config.binary.as_path()),
+            ("HEX_GUEST_KERNEL", kernel),
+            ("HEX_GUEST_INITRD", initrd),
         ] {
             lines.push((
                 name.to_owned(),
@@ -402,7 +403,7 @@ impl Driver for Shards {
     }
 
     fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String> {
-        let mut spec = self.config.spec();
+        let mut spec = self.config.spec().map_err(|e| e.to_string())?;
         hex_runtime::guest::tell_ready(
             &mut spec.cmdline,
             deadline.saturating_duration_since(Instant::now()),
@@ -1079,8 +1080,10 @@ mod tests {
         }
         GuestConfig {
             binary: dir.join("shards"),
-            kernel: dir.join("kernel"),
-            initrd: dir.join("initrd"),
+            boot: hex_runtime::guest::Boot::Kernel {
+                kernel: dir.join("kernel"),
+                initrd: dir.join("initrd"),
+            },
             vcpus: 2,
             memory_mib: 512,
             gpu: false,

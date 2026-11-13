@@ -34,7 +34,8 @@
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
 //!   flight (a list's parts go one at a time), an end for each program, and the one refusal read
-//!   before reading stopped;
+//!   before reading stopped; and, on a connection that leases its boxes' credentials ([`leases`]), its lease asks
+//!   (at most its in-flight limit), a give-back for each lease its boxes' runs hold, and an end for each run;
 //! - workers (the platform's threads, [`Platform::threads`]): one for every call the connections' in-flight
 //!   bounds admit, where the kernel's thread limit allows; a call past them waits in the queue those
 //!   bounds hold.
@@ -59,7 +60,10 @@ use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
+pub use leases::WireLessors;
 
+pub mod fit;
+pub mod leases;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -105,9 +109,11 @@ pub struct Platform {
 ///   admitted has a worker that can exist;
 /// - programs watched: the programs the node can watch at once.
 ///
-/// Each is a ceiling the platform sets, not the room left under it now: what else holds the platform's room, the
-/// kernel refuses past as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission (the lead,
-/// 2026-11-09, over reading the room at each admission, which cost every exec a listing of the node's descriptors).
+/// Each is a ceiling the platform sets, which a node's start fits to its descriptors with everything else it holds
+/// ([`fit`], ROOT's one accounting of 2026-11-13; Linux's with its pools, `crate::netns::fit`), not the room left
+/// under it now: what else holds the platform's room, the kernel refuses past as the node takes it (`EMFILE`,
+/// `EAGAIN`), typed, at no cost to an admission (the lead, 2026-11-09, over reading the room at each admission, which
+/// cost every exec a listing of the node's descriptors).
 pub fn limits(platform: &Platform) -> Limits {
     Limits {
         connections: platform.descriptors,
@@ -280,6 +286,12 @@ pub trait Host: Runtime {
     /// Counts in box `id` a program exec'd in it that the node ended because the connection watching
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
+    /// The node's lessors over its wire, where its runtime leases its image VMs' credentials through them
+    /// (docs/design/credential-grants.md C7): a connection that says it leases ([`Call::Lessors`]) answers for the
+    /// boxes it creates. None where the runtime leases through no connection, which refuses that call by type.
+    fn lessors(&self) -> Option<Arc<WireLessors>> {
+        None
+    }
 
     /// The node's network namespace counts (decision 4).
     fn netns(&self) -> Result<netns::Counts, Refusal>;
@@ -535,6 +547,9 @@ struct Shared<O: Os> {
     work: Condvar,
     /// Why the I/O thread stopped, if it failed.
     fault: Mutex<Option<String>>,
+    /// The host's lessors over the wire, asked once ([`Host::lessors`]): each box's route to the connection that
+    /// created it, where that connection leases.
+    lessors: Option<Arc<WireLessors>>,
 }
 
 /// The connections and the programs they watch, by token. Locked before a connection's own state when
@@ -610,6 +625,13 @@ struct Out {
     kept: usize,
     /// Whether its requests are read ([`Interest::Read`]) or only its backlog written.
     reading: bool,
+    /// Where it leases ([`Call::Lessors`]): the line its boxes' runs ask their leases on, held while it stands.
+    line: Option<Arc<dyn leases::Line>>,
+    /// Its lease asks waiting for their answers, by their ids: at most its in-flight limit, each filled as its answer
+    /// comes or as it closes.
+    asks: BTreeMap<u64, Arc<leases::Slot>>,
+    /// The id its next lease ask takes.
+    next_ask: u64,
 }
 
 impl Out {
@@ -954,6 +976,7 @@ impl<O: Os> Server<O> {
         let shared = Arc::new(Shared {
             os,
             classes: host.classes(),
+            lessors: host.lessors(),
             host,
             limits,
             workers,
@@ -1241,6 +1264,9 @@ impl<O: Os> Shared<O> {
                     given: BTreeMap::new(),
                     kept: 0,
                     reading: true,
+                    line: None,
+                    asks: BTreeMap::new(),
+                    next_ask: 1,
                 }),
                 drained: hex_wait::Condvar::new(),
             }),
@@ -1322,14 +1348,22 @@ impl<O: Os> Shared<O> {
             if size == 0 && passed.is_empty() && (gone || self.os.hung_up(&conn.sock)) {
                 return Ok(true);
             }
-            let bytes = buf.get(..got.min(size).min(buf.len())).unwrap_or_default();
+            let read = got.min(size).min(buf.len());
+            let bytes = buf.get(..read).unwrap_or_default();
+            // A lease's value crosses in its message alone: its bytes here are wiped once it is read, whatever came of
+            // it (docs/design/credential-grants.md C7).
+            let secret = wire::carries_secret(bytes);
             let received = Received {
                 bytes,
                 size,
                 descriptors: passed.len(),
                 descriptors_cut: cut,
             };
-            if self.request(conn, &received, passed)? {
+            let ended = self.request(conn, &received, passed);
+            if secret && let Some(held) = buf.get_mut(..read) {
+                hex_api::lease::wipe_in_place(held);
+            }
+            if ended? {
                 return Ok(true);
             }
         }
@@ -1380,6 +1414,12 @@ impl<O: Os> Shared<O> {
             Ok((h, Request::Release)) => self.release(conn, h.id),
             Ok((h, Request::Taken)) => self.taken(conn, h.id),
             Ok((h, Request::StreamsReady)) => self.streams_ready(conn, h),
+            Ok((h, Request::Lessor(made))) => {
+                self.lease_reply(conn, h.id, leases::Reply::Lessor(made), None)
+            }
+            Ok((h, Request::Leased { run, answer })) => {
+                self.lease_reply(conn, h.id, leases::Reply::Leased(answer), Some(run))
+            }
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;
@@ -1624,6 +1664,14 @@ impl<O: Os> Shared<O> {
                 self.idle_programs.fetch_sub(1, Ordering::AcqRel);
             }
             out.backlog.clear();
+            // Its lease asks hear its end, and its boxes' runs lease from no one here from now.
+            for slot in std::mem::take(&mut out.asks).into_values() {
+                slot.fill(leases::Reply::Ended);
+            }
+            out.line = None;
+            if let Some(wire) = &self.lessors {
+                wire.closed(conn.token);
+            }
             // Its given ends go with it, and the places those of programs it no longer watches held.
             self.kept.fetch_sub(out.kept, Ordering::AcqRel);
             out.kept = 0;
@@ -2070,12 +2118,10 @@ impl<O: Os> Shared<O> {
                 Job::Collect(mut w) => {
                     let exit = match &mut w.run {
                         Run::Local { proc, .. } => {
-                            // Told once its box is gone: the node's learned wait for a box to empty bounds it, the
-                            // removal waiting on that emptying.
-                            match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-                                Ok(Some(exit)) => exit,
-                                Ok(None) | Err(_) => Exit::Unknown,
-                            }
+                            // Told once its box is gone: waited for as a killed box's emptying is, past its W* by the
+                            // program's life alone (decision 9), the removal waiting on that emptying.
+                            crate::emptying::end_of_killed(&mut **proc, Instant::now())
+                                .unwrap_or(Exit::Unknown)
                         }
                         Run::Remote(_) => Exit::Unknown,
                     };
@@ -2264,6 +2310,7 @@ impl<O: Os> Shared<O> {
                 let grant = triomphe::Arc::try_unwrap(grant).map_err(|grant| Refusal::Backing {
                     key: grant.key,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 });
                 grant
                     .and_then(|grant| host.initialize_backing(grant))
@@ -2271,12 +2318,21 @@ impl<O: Os> Shared<O> {
             }
             Call::ReleaseBacking(key) => host.release_backing(key).map(Answer::BackingOffer),
             Call::BackingUsage(key) => host.backing_usage(&key).map(Answer::Usage),
-            Call::Create(spec) => host.create(*spec).map(Answer::Info),
+            Call::Create(spec) => self.create(conn, *spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
-            Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
+            Call::Delete(id) => {
+                let deleted = host.delete(&id);
+                // Its route goes with it, as does one of a box already gone.
+                if let (Some(wire), Ok(()) | Err(Refusal::NoSuchBox(_))) = (&self.lessors, &deleted)
+                {
+                    wire.deleted(&id);
+                }
+                deleted.map(|()| Answer::Done)
+            }
+            Call::Lessors => self.leasing(conn).map(|()| Answer::Done),
             Call::Netns => host.netns().map(Answer::Netns),
             // The endpoint's links at one moment, in as many parts as they need.
             Call::Links => {
@@ -2551,9 +2607,9 @@ impl<O: Os> Shared<O> {
             }
             Err(Unwatched::Killed(why)) => {
                 drop(table);
-                // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
-                let killed = Instant::now();
-                let _ = proc.wait_for(crate::emptying::empty_patience(killed));
+                // A killed process's end: waited for as a killed box's emptying is, its kind of wait, past its W* by
+                // the program's life alone (decision 9).
+                let _ = crate::emptying::end_of_killed(&mut *proc, Instant::now());
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
@@ -2650,10 +2706,9 @@ impl<O: Os> Shared<O> {
         given: Option<hex_api::Given>,
         mut proc: Box<dyn Proc>,
     ) -> Result<(), Refusal> {
-        let exit = match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-            Ok(Some(exit)) => exit,
-            Ok(None) | Err(_) => Exit::Unknown,
-        };
+        // Waited for as a killed box's emptying is, past its W* by the program's life alone (decision 9).
+        let exit =
+            crate::emptying::end_of_killed(&mut *proc, Instant::now()).unwrap_or(Exit::Unknown);
         self.unreserve(conn)?;
         self.done(conn)?;
         match given {
@@ -2710,8 +2765,9 @@ impl<O: Os> Shared<O> {
         }
     }
 
-    /// The server stops: every connection closes, ending its programs, and the thread waits a bounded
-    /// time for them to be reaped and counted before the workers finish the queue and go.
+    /// The server stops: every connection closes, ending its programs, and the thread waits for them to be reaped and
+    /// counted before the workers finish the queue and go: as a killed box's emptying is waited for, within its W*
+    /// and past it, its run-out told once, by the programs' lives alone (decision 9).
     fn stop(self: &Arc<Self>) {
         // Nothing new comes in, and the stop's own wake no longer wakes the wait below.
         self.os.stop_listening();
@@ -2726,11 +2782,24 @@ impl<O: Os> Shared<O> {
             let _ = self.close(conn);
         }
         let mut events = Vec::with_capacity(EVENTS);
+        let bound = crate::emptying::EMPTYING.deadline();
+        let mut past = false;
         loop {
-            let left = crate::emptying::empty_patience(killed);
             let Ok(table) = self.table() else { break };
-            if table.watched.is_empty() || left.is_zero() {
+            if table.watched.is_empty() {
                 break;
+            }
+            let mut left = if past {
+                None
+            } else {
+                bound.map(|window| window.saturating_sub(killed.elapsed()))
+            };
+            if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
+                // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
+                // lives alone.
+                crate::emptying::EMPTYING.ran_out(window);
+                past = true;
+                left = None;
             }
             let tokens: Vec<u64> = table
                 .watched
@@ -2741,14 +2810,18 @@ impl<O: Os> Shared<O> {
             let sourced = self.sources.lock().is_ok_and(|s| !s.is_empty());
             if tokens.is_empty() && !sourced {
                 // Only remote programs are left, whose ends come from their host's own thread.
-                if self.remote_ended.wait_timeout(table, left).is_err() {
+                let waited = match left {
+                    Some(left) => self.remote_ended.wait_timeout(table, left).map(drop),
+                    None => self.remote_ended.wait(table).map(drop),
+                };
+                if waited.is_err() {
                     break;
                 }
                 continue;
             }
             drop(table);
             events.clear();
-            if self.os.wait(&mut events, Some(left)).is_err() {
+            if self.os.wait(&mut events, left).is_err() {
                 break;
             }
             for event in &events {
@@ -2772,6 +2845,147 @@ impl<O: Os> Shared<O> {
         self.stopping.store(true, Ordering::SeqCst);
         if let Ok(_jobs) = self.jobs.lock() {
             self.work.notify_all();
+        }
+    }
+}
+
+/// A connection's line for its boxes' leases (docs/design/credential-grants.md C7): its asks made and answered on it.
+struct ConnLine<O: Os> {
+    shared: std::sync::Weak<Shared<O>>,
+    conn: std::sync::Weak<Conn<O>>,
+}
+
+impl<O: Os> leases::Line for ConnLine<O> {
+    fn ask(&self) -> Result<(u64, Arc<leases::Slot>), Refusal> {
+        let (Some(shared), Some(conn)) = (self.shared.upgrade(), self.conn.upgrade()) else {
+            return Err(line_ended());
+        };
+        let mut out = conn.out.lock().map_err(poisoned)?;
+        if !out.open {
+            return Err(line_ended());
+        }
+        // Its asks waiting are held to its in-flight limit, as its own calls are: each a message the node sends it and a
+        // slot it keeps until its answer or its close.
+        if out.asks.len() >= shared.limits.in_flight {
+            return Err(Refusal::Exhausted {
+                what: "lease asks waiting on one connection",
+                bound: shared.limits.in_flight,
+            });
+        }
+        let id = out.next_ask;
+        out.next_ask = id.checked_add(1).ok_or_else(|| {
+            Refusal::Broken("a connection's lease asks ran out of ids".to_owned())
+        })?;
+        let slot = leases::Slot::new();
+        out.asks.insert(id, Arc::clone(&slot));
+        Ok((id, slot))
+    }
+
+    fn tell(&self, id: u64, answer: &Answer) -> Result<(), Refusal> {
+        let (Some(shared), Some(conn)) = (self.shared.upgrade(), self.conn.upgrade()) else {
+            return Err(line_ended());
+        };
+        shared.answer(&conn, id, answer)
+    }
+
+    fn forget(&self, id: u64) {
+        if let Some(conn) = self.conn.upgrade()
+            && let Ok(mut out) = conn.out.lock()
+        {
+            out.asks.remove(&id);
+        }
+    }
+}
+
+fn line_ended() -> Refusal {
+    Refusal::Unconfigured {
+        what: "lessors for its image VMs' credentials",
+        why: "the connection that created the box, whose orchestrator leases its credentials, has ended".to_owned(),
+    }
+}
+
+/// Whether `spec` grants a credential: a Shards image VM's, whose runs lease (joint plan step 33).
+fn grants_credentials(spec: &BoxSpec) -> bool {
+    matches!(&spec.class, hex_api::ClassSpec::ShardsImage(image) if !image.credentials.is_empty())
+}
+
+impl<O: Os> Shared<O> {
+    /// This connection leases the credentials of the boxes it creates from now on ([`Call::Lessors`]), where the node
+    /// leases over its wire; refused by type where it doesn't.
+    fn leasing(self: &Arc<Self>, conn: &Arc<Conn<O>>) -> Result<(), Refusal> {
+        if self.lessors.is_none() {
+            return Err(Refusal::Unconfigured {
+                what: "lessors over the node's wire",
+                why: "this node's runtime leases its image VMs' credentials through no connection's lessors".to_owned(),
+            });
+        }
+        let mut out = conn.out.lock().map_err(poisoned)?;
+        if out.line.is_none() {
+            let line: Arc<dyn leases::Line> = Arc::new(ConnLine {
+                shared: Arc::downgrade(self),
+                conn: Arc::downgrade(conn),
+            });
+            out.line = Some(line);
+        }
+        Ok(())
+    }
+
+    /// A create on `conn` (docs/design/credential-grants.md C7): a box granting a credential is made only for a
+    /// connection that leases, refused before any record otherwise (default deny), and each box's route is its create's,
+    /// kept before the create is answered: to its connection where the box grants a credential and the connection
+    /// leases, else none.
+    fn create(&self, conn: &Conn<O>, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
+        let line = conn
+            .out
+            .lock()
+            .map_err(poisoned)?
+            .line
+            .as_ref()
+            .map(Arc::downgrade);
+        let granting = grants_credentials(&spec);
+        if granting && line.is_none() {
+            return Err(Refusal::Unconfigured {
+                what: "lessors for its image VMs' credentials",
+                why: format!(
+                    "box {} grants a credential, and the connection that creates it gave no lessors (Lessors): a node \
+                     never leases for a box whose creator gave none",
+                    spec.id
+                ),
+            });
+        }
+        let id = spec.id.try_clone()?;
+        let routed = self.lessors.as_ref().filter(|_| granting);
+        if let Some(wire) = routed {
+            wire.room(&id)?;
+        }
+        let info = self.host.create(spec)?;
+        if let Some(wire) = &self.lessors {
+            wire.route(&id, conn.token, line.filter(|_| granting));
+        }
+        Ok(info)
+    }
+
+    /// A lease ask's answer came on `conn`: its slot filled. One no ask waits for is let go, a lease in it given straight
+    /// back to its run ([`Answer::LeaseGiven`]) so its orchestrator holds it no longer; its value is wiped as it drops.
+    fn lease_reply(
+        &self,
+        conn: &Conn<O>,
+        id: u64,
+        reply: leases::Reply,
+        run: Option<u64>,
+    ) -> Result<(), Refusal> {
+        let slot = conn.out.lock().map_err(poisoned)?.asks.remove(&id);
+        match (slot, reply) {
+            (Some(slot), reply) => {
+                slot.fill(reply);
+                Ok(())
+            }
+            (None, leases::Reply::Leased(Ok(lease))) => self.answer(
+                conn,
+                run.unwrap_or_default(),
+                &Answer::LeaseGiven(lease.lease.clone()),
+            ),
+            (None, _) => Ok(()),
         }
     }
 }

@@ -20,13 +20,12 @@
 //!   healthy parties (`docs/research/runtime/learned-waits.md`, decision 9's bound). Its answer comes in uncensored,
 //!   and W* rises to it. No factor: the following wait measures how long to wait.
 //! - **After a run-out**: the tail it ran into is unknown, the cold start's case, so the next wait follows its party
-//!   from its start ([`Patience::ran_out`], [`Patience::expired`]) until an answer comes.
+//!   from its start ([`Patience::ran_out`]) until an answer comes.
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
 //!   installs one ([`census`]): the waits census probe's record of each wait's distribution
 //!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points, the evidence decision 9's rule is
-//!   held to. A wait that ran out for a slow answer tells the census too ([`Patience::ran_out`]); a party taken for
-//!   dead or hung tells it nothing ([`Patience::expired`]): it says nothing of how long an answer takes. Where the
-//!   census runs, every wait follows its party, unarmed ([`measure_all`]), so the distribution keeps its tail.
+//!   held to. A wait that ran out for a slow answer tells the census too ([`Patience::ran_out`]). Where the census
+//!   runs, every wait follows its party, unarmed ([`measure_all`]), so the distribution keeps its tail.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -86,6 +85,17 @@ pub fn census_full_line(max: u64) -> String {
     format!("census full at {max} lines\n")
 }
 
+/// What a following wait's party is doing as its shell looks at it (decision 9): alive, so its answer may yet come; or
+/// ended (it died or finished, or its connection was reset or closed), so nothing can change its answer now. A wait
+/// past W* follows its party by this alone ([module docs](self)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Party {
+    /// Alive: its answer may yet come.
+    Live,
+    /// Ended: nothing can change its answer now.
+    Ended,
+}
+
 /// A wait's bound, learned from its answers, following its party where it has none ([module docs](self)).
 #[derive(Debug)]
 pub struct Patience {
@@ -107,9 +117,9 @@ impl Patience {
         }
     }
 
-    /// For tests alone (cfg(test), or the `test-seeds` feature, which only hex-testkit's dependency turns on and which
-    /// is a dev-dependency everywhere): the wait `name` as it would be once it had seen an answer of `slowest`. No
-    /// production wait is seeded (decision 9).
+    /// For tests alone (cfg(test), or the `test-seeds` feature, which only dev-dependencies turn on: hex-core's own
+    /// tests', and hex-testkit's through hex-core's, hex-testkit a dev-dependency everywhere): the wait `name` as it
+    /// would be once it had seen an answer of `slowest`. No production wait is seeded (decision 9).
     #[cfg(any(test, feature = "test-seeds"))]
     pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
         Self {
@@ -145,20 +155,12 @@ impl Patience {
     /// The wait ran out, `after` passing with no answer: no sample (Karn's point), so the slowest seen stays, but the
     /// tail is unknown, so the next wait follows its party until an answer comes; told to the census where one is
     /// installed. A run-out refuses nothing by itself: the wait that ran out goes on, following its party past W* by its
-    /// life, its answer the uncensored sample W* rises to. Said where the answer is slow, never where
-    /// its party is taken for dead or hung ([`Patience::expired`]).
+    /// life, its answer the uncensored sample W* rises to.
     pub fn ran_out(&self, after: Duration) {
         self.following.store(true, Ordering::Relaxed);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::RanOut(after));
         }
-    }
-
-    /// The wait's bound passed and its party was taken for dead or hung (a parked init's silence past its claim's W*):
-    /// no sample and nothing for the census, a hung party saying nothing of how long an answer takes, but the next
-    /// wait follows its party, so a slow party past the slowest seen is waited for while it lives.
-    pub fn expired(&self) {
-        self.following.store(true, Ordering::Relaxed);
     }
 
     /// The wait's name.
