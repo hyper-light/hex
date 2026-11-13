@@ -883,6 +883,17 @@ impl Service {
         )?;
         capacity::retain_unavailable(&mut local, None, &snapshot.unavailable)?;
         charges::apply(&mut local, &learned)?;
+        // With a capacity lane, the room measured here is the Driver's before its view opens, so a keeper started, or
+        // started again after a kill (CV11), decides a holder's first reserve in the room there is, no command of Hex's
+        // needed to measure it first (joint plan step 13).
+        let measured = if capacity.is_some() {
+            Some(local.try_clone().map_err(|_| Refusal::Exhausted {
+                what: "local node snapshot",
+                bound: 1,
+            })?)
+        } else {
+            None
+        };
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
@@ -901,6 +912,9 @@ impl Service {
             )
             .map_err(failed)?,
         );
+        if let Some(measured) = measured {
+            driver.refresh_node(measured).map_err(failed)?;
+        }
         // The view opens before any admission this process makes, so none is made without it (CV1).
         let lane = match capacity {
             Some((lane, credentials)) => {

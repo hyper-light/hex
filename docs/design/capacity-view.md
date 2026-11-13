@@ -254,7 +254,9 @@ messages, each answered), so a holder that speaks only this protocol needs none 
 - **In production**: `hex schedule serve` serves the node's keeper as `placement::DriverView` where its
   configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
   kiln's CA's answer completed, read whole before anything binds, and `holders`, each by its `name`). The view
-  opens before any admission the scheduler makes, its endpoint serves `CAPACITY_PORT` alone, two connections a
+  opens before any admission the scheduler makes, with the machine's room as the scheduler measured it starting, so
+  a keeper started, or started again (CV11), decides a holder's first reserve in the room there is, no command of
+  Hex's needed to measure it first; its endpoint serves `CAPACITY_PORT` alone, two connections a
   holder (one, and the one replacing it: `hex-quic.md` Q8), and admits those holders alone: any other peer is
   refused at its handshake and holds none of them (`hex-quic.md` Q10). Every command it takes ends with the hints
   owed.
