@@ -225,7 +225,7 @@ view, so the next decision is made on the room there is (Omega §3.4: resync, th
 | Bound | Value | Derivation | Overflow |
 |---|---|---|---|
 | Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` |
-| Reservations per holder | `Budget::reservations` | the host's own record bound: what its records directory is sized to hold (the shell's, checkpoint 2) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
+| Reservations per holder | `Budget::reservations` | the most one sync lists (`hex_core::capacity::most_held`: the wire's message bound over the widest reservation), so every holder's sync fits one message (CV9); the keeper's records folder is sized to it, whatever runtime classes the host runs of its own (a Mac that places none still keeps a holder's) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
 | A holder's name | `Budget::name_bytes` | the host's wire message bound (`hex_core::wire::MAX_MESSAGE` on Hex's shell), so a hello always fits one message | `Closed { Invalid }` |
 | Hints owed | one per holder | coalesced: the newest view replaces the unsent one | none: a flag |
 
@@ -245,7 +245,7 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   away (CV5); a connection that breaks the framing or says a message that isn't one is reset as breaking
   the protocol.
 - **A sync fits one message**: the keeper holds each holder to the most reservations one sync lists at
-  their widest (`hex_core::capacity::most_held`), beside the node's own record bound (CV8).
+  their widest (`hex_core::capacity::most_held`), its bound (CV8).
 - **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
   a link within the endpoint's connection bound, to the holders its host authorizes alone, each by the name its
   certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it delivers each hint to the
@@ -253,8 +253,10 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   holder's end.
 - **In production**: `hex schedule serve` serves the node's keeper as `placement::DriverView` where its
   configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
-  kiln's CA's answer completed, read whole before anything binds, and `holders`, each `name` and `user`). The view
-  opens before any admission the scheduler makes, its endpoint serves `CAPACITY_PORT` alone, two connections a
+  kiln's CA's answer completed, read whole before anything binds, and `holders`, each by its `name`). The view
+  opens before any admission the scheduler makes, with the machine's room as the scheduler measured it starting, so
+  a keeper started, or started again (CV11), decides a holder's first reserve in the room there is, no command of
+  Hex's needed to measure it first; its endpoint serves `CAPACITY_PORT` alone, two connections a
   holder (one, and the one replacing it: `hex-quic.md` Q8), and admits those holders alone: any other peer is
   refused at its handshake and holds none of them (`hex-quic.md` Q10). Every command it takes ends with the hints
   owed.
@@ -290,66 +292,68 @@ person removing it from the holder's configuration returns the holder to admitti
   lags that growth by up to one refresh; goal 14's contention rule holds the growth physically meanwhile
   (the VM is held at its budget), so the lag is never a double booking of room the view granted.
 
-### CV12. A holder's memory is counted once: its scope, read with the free memory
+### CV12. A holder's memory is counted twice: no credit for it
 
-**The defect.** The room is measured: free memory plus what Hex's own boxes use (`Facts::node_with_owned`). What a
+**What it costs.** The room is measured: free memory plus what Hex's own boxes use (`Facts::node_with_owned`). What a
 holder's work uses is missing from that free memory, and the holder's reservation is held besides, so each byte its
-work uses was counted twice: never an oversubscription, but room lost up to the holder's use
-(`placement::view::credit_tests`, red before this decision).
+work uses is counted twice: room lost up to the holder's use, an under-admission and never more than the machine holds
+(`placement::view::tests::cv12_withdrawn_a_holders_used_memory_is_counted_twice_never_credited`).
 
-**The choice** (ROOT, 2026-11-12, Option A with its conditions). A holder's hello may name where its reserved work
-runs, a `Scope` (an optional field, append-only): a cgroup v2 directory on Linux, a process group on macOS, a job
-object on Windows. The host reads each synced holder's scope in the same sample as its free memory, once on either
-side of that read, and keeps the smaller (`hex_node::scopes::around`): a use that moved while free memory was read
-is credited at its least. The room every admission is decided in, the keeper's and the node's ledger alike, is the
-measured room plus each synced holder's credit, `min(use, its reservations)` (`Keeper::credit`). Use past a holder's
-reservations stays counted against the room. The credit is the sample's and the session's: a holder's next sample
-replaces it, a hello replaces its session's, and a dropped link ends it at once (the node's admission given the room
-without it before the lock is let go). The room and the credit of one sample are set together, under the lock
-every admission commits under (`Driver::refresh_node_sampled`).
+**The choice** (ROOT, 2026-11-12, withdrawing the credit it approved that morning as Option A). No keeper credits a
+holder's use: the host gives the keeper the room it measured, nothing added (`Keeper::set_room`,
+`Driver::refresh_node`). A hello's `scope` stays on the wire, the protocol only appending, and the keeper ignores it;
+`Close::Scope` stays on the wire too, and no keeper says it. The scope readers, the declared users and the
+`capacity.holders[].user` setting went with the credit.
 
-**Ownership.** A scope earns credit only once proved its holder's user's, the user the person declares for that
-holder in the host's configuration (a uid, or a SID on Windows; nothing the holder says can name it):
-- Linux: some directory from the cgroup up to the hierarchy's root, the root not counted, is owned by the uid: a tree
-  the user owns, or one delegated to it (the kernel's `cgroup-v2.rst`, "Delegation": the delegatee is given the
-  subtree's directory and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`). Its use is its
-  `memory.current` ("the total amount of memory currently being used by the cgroup and its descendants").
-- macOS: every member of the process group runs as the uid (`proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_uid`); its use is
-  their footprints summed (`proc_pid_rusage`'s `ri_phys_footprint`, what the node already reads of its own boxes).
-- Windows: the job's owner, read from its security descriptor (`GetKernelObjectSecurity`,
-  `GetSecurityDescriptorOwner`), is the declared SID, compared byte for byte; its use is its processes' private
-  working sets summed (`PROCESS_MEMORY_COUNTERS_EX2.PrivateWorkingSetSize`), which the machine's available physical
-  memory (`ullAvailPhys`, the node's free memory there) lacks, shared pages not counted, so never more than the
-  work takes of it. An elevated runner makes jobs that BUILTIN\Administrators owns (an elevated token's default
-  owner): such a job fails the proof against the runner's own SID and earns no credit, the safe outcome
-  (`scopes::tests::cv12_a_job_is_its_holders_only_when_its_owner_is_the_declared_sid`).
-A scope the host can't prove or read earns nothing, and the holder's session is closed, typed, with the hints:
-`Close::Scope(NoUser | NotOwned | Unreadable | Invalid | NotThisPlatform)`; its holder drops the scope and may say
-hello again without it. Ownership doesn't widen what a holder could already do by releasing early; it keeps a
-mistaken scope from crediting someone else's memory.
+**Why the credit was withdrawn.**
+1. *No read of the OS's makes a credit safe for every movement of a holder's use.* The host's read of free memory gives
+   `F = K - U(t)`: `K` is the room with the holder's use counted once (the machine's memory less what neither Hex's
+   boxes nor a holder use), which the host doesn't know, and `U(t)` the holder's use at the instant of that read.
+   Every other input a rule could take is a read of the holder's scope at another instant. Two worlds give a rule the
+   same inputs: in one the rest of the machine uses `O` and the holder `U(t) = u`; in the other the rest uses
+   `O + u` and the holder's use falls to nothing just as free memory is read, back where the scope reads before and
+   after find it. The rule can't tell them apart, so it credits both alike; in the second, any credit above none says
+   room that isn't there. A safe credit needs the scope's use at that instant, or a bound below it: one read of free
+   memory and a scope's use together, or a counter of a scope's least use. No supported OS has either: Linux's
+   `memory.peak`, macOS's `ri_interval_max_phys_footprint` and Windows' `PeakJobMemoryUsed` are greatest uses;
+   `/proc/meminfo` and `memory.current`, `vm.page_free_count` and `proc_pid_rusage`, `GlobalMemoryStatusEx` and
+   `K32GetProcessMemoryInfo` are separate reads. hex-sim showed it: moving a runner's use both ways, several times, on
+   either side of the free memory's read, the withdrawn rule (a scope read on either side, the smaller kept, up to the
+   holder's reservations) credited more than the read lacked (4ce813ae, red: 2 runners, seed 10, step 31, credited
+   3,282,241,018 B where the read lacked 1,683,269,796 B). That rule is hex-sim's planted `Mutant::Credit` now.
+2. *On Linux the credit also counted a holder's page cache as free twice.* The free figure is `MemAvailable`, which
+   counts the file pages the kernel can reclaim as available (`Documentation/filesystems/proc.rst`; `mm`'s
+   `si_mem_available`), and the scope's use was its `memory.current`, which includes the page cache charged to it
+   (`cgroup-v2.rst`, `memory.current` and `memory.stat`'s `file`): those pages were in the room once as available and
+   again as credit, whatever the window.
 
-**Alternatives.**
-- *The holder reports its own use* (no platform code): rejected. A report goes stale when the use drops; credited
-  then, it lets others into the holder's reserved slack, which the work grows back into.
-- *The holder's whole process tree, or its runner's cgroup*: credits the runner's own memory, which no reservation
-  holds, so others admit into it.
-- *Crediting the whole reservation*: free room the work hasn't used yet becomes others' while it is still promised.
+**Rejected.**
+- *The window narrowed to the free memory's read alone, its residual stated*: a use that falls and rises inside it is
+  still credited at its high, the fall too much, until the next sample; rarer, not safe. Bounding the fall needs a
+  bound on how fast a scope can be charged memory again, and none is rigorous: Windows faults standby pages back
+  without touching them, Linux's `init_on_free` skips zeroing on allocation, and a fastest rate measured is a lower
+  bound on the true one. (This was the open item "the credit's window".)
+- *The scope frozen while free memory is read* (cgroup v2's `cgroup.freeze`, `SIGSTOP` to the process group): pauses
+  kiln's jobs at every sample, needs write access to their cgroup, has no Windows equivalent, and reclaim and socket
+  buffers still move a frozen cgroup's use.
 
-**What would falsify it.** On the two-machine run, a holder whose work uses `U` under reservations `R >= U`, its use
-moving between samples: the free room the view says ever exceeding the room minus everything held at the larger of
-its use and its reservation, or a sample's credit exceeding the use read on either side of its free memory.
+**What would allow a credit later, and so falsify this.** Any of: one read of free memory and a scope's use together;
+a counter of a scope's least use over an interval, a bound below its use at the free memory's read; or holder-side
+enforcement that pins its use (its reserved work charged its whole reservation from its start, its memory locked or
+preallocated to it), so nothing moves. Each would come back as a decision of its own, with its own red.
 
 ## The protocol
 
-**Holder to keeper** (`ToKeeper`): `Hello { holder, epoch, scope? }` (CV12); `Sync { fence, held: [(id, amount)] }`;
+**Holder to keeper** (`ToKeeper`): `Hello { holder, epoch, scope? }` (`scope` the wire's, ignored: CV12);
+`Sync { fence, held: [(id, amount)] }`;
 `Reserve { fence, id, amount }`; `Release { fence, id }`.
 
 **Keeper to holder** (`ToHolder`): `Welcome { fence, view }`; `Synced { fence, view, count, sum,
 released, adopted, disagreed }`; `Granted { fence, id, amount, view }`; `Refused { fence, id, why,
 view }` (`why`: `Room`, `Full`, `Empty`, `Devices`, `Disagrees`); `Released { fence, id, view }`;
 `Hint { fence, view }`; `Closed { rejected, why }` (`rejected`: the fence of the message closed, none for a
-hello; `why`: `OlderEpoch`, `Session`, `NotSynced`, `HoldersFull`, `Invalid`, `Scope` (CV12), `NotAuthorized`
-(CV8, CV9)).
+hello; `why`: `OlderEpoch`, `Session`, `NotSynced`, `HoldersFull`, `Invalid`, `Scope` (the wire's, no keeper says
+it: CV12), `NotAuthorized` (CV8, CV9)).
 
 **The keeper, per holder** (R04): `Away` (no session; its reservations kept) → hello → `Joined
 { session }` (a sync is owed) → sync → `Synced { session }` (reserves and releases served) → link down →
@@ -396,7 +400,7 @@ core kiln drives through hex-api (Shards R12: one implementation), feeding it wh
    The protocol only appends: a variant or optional field it doesn't know is a newer keeper's.
 4. **The order of words** (CV4, CV5):
    - `Hello { holder, epoch, scope? }`: its certificate's name, and an epoch one more at every start of its process,
-     kept durably;
+     kept durably; no `scope` (the wire keeps the field, and the keeper credits nothing from it: CV12);
    - on `Welcome`, `Sync { fence, held }` listing every reservation whose work may still run, of any of its epochs;
      on `Synced`, its own count and sum must be the keeper's (`Event::Synced { agree }`), and where they aren't, the
      keeper's books are the machine's and it reports the difference;
@@ -410,15 +414,10 @@ core kiln drives through hex-api (Shards R12: one implementation), feeding it wh
    the machine changed (CV7): fold it into kiln's own ledger (its budget and `outside`). `Closed`:
    `OlderEpoch` (a newer process of it is there: this one admits nothing more here), `Session` or `NotSynced` (say
    hello again), `HoldersFull` or `NotAuthorized` (this keeper doesn't serve it: admit nothing here and tell the
-   person), `Scope(_)` (say hello again without the scope; the core drops it), `Invalid(_)` (its own defect).
+   person), `Scope(_)` (the wire's, no keeper says it: as `Session`), `Invalid(_)` (its own defect).
 6. **Down.** With no synced session to a keeper it knows of (CV10), it admits nothing new on that machine (CV11);
    work already started runs on, held in the keeper's ledger, and its next sync says what still runs.
-7. **Its scope** (CV12, optional): where its reserved work runs and nothing else of it, its own process not
-   included: Linux, a cgroup v2 path relative to `/sys/fs/cgroup` under a tree its user owns or was delegated
-   (`kiln-jobs-<pid>`, the parent of its jobs' cgroups); macOS, one process group whose members all run as its
-   user; Windows, a job object it names, owned by its account (an elevated runner's jobs are BUILTIN\Administrators'
-   and earn nothing). The person declares that user beside its name (`capacity.holders[].user`: a uid, or a SID).
-8. **Gone for good.** The person releases what it held with `hex schedule forget --socket <scheduler socket>
+7. **Gone for good.** The person releases what it held with `hex schedule forget --socket <scheduler socket>
    --holder <name>` (CV6), refused while it is connected, logged as `hex.capacity event=forgotten`.
 
 ## The interface with goal 14 (learned charge)
@@ -465,24 +464,22 @@ window, which would under-count Hex here.
   what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
-  as the node measures it (CV12): every CPU, and the memory that is free or Hex's own boxes', which lacks what
-  each runner's process and its runs use. Half the runners name their runs' scope; each run uses memory within
-  its reservation, moved by the nemesis between samples; the host's sample reads each synced runner's scope on
-  either side of its read of free memory, keeps the smaller, and gives the keeper the room and the reads together;
-  one run of a runner it reads may move once in the window, before the free memory's read or after it; and the OS
-  now and then won't read a scope, which closes its runner's session. After every step:
+  as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
+  runner's process and its runs use, the runs held besides (counted twice: CV12). Each run uses memory within its
+  reservation, moved by the nemesis between samples and, both ways, several times, on either side of the free
+  memory's read in a sample's window. After every step:
   every running run is in the keeper's books while it is up, but one so released, until its runner's next
   sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
   adopted; what the keeper books past the room (only an adoption's), its view says it is over by; and the
-  keeper credits each scoped runner at most what its work used when free memory was last read, up to its
-  reservations (CV12). After
+  keeper decides in no more room than its host last measured (`Violation::Overcredited`, CV12). After
   settling (every link healed, every message delivered, every hint drained): the keeper's books of each
   runner, the runner's own, and what it runs are the same, and no sync said the counts disagree. Planted
   shell mistakes, each caught on some of 64 seeds: release on silence, a run started before its grant, a
   restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
-  boxes alone, a sync that drops what the keeper lacks instead of adopting it; and CV12's: a host keeping the
-  larger of a scope's two reads, a host crediting whole reservations, a scope holding its runner's own process.
-  Bounded seeds here (64 of
+  boxes alone, a sync that drops what the keeper lacks instead of adopting it, and a host crediting the room its
+  runners' use (CV12's withdrawn rule, standing for any credit; the three credit shapes planted before it, the
+  larger of two reads, whole reservations and a scope holding its runner, are folded into it). Bounded seeds here
+  (64 of
   2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
   `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
   of which must hold, and each mistake caught on some.
@@ -495,11 +492,4 @@ window, which would under-count Hex here.
 - A holder's GPU reservations need device grants by identity (CV3).
 - The lane's log events (`hex.capacity event=refused`, `forgotten`, `lane_ended`, `hint_failed`) are to be agreed
   with kiln's Observe owner (CLAUDE.md §10).
-- A scheduler with no runtime class keeps no holder reservation: CV8 bounds a holder's by the node's own record
-  bound, which such a node derives as none.
-- The credit's window (CV12): a scope read on either side of the free memory's read, the smaller kept, is at most
-  what that read lacked when the scope's use moved one way in between. A use that falls and rises again inside the
-  window is credited at its high, the fall too much, until the next sample. The window today is the scheduler's
-  whole facts read (`runtime_observations`: its backend's physical report, then the machine's facts), not the free
-  memory's read alone; hex-sim moves one run once a window, the case CV12 claims.
 - kiln's runner implements its side (the section above); until it does, the lane serves no holder in production.

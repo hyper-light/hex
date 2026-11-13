@@ -20,10 +20,7 @@ fn total(all: Report, r: Report) -> Report {
         forgotten: all.forgotten + r.forgotten,
         wrongly_forgotten: all.wrongly_forgotten + r.wrongly_forgotten,
         samples: all.samples + r.samples,
-        scopes_read: all.scopes_read + r.scopes_read,
-        credited: all.credited + r.credited,
         moved_in_window: all.moved_in_window + r.moved_in_window,
-        scopes_refused: all.scopes_refused + r.scopes_refused,
     }
 }
 
@@ -39,12 +36,11 @@ fn seeds(runners: usize, seeds: u64, steps: u64) -> Report {
 /// keeper, for 64 seeds of 2,000 steps under the nemesis (the keeper crashing between messages and at
 /// its writes, before and after they land; runners crashing, their runs outliving them or not; links
 /// dropped with what was on them, partitioned and healed; waits run out; a runner retired and released
-/// by the person; runs' use moving, in a sample's window too, and scopes the OS won't read); expect the work
-/// running never past the room, every running run in the keeper's books and the keeper's credit within what
-/// the scoped runners' work used when free memory was read at every step, and once settled the keeper's books,
-/// each runner's and what it runs the same; and (non-vacuity) each fault struck, both sides refused for room,
-/// syncs released what ended, a sync adopted work the person had released while its runner was away (CV6), and
-/// samples credited runners' use, saw it move in their windows and closed a session for an unreadable scope (CV12).
+/// by the person; runs' use moving, both ways, several times, in a sample's window too); expect the work
+/// running never past the room, every running run in the keeper's books and the keeper deciding in no more room
+/// than its host measured at every step, and once settled the keeper's books, each runner's and what it runs the
+/// same; and (non-vacuity) each fault struck, both sides refused for room, syncs released what ended, a sync
+/// adopted work the person had released while its runner was away (CV6), and samples saw use move in their windows.
 #[test]
 fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
     let all = seeds(2, 64, 2_000);
@@ -64,10 +60,7 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.wrongly_forgotten > 0
             && all.adopted_at_sync > 0
             && all.samples > 0
-            && all.scopes_read > 0
-            && all.credited > 0
-            && all.moved_in_window > 0
-            && all.scopes_refused > 0,
+            && all.moved_in_window > 0,
         "{all:?}"
     );
 }
@@ -168,11 +161,12 @@ fn dropping_what_the_keeper_lacks_at_a_sync_is_caught() {
     );
 }
 
-/// Non-vacuity, CV12: do plant a host that keeps the larger of a scope's two reads around its read of free memory;
-/// expect some seed whose keeper credits more than the work used when free memory was read.
+/// Non-vacuity, CV12 (withdrawn): do plant a host that credits the room each joined runner's work, the smaller of two
+/// reads on either side of its read of free memory, up to its reservations (the withdrawn rule, for any credit); expect
+/// some seed whose keeper decides in more room than its host measured.
 #[test]
-fn crediting_the_larger_read_is_caught() {
-    let found = caught(Mutant::CreditLargerRead);
+fn crediting_any_use_is_caught() {
+    let found = caught(Mutant::Credit);
     assert!(
         matches!(
             found,
@@ -180,62 +174,6 @@ fn crediting_the_larger_read_is_caught() {
         ),
         "{found:?}"
     );
-}
-
-/// Non-vacuity, CV12: do plant a host that credits a scoped runner its whole reservations; expect some seed whose
-/// keeper credits room the runner's work hasn't used.
-#[test]
-fn crediting_whole_reservations_is_caught() {
-    let found = caught(Mutant::CreditWholeReservation);
-    assert!(
-        matches!(
-            found,
-            Some(Violation::Overcredited { .. } | Violation::Oversubscribed { .. })
-        ),
-        "{found:?}"
-    );
-}
-
-/// Non-vacuity, CV12 (the holder contract's item 7): do plant runners whose scope holds their own process beside
-/// their reserved work; expect some seed whose keeper credits memory no reservation holds.
-#[test]
-fn a_scope_holding_its_runner_is_caught() {
-    let found = caught(Mutant::ScopeHoldsRunner);
-    assert!(
-        matches!(
-            found,
-            Some(Violation::Overcredited { .. } | Violation::Oversubscribed { .. })
-        ),
-        "{found:?}"
-    );
-}
-
-/// AC-T7.4.1, joint plan step 13 (CV12): do run the nemesis's 64 seeds of 2,000 steps with two runners and read the
-/// keeper's credit after every step; expect some step to credit a scoped runner's measured use, so the sweep holds the
-/// credit's invariant where there is a credit to hold it to (non-vacuity).
-#[test]
-fn cv12_the_nemesis_credits_scoped_runners_their_measured_use() {
-    let credited = (0..64).any(|seed| {
-        let mut world = World::new(seed, 2, None).unwrap();
-        (0..2_000).any(|_| {
-            world.step().unwrap();
-            world.keeper.as_ref().is_some_and(|k| !k.credit().is_zero())
-        })
-    });
-    assert!(
-        credited,
-        "no step of 64 seeds credited a runner's use: the nemesis names no scope and samples no use"
-    );
-}
-
-/// AC-T7.4.1, joint plan step 13 (CV12): seed 1613 with one runner, which ROOT's record sweep at 8d1593f9 failed on. Just
-/// before the nemesis stops a sample finds the runner's scope unreadable, the keeper's hints close its session, and its
-/// releases of two reservations are answered on the closed session. Do run it 2,000 steps and settle; expect the runner
-/// to say hello again without its scope, its sync to release both, and the books to agree.
-#[test]
-fn seed_1613_a_session_closed_while_settling_says_hello_again() {
-    let settled = run(1613, 1, 2_000, None);
-    assert!(settled.is_ok(), "{settled:?}");
 }
 
 /// T-T7.4.1's determinism: one seed, one run.
@@ -274,9 +212,7 @@ fn the_record_sweep() {
         Mutant::AnswerBeforeWrite,
         Mutant::LocalIgnoresForeign,
         Mutant::DropUnknownAtSync,
-        Mutant::CreditLargerRead,
-        Mutant::CreditWholeReservation,
-        Mutant::ScopeHoldsRunner,
+        Mutant::Credit,
     ] {
         let caught: Vec<u64> = (0..n)
             .filter(|seed| run(*seed, 2, steps, Some(mutant)).is_err())
