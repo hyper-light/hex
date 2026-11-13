@@ -905,6 +905,7 @@ mod tests {
                 devices: Vec::new(),
                 allocation: Some(sim_vm_allocation().unwrap()),
                 route: None,
+                band: 0,
             })
             .unwrap();
         assert!(matches!(
@@ -947,6 +948,7 @@ mod tests {
                 devices: Vec::new(),
                 allocation: None,
                 route: None,
+                band: 0,
             })
             .unwrap();
         assert!(matches!(

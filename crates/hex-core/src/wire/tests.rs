@@ -4632,6 +4632,7 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
         devices: Vec::new(),
         allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
         route: None,
+        band: 0,
     })));
     let bytes = request(93, &create, MAX_MESSAGE).unwrap();
     assert_eq!(
