@@ -61,8 +61,34 @@ class FakeCgroup:
 
     def set(self, usage_usec, memory, populated):
         self.write(self.session, "cpu.stat", f"usage_usec {usage_usec}\nuser_usec 0\nsystem_usec 0\n")
-        self.write(self.session, "memory.current", f"{memory}\n")
+        if memory is None:
+            if os.path.exists(os.path.join(self.session, "memory.current")):
+                os.remove(os.path.join(self.session, "memory.current"))
+        else:
+            self.write(self.session, "memory.current", f"{memory}\n")
         self.write(self.session, "cgroup.events", f"populated {int(populated)}\nfrozen 0\n")
+
+
+class FakeProc:
+    """A /proc of the session's processes under a temporary directory: each process's smaps_rollup or, where the test
+    gives none, its status, as the kernel writes them, its memory in kB."""
+
+    def __init__(self, root):
+        self.root = root
+        os.makedirs(root)
+
+    def put(self, pid, kb, rollup=True):
+        os.makedirs(os.path.join(self.root, str(pid)), exist_ok=True)
+        if rollup:
+            text = f"55d0c0000000-7ffc00000000 ---p 00000000 00:00 0    [rollup]\nRss:   {kb} kB\nPss:   {kb} kB\n"
+            FakeCgroup.write(os.path.join(self.root, str(pid)), "smaps_rollup", text)
+        else:
+            text = f"Name:\tagent\nVmPeak:\t{2 * kb} kB\nVmRSS:\t{kb} kB\nThreads:\t4\n"
+            FakeCgroup.write(os.path.join(self.root, str(pid)), "status", text)
+
+    def end(self, pid):
+        import shutil
+        shutil.rmtree(os.path.join(self.root, str(pid)))
 
 
 class AttachTest(unittest.TestCase):
@@ -110,6 +136,60 @@ class AttachTest(unittest.TestCase):
         steps = [tuple(map(int, line.split())) for line in text.splitlines() if not line.startswith("#")]
         self.assertEqual(steps, [(50, 1, 1), (50, 0, 1), (50, 2, 2), (50, 1, 2), (100, 0, 2)])
         self.assertIn("# ended: 300 ms, 200 ms of CPU, the cgroup emptied", text)
+
+    def test_w14_a_cgroup_with_no_memory_controller_is_recorded_from_its_processes_rss(self):
+        """ROOT, 2026-11-13: kiln's per-agent cgroups have cpu but no memory controller. Do attach to a running session
+        whose cgroup has no memory.current, its two processes holding 1 MiB (its smaps_rollup's Rss) and 2 MiB (its
+        status's VmRSS, it having no smaps_rollup); let a window pass, then one in which the second ends, after which
+        the session empties. Expect the trace's header to name its memory as its processes' Rss, its steps to hold 3
+        MiB, then 1 MiB, the ended process out of the sum, and its CPU cpu.stat's as before."""
+        fake = FakeCgroup(os.path.join(self.dir.name, "e"), cpu_max_on_session=False)
+        fake.set(1_000_000, None, populated=True)
+        FakeCgroup.write(fake.session, "cgroup.procs", "11\n12\n")
+        proc = FakeProc(os.path.join(self.dir.name, "proc"))
+        proc.put(11, 1024)
+        proc.put(12, 2048, rollup=False)
+        clock = [0]
+
+        def now_ns():
+            return clock[0]
+
+        def first():
+            fake.set(1_100_000, None, populated=True)
+
+        def second():
+            proc.end(12)
+            fake.set(1_200_000, None, populated=False)
+
+        windows = iter([first, second])
+
+        def sleep_until(deadline_ns):
+            clock[0] = deadline_ns
+            next(windows)()
+
+        out = os.path.join(self.dir.name, "rss.txt")
+        rt.attach(out, fake.session, fake.root, now_ns=now_ns, sleep_until=sleep_until, proc=proc.root)
+        with open(out) as f:
+            text = f.read()
+        self.assertIn("# memory: procs-rss", text)
+        steps = [tuple(map(int, line.split())) for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(steps, [(100, 1, 3), (100, 1, 1)])
+
+    def test_w14_a_session_in_its_cgroups_memory_says_so(self):
+        """Do attach to a session whose cgroup has memory.current. Expect the trace's header to name its memory as the
+        cgroup's."""
+        fake = FakeCgroup(os.path.join(self.dir.name, "f"), cpu_max_on_session=False)
+        fake.set(0, MIB, populated=True)
+        clock = [0]
+
+        def sleep_until(deadline_ns):
+            clock[0] = deadline_ns
+            fake.set(0, MIB, populated=False)
+
+        out = os.path.join(self.dir.name, "cgroup.txt")
+        rt.attach(out, fake.session, fake.root, now_ns=lambda: clock[0], sleep_until=sleep_until)
+        with open(out) as f:
+            self.assertIn("# memory: cgroup", f.read())
 
     def test_w14_a_cgroup_is_named_as_proc_names_it_or_by_its_directory(self):
         """Do name a session's cgroup as /proc/<pid>/cgroup and systemd name it (rooted at the cgroup mount, with or
