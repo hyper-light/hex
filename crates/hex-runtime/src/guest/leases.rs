@@ -9,7 +9,7 @@ use hex_api::lease::{Lease, LeaseRefused, Lessor, Lessors};
 use hex_api::{BoxId, Refusal, ShardsImage};
 use shards_api::image::{CredentialGrant, LeaseRefusal, Leased, RunLessor, Secret};
 
-use super::GuestRuntime;
+use super::{GuestRuntime, ImageClass};
 
 /// "Until its run ends", as Shards' run channel carries a lease's life: the most its u64 of nanoseconds holds, which the
 /// run host and its network process read as living until the run ends wherever it passes what their clocks name
@@ -17,11 +17,24 @@ use super::GuestRuntime;
 const RUN_LIFE: Duration = Duration::from_nanos(u64::MAX);
 
 impl GuestRuntime {
-    /// Its Shards image VMs' credentials leased through `lessors`, its orchestrator's (C3). A node given none refuses a
-    /// box granting a credential as it is created, `Unconfigured`.
+    /// Its Shards image VMs' credentials leased through `lessors`, its orchestrator's (C3), by the image class it holds
+    /// ([`ImageClass::with_lessors`]).
     pub fn with_lessors(mut self, lessors: Arc<dyn Lessors>) -> Self {
-        self.lessors = Some(lessors);
+        self.images.set_lessors(lessors);
         self
+    }
+}
+
+impl ImageClass {
+    /// Its VMs' credentials leased through `lessors`, its orchestrator's (C3). A class given none refuses a box granting
+    /// a credential as it is created, `Unconfigured`.
+    pub fn with_lessors(mut self, lessors: Arc<dyn Lessors>) -> Self {
+        self.set_lessors(lessors);
+        self
+    }
+
+    pub(super) fn set_lessors(&mut self, lessors: Arc<dyn Lessors>) {
+        self.lessors = Some(lessors);
     }
 
     /// Whether this node can lease `image`'s credentials: none asks nothing; any asks for its lessors.

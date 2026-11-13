@@ -1379,7 +1379,7 @@ fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
         vec![Duration::MAX],
         "Shards' stats was asked with a bound of Hex's"
     );
-    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    let stats = &runtime.images.image().unwrap().waits().unwrap().stats;
     assert!(
         stats.slowest().is_some_and(|slowest| slowest > learned),
         "W* didn't rise to the answer that passed it: {:?}",
@@ -1693,7 +1693,7 @@ fn original_a_boot_past_its_learned_w_star_goes_on_to_its_run() {
         vec![Duration::MAX],
         "Shards' boot was given a bound of Hex's"
     );
-    let boot = &runtime.image().unwrap().waits().unwrap().boot;
+    let boot = &runtime.images.image().unwrap().waits().unwrap().boot;
     assert_eq!(boot.deadline(), None, "the run-out wasn't told");
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Created);
     assert_eq!(

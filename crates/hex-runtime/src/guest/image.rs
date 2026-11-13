@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
@@ -36,7 +36,7 @@ use shards_api::image::{
 };
 
 use super::{GuestRuntime, poisoned};
-use crate::devices;
+use crate::devices::{self, Books};
 
 /// The waits an image box's calls make, each learned (decision 9): Shards' boot of an image to its members' start, a
 /// stats answer, and a stop to its run host's exit. Each is the slowest answer this process has seen, a bound only
@@ -80,6 +80,21 @@ pub(super) struct ImageBoot {
     /// by the node's boxes ([`crate::MAX_BOXES`]).
     runs: Mutex<BTreeMap<BoxId, Run>>,
     session: OnceLock<Option<BootSession>>,
+}
+
+/// The Shards class on Agentfile images, whole (joint plan step 12's item B): Shards' image boot or why its node
+/// serves none ([`ImageClass::with_boot`]), the record authority its boxes' records are kept by, bound once
+/// ([`ImageClass::bind_books`]), and its run hosts: the `shards` binary each is, and the Shards home and cache whose
+/// store holds the images ([`ImageClass::with_paths`]). A node's guest runtime holds one beside its guest
+/// ([`GuestRuntime::with_images`]); a runtime of the class alone holds one with no guest of Hex's.
+pub struct ImageClass {
+    image: Option<ImageBoot>,
+    books: OnceLock<Weak<dyn Books>>,
+    binary: PathBuf,
+    native_paths: Option<Arc<shards_api::RuntimePaths>>,
+    /// What leases its VMs' credentials, its orchestrator's (joint plan step 33; [`ImageClass::with_lessors`]): none,
+    /// so a box granting a credential is refused as it is created.
+    pub(super) lessors: Option<Arc<dyn hex_api::lease::Lessors>>,
 }
 
 /// A run of this process.
@@ -708,6 +723,50 @@ impl GuestRuntime {
         waits: Result<ImageWaits, Refusal>,
         diagnostics: PathBuf,
     ) -> Self {
+        self.images.boot_with(images, waits, diagnostics);
+        self
+    }
+
+    /// The host's boot session as the node's records carry it (T-T7.1.2), bound once beside the record
+    /// authority: a held run whose record an earlier boot wrote ended with that boot.
+    pub fn bind_boot_session(&self, session: Option<BootSession>) -> Result<(), Refusal> {
+        self.images.bind_boot_session(session)
+    }
+}
+
+impl ImageClass {
+    /// The class whose run hosts are the `shards` binary `binary`, with no image boot yet, no record authority, and no
+    /// Shards home or cache of its own, so that its run hosts take Shards' own.
+    pub fn new(binary: PathBuf) -> Self {
+        Self {
+            image: None,
+            books: OnceLock::new(),
+            binary,
+            native_paths: None,
+            lessors: None,
+        }
+    }
+
+    /// Shards' image boot (D231) or why this node has none ([`host_images`]), and the waits its calls
+    /// make or why there are none: a create is refused with either refusal, so no box exists that this
+    /// node couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6). Each
+    /// box's run host's diagnostics are kept whole in `diagnostics`, a directory under the node's state.
+    pub fn with_boot(
+        mut self,
+        images: Result<Arc<dyn Images>, Refusal>,
+        waits: Result<ImageWaits, Refusal>,
+        diagnostics: PathBuf,
+    ) -> Self {
+        self.boot_with(images, waits, diagnostics);
+        self
+    }
+
+    pub(super) fn boot_with(
+        &mut self,
+        images: Result<Arc<dyn Images>, Refusal>,
+        waits: Result<ImageWaits, Refusal>,
+        diagnostics: PathBuf,
+    ) {
         self.image = Some(ImageBoot {
             images,
             waits,
@@ -715,7 +774,49 @@ impl GuestRuntime {
             runs: Mutex::new(BTreeMap::new()),
             session: OnceLock::new(),
         });
+    }
+
+    /// Its run hosts' Shards home and cache, `paths`, whose store holds the images: each run host's `SHARDS_HOME` and
+    /// `SHARDS_CACHE`, and where Shards' console records say how much of a VM's end it quotes.
+    pub fn with_paths(mut self, paths: Arc<shards_api::RuntimePaths>) -> Self {
+        self.native_paths = Some(paths);
         self
+    }
+
+    pub(super) fn set_paths(&mut self, paths: Arc<shards_api::RuntimePaths>) {
+        self.native_paths = Some(paths);
+    }
+
+    /// The record authority its boxes' records are kept by, bound once, as a node binds its guest's
+    /// ([`GuestRuntime::bind_books`]).
+    pub fn bind_books(&self, books: Weak<dyn Books>) -> Result<(), Refusal> {
+        super::books::bind_once(&self.books, books)
+    }
+
+    fn uses_books(&self) -> bool {
+        self.books.get().is_some()
+    }
+
+    fn authority(&self) -> Result<Arc<dyn Books>, Refusal> {
+        self.books
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| Refusal::Broken("a Shards image VM has no live record authority".into()))
+    }
+
+    /// Box `id`'s record, as its record authority holds it now.
+    fn recorded_box(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+        if !self.uses_books() {
+            return Ok(None);
+        }
+        self.authority()?
+            .records()?
+            .remove(id)
+            .map(|record| {
+                record
+                    .map_err(|_| Refusal::Broken("a Shards image VM's record is unreadable".into()))
+            })
+            .transpose()
     }
 
     /// The host's boot session as the node's records carry it (T-T7.1.2), bound once beside the record
@@ -741,7 +842,7 @@ impl GuestRuntime {
         })
     }
 
-    fn image_books(&self) -> Result<&std::sync::Weak<dyn crate::devices::Books>, Refusal> {
+    fn image_books(&self) -> Result<&Weak<dyn Books>, Refusal> {
         self.books.get().ok_or_else(|| {
             Refusal::Broken("a Shards image VM needs the guest's record authority".to_owned())
         })
@@ -794,10 +895,10 @@ impl GuestRuntime {
             nesting: false,
             ready_by: None,
             // Its credentials by reference (D242), as its spec grants them and no other (joint plan step 33); their
-            // lessor is its run's, made as it starts ([`GuestRuntime::run_lessor`]).
+            // lessor is its run's, made as it starts ([`ImageClass::run_lessor`]).
             credentials: super::leases::lowered(image)?,
             lessor: None,
-            binary: Some(self.config.binary.clone()),
+            binary: Some(self.binary.clone()),
             env,
             // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
             control: None,
@@ -1506,9 +1607,117 @@ impl GuestRuntime {
     }
 }
 
+impl ImageClass {
+    /// Box `id`'s record for a call of the class alone, refused `NoSuchBox` where its records hold no image box of that
+    /// id, and as the box's backing refuses it where its backing was retired (joint plan step 14).
+    fn called(&self, id: &BoxId) -> Result<BoxRecord, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if record.retired {
+            return Err(record.retired_refusal()?);
+        }
+        Ok(record)
+    }
+}
+
+/// The class alone as a runtime (joint plan step 12's item B): a node with no guest of Hex's serves its boxes, each a
+/// Shards image VM, through it, once its record authority is bound ([`ImageClass::bind_books`]). A box of any other
+/// class is refused at its create, and a program in a member awaits the agent-control endpoint, as on any node.
+impl hex_api::Runtime for ImageClass {
+    fn classes(&self) -> Vec<hex_api::Class> {
+        vec![hex_api::Class::Shards]
+    }
+
+    fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if !matches!(spec.class, ClassSpec::ShardsImage(_)) {
+            return Err(Refusal::Invalid {
+                what: "class",
+                why: "this runtime serves Shards image VMs alone".to_owned(),
+            });
+        }
+        self.create_image(spec)
+    }
+
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.start_image(self.called(id)?)
+    }
+
+    fn exec(
+        &self,
+        id: &BoxId,
+        _: hex_api::Program,
+        _: hex_api::Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.called(id)?;
+        // A member's program is the agent-control endpoint's (joint plan step 11).
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberExec,
+        })
+    }
+
+    fn run(
+        &self,
+        spec: BoxSpec,
+        _: hex_api::Program,
+        _: hex_api::Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        Err(Refusal::Invalid {
+            what: "class",
+            why: "a Shards image VM runs its image's members or its own command, never a run's program".to_owned(),
+        })
+    }
+
+    fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        self.signal_image(self.called(id)?, signal)
+    }
+
+    fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if record.retired {
+            return record.retired_info();
+        }
+        self.inspect_image(record)
+    }
+
+    fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        self.usage_image(self.called(id)?)
+    }
+
+    fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        self.image_infos()
+    }
+
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        self.delete_image(record)
+    }
+
+    fn member(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.member_image(self.called(id)?, member)
+    }
+
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.room_image(self.called(id)?, room)
+    }
+
+    fn rate(&self, id: &BoxId, rate: Option<NonZeroU64>) -> Result<Option<NonZeroU64>, Refusal> {
+        self.rate_image(self.called(id)?, rate)
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
+        self.host_use_image(self.called(id)?)
+    }
+}
+
 /// `id`'s record as it is now.
-fn record_now(runtime: &GuestRuntime, id: &BoxId) -> Result<BoxRecord, Refusal> {
-    runtime
+fn record_now(class: &ImageClass, id: &BoxId) -> Result<BoxRecord, Refusal> {
+    class
         .image_record(id)?
         .ok_or(Refusal::NoSuchBox(id.try_clone()?))
 }

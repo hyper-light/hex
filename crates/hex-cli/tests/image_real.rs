@@ -266,3 +266,35 @@ fn the_in_tree_harness_context_pins_its_base_and_runs_one_member() {
         serde_json::json!({"entrypoint": "/bin/sh -c", "options": ["cat"]})
     );
 }
+
+/// HVF (a) (ROOT's HVF run of image_real at c8b4ce6b: the build in the node's home exited 1 after 285 s, its error naming
+/// only its command): a build or pull in the node's Shards home that fails says why in its own words. Do build with a
+/// `shards` that says why on its stderr and exits 1. Expect the build refused naming its command, its exit and those
+/// words.
+#[cfg(unix)]
+#[test]
+fn a_failed_build_in_the_nodes_home_says_why_in_its_own_words() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let shards = dir.path().join("shards");
+    let words = "registry-1.docker.io: resolving: nodename nor servname provided, or not known";
+    fs::write(&shards, format!("#!/bin/sh\necho '{words}' >&2\nexit 1\n")).unwrap();
+    fs::set_permissions(&shards, fs::Permissions::from_mode(0o755)).unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir_all(work.join("state")).unwrap();
+    let context = dir.path().join("context");
+    let failed =
+        std::panic::catch_unwind(|| built(&shards, &context, &work, "hex-image-real/check"));
+    let why = match failed {
+        Ok(image) => panic!("a failed build was taken as {image}"),
+        Err(why) => why
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| why.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default(),
+    };
+    assert!(
+        why.contains("build") && why.contains("exit status: 1") && why.contains(words),
+        "{why}"
+    );
+}
