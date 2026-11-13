@@ -3302,6 +3302,25 @@ mod tests {
         assert!(own, "the node keeps its records in {:?}", rt.scratch_root);
     }
 
+    /// AC-T7.4.1 (joint plan step 13, HEX-CV-L1 on Windows): do make a node's runtime as `hex node` does, on a
+    /// keeper folder in a fresh state folder, and read its capacity before any `oci` box has made its scratch
+    /// folder, as a scheduler opening over a fresh node reads it; expect the size of the volume that folder will
+    /// be made on, and the folder still not made.
+    #[test]
+    fn a_fresh_nodes_capacity_is_read_before_its_scratch_folder_is_made() {
+        let (name, state) = (node("fresh"), tempfile::tempdir().unwrap());
+        let rt =
+            WinRuntime::outliving(&name, &state.path().join("keeper"), &keeper("fresh")).unwrap();
+        let read = rt.capacity(Class::Process);
+        let made = rt.scratch_root.exists();
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
+        let (volume, _) = sys::disk_space(state.path()).unwrap();
+        assert_eq!(read.unwrap().map(|c| c.total.disk_bytes), Some(volume));
+        assert!(!made, "reading the capacity made {:?}", rt.scratch_root);
+    }
+
     /// T-T7.1.2 (native plan step 8): a box taken back after its node AND its keeper both went — its job
     /// outliving them, as an `oci` box's container does (a `process` box's is modelled here by a handle the
     /// test holds, since kill-on-close would end a real one) — is re-held by the taking-back node's keeper,
