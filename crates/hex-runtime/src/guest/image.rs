@@ -215,6 +215,59 @@ fn exit_of(end: &RunEnd) -> Exit {
     }
 }
 
+/// The file a box's run host's diagnostics are kept in, whole (D258), made new, the node's alone where the OS says so:
+/// its directory made where it isn't there.
+fn diagnostics_file(path: &Path) -> Result<std::fs::File, Refusal> {
+    let os = |why: std::io::Error| Refusal::os("keeping a Shards image VM's diagnostics", why);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(os)?;
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    open.open(path).map_err(os)
+}
+
+/// Removes a box's diagnostics file, as its delete does: one never made, or gone, is no failure.
+fn remove_diagnostics(path: &Path) -> Result<(), Refusal> {
+    match std::fs::remove_file(path) {
+        Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
+            Err(Refusal::os("removing a Shards image VM's diagnostics", why))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A failed run's `words`, then its run host's last diagnostics in `file`: its last `bound` bytes, as text, where it
+/// says any, and where it can't be read, why.
+fn with_last_said(words: &str, file: &Path, bound: usize) -> String {
+    match last_bytes(file, bound) {
+        Ok(said) if said.trim().is_empty() => words.to_owned(),
+        Ok(said) => format!(
+            "{words}\nits run host's last diagnostics ({}):\n{}",
+            file.display(),
+            said.trim_end()
+        ),
+        Err(why) => format!(
+            "{words}\nits run host's diagnostics ({}) could not be read: {why}",
+            file.display()
+        ),
+    }
+}
+
+/// The last `bound` bytes of `file`, as text (a cut character replaced).
+fn last_bytes(file: &Path, bound: usize) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _};
+    let mut from = std::fs::File::open(file)?;
+    let len = from.metadata()?.len();
+    let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+    from.seek(std::io::SeekFrom::Start(len.saturating_sub(bound)))?;
+    let mut said = Vec::new();
+    from.take(bound).read_to_end(&mut said)?;
+    Ok(String::from_utf8_lossy(&said).into_owned())
+}
+
 /// D231's refusal, typed as the call it answers.
 fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
     match why {
@@ -737,19 +790,53 @@ impl GuestRuntime {
         })
     }
 
-    /// Writes the box's end, its exit and why where its run failed, once, where its record lacks it.
-    fn record_end(&self, id: &BoxId, end: &End) -> Result<(), Refusal> {
+    /// Writes the box's end, its exit and why where its run failed, once, where its record lacks it: a failed run's
+    /// words, then its run host's last diagnostics from the box's file (D258), as many bytes as Shards quotes of a VM's
+    /// end ([`GuestRuntime::quote_bound`]). Returns the end its record holds.
+    fn record_end(&self, id: &BoxId, end: &End) -> Result<End, Refusal> {
+        let bound = end.why.as_ref().map(|_| self.quote_bound());
+        let mut recorded = None;
         devices::with_transaction(self.image_books()?, id, &[], |transaction| {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            if record.exit.is_some() {
+            if let Some(exit) = record.exit {
+                recorded = Some(End {
+                    exit,
+                    why: record.ended.clone(),
+                });
                 return Ok(());
             }
+            let why = match (&end.why, &record.diagnostics, bound) {
+                (Some(words), Some(file), Some(bound)) => Some(with_last_said(words, file, bound)),
+                (words, ..) => words.clone(),
+            };
             record.exit = Some(end.exit);
-            record.ended.clone_from(&end.why);
-            transaction.put(&record)
-        })
+            record.ended.clone_from(&why);
+            transaction.put(&record)?;
+            recorded = Some(End {
+                exit: end.exit,
+                why,
+            });
+            Ok(())
+        })?;
+        recorded
+            .ok_or_else(|| Refusal::Broken("a box's end was recorded with no record".to_owned()))
+    }
+
+    /// How many of its run host's last diagnostics a failed run's `ended` quotes: as many as Shards quotes of a VM's
+    /// end, what its kernel's console records need (`shards_abi::bounds::console_said`, as the dedicated guest reads
+    /// it), the kernel the node's `SHARDS_KERNEL` names, which its run hosts boot. With none named they boot Shards' own,
+    /// which this node can't name: Shards reads a kernel it can't pin as one of no records of its own, so every
+    /// kernel's records bound it (shards-api's `said::kept_at`).
+    fn quote_bound(&self) -> usize {
+        let kernel = std::env::var_os("SHARDS_KERNEL")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        match &self.native_paths {
+            Some(paths) => shards_api::recorded_console_bytes_at(&kernel, paths),
+            None => shards_api::recorded_console_bytes(&kernel),
+        }
     }
 
     /// Keeps how the run's microVM started (D253), as its run host said it as the run started, in the box's record, where
@@ -859,14 +946,12 @@ impl GuestRuntime {
                 self.settle_running(image, id, guest)
             }
             Next::Ends(end) => {
-                self.record_end(id, &end)?;
+                let end = self.record_end(id, &end)?;
                 image.forget(id)?;
                 Ok(State::Ended(end))
             }
             Next::NoRun if image.earlier_boot(record) => {
-                let end = End::unknown(None);
-                self.record_end(id, &end)?;
-                Ok(State::Ended(end))
+                Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
             }
             Next::NoRun => Ok(State::Held),
         }
@@ -944,6 +1029,9 @@ impl GuestRuntime {
             ));
         };
         let spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
+        // with its delete.
+        let diagnostics = image.diagnostics.join(format!("{id}.log"));
         // The boot's intent, durable before any effect: a crash from here on holds the box.
         devices::with_transaction(self.image_books()?, &id, &[], |transaction| {
             let mut current = transaction
@@ -956,8 +1044,21 @@ impl GuestRuntime {
                 return Err(super::books::uncertain(&id)?);
             }
             current.phase = Phase::Ready;
+            current.diagnostics = Some(diagnostics.clone());
             transaction.put(&current)
         })?;
+        // Its file made before its boot, so the run host keeps there all it says from its start on.
+        let kept = match diagnostics_file(&diagnostics) {
+            Ok(file) => file,
+            Err(why) => {
+                // No boot began: the box ends, its intent's record kept with its end, in the words why.
+                let end = End::unknown(Some(why.to_string()));
+                image.insert(&id, Run::Ended(end.clone()))?;
+                self.record_end(&id, &end)?;
+                image.forget(&id)?;
+                return Err(why);
+            }
+        };
         let slot = Arc::new(Slot::new());
         image.insert(&id, Run::Booting(Arc::clone(&slot)))?;
         let answer = Arc::clone(&slot);
@@ -966,9 +1067,16 @@ impl GuestRuntime {
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
+        // A booted run's host keeps its diagnostics in the box's file from then on, after what it kept until then; a run
+        // whose host can't is dropped, which ends it, and its boot is refused in those words.
         let spawned = std::thread::Builder::new()
             .name("hex-image-boot".to_owned())
-            .spawn(move || answer.put(images.boot(&spec, Duration::MAX)));
+            .spawn(move || {
+                answer.put(images.boot(&spec, Duration::MAX).and_then(|guest| {
+                    guest.keep_diagnostics(kept)?;
+                    Ok(guest)
+                }))
+            });
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
             image.insert(&id, Run::Ended(End::unknown(None)))?;
@@ -1311,6 +1419,10 @@ impl GuestRuntime {
                 self.stop_image(&id, state)?;
             }
             State::Created | State::Ended(_) => {}
+        }
+        // Its run host's diagnostics go with it, before its record does, so no file outlives the record naming it.
+        if let Some(file) = &record.diagnostics {
+            remove_diagnostics(file)?;
         }
         devices::with_transaction(self.image_books()?, &id, &[], |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;

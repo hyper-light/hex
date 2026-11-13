@@ -101,6 +101,15 @@ Sources, read at the revisions named:
   guest holds to that guest's node, but an image VM's: its guest runs no node of Hex's, so the guest runtime here
   answers it (`hex-node` `recorded.rs` `forward_for`), as the Linux node runs an image VM's exec here
   (`node/backends.rs` `guest_node_class`).
+- **Its run host's diagnostics, whole** (D258's `ImageGuest::keep_diagnostics`; ROOT, 2026-11-13). A box's start
+  names `state/image-diagnostics/<box>.log` in its record with its boot's intent and makes the file before the boot;
+  the booted run's host writes every part of its diagnostics, its VM's among them, there from then on, after what it
+  kept until then (a run whose host can't is dropped, which ends it, and its boot is refused in those words). The file
+  is kept whole, with no bound of Hex's: it is for diagnosing the run. A failed run's `BoxInfo.ended` carries its
+  words, then the file's last bytes, as many as Shards quotes of a VM's end (`shards_abi::bounds::console_said` over
+  the kernel's console records, as the dedicated guest reads them). The node Store keeps the file's name, the run's
+  words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the
+  box's delete removes the file before its record.
 
 ## 2. Mapping onto D231
 
@@ -275,6 +284,8 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   command's end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own:
   it runs in the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run
   host per box, nor read its use on the host (§4).
+- **Its diagnostics' disk use** (§1): the bytes of a box's diagnostics file are its own use of the node's disk, which
+  no usage the image class reports counts yet (`Usage` has no disk use).
 
 ## 9. What would falsify it
 

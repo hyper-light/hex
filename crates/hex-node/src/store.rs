@@ -449,6 +449,13 @@ impl Store {
             true,
             &record.spec.id,
         )?;
+        // The file its run host's diagnostics are kept in (D258), named with its start's intent alone.
+        let diagnostics = lifecycle_fact(
+            current.diagnostics.take(),
+            record.diagnostics.clone(),
+            introducing,
+            &record.spec.id,
+        )?;
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
@@ -464,6 +471,7 @@ impl Store {
         current.exit = exit;
         current.ended = ended;
         current.started_from = started_from;
+        current.diagnostics = diagnostics;
         current.native_scope = native_scope;
         // Both writers count monotonically: publishing a backend completion cannot discard a
         // disconnect counted by the existing socket owner while native I/O was in flight.
