@@ -1589,11 +1589,13 @@ impl GuestRuntime {
         };
         match &booted.guest {
             GuestHandle::Managed(guest) => managed::rate(guest, id, rate),
-            GuestHandle::Shared(_) => Ok(ManagedRate::Platform(Refusal::Platform {
-                what: "a managed VM's governor",
-                platform: std::env::consts::OS,
-                why: "its guest is held through no managed guest of its own".to_owned(),
-            })),
+            GuestHandle::Shared(_) | GuestHandle::Node(_) => {
+                Ok(ManagedRate::Platform(Refusal::Platform {
+                    what: "a managed VM's governor",
+                    platform: std::env::consts::OS,
+                    why: "its guest is held through no managed guest of its own".to_owned(),
+                }))
+            }
         }
     }
 
@@ -1610,7 +1612,7 @@ impl GuestRuntime {
         };
         Ok(match &booted.guest {
             GuestHandle::Managed(guest) => guest.rate_period(),
-            GuestHandle::Shared(_) => None,
+            GuestHandle::Shared(_) | GuestHandle::Node(_) => None,
         })
     }
 
