@@ -1325,6 +1325,13 @@ impl Runtime for GuestRuntime {
             books::Routed::Other(snapshot) => self.delete_payload(snapshot.as_ref(), id),
         }
     }
+
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.images.delete_image_used(record),
+            books::Routed::Retired(_) | books::Routed::Other(_) => self.delete(id).map(|()| None),
+        }
+    }
 }
 
 impl GuestRuntime {
