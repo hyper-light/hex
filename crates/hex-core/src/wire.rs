@@ -52,7 +52,7 @@ use hex_api::{
     MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
     Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver,
     Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal,
-    Upstream, Usage, User, check_grants, check_published,
+    StartedFrom, Upstream, Usage, User, check_grants, check_published,
 };
 
 use crate::netns;
@@ -636,6 +636,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             }
             // Appended after the counters (joint plan step 12): absent, a byte 0.
             w.option_with(u.guest.as_ref(), put_guest_time)?;
+            // Appended after guest time (D253; joint plan step 12): absent, a byte 0.
+            w.option(u.started_from, put_started_from);
         }
         Answer::Boxes { infos, more } => {
             w.header(kind::BOXES, id);
@@ -1057,6 +1059,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             io_read_bytes: r.u64()?,
             io_write_bytes: r.u64()?,
             guest: r.option(guest_time)?,
+            started_from: r.option(started_from)?,
         }),
         kind::BOXES => Answer::Boxes {
             more: r.bool("more")?,
@@ -2323,8 +2326,9 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
-/// its variables and an option of its working directory (joint plan step 17). Fields a later step adds go after
-/// the members (append-only).
+/// its variables, an option of its working directory (joint plan step 17) and its run-time arguments (D256, after
+/// the working directory), then its shares (kiln's step 18), each its host directory, where its guest sees it and
+/// whether read-only, as a mount's. Fields a later step adds go after the shares (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
@@ -2337,7 +2341,14 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
             w.string(k)?;
             w.string(v)
         })?;
-        w.option_with(m.workdir.as_deref(), Writer::string)
+        w.option_with(m.workdir.as_deref(), Writer::string)?;
+        w.list(&m.args, |w, arg| w.string(arg))
+    })?;
+    w.list(&image.shares, |w, m| {
+        w.path(&m.source)?;
+        w.string(&m.destination)?;
+        w.bool(m.read_only);
+        Ok(())
     })
 }
 
@@ -2351,6 +2362,14 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 member: member(r)?,
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
+                args: r.list(|r| r.string("member argument"))?,
+            })
+        })?,
+        shares: r.list(|r| {
+            Ok(Mount {
+                source: r.path()?,
+                destination: r.string("share destination")?,
+                read_only: r.bool("read_only")?,
             })
         })?,
     })
@@ -2394,6 +2413,28 @@ fn guest_time(r: &mut Reader<'_>) -> Result<GuestTime, Fault> {
         }
         1 => Ok(GuestTime::Awaits(upstream(r)?)),
         t => Err(Fault::value("guest time", format!("variant {t}"))),
+    }
+}
+
+/// How a Shards image VM's microVM started (D253): a tag, its place in [`StartedFrom`], so append only.
+fn put_started_from(w: &mut Writer, from: StartedFrom) {
+    w.u8(match from {
+        StartedFrom::Booted => 0,
+        StartedFrom::Saved => 1,
+        StartedFrom::Restored => 2,
+        StartedFrom::Replaced => 3,
+        StartedFrom::Warm => 4,
+    });
+}
+
+fn started_from(r: &mut Reader<'_>) -> Result<StartedFrom, Fault> {
+    match r.u8()? {
+        0 => Ok(StartedFrom::Booted),
+        1 => Ok(StartedFrom::Saved),
+        2 => Ok(StartedFrom::Restored),
+        3 => Ok(StartedFrom::Replaced),
+        4 => Ok(StartedFrom::Warm),
+        t => Err(Fault::value("started from", format!("variant {t}"))),
     }
 }
 

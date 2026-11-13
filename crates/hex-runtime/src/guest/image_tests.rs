@@ -11,17 +11,33 @@ use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
-    Receiving, VcpuTime,
+    Receiving, StartedFrom, VcpuTime,
 };
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
 /// written, stays; only a Deleting record is removed.
-#[derive(Default)]
 struct Owner {
     records: Mutex<Records>,
     /// Its scans of every record ([`Books::records`]), each a read of the node's whole Store.
     scans: AtomicUsize,
+    /// The node's state's own directory for its image boxes' diagnostics, gone with the owner.
+    state: tempfile::TempDir,
+}
+
+impl Owner {
+    fn new() -> Self {
+        Self {
+            records: Mutex::default(),
+            scans: AtomicUsize::new(0),
+            state: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    /// Where the class keeps its runs' diagnostics ([`GuestRuntime::with_images`]).
+    fn diagnostics(&self) -> std::path::PathBuf {
+        self.state.path().join("image-diagnostics")
+    }
 }
 
 fn broken(why: &str) -> Refusal {
@@ -185,6 +201,9 @@ struct ModelRun {
     stats: Mutex<Stats>,
     /// The patience each stats ask was given, in order (decision 9).
     stats_asked: Mutex<Vec<Duration>>,
+    /// Each file its run host's diagnostics were told to go to (`ImageGuest::keep_diagnostics`), in order: the test
+    /// writes the host's diagnostics into the last, as the run host's do.
+    diagnostics: Mutex<Vec<std::fs::File>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -216,6 +235,8 @@ struct ModelGuest {
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
     outside: Mutex<std::collections::BTreeMap<String, Outside>>,
+    /// How its microVM started (D253), as the model's run host said it at its boot.
+    started_from: StartedFrom,
 }
 
 /// The period the model's run host says its VM's governor holds a rate over (D247's `rate_period`): the model's
@@ -235,6 +256,9 @@ impl ImageGuest for ModelGuest {
     }
     fn rate_period(&self) -> Duration {
         MODEL_RATE_PERIOD
+    }
+    fn started_from(&self) -> StartedFrom {
+        self.started_from
     }
     fn take_output(
         &self,
@@ -343,6 +367,10 @@ impl ImageGuest for ModelGuest {
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         Ok(())
     }
+    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+        self.run.diagnostics.lock().unwrap().push(to);
+        Ok(())
+    }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
         let end = self.run.end.lock().unwrap().clone();
         Ok(end.or_else(|| {
@@ -381,6 +409,8 @@ struct ModelImages {
     /// `Agentfile::named`), as the test sets it: the run host holds every one to its reach of the names kept where a
     /// boot holds members apart (`Narrowing::members`, D246).
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
+    /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
+    started_from: Mutex<StartedFrom>,
 }
 
 impl ModelImages {
@@ -395,6 +425,7 @@ impl ModelImages {
             members: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
             named: Mutex::new(Vec::new()),
+            started_from: Mutex::new(StartedFrom::Booted),
         })
     }
 
@@ -564,6 +595,7 @@ impl Images for ModelImages {
             members: self.members.lock().unwrap().clone(),
             published,
             outside: Mutex::new(outside),
+            started_from: *self.started_from.lock().unwrap(),
         }))
     }
 }
@@ -584,14 +616,18 @@ fn model_runtime(
     images: &Arc<ModelImages>,
     waits: Result<ImageWaits, Refusal>,
 ) -> (GuestRuntime, Arc<Owner>) {
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(Ok(Arc::clone(images) as Arc<dyn Images>), waits);
+    .with_images(
+        Ok(Arc::clone(images) as Arc<dyn Images>),
+        waits,
+        owner.diagnostics(),
+    );
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     (runtime, owner)
@@ -694,6 +730,21 @@ fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
     assert!(runtime.list().unwrap().iter().any(|info| info.id == id));
 }
 
+/// Joint plan step 12 (D242, image channel v20): a box's spec grants its VM no credential by reference, so its boot
+/// names no lessor to lease one, which Shards takes as a run that asks nothing of a lessor (and would refuse with a
+/// grant). Do create and start an image VM. Expect its one boot asked no credential grant and no lessor.
+#[test]
+fn w12_a_vm_granted_no_credential_boots_with_no_lessor() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-no-lessor", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].credentials.is_empty());
+    assert!(asked[0].lessor.is_none());
+}
+
 /// Joint plan step 12, Hex's stop: do signal KILL to a running VM. Expect: its run stopped once, its
 /// end recorded as Signal(9) and shown Empty; a second signal NotRunning; delete then removes its record.
 #[test]
@@ -783,6 +834,137 @@ fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
     assert_eq!(alike, first);
 }
 
+/// Joint plan step 12 for kiln's step 17 (D256, image channel v18): a member its caller drives takes its run-time
+/// arguments after its image's command, as a harness takes its session's flags on the host. Do boot a VM whose driven
+/// harness is given `--resume s-1`, an empty argument and `--model claude-opus-4`, and one whose driven harness is given
+/// none. Expect the first boot to ask Shards for that member with exactly those arguments, in their order, the empty
+/// one kept; the second for its member with none, its image's command alone.
+#[test]
+fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let args = vec![
+        "--resume".to_owned(),
+        "s-1".to_owned(),
+        String::new(),
+        "--model".to_owned(),
+        "claude-opus-4".to_owned(),
+    ];
+    for given in [args.clone(), Vec::new()] {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut boxed = spec("image-args", None);
+        if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+            image.members.push(ImageMember {
+                args: given.clone(),
+                ..ImageMember::new(Member {
+                    kind: MemberKind::Harness,
+                    name: "claude".to_owned(),
+                })
+            });
+        }
+        let id = runtime.create(boxed).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        let [member] = boot.members.as_slice() else {
+            panic!("the boot's members: {:?}", boot.members);
+        };
+        assert_eq!(member.member, MemberName::harness("claude"));
+        assert_eq!(member.args, given);
+    }
+}
+
+/// Joint plan step 12 for kiln's step 18 (D231's shares): an image VM's guest sees the host directories its caller
+/// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only; one granted egress and
+/// sharing none; then one whose share Shards refuses. Expect the first boot to ask Shards for exactly those two shares,
+/// each its host directory, where the guest sees it and whether read-only, in order; the second for none, its grants
+/// widening no share; the third's start refused as Invalid, in Shards' own words.
+#[test]
+fn w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Mount, Ports, Proto};
+    let shares = vec![
+        Mount {
+            source: std::path::PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+            destination: "/home/agent/.claude".to_owned(),
+            read_only: false,
+        },
+        Mount {
+            source: std::path::PathBuf::from("/srv/projects/hex"),
+            destination: "/work/hex".to_owned(),
+            read_only: true,
+        },
+    ];
+    let boot_of = |shares: Vec<Mount>, grants: Vec<Grant>| {
+        let images = ModelImages::new();
+        images.names(
+            shards_api::image::MemberKind::Harness,
+            "codex",
+            &["api.anthropic.com:443"],
+        );
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut boxed = spec("image-shares", None);
+        if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+            image.shares = shares;
+            image.grants = grants;
+        }
+        let id = runtime.create(boxed).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        boot.clone()
+    };
+    let shared = boot_of(shares.clone(), Vec::new());
+    let asked: Vec<(std::path::PathBuf, String, bool)> = shared
+        .shares
+        .iter()
+        .map(|s| (s.host.clone(), s.at.clone(), s.read_only))
+        .collect();
+    let named: Vec<(std::path::PathBuf, String, bool)> = shares
+        .iter()
+        .map(|m| (m.source.clone(), m.destination.clone(), m.read_only))
+        .collect();
+    assert_eq!(asked, named);
+    let granted = boot_of(
+        Vec::new(),
+        vec![Grant::Egress {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            },
+            to: Destination::Name("api.anthropic.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }],
+    );
+    assert!(granted.shares.is_empty(), "{:?}", granted.shares);
+    let images = ModelImages::new();
+    let words = "/srv/projects/hex: a share's directory is an absolute UTF-8 path";
+    *images.refuse.lock().unwrap() = Some(ImageRefusal::Spec {
+        what: "a share",
+        why: words.to_owned(),
+    });
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let mut boxed = spec("image-share-refused", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.shares = shares;
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    match runtime.start(&id) {
+        Err(Refusal::Invalid { what, why }) => {
+            assert_eq!(what, "shards image");
+            assert!(why.contains("a share") && why.contains(words), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
 /// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
 /// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
@@ -843,6 +1025,51 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
         (Some(Exit::Unknown), Some(words))
     );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one
+/// file under the node's state, named in its record as its start's intent is written, and a failed run's `ended` quotes
+/// their last bytes after its own words; the file goes with the box's delete. Do start an image VM, write its run host's
+/// diagnostics into the file the class named, then end its run failed and inspect it; then delete it. Expect its record
+/// to name the class's file for the box, Shards told once to keep the diagnostics there; the box shown Empty, its
+/// `ended` its run's words, then the run host's last words from the file, its record keeping the same; after the
+/// delete, the file gone with the record.
+#[test]
+fn w12_a_failed_runs_ended_quotes_its_run_hosts_diagnostics_and_its_delete_removes_them() {
+    use std::io::Write as _;
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-diagnostics", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let file = owner.diagnostics().join("image-diagnostics.log");
+    assert_eq!(
+        record(&owner, &id).unwrap().diagnostics.as_deref(),
+        Some(file.as_path())
+    );
+    assert_eq!(images.run.diagnostics.lock().unwrap().len(), 1);
+    let last =
+        "api-run: its VM's kernel panicked: VFS: unable to mount root fs on unknown-block(0,0)";
+    {
+        let mut kept = images.run.diagnostics.lock().unwrap();
+        let to = kept.last_mut().unwrap();
+        to.write_all(b"api-run: booting its microVM\n").unwrap();
+        to.write_all(format!("{last}\n").as_bytes()).unwrap();
+    }
+    let words = "its VM failed";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    let ended = info.ended.unwrap();
+    assert!(
+        ended.starts_with(words) && ended.trim_end().ends_with(last),
+        "{ended}"
+    );
+    assert_eq!(
+        record(&owner, &id).unwrap().ended.as_deref(),
+        Some(ended.as_str())
+    );
+    runtime.delete(&id).unwrap();
+    assert!(!file.exists(), "{file:?} outlived its box");
+    assert!(record(&owner, &id).is_none());
 }
 
 /// Joint plan step 12 (goal 15's finding; ROOT's (b), 2026-11-13): do start a VM whose run fails as it boots, its command
@@ -946,6 +1173,7 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
             member: claude.clone(),
             env: vec![("TZ".to_owned(), "UTC".to_owned())],
             workdir: Some("/work/project".to_owned()),
+            args: Vec::new(),
         });
     }
     let id = runtime.create(boxed).unwrap().id;
@@ -1117,7 +1345,7 @@ fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
         vec![Duration::MAX],
         "Shards' stats was asked with a bound of Hex's"
     );
-    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    let stats = &runtime.images.image().unwrap().waits().unwrap().stats;
     assert!(
         stats.slowest().is_some_and(|slowest| slowest > learned),
         "W* didn't rise to the answer that passed it: {:?}",
@@ -1201,6 +1429,115 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     ));
 }
 
+/// Joint plan step 12's item B (goal 54's change 3; ROOT and g121, 2026-11-13): kiln learns what a VM costs its host
+/// over its window, and charges a deleted VM its final use, read with its end, never a use made up. Do read a running
+/// image VM's host use twice, then delete it answering its final use; delete it again; then delete a VM whose run ended
+/// on its own before its delete. Expect each read's window to run from its run's start and grow; the delete to answer the
+/// VM's final use, its window the whole run and no less than the last read's, its counters its run host's; the second
+/// delete refused NoSuchBox; and the delete of the ended run to answer none, nothing read at its end.
+#[test]
+fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-final-use", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let first = runtime.host_use(&id).unwrap();
+    let second = runtime.host_use(&id).unwrap();
+    assert!(first.window > Duration::ZERO, "{first:?}");
+    assert!(second.window >= first.window, "{first:?} then {second:?}");
+    let last = runtime.delete_with_host_use(&id).unwrap().unwrap();
+    assert!(last.window >= second.window, "{second:?} then {last:?}");
+    assert_eq!(
+        (last.cpu_ns, last.footprint_bytes, last.guest_ns.len()),
+        (9_000_000, 1 << 20, usize::try_from(vcpus).unwrap())
+    );
+    // A delete retried once the VM is gone, as kiln's runtime of the class alone answers it (hex-node's ImageRuntime):
+    // NoSuchBox, never a use made up. A node's guest runtime takes an id it has no record of as its guest's own.
+    assert!(matches!(
+        hex_api::Runtime::delete_with_host_use(&runtime.images, &id),
+        Err(Refusal::NoSuchBox(_))
+    ));
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-ended-use", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
+    shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(runtime.delete_with_host_use(&id).unwrap(), None);
+}
+
+/// Joint plan step 12 (D253, image channel v19 and v21): a box says how its VM's microVM came up, as its run host said it
+/// as the run started, in its usage and in its record. Do boot an image VM whose run host says it restored its image's
+/// template, its start taking the boot's answer; then one whose run host says it was a warm host's, its start Pending
+/// (its boot held past its W*) and its answer taken by a later call. Expect before each boot no start in its record,
+/// then its usage saying it and its record keeping it, written as its boot's answer was taken, whichever call took it.
+#[test]
+fn w12_a_vms_usage_and_record_say_how_its_microvm_started() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let stats = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(64 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    // Its start takes its boot's answer.
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Restored;
+    *images.run.stats.lock().unwrap() = stats.clone();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-restored", None)).unwrap().id;
+    assert_eq!(record(&owner, &id).unwrap().started_from, None);
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        record(&owner, &id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Restored)
+    );
+    assert_eq!(
+        runtime.usage(&id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Restored)
+    );
+    // A later call takes it: the start Pending, its boot held before its run host's start past a 1 ns W*.
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Warm;
+    *images.run.stats.lock().unwrap() = stats;
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_held_warm",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime.create(spec("image-warm", None)).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    assert_eq!(record(&owner, &id).unwrap().started_from, None);
+    images.gate(Gate::Open);
+    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    assert_eq!(
+        record(&owner, &id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Warm)
+    );
+    assert_eq!(
+        runtime.usage(&id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Warm)
+    );
+}
+
 /// Joint plan step 14 (C7, C4, C1; AC-T7.4.1): a running image VM is told its room, held to its rate and read for its
 /// host cost through its runtime, the one call each of the node's charge learner and a caller's own runtime (goal 12's
 /// item B) make. Do tell a VM rooms of 32 MiB, -8 MiB (its budget short of what it holds) and none, hold it at 250
@@ -1243,13 +1580,15 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
     assert_eq!(runtime.rate(&id, rate).unwrap(), rate);
     assert_eq!(runtime.rate(&id, None).unwrap(), None);
     assert_eq!(*images.run.rates.lock().unwrap(), [rate, None]);
+    let read = runtime.host_use(&id).unwrap();
     assert_eq!(
-        runtime.host_use(&id).unwrap(),
+        read,
         hex_api::HostUse {
             cpu_ns: 9_000_000,
             footprint_bytes: 1 << 20,
             resident_bytes: 1 << 20,
             guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
+            window: read.window,
         }
     );
     *images.run.stats.lock().unwrap() = Stats {
@@ -1364,7 +1703,7 @@ fn original_a_boot_past_its_learned_w_star_goes_on_to_its_run() {
         vec![Duration::MAX],
         "Shards' boot was given a bound of Hex's"
     );
-    let boot = &runtime.image().unwrap().waits().unwrap().boot;
+    let boot = &runtime.images.image().unwrap().waits().unwrap().boot;
     assert_eq!(boot.deadline(), None, "the run-out wasn't told");
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Created);
     assert_eq!(
@@ -1476,7 +1815,7 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
 /// any record.
 #[test]
 fn a_create_is_refused_before_any_record_on_a_node_without_an_image_boot() {
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
@@ -1566,14 +1905,14 @@ fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
         }
         return;
     };
-    let owner = Arc::new(Owner::default());
+    let owner = Arc::new(Owner::new());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(host_images(), waits());
+    .with_images(host_images(), waits(), owner.diagnostics());
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     let made = runtime

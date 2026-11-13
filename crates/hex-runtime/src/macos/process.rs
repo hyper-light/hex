@@ -1421,6 +1421,7 @@ impl ProcessBox {
             io_read_bytes: s.read_bytes,
             io_write_bytes: s.written_bytes,
             guest: None,
+            started_from: None,
         })
     }
 

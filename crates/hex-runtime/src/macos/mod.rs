@@ -551,6 +551,7 @@ impl BoxUser {
             io_read_bytes: 0,
             io_write_bytes: 0,
             guest: None,
+            started_from: None,
         })
     }
 

@@ -1376,6 +1376,35 @@ fn a_runs_end_told_late_is_waited_for_on_a_worker() {
     assert_eq!(lab.watched(), 0);
 }
 
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a run's
+/// end waited for on a worker (its watch reported before its runtime could tell it) was `Exit::Unknown` at
+/// node.emptying's W*, the slowest emptying this process had seen, though its runtime went on to tell it. Do: once an
+/// emptying of a microsecond has been seen, run a program, end it with its end untold, and tell the end only once W*,
+/// the slowest emptying seen (other tests share it, and may raise it meanwhile), has passed since, or an answer came.
+/// Expect: the run's end, Code(0), never Unknown, and nothing left watched.
+#[test]
+fn original_a_runs_end_told_past_the_emptyings_w_star_is_its_own_never_unknown() {
+    crate::emptying::EMPTYING.answered(Duration::from_micros(1));
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, run(7, "r"));
+    let pid = match answer_of(&sock) {
+        (Header { id: 7, .. }, Answer::Started { pid }) => pid,
+        other => panic!("{other:?}"),
+    };
+    lab.os.lock().untold.insert(pid);
+    lab.os.end(pid);
+    let ended = Instant::now();
+    wait_until("W* to pass since the end, or an answer", || {
+        let window = crate::emptying::EMPTYING.slowest().unwrap_or_default();
+        ended.elapsed() > window || !sock.to_client.lock().unwrap().is_empty()
+    });
+    lab.os.tell(pid);
+    let (h, end) = answer_of(&sock);
+    assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(0))));
+    assert_eq!(lab.watched(), 0);
+}
+
 /// HEX-SOCK-7 (the core), runtime goal 7 (decision 7): a run's program its node reaped before the core could watch it
 /// (to remove its box) is answered as any run is, its start and then its end, which its `Proc` tells, and its place
 /// among the programs is given back. Do: run a program the OS finds reaped when the core watches it, then exec two

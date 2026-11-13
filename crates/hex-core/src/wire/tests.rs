@@ -5,7 +5,9 @@
 //! type and never panic.
 
 use super::*;
-use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
+use hex_api::{
+    Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, StartedFrom, User,
+};
 use proptest::prelude::*;
 
 fn device_claims() -> Vec<DeviceId> {
@@ -1011,6 +1013,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 io_read_bytes: 7,
                 io_write_bytes: u64::MAX,
                 guest: Some(GuestTime::PerVcpuNs(vec![0, 1, u64::MAX])),
+                started_from: Some(StartedFrom::Warm),
             }),
         ),
         (
@@ -2727,11 +2730,12 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
         io_read_bytes: 17,
         io_write_bytes: 19,
         guest: None,
+        started_from: None,
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    // The counters, then guest time's option byte, appended (joint plan step 12): none here.
-    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 1);
+    // The counters, then guest time's option byte and the microVM's start's, appended (joint plan step 12): none here.
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 2);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
@@ -4251,14 +4255,15 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     let per_vcpu = usage(Some(GuestTime::PerVcpuNs(vec![5, 7])));
     let bytes = answer(4, &per_vcpu, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[counters..counters + 6], &[1, 0, 2, 0, 0, 0]);
-    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>());
+    // Then the microVM's start's option byte (D253): none here.
+    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>() + 1);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         per_vcpu
     );
     let awaits = usage(Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)));
     let bytes = answer(4, &awaits, MAX_MESSAGE).unwrap();
-    assert_eq!(&bytes[counters..], &[1, 1, 0]);
+    assert_eq!(&bytes[counters..], &[1, 1, 0, 0]);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         awaits
@@ -4290,11 +4295,12 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     )
     .unwrap();
     let count = u32::try_from(GuestTime::MAX_VCPUS + 1).unwrap();
-    read_past.truncate(read_past.len() - size_of::<u32>());
+    // Its count and the start's option byte after it, written again with a count past the index space.
+    read_past.truncate(read_past.len() - size_of::<u32>() - 1);
     read_past.extend_from_slice(&count.to_le_bytes());
     read_past.extend(std::iter::repeat_n(
         0,
-        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>(),
+        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>() + 1,
     ));
     assert!(matches!(
         read_answer(&received(&read_past, 0), MAX_MESSAGE),
@@ -4643,6 +4649,66 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
 }
 
+/// Joint plan step 12 (D253; AC-T7.4.1): a usage answer says how a Shards image VM's microVM started, after its guest
+/// time, as an option: tag 1 and its place in `StartedFrom` (Booted 0, Saved 1, Restored 2, Replaced 3, Warm 4); a box
+/// with no Shards image run says none, a byte 0. Do answer each, then one whose tag is 5, then each as JSON. Expect each
+/// read back as written, its tag its last byte; none a 0 last; tag 5 refused as "started from"; the JSON named in
+/// kebab-case and left out where none.
+#[test]
+fn w12_a_usages_microvm_start_crosses_the_wire_last() {
+    let usage = |started_from| {
+        Answer::Usage(Usage {
+            pids: 1,
+            started_from,
+            ..Usage::default()
+        })
+    };
+    for (tag, from) in [
+        (0u8, StartedFrom::Booted),
+        (1, StartedFrom::Saved),
+        (2, StartedFrom::Restored),
+        (3, StartedFrom::Replaced),
+        (4, StartedFrom::Warm),
+    ] {
+        let said = usage(Some(from));
+        let bytes = answer(4, &said, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[bytes.len() - 2..], &[1, tag], "{from:?}");
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            said
+        );
+    }
+    let none = answer(4, &usage(None), MAX_MESSAGE).unwrap();
+    assert_eq!(&none[none.len() - 2..], &[0, 0], "no guest time, no start");
+    assert_eq!(
+        read_answer(&received(&none, 0), MAX_MESSAGE).unwrap().1,
+        usage(None)
+    );
+    let mut hostile = answer(4, &usage(Some(StartedFrom::Warm)), MAX_MESSAGE).unwrap();
+    let last = hostile.len() - 1;
+    hostile[last] = 5;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "started from",
+            ..
+        })
+    ));
+    let warm = Usage {
+        started_from: Some(StartedFrom::Warm),
+        ..Usage::default()
+    };
+    let json = serde_json::to_value(&warm).unwrap();
+    assert_eq!(json["started_from"], "warm");
+    assert_eq!(serde_json::from_value::<Usage>(json).unwrap(), warm);
+    let older = serde_json::to_value(Usage::default()).unwrap();
+    assert!(older.get("started_from").is_none(), "skipped when none");
+    assert_eq!(
+        serde_json::from_value::<Usage>(older).unwrap(),
+        Usage::default()
+    );
+}
+
 /// Joint plan step 14 (AC-T7.4.1), C5: a box's priority band reaches its node. Do send a create of a spec in band 3
 /// through the node's wire, then the same cut by its last byte, and the spec as JSON, then a band-0 spec as JSON. Expect
 /// the create back exactly, its band its last byte, the cut one refused as every truncation is, and the JSON back
@@ -4837,8 +4903,9 @@ fn unknown_grant_tags_are_refused_by_name() {
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create a Shards image VM whose spec names the members its caller drives, one
-/// with variables and a working directory and one with neither; expect it read back whole, its members after its
-/// grants.
+/// with variables, a working directory and run-time arguments (D256, kiln's step 17; an empty one among them) and one
+/// with none of them; expect it read back whole, its members after its grants, each member's arguments after its
+/// working directory.
 #[test]
 fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
     let members = vec![
@@ -4849,6 +4916,13 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
             },
             env: vec![("LANG".to_owned(), "C.UTF-8".to_owned())],
             workdir: Some("/home/me/project".to_owned()),
+            args: vec![
+                "--resume".to_owned(),
+                "s-1".to_owned(),
+                String::new(),
+                "--model".to_owned(),
+                "claude-opus-4".to_owned(),
+            ],
         },
         hex_api::ImageMember::new(Member {
             kind: MemberKind::Agent,
@@ -4869,6 +4943,46 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
         band: 0,
     })));
     let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+}
+
+/// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): do create a Shards image VM sharing two host directories, one
+/// read-write and one read-only, beside a member its caller drives. Expect it read back whole, its shares after its
+/// members, each its host directory, where its guest sees it and whether read-only.
+#[test]
+fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-shares"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            members: vec![hex_api::ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            })],
+            shares: vec![
+                Mount {
+                    source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+                    destination: "/home/agent/.claude".to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    source: PathBuf::from("/srv/projects/hex"),
+                    destination: "/work/hex".to_owned(),
+                    read_only: true,
+                },
+            ],
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    })));
+    let bytes = request(94, &create, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         create
