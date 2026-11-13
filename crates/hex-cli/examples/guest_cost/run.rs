@@ -1493,7 +1493,9 @@ mod tests {
     /// AC-T7.4.1 (ROOT, the Mac window's fixed point): a window that the rate sets, over guests whose VMM uses
     /// 1 ms of its own in each window of their steady state: expect the first census at the envelope's rate,
     /// each next at the envelope's and what the one before measured, the run ending at the first census that
-    /// measures no more than its window's rate was taken at, that charged, and each census in the evidence.
+    /// measures no more than its window's rate was taken at, and each census in the evidence. What the last
+    /// measured is evidence alone (joint plan step 14; ROOT, 2026-11-13, by decision 9's rule): the cost written
+    /// carries no overhead and no guest allowance, and its evidence names the measured overhead.
     #[test]
     fn the_mac_window_settles_at_the_rate_it_charges() {
         let dir = tempfile::tempdir().unwrap();
@@ -1533,13 +1535,14 @@ mod tests {
         }
         let (rate, measured) = *censuses.last().unwrap();
         assert!(measured <= rate - 2000, "{censuses:?}");
-        let (cost, _, _) = hex_runtime::guest::load_runtime_evidence(
-            &made.cost_file,
-            made.cost_sha256,
-            &made.evidence_file,
-        )
-        .unwrap();
-        assert_eq!(cost.overhead.cpu_milli, rate - 2000);
+        let written: RuntimeCost =
+            serde_json::from_slice(&std::fs::read(&made.cost_file).unwrap()).unwrap();
+        assert_eq!(written.overhead, CapacityResources::default());
+        assert_eq!(written.guest_overhead, CapacityResources::default());
+        assert!(
+            text.contains(&format!("\noverhead cpu_milli={} ", rate - 2000)),
+            "{text}"
+        );
         assert!(text.contains("\nwindow 20000000 ns (at "), "{text}");
     }
 
