@@ -746,6 +746,18 @@ fn invalid_cost(why: &'static str) -> Refusal {
 }
 
 impl RuntimeCost {
+    /// The profile as a node takes it (joint plan step 14; ROOT, 2026-11-13, by decision 9's rule: a census row is
+    /// evidence only, never a starting number): its envelope alone, the VMM overhead and guest allowance its census
+    /// measured left in its evidence, which its id still names. What a VM takes past its envelope is learned from its
+    /// windows (`docs/design/learned-charge.md` C1); what a guest's own takes, from its backing's (C7).
+    pub fn census_free(self) -> Self {
+        Self {
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+            ..self
+        }
+    }
+
     pub fn check(self) -> Result<(), Refusal> {
         if self.id == [0; 32]
             || !self.ceiling.holds(self.floor)
@@ -2127,6 +2139,11 @@ pub enum LifecycleCause {
     Uncertain,
     #[error("another operation owns this box's lifecycle")]
     Busy,
+    /// Its backing was retired at its node's start (joint plan step 14; ROOT, 2026-11-13): recorded under a census
+    /// cost, its identity is no longer its node's profile's. A box on it keeps its record, ready, until its owner's
+    /// delete. Appended (wire append-only).
+    #[error("its backing's identity changed with decision 9's census-free cost")]
+    Retired,
 }
 
 /// Why a CONNECT handshake failed: the phase it failed in and what it saw.

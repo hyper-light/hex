@@ -1412,7 +1412,8 @@ fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             refused
         );
-        for tag in [3, u8::MAX] {
+        // 3 is Retired (joint plan step 14); the next tag is unknown.
+        for tag in [4, u8::MAX] {
             let mut invalid = bytes.clone();
             *invalid.last_mut().unwrap() = tag;
             let error = read_answer(&received(&invalid, 0), MAX_MESSAGE).unwrap_err();
@@ -3118,7 +3119,8 @@ fn route_wire_hostile_route_and_backing_tags_are_redacted() {
         MAX_MESSAGE,
     )
     .unwrap();
-    *bytes.last_mut().unwrap() = 3;
+    // 3 is Retired (joint plan step 14); 4 is no cause.
+    *bytes.last_mut().unwrap() = 4;
     let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
     assert!(matches!(
         fault,
@@ -3820,7 +3822,8 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
         ));
     }
     assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
-    for cause in [3, u8::MAX] {
+    // 3 is Retired (joint plan step 14); the next cause is unknown.
+    for cause in [4, u8::MAX] {
         let mut raw = bytes.clone();
         raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = cause;
         assert!(matches!(

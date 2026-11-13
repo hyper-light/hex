@@ -643,6 +643,7 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
             LifecycleCause::Pending => "pending",
             LifecycleCause::Busy => "busy",
             LifecycleCause::Uncertain => "uncertain",
+            LifecycleCause::Retired => "retired",
         };
         assert!(text.ends_with(&format!("cause={name}")));
     }
