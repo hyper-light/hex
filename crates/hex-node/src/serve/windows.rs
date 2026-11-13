@@ -49,6 +49,13 @@ use hex_core::wire::{self, Streams};
 
 use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
+/// How many handles the node's process holds now ([`hex_runtime::windows::sys::open_handles`]): what it held at its
+/// start beside its bounds as it fits them ([`super::fit::fit`]).
+pub fn open_descriptors() -> Result<u64, Refusal> {
+    hex_runtime::windows::sys::open_handles()
+        .map_err(|e| Refusal::os("counting the node's open handles", e))
+}
+
 /// Windows' startup admission ceilings (native plan step 8): handles are bounded by its documented
 /// 2^24 per-process kernel handle table; each program watch retains a process and wait-packet handle.
 /// Threads are bounded by the process's commit room divided by a default worker's measured stack extent.

@@ -55,11 +55,12 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
-use hex_core::patience::{Follow, Party, Patience};
+use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
 
+pub mod fit;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -105,9 +106,11 @@ pub struct Platform {
 ///   admitted has a worker that can exist;
 /// - programs watched: the programs the node can watch at once.
 ///
-/// Each is a ceiling the platform sets, not the room left under it now: what else holds the platform's room, the
-/// kernel refuses past as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission (the lead,
-/// 2026-11-09, over reading the room at each admission, which cost every exec a listing of the node's descriptors).
+/// Each is a ceiling the platform sets, which a node's start fits to its descriptors with everything else it holds
+/// ([`fit`], ROOT's one accounting of 2026-11-13; Linux's with its pools, `crate::netns::fit`), not the room left
+/// under it now: what else holds the platform's room, the kernel refuses past as the node takes it (`EMFILE`,
+/// `EAGAIN`), typed, at no cost to an admission (the lead, 2026-11-09, over reading the room at each admission, which
+/// cost every exec a listing of the node's descriptors).
 pub fn limits(platform: &Platform) -> Limits {
     Limits {
         connections: platform.descriptors,
@@ -147,9 +150,9 @@ const READS_PER_WAKE: usize = 64;
 pub const EVENTS: usize = 256;
 /// How long a list's worker waits for its client to read the parts before the one it sends next: the slowest such wait
 /// this process has seen (decision 9), a bound only while the reads come within it. Past it the run-out is told to the
-/// census and the wait follows its client by the messages it takes; one that takes none over a whole W* window has
-/// stopped reading, and its connection is closed, the other calls on it refused by the close ([`Shared::drained`]).
-/// No record is read: `bench/competitive/probes/waits_census.md`'s `serve.reads` row is evidence.
+/// census and the wait follows its client by its life alone, its connection, until the parts go or the connection
+/// closes ([`Shared::drained`]). No record is read: `bench/competitive/probes/waits_census.md`'s `serve.reads` row is
+/// evidence.
 static READS: Patience = Patience::measuring("serve.reads");
 
 /// The first token a connection or program takes: below it are the listener's and the wake's.
@@ -608,10 +611,6 @@ struct Out {
     given: BTreeMap<u64, Vec<hex_api::End>>,
     /// Of `given`, those whose programs it no longer watches: each a place of its own.
     kept: usize,
-    /// Its messages gone into its socket, counted: the client's taken count. Once its socket is full, as it is while
-    /// answers wait in `backlog`, a message goes only as its client reads, so the count rises only while it reads: the
-    /// progress a list's next part follows past [`READS`]' bound (decision 9).
-    gone: u64,
     /// Whether its requests are read ([`Interest::Read`]) or only its backlog written.
     reading: bool,
 }
@@ -626,10 +625,9 @@ impl Out {
             .saturating_add(self.kept)
     }
 
-    /// A message has gone with `ends` riding as its descriptors: counted ([`Out::gone`]), and a given answer's ends
-    /// (`given`, its exec's id) kept until its client says it took them, any other's let go.
+    /// A message has gone with `ends` riding as its descriptors: a given answer's ends (`given`, its exec's id) kept
+    /// until its client says it took them, any other's let go.
     fn sent(&mut self, ends: Vec<hex_api::End>, given: Option<u64>) {
-        self.gone = self.gone.saturating_add(1);
         if let Some(slot) = given.and_then(|exec| self.given.get_mut(&exec)) {
             *slot = ends;
         }
@@ -1245,7 +1243,6 @@ impl<O: Os> Shared<O> {
                     backlog: VecDeque::new(),
                     given: BTreeMap::new(),
                     kept: 0,
-                    gone: 0,
                     reading: true,
                 }),
                 drained: hex_wait::Condvar::new(),
@@ -1509,10 +1506,7 @@ impl<O: Os> Shared<O> {
     ) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         if after_read {
-            out = match self.drained(conn, out)? {
-                Some(out) => out,
-                None => return Ok(()),
-            };
+            out = self.drained(conn, out)?;
         }
         if !out.open {
             return Ok(());
@@ -1544,12 +1538,11 @@ impl<O: Os> Shared<O> {
     /// Waits for a connection's waiting answers to go, before a list's next part, as decision 9 waits (the person's
     /// ruling of 2026-11-13) on the server's reads' wait ([`Shared::reads`], [`READS`]):
     /// - **Within W***, the slowest such wait this process has seen, the answers going end it.
-    /// - **Past W*** the run-out is told to the census, no sample, and the wait follows its client by the messages it
-    ///   takes ([`Out::gone`]): it goes on while the client takes one within each W* window. Once a whole window
-    ///   passes with none taken, the client has stopped reading: its connection is closed, the other calls on it
-    ///   refused by the close, and the part goes nowhere (`None`).
+    /// - **Past W*** the run-out is told to the census, no sample, and the wait follows its client by its life alone,
+    ///   as at every local site (docs/research/runtime/learned-waits.md): the answers going, or the connection's close,
+    ///   ends it, however long that takes.
     /// - **With no W*** (before the first such wait, and from a run-out to the next answer) it follows the client from
-    ///   its start ([`Patience::follow`]).
+    ///   its start.
     /// - **The connection's close** ends it at any time: the part then goes to no one.
     ///
     /// Its answer, however long it took, is the sample W* rises to.
@@ -1557,44 +1550,26 @@ impl<O: Os> Shared<O> {
         &self,
         conn: &'a Conn<O>,
         mut out: hex_wait::MutexGuard<'a, Out>,
-    ) -> Result<Option<hex_wait::MutexGuard<'a, Out>>, Refusal> {
+    ) -> Result<hex_wait::MutexGuard<'a, Out>, Refusal> {
         if !out.open || out.backlog.is_empty() {
-            return Ok(Some(out));
+            return Ok(out);
         }
         let began = Instant::now();
-        let bound = self.reads.deadline();
-        let mut following = bound.is_none().then(|| self.reads.follow());
+        let mut bound = self.reads.deadline();
         while out.open && !out.backlog.is_empty() {
             let now = began.elapsed();
-            if following.is_none()
-                && let Some(bound) = bound
-                && now >= bound
+            if let Some(within) = bound
+                && now >= within
             {
                 // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on.
-                self.reads.ran_out(bound);
-                following = Some(Follow::past(bound));
+                self.reads.ran_out(within);
+                bound = None;
             }
-            let until = match following.as_mut() {
-                Some(follow) => {
-                    if follow
-                        .look(Party::Alive { progress: out.gone }, now)
-                        .is_err()
-                    {
-                        drop(out);
-                        // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample: a
-                        // client taken for stopped says nothing of how long a read takes.
-                        self.os.shutdown(&conn.sock);
-                        return Ok(None);
-                    }
-                    follow.stalls_after()
-                }
-                None => bound,
-            };
-            out = match until {
+            out = match bound {
                 None => conn.drained.wait(out).map_err(wait_refused)?,
-                Some(until) => {
+                Some(within) => {
                     conn.drained
-                        .wait_timeout(out, until.saturating_sub(now))
+                        .wait_timeout(out, within.saturating_sub(now))
                         .map_err(wait_refused)?
                         .0
                 }
@@ -1603,7 +1578,7 @@ impl<O: Os> Shared<O> {
         if out.open {
             self.reads.answered(began.elapsed());
         }
-        Ok(Some(out))
+        Ok(out)
     }
 
     /// Writes a connection's waiting answers while there is room; once all are out its requests are
@@ -2098,12 +2073,10 @@ impl<O: Os> Shared<O> {
                 Job::Collect(mut w) => {
                     let exit = match &mut w.run {
                         Run::Local { proc, .. } => {
-                            // Told once its box is gone: the node's learned wait for a box to empty bounds it, the
-                            // removal waiting on that emptying.
-                            match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-                                Ok(Some(exit)) => exit,
-                                Ok(None) | Err(_) => Exit::Unknown,
-                            }
+                            // Told once its box is gone: waited for as a killed box's emptying is, past its W* by the
+                            // program's life alone (decision 9), the removal waiting on that emptying.
+                            crate::emptying::end_of_killed(&mut **proc, Instant::now())
+                                .unwrap_or(Exit::Unknown)
                         }
                         Run::Remote(_) => Exit::Unknown,
                     };
@@ -2292,6 +2265,7 @@ impl<O: Os> Shared<O> {
                 let grant = triomphe::Arc::try_unwrap(grant).map_err(|grant| Refusal::Backing {
                     key: grant.key,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 });
                 grant
                     .and_then(|grant| host.initialize_backing(grant))
@@ -2579,9 +2553,9 @@ impl<O: Os> Shared<O> {
             }
             Err(Unwatched::Killed(why)) => {
                 drop(table);
-                // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
-                let killed = Instant::now();
-                let _ = proc.wait_for(crate::emptying::empty_patience(killed));
+                // A killed process's end: waited for as a killed box's emptying is, its kind of wait, past its W* by
+                // the program's life alone (decision 9).
+                let _ = crate::emptying::end_of_killed(&mut *proc, Instant::now());
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
@@ -2678,10 +2652,9 @@ impl<O: Os> Shared<O> {
         given: Option<hex_api::Given>,
         mut proc: Box<dyn Proc>,
     ) -> Result<(), Refusal> {
-        let exit = match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
-            Ok(Some(exit)) => exit,
-            Ok(None) | Err(_) => Exit::Unknown,
-        };
+        // Waited for as a killed box's emptying is, past its W* by the program's life alone (decision 9).
+        let exit =
+            crate::emptying::end_of_killed(&mut *proc, Instant::now()).unwrap_or(Exit::Unknown);
         self.unreserve(conn)?;
         self.done(conn)?;
         match given {
@@ -2738,8 +2711,9 @@ impl<O: Os> Shared<O> {
         }
     }
 
-    /// The server stops: every connection closes, ending its programs, and the thread waits a bounded
-    /// time for them to be reaped and counted before the workers finish the queue and go.
+    /// The server stops: every connection closes, ending its programs, and the thread waits for them to be reaped and
+    /// counted before the workers finish the queue and go: as a killed box's emptying is waited for, within its W*
+    /// and past it, its run-out told once, by the programs' lives alone (decision 9).
     fn stop(self: &Arc<Self>) {
         // Nothing new comes in, and the stop's own wake no longer wakes the wait below.
         self.os.stop_listening();
@@ -2754,11 +2728,24 @@ impl<O: Os> Shared<O> {
             let _ = self.close(conn);
         }
         let mut events = Vec::with_capacity(EVENTS);
+        let bound = crate::emptying::EMPTYING.deadline();
+        let mut past = false;
         loop {
-            let left = crate::emptying::empty_patience(killed);
             let Ok(table) = self.table() else { break };
-            if table.watched.is_empty() || left.is_zero() {
+            if table.watched.is_empty() {
                 break;
+            }
+            let mut left = if past {
+                None
+            } else {
+                bound.map(|window| window.saturating_sub(killed.elapsed()))
+            };
+            if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
+                // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
+                // lives alone.
+                crate::emptying::EMPTYING.ran_out(window);
+                past = true;
+                left = None;
             }
             let tokens: Vec<u64> = table
                 .watched
@@ -2769,14 +2756,18 @@ impl<O: Os> Shared<O> {
             let sourced = self.sources.lock().is_ok_and(|s| !s.is_empty());
             if tokens.is_empty() && !sourced {
                 // Only remote programs are left, whose ends come from their host's own thread.
-                if self.remote_ended.wait_timeout(table, left).is_err() {
+                let waited = match left {
+                    Some(left) => self.remote_ended.wait_timeout(table, left).map(drop),
+                    None => self.remote_ended.wait(table).map(drop),
+                };
+                if waited.is_err() {
                     break;
                 }
                 continue;
             }
             drop(table);
             events.clear();
-            if self.os.wait(&mut events, Some(left)).is_err() {
+            if self.os.wait(&mut events, left).is_err() {
                 break;
             }
             for event in &events {

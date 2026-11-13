@@ -393,6 +393,7 @@ impl JobBox {
                         generation: *scope.bytes(),
                     },
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 },
                 None => super::inconsistent_slots(),
             },
@@ -579,6 +580,7 @@ impl JobBox {
             io_read_bytes: a.read_bytes,
             io_write_bytes: a.write_bytes,
             guest: None,
+            started_from: None,
         })
     }
 

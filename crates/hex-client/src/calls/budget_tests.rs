@@ -858,8 +858,36 @@ fn actual_token_read(
     }
 }
 
-/// Do make real partial token progress just before the original deadline; expect expiry at
-/// that deadline, rather than another whole cap after the most recent byte.
+/// The client's next read, or reads, until one waits (`WouldBlock`): it waits again, all it had read taken. A byte read
+/// first is refused by type: none was sent.
+fn waiting_again(
+    reads: &mpsc::Receiver<TokenRead>,
+    events: &mut Vec<TokenRead>,
+    at: Option<Instant>,
+) -> Result<(), Refusal> {
+    loop {
+        let event = recv_by(reads, at)
+            .map_err(|error| Refusal::os("observing an actual token read", error))?;
+        events.push(event);
+        match event.result {
+            Err(io::ErrorKind::WouldBlock) => return Ok(()),
+            Err(io::ErrorKind::Interrupted) => {}
+            other => {
+                return Err(Refusal::Broken(format!(
+                    "the token probe read {other:?} before a byte was sent"
+                )));
+            }
+        }
+    }
+}
+
+/// Do make real partial token progress before the original deadline, each byte sent on a fact, never at a time of the
+/// test's own: the first once the client dialed, the second once the client, having read the first, waits again;
+/// expect expiry at that deadline, naming it, with no read past it. (Its second byte was sent CAP before the deadline,
+/// a chosen window: a loaded host woke the test past the deadline first, "harness miss", at main 54a896cc and since.)
+/// Whether progress could have reset the deadline rests on the token's read taking its deadline once, by value
+/// (`protocol_read`): a test that sent a byte late enough to tell a reset apart from the deadline's own lateness would
+/// need a time of its own again.
 #[test]
 fn partial_token_progress_does_not_reset_the_absolute_deadline() {
     /// The connect's dial, accepted.
@@ -869,6 +897,11 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
         Patience::measuring("test.hex_client.budget.partial_token_first_read");
     /// The connect's refusal at its original deadline, the token cut short.
     static EXPIRED: Patience = Patience::measuring("test.hex_client.budget.partial_token_expired");
+    /// The client waiting again, its read of the first byte done.
+    static WAITING: Patience = Patience::measuring("test.hex_client.budget.partial_token_waiting");
+    /// The client's read of the token's second byte.
+    static SECOND_READ: Patience =
+        Patience::measuring("test.hex_client.budget.partial_token_second_read");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -912,21 +945,13 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
             .copied()
             .ok_or_else(|| Refusal::Broken("the token peer had no recorded dial".into()))?
             .1;
-        until(deadline.checked_sub(CAP).unwrap())?;
-        if Instant::now() >= deadline {
-            return Err(Refusal::Broken(
-                "harness miss: the original token injection window elapsed".into(),
-            ));
-        }
+        // The client waits again, its read of the first byte done: the fact the second byte is sent on.
+        within(&WAITING, |by| waiting_again(&reads, &mut events, by))?;
         peer.write_all(&[2])
             .map_err(|error| Refusal::os("writing the second token byte", error))?;
-        // Not a wait for a fact: the claim's window. This read must come within CAP of its injection, by the original
-        // deadline, and past that deadline the client reads no more.
-        let second = actual_token_read(
-            &reads,
-            &mut events,
-            Some(Instant::now().checked_add(CAP).unwrap()),
-        )?;
+        let second = within(&SECOND_READ, |by| {
+            actual_token_read(&reads, &mut events, by)
+        })?;
         Ok((first, second, deadline))
     })();
     let completed = recv_on(&EXPIRED, &answer);
@@ -959,11 +984,17 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
     );
     let (returned, result) = completed.unwrap();
     assert!(matches!(result, Err(Refusal::Os { why, .. }) if why.contains("caller")));
-    // A deadline that progress reset would end no sooner than a whole budget after the most recent byte's read.
+    // Refused at its original deadline, never before it, and nothing read past it.
     assert!(
-        returned < second.checked_add(LONG_CAP).unwrap(),
-        "the connect ended {:?} after its most recent byte: progress reset its original deadline",
-        returned.saturating_duration_since(second)
+        returned >= deadline,
+        "refused {:?} before its deadline",
+        deadline.saturating_duration_since(returned)
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.result.is_err() || event.at < deadline),
+        "a byte read past the deadline: {events:?}"
     );
     assert_eq!(recorded_deadlines.lock().unwrap().len(), 1);
 }
@@ -1188,8 +1219,8 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             .send(ControlPhase::Delete)
             .map_err(|error| Refusal::os("announcing pending fixture delete", error))?;
         client.delete(&id)?;
-        // A program's end through a Proc takes the suites' program-end record (hex_testkit::waits).
-        let ended = proc.wait_for(hex_api::conformance::PATIENCE)?;
+        // A program's end through a Proc is followed to it, as the suites follow one.
+        let ended = hex_api::conformance::end_of(&mut proc)?;
         drop(proc);
         let clean = {
             let state = client.conn.shared.state()?;
@@ -1239,7 +1270,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     );
     assert_eq!(pending, None);
     assert_eq!(&bytes, b"late");
-    assert_eq!(ended, Some(Exit::Code(0)));
+    assert_eq!(ended, Exit::Code(0));
     assert!(clean);
     assert_eq!(names.len(), 3);
     assert!(
@@ -1333,6 +1364,7 @@ impl Transport for Offers {
                         stdin: true,
                         ..Streams::default()
                     },
+                    setup: None,
                 }),
             ),
             Request::Call(Call::Start(_)) => self.queue(header.id, Answer::Done),
@@ -2283,6 +2315,7 @@ impl BootstrapCall {
                     route: None,
                     last_resort: None,
                     ended: None,
+                    credentials: Vec::new(),
                 })
             }
         }

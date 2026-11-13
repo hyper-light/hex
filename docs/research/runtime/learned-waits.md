@@ -7,8 +7,10 @@ as derived; an estimator of what's seen does"; "Account for cold starts well in 
 ## The bound (2026-11-13)
 
 A wait's bound is the slowest answer its node has seen, with no margin. Before its first answer, and after a run-out,
-it follows its party: it lasts while the party is alive and advancing, refused, typed, at its death, a reset or a
-stall of its own measured progress (`hex_core::patience::Follow`). No record seeds it, and no factor scales it.
+it follows its party. At the node's local sites it follows the party by its life alone, refused, typed, only at the
+party's death or a reset; a stall of the party's measured progress is judged only where that progress is continuous
+work toward the answer at a scale the window can see (a VM's boot, below). No record seeds it, and no factor scales
+it.
 
 - **Least expected cost.** A bound `T` costs a call `p·T + (1 − p)·P(answer > T)·C`: its wait for an answer that never
   comes, at rate `p`, and a run-out of an answer that would have come, costing `C > 0`. Over an empirical distribution
@@ -24,9 +26,29 @@ stall of its own measured progress (`hex_core::patience::Follow`). No record see
   1941. A bound past it rests on a model of the unseen tail, which Ada's rule refuses.
 - **The following wait.** Where nothing has been seen (the cold start) or the tail ran past what was (a run-out), no
   seen value bounds the wait; what the wait sees as it runs does. The party's liveness (a pidfd, a process handle, a
-  connection's state) ends it at the party's death or reset; its progress (a count that only rises while it works)
-  ends it at a stall longer than any gap between advances this wait has measured, the same estimator, the largest
-  seen, over the wait's own observations. Its answer comes in uncensored, so the learned bound rises to it.
+  connection's state) ends it at the party's death or reset. Its answer comes in uncensored, so the learned bound
+  rises to it.
+- **A stall judged at the slowest gap seen refuses healthy parties.** The person's rule of 2026-11-13 makes a stall
+  of the party's measured progress the typed refusal; the same record argument as the bound's says where such a stall
+  can be judged at all. A party's gaps between advances are exchangeable, so the `k`-th gap is the longest yet with
+  chance `1 / k`. A wait that refuses once a gap runs past the longest it has measured refuses at the first such
+  record: over `n` gaps, with chance `1 − 1 / n` (90% at 10), each time from a party that advances again a moment
+  later. Learned across waits, process-wide and only rising as W* is, the chance is still `1 / (N + 1)` a gap over all
+  `N` seen, high early, and asking for more gaps before judging is a picked count. Judged over W*, the slowest
+  answer, it fails wherever the party advances less often than W* is long, and it did, W* microseconds against
+  milliseconds between advances: CPU time judged at µs scale took a killed box for stalled (`node.emptying`, HEX-RT-1:
+  304 µs), and the seeds freed took a create in line for stalled (oci_reuse, "Exhausted create seeds"). The hang
+  bound, judging no progress at all, killed a seed still answering ("a create seed did not answer within 1.16752ms",
+  oci_box).
+- **Life alone at the node's local sites.** So at `node.emptying`, the seeds' line (`seeds.wait`), `seeds.hang`, the
+  exec seeds (`exec_seeds.answers`), `serve.reads` and `guest.stage`, past W* the wait follows its party's life alone,
+  the run-out told. A wedged party that stays alive is ended by its caller's own deadline or its owner's stop, never by
+  a guess at how long its next advance may take. Stall judgment stays only where progress is continuous work toward
+  the answer at a scale the window can see: Shards' Part B for a VM's boot (no CPU over a whole boot-scale W*), for
+  the image boot and the hosted boot once it is vendored. The tests' waits follow life alone too
+  (`hex_testkit::waits::follow`: copy::tests' copier was refused at 44 µs of standing CPU time against a 42.9 µs
+  window), and `hex_core::patience::Follow`, which judged a stall over W* or the longest gap a wait had measured, is
+  removed with `Party::Alive` and `Stopped`: nothing in Hex judges a stall of measured progress.
 - **RFC 6298's back-off, considered and dropped.** RFC 6298 §5.5 (sha256 of the rfc-editor.org text
   `f3a6d937c0a7653bd431fdbbdcd7920f4e9d9cdb6134fa9db7a74b90d215edf6`): "(5.5) The host MUST set RTO <- RTO * 2 ("back
   off the timer")." Its factor is a cited number, not an estimate of what is seen (Ada, 2026-11-06, as the Hex lead
@@ -40,52 +62,63 @@ is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
-| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd (`Seeds::died`) | its CPU time | liveness; progress owed |
-| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds | a seed freed | yes |
+| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | none: a local site | liveness alone past W*, never taken for hung (`Seeds::past_hang`) |
+| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | none: a local site | liveness alone past W* |
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
-| `node.emptying` | a killed box | its cgroup | members gone | owed (`Duration::MAX` meanwhile) |
-| `serve.reads` | a client reading a list | its connection | messages it takes (`Out::gone`) | yes |
-| `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*`, `guest.stage` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
+| `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W* |
+| `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
+| `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
+| `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
+| `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
+| `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
+| `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
+
+**What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
+alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
+its pidfd says it ended. A create in line waits until a seed is handed to it, refused only when no seed is up,
+starting or asked for (`Seeds::none_can_come`). An exec waits until a seed frees or a slot opens. A list's part waits
+until its client reads or its connection closes, and a stage until its relay answers or the connection ends or
+resets.
 
 ## Owed (2026-11-13)
 
-Three places still seed a wait from a record, the first in production. Each needs code that this change's one-host
-checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
+Three places seeded a wait from a record, the first in production; the second is done. Each needs code that this
+change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
 
 1. **The guest's first boot reads records.tsv: a production R03 violation, the first to close.**
    `hex_client::guest::shards::RECORDS` takes `bench/native/guest/records.tsv` by `include_str!`; `recorded_boot`
    reads this host class's `boot_ready` row (with none, the slowest of any class's; where no class has one, refused
    "record one first"); and `hex_runtime::guest::first_dial_bound`, the larger of it and the slowest boot seen, makes
-   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (fifteen
-   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs), as `ShardsGuest::dial_before(port, None)`
+   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (nine
+   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs; the six that bounded a managed scope's stop went
+   to `managed.stop` on 2026-11-13, ROOT's (C) of joint plan step 14), as `ShardsGuest::dial_before(port, None)`
    dials until it. The design, HEX-GUEST-33's liveness-sliced dial: before the first boot, and after one that ran out,
    the budget follows the guest's VM (`Budget::following(party)` beside `Budget::new(bound)`, its deadline an
    `Option<Instant>`). The VM's liveness is its process's end, an event on every OS (a pidfd on Linux,
-   `EVFILT_PROC`/`NOTE_EXIT` on macOS, a process handle on Windows); its progress is its CPU time
-   (`/proc/<pid>/stat`, `proc_pid_rusage`, `GetProcessTimes`), given to `Follow::look`. Shards'
-   `connect_once_before(port, at)` takes a finite instant, so the dial is cut into slices at the follower's own
-   instants: `Follow::stalls_after()` once the VM has shown a gap between advances, before that the next look its own
-   events give (its exit, its console's bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
+   `EVFILT_PROC`/`NOTE_EXIT` on macOS, a process handle on Windows). A stall of its boot is Shards' Part B's to judge
+   (no CPU over a whole boot-scale W*), once vendored, not Hex's. Shards' `connect_once_before(port, at)` takes a
+   finite instant, so the dial is cut into slices at the next look the VM's own events give (its exit, its console's
+   bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
    or its VM's end (`Option<Instant>`, `None` for "until either"), with no slices; Shards is ROOT's to change. Then
    `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
    alone.
-2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`): `conformance::PATIENCE`, the program-end record
-   of this host's class (`HostClass::slowest_recorded_end`: Linux 957 ms, macOS 939 ms, Windows 6,239 ms), and `ENDS`,
-   a `LearnedWait` seeded from it. hex-api can't name `hex_core::patience` (hex-core depends on hex-api), so the design
-   moves the pure core down: `crates/hex-core/src/patience.rs` and its tests to `hex_api::patience`, with
-   `pub use hex_api::patience;` in hex-core, so every `hex_core::patience` path stands, and `test-seeds` with it.
-   `ENDS` becomes `Patience::measuring("conformance.ends")`: a case's wait for a program it expects to end follows the
-   program until the first end (`Proc::try_wait` looked at on its own events, the end the answer), then is bounded at
-   the slowest end seen; `still_running()`, the negative watch, is the slowest end seen, or a typed refusal where none
-   has been (the suite runs its ending cases before it). `PATIENCE`, `seed`, `seed_from`, `SLOWEST_RECORDED_END`,
-   `slowest_recorded_end` and `LearnedWait` go, and their users outside the suite (about 45 calls, in hex-cli's Linux
-   and Windows tests and in hex-node, hex-client and hex-bench) take a helper, `conformance::end_of(&mut proc)`,
-   that waits as the suite does.
+2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
+   goal 12's macOS checks had failed hex_quic_20, HEX-RT-2 "still running after 939ms", macOS's record). The pure
+   core moved down: `hex_api::patience`, with `pub use hex_api::patience;` in hex-core, so every `hex_core::patience`
+   path stands, and `test-seeds` with it. `ENDS` is `Patience::measuring("conformance.ends")`, and a case's wait for a
+   program's end follows the program to it (`conformance::end_of`: within W*, then by its own events until its end,
+   the run-out told). The exit and removal waits read the box while the runtime under test lives
+   (`Fixture::party`), and each differential reading follows that party: a double whose answers can't change has
+   ended, and fails at once at the step that differs. `still_running()`, the negative watch, is the slowest end seen:
+   a check that something doesn't happen needs a learned bound, and that is the one. `PATIENCE`, `seed`, `seed_from`,
+   `SLOWEST_RECORDED_END`, `HostClass` and `LearnedWait` went, their users (about 45 calls, in hex-cli's tests and in
+   hex-node, hex-client and hex-bench) taking `conformance::end_of`, and hex-bench's checker of the record's uses
+   with them.
 3. **The tests' own waits**: `Patience::seeded` seeds them from `hex_testkit::waits`' census constants (`PROGRAM` to
    `SEEDS`, adacachy2's debug run 5) under the lead's rule of 2026-11-08, and a dozen tests double a record
    (`node_socket.rs`'s `ANSWERED` and emptying, `oci_box.rs`'s namespaces, program end and creates, `oci_reuse.rs`'s
@@ -93,8 +126,8 @@ checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
    `macos_process_box.rs`, `helper_daemon/tests.rs`). Made plainly `measuring`, the first answer in a test binary
    would bound every later wait for that fact in it, and a test fails at a run-out where production follows. The
    design: `hex_testkit::waits::until` and `within` take the fact's party (`impl FnMut() -> Party`: a `Proc`'s
-   `try_wait`, a cgroup's populated count, a pid's CPU time) and follow it with `Follow` before the first answer and
-   after a run-out; a run-out is told to the census and never fails a test, which fails at its party's end or stall.
+   `try_wait`, a cgroup's populated count, a thread's life) and follow it by its life alone before the first answer
+   and after a run-out; a run-out is told to the census and never fails a test, which fails only at its party's end.
    Then the constants, the doubles, `seeded` and `test-seeds` go: eighteen seeded statics in six Linux-only files
    (`oci_box.rs`, `oci_reuse.rs`, `node_socket.rs`, `oci_spec_box.rs`, `serve/linux_tests.rs`, `netcheck/tests.rs`)
    and the rest in hex-client, hex-node, hex-runtime and hex-testkit.
@@ -124,6 +157,57 @@ Doubled bounds of the 2026-11-06 rule outside `Patience`, each a record and a fa
 `hex_core::watch`'s lateness seeds (an unrecorded model at twice the highest record), `hex_node::serve::windows`'
 `close_wait` (twice the larger of `PEER_CLOSE_RECORD` and what it has seen), and, on the lead's line,
 `precise_patience` (hex-client) and the charge driver's `guard` (hex-cli).
+
+## The audit (2026-11-13)
+
+Every wait whose learned bound still ends something, or a test's wait on a time rather than on its party, by the rule
+above: past W* a wait tells its run-out and follows its party's life alone, refused only at its end. Each is fixed red
+first where the code is wrong; the tests' own waits are fixed in place. Status as of this list:
+
+Production, a W* that still ends something:
+
+1. **`node.emptying` in the socket's core** (hex-node `serve`): a collected run's end (`Job::Collect`) and a gone
+   client's program's end (`Shared::gone`) were `Exit::Unknown` at W*, a killed program's end (`Unwatched::Killed`)
+   was given up at W*, and a stopping server's drain stopped at W*. Done: each follows its programs past W* by their
+   lives, the run-out told (`emptying::end_of_killed`; the drain's own loop).
+2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* was taken for hung, killed, and
+   the claim fell back to a seed's clone of the same request, on the same sync pipe, where a word the killed init had
+   written by then stood first: a rootless init's ask for its maps, answered with the new init's pid, the kernel
+   refusing the map ("writing uid_map failed: Operation not permitted", 2026-11-13). Done: the claim follows the init
+   past W* by its life (its sync pipe, claim socket and pidfd), the run-out told; `Patience::expired` went with it.
+3. **A park's wait for its init's word** (hex-node `createpool::Parker::park`, `Parked::wait_parked`): bounded by
+   `seeds.hang`'s W*, a bound learned from another wait, past it the park failed and its init was killed. Done: the
+   wait learns its own W* (`createpool::PARKS`, `parked.park`) and past it follows the init by its life (its socket and
+   pidfd) to its word or its end, the run-out told.
+4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
+   still tentative at the settle's W*, or a dump read past the answers' W*, is thrown away, counted, and another read.
+   Owed: past W* each follows the namespace (the kernel's rtnetlink, its notices) to its settle or answer.
+5. **`hex.image.stats`** (hex-runtime `guest::image`): goal 12's.
+6. **`guest.hosted.ready`** (hex-runtime `guest::hosted::follow_ready`): past W* a node VM's boot is refused where a
+   whole W* window shows no CPU time of its VM's process: a VM's boot, the one place a stall of measured progress is
+   judged ("Life alone at the node's local sites"), to become Shards' Part B once vendored.
+7. **The guest's first boot** ("Owed", 1): records.tsv's `boot_ready`, the Link's.
+
+Production, holding the rule: `node.listing` (run-out told, the listing goes on), `node.turns` and `store.turns`
+(the holder followed to its let-go), `client.answer.*` (only a caller's deadline fails a call), `recorded.lifecycle`
+(a try), `netns.make` (no bound), and the local sites above it.
+
+Tests, waiting on a time rather than on their party:
+
+8. **hex-client's `guest::tests`** `a_relay_token_held_past_the_links_bound_refuses_the_connect` and
+   `absolute_connect_completes_and_evented_retains_the_same_link`: each failed only under load on adacachy2 (their
+   runs 12 s against 2.5 s quiet), so each waits on a time, not on its party. Owed.
+9. **A fixed duration as a test's wait** (hex-cli's tests): `FIXTURE`'s 30 s in `guest_boot_deadline.rs` went
+   (6042219c, its waits following the relay). Left: `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `DELETE_PATIENCE` 10 s
+   (`delete_flake.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`,
+   `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `HANG_GUARD` 39.507 s and
+   `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
+   (`windows_oci_box.rs`, a seeded test wait), and inline durations in `completion_backends.rs`,
+   `completion_managed_api.rs`, `oci_box.rs` and `process_box.rs`; the real-VM tests (`charge_fleet.rs`,
+   `guest_boot_record.rs`, `image_real.rs`, `image_record.rs`, `native_firecracker_smoke.rs`,
+   `native_windows_hcs_compute.rs`, `node_hosted_real.rs`) after goal 12's batch, built and linted here, run by the
+   Hex lead on KVM, HVF and WHP.
+10. **The tests' record seeds** ("Owed", 3).
 
 ## The failure-bound rule (the lead, 2026-11-06, superseded 2026-11-13)
 

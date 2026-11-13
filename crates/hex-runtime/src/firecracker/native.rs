@@ -827,6 +827,7 @@ impl FirecrackerRuntime {
             .ok_or(Refusal::Backing {
                 key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             })?;
         self.preflight_backing(&source)?;
         // This is an exact isolation/identity check, not another picker. Refuse an inseparable
@@ -866,6 +867,7 @@ impl FirecrackerRuntime {
                     return Err(Refusal::Backing {
                         key,
                         cause: LifecycleCause::Pending,
+                        why: None,
                     });
                 }
                 if transaction.read(&id)?.is_some() {
@@ -1373,6 +1375,7 @@ impl Runtime for FirecrackerRuntime {
                     abandoned: record.abandoned,
                     last_resort: None,
                     ended: None,
+                    credentials: Vec::new(),
                 });
             }
             let mut info = self.client(record, transaction)?.inspect(id)?;

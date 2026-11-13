@@ -31,6 +31,20 @@ pub const STDIO_PORT: u32 = 0x4845_5801;
 /// listening.
 pub const STAMPS_PORT: u32 = 0x4845_5803;
 
+/// The file name of the relay's listener for `port` where it listens on AF_UNIX stream sockets in a directory of its
+/// own rather than on vsock: hex-cli's `hex guest relay --unix`, a node under shards-init, whose host reaches each by a
+/// socket lane of its run's agent-control endpoint (docs/design/node-under-shards-init.md §5). `None` for a port the
+/// relay doesn't listen on. docs/design/shards-guest.md §3a's ports table names each (HEX-GUEST-30).
+pub fn socket_name(port: u32) -> Option<&'static str> {
+    match port {
+        CONTROL_PORT => Some("control.sock"),
+        STDIO_PORT => Some("stdio.sock"),
+        files::FILES_PORT => Some("files.sock"),
+        STAMPS_PORT => Some("stamps.sock"),
+        _ => None,
+    }
+}
+
 /// AC-T7.4.1: a Firecracker guest sends this versioned readiness receipt only after
 /// its node and relay listeners are ready. The host owns the private per-VM socket;
 /// this is a boot notification, not a control connection or an attachment grant.

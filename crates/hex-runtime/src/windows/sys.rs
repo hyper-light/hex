@@ -3,8 +3,10 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process-creation support is unstable. Each `unsafe`
 //! block states the invariant that makes it sound. A box is a job object: this file creates one, sets
 //! its limits, starts a member suspended inside it (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs
-//! outside it) and resumes it, reads the job's accounting, and ends the job. Names, structures and
-//! flags are Windows' own (`windows-sys`; docs/research/runtime/windows-job-objects.md).
+//! outside it) and resumes it, reads the job's accounting, and ends the job. It also counts the handles
+//! the process holds (`GetProcessHandleCount`): what a node holds at its start beside its bounds as it
+//! fits them (`hex_node::serve::fit`). Names, structures and flags are Windows' own (`windows-sys`;
+//! docs/research/runtime/windows-job-objects.md).
 
 // The Windows class's one place `unsafe` is allowed (CLAUDE.md §12); every block below carries its
 // SAFETY comment.
@@ -42,11 +44,11 @@ use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW,
     CreateProcessW, CreateWaitableTimerExW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
-    GetExitCodeProcess, GetProcessTimes, GetSystemTimes, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, SetPriorityClass,
+    GetExitCodeProcess, GetProcessHandleCount, GetProcessTimes, GetSystemTimes,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, SetPriorityClass,
     SetThreadPriority, SetWaitableTimer, THREAD_PRIORITY_TIME_CRITICAL, TIMER_ALL_ACCESS,
     TerminateProcess, WaitForMultipleObjects, WaitForSingleObject,
 };
@@ -99,6 +101,20 @@ pub fn thread_stack_bytes() -> io::Result<usize> {
 
 /// The enclosing job's declared process ceiling, if it sets one. Kernel allocation failures remain
 /// authoritative when the current job has none, or another enclosing job is tighter.
+/// How many handles this process holds now: `GetProcessHandleCount` of its own pseudo-handle
+/// (learn.microsoft.com, "GetProcessHandleCount function"), what a node held at its start beside its
+/// bounds as it fits them (`hex_node::serve::fit`), as Linux's node reads `/proc/self/fd`.
+pub fn open_handles() -> io::Result<u64> {
+    let mut count: u32 = 0;
+    // SAFETY: GetCurrentProcess returns this process's pseudo-handle, which needs no closing;
+    // GetProcessHandleCount writes one u32 to `count`, a local that outlives the call.
+    let held = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    if held == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(count))
+}
+
 pub fn enclosing_process_limit() -> io::Result<Option<usize>> {
     use windows_sys::Win32::System::JobObjects::{
         IsProcessInJob, JOBOBJECT_BASIC_LIMIT_INFORMATION, JobObjectBasicLimitInformation,
@@ -1165,6 +1181,20 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
         WAIT_TIMEOUT => Ok(false),
         _ => Err(last_error()),
     }
+}
+
+/// Flushes directory `dir` (FlushFileBuffers on its handle), so a rename or removal in it outlives a host crash.
+/// CreateFileW opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and FlushFileBuffers needs a handle with
+/// `GENERIC_WRITE` (both in their Win32 reference pages), so it is opened for writing: std's `File::open` opens it
+/// for reading alone, refused "Access is denied" (os error 5). No `unsafe`: std's open takes the flag.
+pub fn flush_directory(dir: &std::path::Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
 }
 
 /// Publish a flushed temp file beside its final name. MoveFileExW documents write-through move

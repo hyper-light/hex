@@ -1566,6 +1566,7 @@ mod physical_merge_tests {
             Err(Refusal::Backing {
                 key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             }),
         )
         .unwrap();
@@ -1576,7 +1577,8 @@ mod physical_merge_tests {
             report.unavailable[0].cause,
             Refusal::Backing {
                 key,
-                cause: LifecycleCause::Uncertain
+                cause: LifecycleCause::Uncertain,
+                why: None,
             }
         );
         let mut readiness = reading();
@@ -1606,7 +1608,8 @@ mod physical_merge_tests {
                 Class::Firecracker,
                 Err(Refusal::Backing {
                     key,
-                    cause: LifecycleCause::Pending
+                    cause: LifecycleCause::Pending,
+                    why: None,
                 })
             )
             .is_err()
@@ -1635,6 +1638,7 @@ mod physical_merge_tests {
             Err(Refusal::Backing {
                 key,
                 cause: LifecycleCause::Pending,
+                why: None,
             }),
         )
         .unwrap();

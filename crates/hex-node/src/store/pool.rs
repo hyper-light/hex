@@ -34,6 +34,7 @@ fn refused(key: BackingKey) -> Refusal {
     Refusal::Backing {
         key,
         cause: LifecycleCause::Uncertain,
+        why: None,
     }
 }
 
@@ -246,6 +247,7 @@ impl Store {
                 return Err(Refusal::Backing {
                     key: current.key,
                     cause: LifecycleCause::Busy,
+                    why: None,
                 });
             }
             // A changed complement cannot replace an admitted native scope. Publish only its
@@ -289,6 +291,7 @@ impl Store {
             return Err(Refusal::Backing {
                 key: source,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             });
         }
         // Configured native owners share their existing MAX_BOXES slot bound. Scans and source
@@ -394,6 +397,7 @@ impl Store {
                 return Err(Refusal::Backing {
                     key: source,
                     cause: LifecycleCause::Busy,
+                    why: None,
                 });
             }
             crate::recorded::check_single_consumer(
@@ -489,6 +493,7 @@ impl Store {
             return Err(Refusal::Backing {
                 key: *key,
                 cause: LifecycleCause::Busy,
+                why: None,
             });
         }
         let directory = self.pool_directory()?;

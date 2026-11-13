@@ -4,8 +4,19 @@ Joint plan step 14 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "[Hex + Shards
 contention rule, and budgets per fleet"), serving AC-T7.4.1 (placement) and AC-T7.5.2 (shares under
 contention). Status: the charge by measured use is the person's decision (below); the plan has the research shape
 the rule without holding the step up, and ROOT took the rule (C1 to C7) and the interface with step 13 (C8) on
-2026-11-12, correcting C1's memory and C2's prior to the forms below. ROOT measures density, fairness and the
-violation rates once it is built.
+2026-11-12, correcting C1's memory and C2's prior to the forms below. Built, merged and live as of 2026-11-13, live
+being GitHub's main (`025aae6d`):
+- Live: the core, admission, C4's placement and the last resort (`d02a039d`, `b38ce550`, `3e30392d`, `eff0eaea`);
+  macOS and Windows managed VMs capped at their shares and ended through their receipts, why written first
+  (`b19ef663`, `6ff188e2`, `803d311f`); one derived bound (`21c779cf`); the density driver and the trace recorder
+  (`0b483d0c`, `7f1d7334`); an image VM's room, rate and host cost (`6df918db`); and a cold class and a VM's ceiling
+  (`2cd5f8f3`, `2964330d`).
+- Merged on Hex's main: a census's cost as evidence alone, with its VMs retired (`97f77b14`, `5362acb3`); hex-sim
+  replaying recorded traces (`9e0c5805`); macOS's CPU control learning its response (`a8dc671c`, `312f4e98`,
+  `c9d5cf93`); a backing's measured guest overhead (`6f40da16`); an unread VM counted whole (`0e401dbe`); and a
+  managed stop's own wait (`788dda27`).
+- Built: the learner's window from each image VM's rate period (`f95ed62b`).
+- Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
 
 Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>` with kiln's grade; raw texts in
 `~/.cache/hex-lead/research/hexres-c14`); Linux `Documentation/admin-guide/cgroup-v2.rst` at `1590cf03`; Shards
@@ -290,6 +301,14 @@ The pinned share is Shards' own since ring-pins-v1 (D230, vendored at 66113379):
 where the room init is told covers it past the room the run needs to go on (where it is told none, the guest's
 available memory), idle slots go back as a told room shrinks, and the relay that pins them is in the run's cgroup, so
 once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
+
+A shared backing's guest holds its own kernel and relay inside its envelope, beside its boxes, and that overhead is
+measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `guest_overhead`). At each capacity
+answer its runtime reads its guest agent's memory in use (its total less its free) past what its boxes hold, the most
+seen, only rising, kept per backing generation (`guest::shared::guest_seen`); its CPU and disk the agent's answer
+doesn't read, so they stay none. Its offer carries it (`BackingOffer::guest`), a shared payload fits its envelope with
+it (`BackingOffer::check_inner`), its boxes' sum alone while cold, and the scheduler's rank takes its CPU
+(`hex_sim::index::routes::rank_cpu`).
 
 **Sources.** The plan's architecture ("Hex sets budgets per fleet, and Shards' D188 tells each guest its room.
 Everything a VM holds, ring pins included, comes out of that room"); D188 (f53 B); Borg admits quota by the limit and

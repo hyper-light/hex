@@ -14,6 +14,11 @@ struct Native {
     stops: AtomicUsize,
     /// A stop ends what of the scope outlived its controller, as the helper's does, so the scope is Released.
     stop_releases: AtomicBool,
+    /// The scope ends only once its wait follows it with no bound, as a scope's own observer ends such a wait at its
+    /// end (decision 9's following wait): any bounded wait for it sees no end.
+    released_when_followed: AtomicBool,
+    /// Each patience a wait for the scope was asked with.
+    asked: Mutex<Vec<Duration>>,
     /// The controller a launch published, where the model has one.
     identity: std::sync::OnceLock<shards_api::Identity>,
 }
@@ -41,7 +46,14 @@ impl shards_api::ManagedProcess for Native {
             },
         }))
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+    fn wait_for(
+        &self,
+        patience: Duration,
+    ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+        self.asked.lock().unwrap().push(patience);
+        if patience == Duration::MAX && self.released_when_followed.load(Ordering::SeqCst) {
+            self.released.store(true, Ordering::SeqCst);
+        }
         Ok(self
             .terminal()?
             .filter(|end| end.scope == shards_api::TerminalScope::Released))
@@ -350,8 +362,10 @@ fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {
 fn configured_for(path: &Path, owner: &Arc<Owner>) -> GuestRuntime {
     let mut config = super::super::tests::config();
     config.binary = path.join("shards");
-    config.kernel = path.join("kernel");
-    config.initrd = path.join("initrd");
+    config.boot = crate::guest::Boot::Kernel {
+        kernel: path.join("kernel"),
+        initrd: path.join("initrd"),
+    };
     config.shares.clear();
     let floor = selected::resources(&config).unwrap();
     let cost = hex_api::RuntimeCost {
@@ -612,6 +626,7 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
         Err(Refusal::Backing {
             key: offer.key,
             cause: LifecycleCause::Retired,
+            why: None,
         })
     );
     let kept = Transaction::read(owner.as_ref(), &id).unwrap().unwrap();
@@ -1101,6 +1116,65 @@ fn shared_backing_rearms_only_after_original_scope_release_and_index_ack() {
     assert!(owner.boxes.lock().unwrap().is_empty());
 }
 
+/// Joint plan step 14 (ROOT, 2026-11-13, (C); decision 9): a managed scope's stop is a wait of its own, measuring,
+/// never a boot's record. Before its first stop, and past the slowest stop seen (the run-out told), it follows the
+/// scope by its own party to its end (Studio r201: a release's stop waited the guest's first boot's 5.26 s record and
+/// was refused Uncertain at it). Do grant a shared backing whose launch's scope ends only once a wait follows it with
+/// no bound; then release it. Expect it Released at once, its end recorded and its native scope
+/// finalized; its stop's wait followed with no bound; and the boot's bound never asked.
+#[test]
+fn w14_c_a_pools_stop_follows_its_scope_and_never_waits_a_boots_record() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    assert!(runtime.initialize_backing(grant(&offer)).is_err());
+    owner
+        .native
+        .released_when_followed
+        .store(true, Ordering::SeqCst);
+    let released = runtime.release_backing(offer.key);
+    let asked = owner.native.asked.lock().unwrap().clone();
+    let released = released.unwrap_or_else(|why| panic!("{why:?}; its waits asked {asked:?}"));
+    assert_eq!(released.phase, BackingPhase::Released);
+    assert_eq!(owner.row().exit, Some(hex_api::Exit::Code(7)));
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+    assert!(
+        asked.contains(&Duration::MAX),
+        "its stop never followed its scope: {asked:?}"
+    );
+    assert!(
+        !asked.contains(&runtime.first_dial_bound().unwrap()),
+        "its stop waited the first boot's bound: {asked:?}"
+    );
+}
+
+/// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a backing's refusal
+/// says why, in its refusing site's own words. Do prepare the shared backing, then release another generation of its
+/// pool, one its guest holds no record of. Expect it refused Uncertain, its key the one asked, and its reason that its
+/// guest holds no record of it.
+#[test]
+fn w14_b_a_release_of_a_backing_its_guest_holds_no_record_of_says_why() {
+    let dir = socket_fixture();
+    let (runtime, _owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    let other = BackingKey {
+        pool: offer.key.pool,
+        generation: [9; 16],
+    };
+    let refused = runtime.release_backing(other).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain,
+                why: Some(why),
+            } if *key == other && why == "its guest holds no record of it"
+        ),
+        "{refused:?}"
+    );
+}
+
 /// AC-T7.4.1: explicit Index ACK cannot erase a remaining shared workload or
 /// remove a later incarnation when the original key is replayed.
 #[test]
@@ -1146,7 +1220,7 @@ fn shared_index_ack_preserves_references_and_refuses_a_stale_generation() {
         )),
     );
     assert!(
-        matches!(runtime.release_backing(original.key), Err(Refusal::Backing { key, cause: LifecycleCause::Busy }) if key == original.key)
+        matches!(runtime.release_backing(original.key), Err(Refusal::Backing { key, cause: LifecycleCause::Busy, why: None }) if key == original.key)
     );
     assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
     assert_eq!(owner.row().key, original.key);
@@ -1229,4 +1303,54 @@ fn shared_prepared_cancel_and_ack_recheck_native_absence_without_a_scope_end() {
     assert_eq!(owner.native.stops.load(Ordering::SeqCst), 0);
     assert!(!owner.native.released.load(Ordering::SeqCst));
     assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's guest's own overhead is what its agent says it uses past
+/// what its boxes hold, the most seen, only rising; its CPU and disk unread, so none. Do measure a guest of 8 GiB with
+/// 5 GiB free whose boxes hold 2 GiB, from cold; then one with 6 GiB free and 1.5 GiB in its boxes; then one whose
+/// boxes hold more than it says it uses. Expect 1 GiB, then still 1 GiB (0.5 GiB less is no fall), and 1 GiB again.
+#[test]
+fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
+    let gib = 1u64 << 30;
+    let guest = |free: u64| {
+        let mut capacity = hex_api::Capacity {
+            id: "guest".into(),
+            total: CapacityResources {
+                cpu_milli: 2_000,
+                mem_bytes: 8 * gib,
+                disk_bytes: 0,
+            },
+            free: CapacityResources {
+                cpu_milli: 2_000,
+                mem_bytes: free,
+                disk_bytes: 0,
+            },
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            unavailable: Vec::new(),
+            learned: None,
+        };
+        capacity.free.mem_bytes = free;
+        capacity
+    };
+    let first = super::guest_seen(
+        hex_api::LearnedOverhead::default(),
+        &guest(5 * gib),
+        2 * gib,
+    );
+    assert_eq!(
+        first,
+        hex_api::LearnedOverhead {
+            cpu_milli: None,
+            mem_bytes: Some(gib),
+            disk_bytes: None,
+        }
+    );
+    let second = super::guest_seen(first, &guest(6 * gib), 3 * gib / 2);
+    assert_eq!(second.mem_bytes, Some(gib));
+    let third = super::guest_seen(second, &guest(5 * gib), 4 * gib);
+    assert_eq!(third.mem_bytes, Some(gib));
 }

@@ -184,6 +184,7 @@ fn offered(request: u64) -> wire::StreamOffer {
             stdout: true,
             stderr: false,
         },
+        setup: None,
     }
 }
 

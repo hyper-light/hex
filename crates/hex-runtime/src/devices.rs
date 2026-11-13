@@ -1073,6 +1073,7 @@ impl Catalog {
                 return Err(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Busy,
+                    why: None,
                 });
             }
             for id in &record.spec.devices {
@@ -1345,6 +1346,7 @@ impl Catalog {
                     return Err(Refusal::Backing {
                         key: source,
                         cause: hex_api::LifecycleCause::Busy,
+                        why: None,
                     });
                 }
             }
@@ -1404,6 +1406,7 @@ fn record_error(key: hex_api::BackingKey) -> Refusal {
     Refusal::Backing {
         key,
         cause: hex_api::LifecycleCause::Uncertain,
+        why: None,
     }
 }
 
@@ -1750,6 +1753,7 @@ mod authority_tests {
                 Mode::Refused => Err(Refusal::Backing {
                     key: *key,
                     cause: hex_api::LifecycleCause::Busy,
+                    why: None,
                 }),
             }
         }
@@ -1965,7 +1969,7 @@ mod report_tests {
             (None, false, true),
         ] {
             assert!(
-                matches!(check_report_scope(record, scope, writer, required), Err(Refusal::Backing { key, cause:LifecycleCause::Uncertain }) if key == pool.key)
+                matches!(check_report_scope(record, scope, writer, required), Err(Refusal::Backing { key, cause:LifecycleCause::Uncertain, why: None }) if key == pool.key)
             );
         }
         // CPU/Firecracker's separate factual RPC path supplies no Shards writer or request.

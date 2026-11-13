@@ -308,6 +308,12 @@ impl MacRuntime {
         self.shared.rates()
     }
 
+    /// The slowest stop response the managed CPU control has seen in its own holds (joint plan step 14, 2c): none
+    /// before its first.
+    pub fn cpu_response(&self) -> Result<Option<std::time::Duration>, Refusal> {
+        self.shared.cpu_response()
+    }
+
     /// How late the node's watchers have woken past their waits, at the latest (its class's record to
     /// start; observability: what the boxes' holds reckon with).
     pub fn lateness(&self) -> Result<std::time::Duration, Refusal> {
@@ -468,6 +474,7 @@ impl MacRuntime {
             allocation: None,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         })
     }
 }
@@ -545,6 +552,7 @@ impl BoxUser {
             io_read_bytes: 0,
             io_write_bytes: 0,
             guest: None,
+            started_from: None,
         })
     }
 
@@ -601,6 +609,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         allocation: None,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 

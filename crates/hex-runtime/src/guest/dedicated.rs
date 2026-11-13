@@ -253,8 +253,10 @@ mod tests {
                 })),
                 GuestConfig {
                     binary: "/model/shards".into(),
-                    kernel: "/model/kernel".into(),
-                    initrd: "/model/initrd".into(),
+                    boot: Boot::Kernel {
+                        kernel: "/model/kernel".into(),
+                        initrd: "/model/initrd".into(),
+                    },
                     vcpus: 1,
                     memory_mib: 256,
                     gpu: false,
@@ -303,6 +305,7 @@ mod tests {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         }
     }
 
@@ -1167,7 +1170,11 @@ impl GuestRuntime {
             // recovery/create installs the native route before accepting forwards.
             self.cached_selected(id)
         } else if self.managed_shared() {
-            let record = snapshot.ok_or(super::books::uncertain(id)?)?;
+            // A box its guest keeps no record of is no box of its guest's: a macOS or Windows node forwards a call
+            // on an id its host doesn't hold here, which then answers NoSuchBox (HVF image_real's HEX-IMG-1, 6 and 7).
+            let Some(record) = snapshot else {
+                return Ok(None);
+            };
             self.shared_for_record(record)
         } else {
             self.running()
@@ -1182,6 +1189,9 @@ impl GuestRuntime {
     /// The exact pair already held by the configured probe provider. Native
     /// launch borrows the same validated values from its prepared plan.
     pub fn with_runtime_paths(mut self, paths: shards_api::RuntimePaths) -> Self {
+        let paths = Arc::new(paths);
+        // Its image class's run hosts take the same home and cache.
+        self.images.set_paths(Arc::clone(&paths));
         self.native_paths = Some(paths);
         self
     }
@@ -1382,7 +1392,7 @@ impl GuestRuntime {
     }
 
     fn receipt_spec(&self, receipt: &Record) -> Result<shards_api::GuestSpec, Refusal> {
-        let mut spec = self.config.spec();
+        let mut spec = self.config.spec()?;
         spec.gpu = !receipt.devices.is_empty();
         spec.vcpus = receipt.vcpus;
         spec.memory_mib = receipt.memory_mib;
@@ -1415,7 +1425,7 @@ impl GuestRuntime {
 
     pub fn validate_binding(&self, spec: &BoxSpec) -> Result<(), Refusal> {
         if matches!(spec.class, ClassSpec::ShardsImage(_)) {
-            return self.recover_image(spec);
+            return self.images.recover_image(spec);
         }
         if spec.devices.is_empty() && !matches!(spec.class, ClassSpec::Shards(_)) {
             return Ok(());
@@ -1574,7 +1584,7 @@ impl GuestRuntime {
 
     pub fn recover_managed(&self, spec: &BoxSpec) -> Result<(), Refusal> {
         if matches!(spec.class, ClassSpec::ShardsImage(_)) {
-            return self.recover_image(spec);
+            return self.images.recover_image(spec);
         }
         if !self.owns_record(spec) {
             return Ok(());
@@ -1885,7 +1895,7 @@ impl GuestRuntime {
         }
         // The native transaction names the original scope even before publication.
         // PID exit/Gone/observer error never substitutes for complete scope release.
-        let terminal = managed::stop(transaction, id, identity, self.first_dial_bound()?)?;
+        let terminal = managed::stop(transaction, id, identity)?;
         let released_identity = identity
             .map(|identity| -> Result<_, Refusal> {
                 Ok(shards_api::Identity {

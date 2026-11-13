@@ -82,6 +82,14 @@ pub struct Status {
     /// Reads that held any of the box's members stopped across their wait ([`watch::Watch::runs`];
     /// observability: what the hold costs the box).
     pub holds: u64,
+    /// CPU holds whose response went unmeasured (joint plan step 14, 2c): a member that ended, left or couldn't be
+    /// read meanwhile, or a measurement its control refused. Each is no sample, never the scope's refusal; counted here
+    /// so none goes unseen.
+    pub unmeasured_holds: u64,
+    /// Held members a read found running and stopped again (joint plan step 14; ROOT, 2026-11-13): a stop that didn't
+    /// take, or a continue from elsewhere, which would run a member past its charge on its neighbours' CPU. Counted here
+    /// so none goes unseen.
+    pub restops: u64,
 }
 
 /// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
@@ -121,6 +129,9 @@ pub struct Shared {
     /// later act a watcher sees (watch::Lateness). What each box's hold reckons a member running across a
     /// wait can run on for.
     lateness: Arc<Mutex<watch::Lateness>>,
+    /// The slowest stop response the managed CPU control has seen in its own holds (joint plan step 14, 2c; ROOT,
+    /// 2026-11-13): none before its first, only rising, every scope's control starting from it.
+    response: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Shared {
@@ -144,6 +155,8 @@ impl Shared {
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
             lateness: Arc::try_new(Mutex::new(watch::Lateness::new(lateness)))
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            response: Arc::try_new(Mutex::new(None))
+                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
         })
     }
 
@@ -154,6 +167,38 @@ impl Shared {
             .lock()
             .map_err(|_| poisoned("the node's wake lateness"))?
             .worst())
+    }
+
+    /// The slowest stop response the helper's managed CPU control has seen in its own holds (joint plan step 14, 2c):
+    /// none before its first.
+    pub fn cpu_response(&self) -> Result<Option<Duration>, Refusal> {
+        Ok(*self
+            .response
+            .lock()
+            .map_err(|_| poisoned("the managed CPU control's response"))?)
+    }
+
+    /// A hold's measured response (2c): the slowest seen rises to it.
+    pub(super) fn observe_cpu_response(&self, response: Duration) -> Result<(), Refusal> {
+        let mut slowest = self
+            .response
+            .lock()
+            .map_err(|_| poisoned("the managed CPU control's response"))?;
+        *slowest = Some(slowest.map_or(response, |seen| seen.max(response)));
+        Ok(())
+    }
+
+    /// The response a new scope's control starts from (2c): the slowest seen; before any, a cold helper's probe first
+    /// ([`probe_response`]), and the cold one where it gave none.
+    pub(super) fn cpu_start(&self) -> Result<Duration, Refusal> {
+        if self.cpu_response()?.is_none()
+            && let Some(probed) = probe_response()?
+        {
+            self.observe_cpu_response(probed)?;
+        }
+        Ok(self
+            .cpu_response()?
+            .unwrap_or(hex_core::helper::managed::COLD_RESPONSE))
     }
 
     /// The rates as learned so far.
@@ -334,8 +379,23 @@ impl State {
     /// Holds the box as its watcher's read decided (the graded hold, the lead 2026-11-09): of `order`, its
     /// running members, each in `run` runs across the wait, continued if the watcher held it, and the rest are
     /// held, each stopped in turn. A member the box's own programs stopped is theirs, never held, so never
-    /// continued. Returns how many members it holds.
-    fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<usize, Refusal> {
+    /// continued. A held member this read finds running escaped its stop (one that didn't take, or a continue from
+    /// elsewhere: joint plan step 14, ROOT 2026-11-13), and would run past its charge on its neighbours' CPU: it is
+    /// stopped again by its hold's token, once a read, never waited on, and counted (`Status::restops`). Returns how
+    /// many members it holds and how many it stopped again.
+    fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<Applied, Refusal> {
+        self.apply_by(order, run, members, sys::run_state)
+    }
+
+    /// [`Self::apply`], each member's run state read through `run_state`, the kernel's (`sys::run_state`): a test reads
+    /// a held member live, as one whose stop didn't take reads.
+    fn apply_by(
+        &self,
+        order: &[u32],
+        run: &[u32],
+        members: &[Member],
+        run_state: impl Fn(i32) -> io::Result<Option<sys::Run>>,
+    ) -> Result<Applied, Refusal> {
         let mut held = self.held()?;
         let additional = order
             .iter()
@@ -345,20 +405,36 @@ impl State {
         held.stopped.reserve(additional)?;
         held.added.clear();
         held.continued.clear();
+        let mut restopped = 0u64;
         let result = (|| {
             for &member in order {
                 let Ok(pid) = i32::try_from(member) else {
                     continue;
+                };
+                let live = || {
+                    run_state(pid)
+                        .map(|state| state == Some(sys::Run::Live))
+                        .map_err(|error| Refusal::os("reading a member's run state", error))
                 };
                 if run.contains(&member) {
                     if let Some(member) = held.stopped.get(&pid) {
                         self.signal_stopped(member, sys::MemberSignal::Continue)?;
                         held.continued.push(pid);
                     }
-                } else if !held.stopped.contains(&pid)
-                    && sys::run_state(pid)
-                        .map_err(|error| Refusal::os("reading a member's run state", error))?
-                        == Some(sys::Run::Live)
+                } else if let Some(stopped) = held.stopped.get(&pid) {
+                    if live()? {
+                        match self.signal_stopped(stopped, sys::MemberSignal::Stop)? {
+                            Some(again) => {
+                                held.stopped.refresh(again)?;
+                                restopped = restopped.saturating_add(1);
+                            }
+                            // Gone since: nothing left to hold.
+                            None => {
+                                held.stopped.remove(&pid);
+                            }
+                        }
+                    }
+                } else if live()?
                     && let Some(member) = self.stopped_member(pid, members)?
                     && let Some(member) = self.signal_stopped(member, sys::MemberSignal::Stop)?
                 {
@@ -376,8 +452,17 @@ impl State {
         } = &mut *held;
         stopped.retain(|pid| continued.binary_search(pid).is_err());
         stopped.append_reserved(added)?;
+        let count = held.stopped.len();
+        drop(held);
+        if restopped > 0 {
+            let mut status = self.status()?;
+            status.restops = status.restops.saturating_add(restopped);
+        }
         result?;
-        Ok(held.stopped.len())
+        Ok(Applied {
+            held: count,
+            restopped,
+        })
     }
 
     /// Continues every member the watcher holds that is still in group `pgid`, and holds none: what a watcher
@@ -610,6 +695,14 @@ struct Hold {
     stopped: Stops,
     added: Stops,
     continued: Vec<i32>,
+}
+
+/// What a hold's [`State::apply`] did: how many members it holds, and how many of them it found running and stopped
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Applied {
+    held: usize,
+    restopped: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1010,7 +1103,7 @@ impl ProcessBox {
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
     ) -> Result<Arc<Self>, Refusal> {
-        let vm = super::managed::Scope::new(record, control, baseline)?;
+        let vm = super::managed::Scope::new(record, control, baseline, shared.cpu_start()?)?;
         let observer = super::proc::Prepared::new()?;
         let boxed = Arc::try_new(Self::prepared(
             record.owner().try_owned()?,
@@ -1380,6 +1473,7 @@ impl ProcessBox {
             io_read_bytes: s.read_bytes,
             io_write_bytes: s.written_bytes,
             guest: None,
+            started_from: None,
         })
     }
 
@@ -2167,10 +2261,11 @@ impl Watcher {
         if !cpu_run {
             self.run.clear();
         }
-        let mut held = self.state.apply(&self.order, &self.run, &self.last)?;
+        let applied = self.state.apply(&self.order, &self.run, &self.last)?;
+        let mut held = applied.held;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
-        let next = self.cpu_pace(native.vm.as_ref(), next, &mut held)?;
+        let next = self.cpu_pace(native.vm.as_ref(), next, &mut held, applied.restopped)?;
         // How late the watcher acted past its wait: its wake, its read and its stops, through all of which a
         // member running across the wait runs on (the lead, 2026-11-09: from the reads' own observed delays).
         if let Some((at, wait)) = armed {
@@ -2194,11 +2289,14 @@ impl Watcher {
         Ok(next)
     }
 
+    /// The scope's CPU control's turn after the read's hold, which stopped `restopped` held members again: a hold, its
+    /// response measured unless a member had escaped a stop in this read, or the run it permits.
     fn cpu_pace(
         &mut self,
         scope: Option<&super::managed::Scope>,
         next: Option<Duration>,
         held: &mut usize,
+        restopped: u64,
     ) -> Result<Option<Duration>, Refusal> {
         let Some(scope) = scope else { return Ok(next) };
         let owner = self.state.id.as_ref();
@@ -2208,8 +2306,30 @@ impl Watcher {
             Some(super::cpu::Decision::Prepared) => return Err(self.state.uncertain()),
             Some(super::cpu::Decision::Run(wait)) => wait,
             Some(super::cpu::Decision::Hold(_)) => {
-                *held = self.state.apply(&self.order, &[], &self.last)?;
+                // Its response runs from when its credit ran out, read off the observation that held it (2c).
+                let ran_out = scope.cpu_ran_out(owner).ok().flatten();
+                let applied = self.state.apply(&self.order, &[], &self.last)?;
+                *held = applied.held;
                 scope.cpu_held(owner)?;
+                // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
+                // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
+                // didn't take its stop (one this read had to stop again among them), ended, left or couldn't be read, a
+                // response of no time, or one its control or the helper refuses, is no sample (Karn's point): counted,
+                // never the scope's refusal.
+                let escaped = restopped.saturating_add(applied.restopped);
+                let learned = ran_out
+                    .filter(|_| escaped == 0)
+                    .zip(stopped_after(&self.order, sys::run_state))
+                    .and_then(|(from, stopped)| stopped.checked_duration_since(from))
+                    .filter(|response| !response.is_zero())
+                    .is_some_and(|response| {
+                        scope.cpu_learn(owner, response).is_ok()
+                            && self.shared.observe_cpu_response(response).is_ok()
+                    });
+                if !learned {
+                    let mut status = self.state.status()?;
+                    status.unmeasured_holds = status.unmeasured_holds.saturating_add(1);
+                }
                 match scope.cpu_decision(owner)? {
                     Some(super::cpu::Decision::Hold(wait)) => Some(wait),
                     Some(super::cpu::Decision::Run(_)) => {
@@ -2628,6 +2748,160 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::SRCH) => Ok(false),
         Err(e) => Err(Refusal::os("killpg", e)),
+    }
+}
+
+/// A cold helper's first stop response (joint plan step 14, 2c; ROOT, 2026-11-13, cold start (a)), probed at the first
+/// scope it controls, a launch or a re-attach after a restart, so no scope waits on a natural hold for one. A spinner of
+/// its own (`/usr/bin/yes`, one busy thread, as `macos_cpu_response`'s member) runs under a control at Hex's least CPU
+/// bound, `hex_api::MIN_CPU_MILLI` (the kernel's least quota, 1 ms a 100 ms period: the least the learner caps any VM
+/// at, so the charge window's cycle is the one at it; this control's quantum is a milli-CPU, so it holds it), from the
+/// cold response. Once its credit runs out it is held, and its response is a hold's: from its credit's running out to
+/// its stop, read once ([`stopped_after`]). None where the spinner ended first, didn't take its stop, or the stop took
+/// no time.
+fn probe_response() -> Result<Option<Duration>, Refusal> {
+    let mut spinner = super::command::Command::new("/usr/bin/yes")
+        .stdin(super::command::Stdio::null())
+        .stdout(super::command::Stdio::null())
+        .stderr(super::command::Stdio::null())
+        .spawn()
+        .map_err(|error| Refusal::os("starting the CPU response probe", error))?;
+    let probed = probe_hold(spinner.id());
+    // The spinner is the probe's alone: ended and reaped whatever the probe found.
+    let ended = spinner
+        .kill()
+        .and_then(|()| spinner.wait())
+        .map_err(|error| Refusal::os("ending the CPU response probe", error));
+    let probed = probed?;
+    ended?;
+    Ok(probed)
+}
+
+/// One hold of the probe's spinner `pid` ([`probe_response`]).
+fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
+    let failed = |_| Refusal::os("the CPU response probe's control", "its budget refused");
+    // One busy thread is one CPU, a thousand milli-CPU.
+    let mut control = super::cpu::Control::new(
+        u64::from(hex_api::MIN_CPU_MILLI),
+        1_000,
+        hex_core::helper::managed::COLD_RESPONSE,
+        Duration::ZERO,
+    )
+    .map_err(failed)?;
+    control
+        .start(Instant::now(), Duration::ZERO)
+        .map_err(failed)?;
+    let kq = Kqueue::new().map_err(|error| Refusal::os("the CPU response probe's timer", error))?;
+    let mut events = Vec::new();
+    loop {
+        match control
+            .observe(Instant::now(), Duration::ZERO)
+            .map_err(failed)?
+        {
+            super::cpu::Decision::Hold(_) => break,
+            super::cpu::Decision::Run(Some(wait)) => {
+                // Its timer's own event ends the wait, never an interrupted kevent's empty return.
+                let mut timer = Some(wait);
+                events.clear();
+                while !events
+                    .iter()
+                    .any(|event| matches!(event, sys::Event::Timer))
+                {
+                    kq.wait(timer.take(), None, &mut events)
+                        .map_err(|error| Refusal::os("the CPU response probe's timer", error))?;
+                }
+            }
+            super::cpu::Decision::Run(None) | super::cpu::Decision::Prepared => {
+                return Err(Refusal::os(
+                    "the CPU response probe's control",
+                    "a control below its maximum never held its scope",
+                ));
+            }
+        }
+    }
+    let ran_out = control.ran_out();
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| Refusal::os("the CPU response probe's spinner", "its pid"))?;
+    rustix::process::kill_process(target, rustix::process::Signal::STOP)
+        .map_err(|error| Refusal::os("holding the CPU response probe", io::Error::from(error)))?;
+    let stopped = stopped_after(&[pid], sys::run_state);
+    Ok(ran_out
+        .zip(stopped)
+        .and_then(|(from, at)| at.checked_duration_since(from))
+        .filter(|response| !response.is_zero()))
+}
+
+/// When every member of `order` read stopped (joint plan step 14, 2c), each read once after its stop was sent and never
+/// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it with the default action (`psignal_internal`,
+/// bsd/kern/kern_sig.c), so a member that reads anything else there didn't take its stop, and a wait for it to read
+/// stopped could last as long as it lives (Studio r214: one read live for the 5 s after its stop, and its watcher, spinning
+/// on it, missed the release's stop). None where one reads live, ended, left or couldn't be read (ROOT, 2026-11-13: a
+/// measurement that fails or can't be trusted is no sample, never the scope's refusal), so its hold is no sample.
+fn stopped_after(
+    order: &[u32],
+    run_state: impl Fn(i32) -> std::io::Result<Option<sys::Run>>,
+) -> Option<Instant> {
+    for &member in order {
+        let pid = i32::try_from(member).ok()?;
+        if run_state(pid).ok()? != Some(sys::Run::Stopped) {
+            return None;
+        }
+    }
+    Some(Instant::now())
+}
+
+#[cfg(test)]
+mod hold_response_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): a hold's stop is read once a member, after the stop is sent, and never
+    /// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it, so a member that reads anything else
+    /// there didn't take its stop, and a wait for it to read stopped can last as long as the member does. On the Studio
+    /// (r214) a member read live 76 µs after its stop was sent and for the 5 s after, while the watcher spun on it and
+    /// never acted on the release's stop (macos_pool_restart, refused Uncertain). Do read members 11 and 12 after their
+    /// stops, 12 live at its first read and stopped at any later one; then 11 and 13, 13 gone; then 11 and 14, both
+    /// stopped. Expect no sample with 12 read once; none; then an instant after both read stopped, each read once.
+    #[test]
+    fn w14_a_holds_stop_is_read_once_and_a_member_it_didnt_stop_is_no_sample() {
+        let reads = RefCell::new(BTreeMap::<i32, u32>::new());
+        let read = |pid: i32| {
+            let mut reads = reads.borrow_mut();
+            let n = reads.entry(pid).or_insert(0);
+            *n += 1;
+            Ok(match (pid, *n) {
+                (11 | 14, _) => Some(sys::Run::Stopped),
+                (12, 1) => Some(sys::Run::Live),
+                (12, _) => Some(sys::Run::Stopped),
+                _ => None,
+            })
+        };
+        assert_eq!(stopped_after(&[11, 12], read), None);
+        assert_eq!(
+            reads.borrow().get(&12),
+            Some(&1),
+            "read once, never followed"
+        );
+        assert_eq!(stopped_after(&[11, 13], read), None);
+        let before = Instant::now();
+        let stopped = stopped_after(&[11, 14], read).unwrap();
+        assert!(stopped >= before);
+        assert_eq!(reads.borrow().get(&14), Some(&1));
+    }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13: a hold's measurement that fails is no sample, never the scope's
+    /// refusal): a member's run state that can't be read, as after a node's restart when the node is no longer its
+    /// members' parent, leaves the hold unmeasured. Do read a member whose run state read fails. Expect no sample, not
+    /// an error.
+    #[test]
+    fn w14_a_holds_stop_that_cant_be_read_is_no_sample() {
+        let read = |_: i32| -> std::io::Result<Option<sys::Run>> {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        };
+        assert_eq!(stopped_after(&[11], read), None);
     }
 }
 

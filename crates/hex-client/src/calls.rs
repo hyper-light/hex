@@ -2908,6 +2908,7 @@ impl<T: Transport> Runtime for Core<T> {
             _ => Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             }),
         }
     }
@@ -2922,6 +2923,7 @@ impl<T: Transport> Runtime for Core<T> {
             _ => Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             }),
         }
     }

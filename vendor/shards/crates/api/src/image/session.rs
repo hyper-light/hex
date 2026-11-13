@@ -8,6 +8,10 @@
 //! state's lock as `exited` is set, and signalled only while it is unreaped
 //! (`shards_ipc::Child`), so no signal reaches another process that took its pid (as
 //! `crate::client` does a direct boot's).
+//!
+//! A lease the host asks (D242) is asked of the run's lessor on a thread of its own, and every
+//! lease it gives is released once: as the host says the run released them, as its answers
+//! end where it never does, or, given after either, as it comes.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
@@ -17,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::wire::{self, Channel, MemberInfo, Ready, RunEnd, Stats, StatsScope};
-use super::{ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberName};
+use super::wire::{self, Channel, LeaseRefusal, MemberInfo, Ready, RunEnd, Stats, StatsScope};
+use super::{ImageGuest, ImageRefusal, ImageSpec, Leased, Lessor, MemberEnd, MemberName, RunLessor};
 
 /// The most of a member channel's bytes the client lets its host send ahead of what the
 /// caller's pipe has taken: one read of the guest's (`run::CHUNK`), the most one of its
@@ -58,7 +62,15 @@ struct InputFlow {
 #[derive(Debug, Default)]
 struct State {
     started: Option<wire::Started>,
+    /// How a warm host's microVM started, once it is ready for its run (`WARMED`, D253's
+    /// pools).
+    warmed: Option<wire::StartedFrom>,
+    /// The members whose stdin the request asks for, by kind and name: each one's flow is
+    /// made as the run's start is taken ([`take`]), by its index there.
+    asked_inputs: Vec<(wire::MemberKind, String)>,
     refused: Option<ImageRefusal>,
+    /// Its refusal was of a run of another microVM's than its warm one (`Cause::Unfit`).
+    unfit: bool,
     flows: HashMap<(u32, Channel), Flow>,
     /// Each member's stdin its spec asked for, by its index.
     inputs: HashMap<u32, InputFlow>,
@@ -76,6 +88,9 @@ struct State {
     /// Each resize asked and still awaited, by its ask's id, and its answer once it came
     /// (D244), held as [`rooms`](Self::rooms) is.
     resizes: HashMap<u32, Option<Result<(), String>>>,
+    /// Each save asked and still awaited, by its ask's id, and its answer once it came (D259),
+    /// held as [`rooms`](Self::rooms) is.
+    saves: HashMap<u32, Option<Saved>>,
     next_ask: u32,
     /// The run's own command's readiness under the nesting grant (D234), as its init last
     /// said it: init owns it, and moves it by D234's table.
@@ -88,11 +103,35 @@ struct State {
     said: VecDeque<u8>,
     /// Its diagnostics have all been read: its stderr has ended, its VM's with it.
     said_all: bool,
+    /// The leases its host asked (D242).
+    leases: Leases,
+}
+
+/// A lease of the run's, as its orchestrator's side holds it (D242, R04): asked of the run's
+/// lessor and not yet answered; or given, the lessor's name for it kept for its release.
+/// Refused and released are its ends, where it leaves the ledger.
+#[derive(Debug)]
+enum Holding {
+    Asked,
+    Given(String),
+}
+
+/// The run's leases by their asks' ids, whether the run has released them (once it has, a
+/// lease given after is released as it comes), and the SHA-256 of the run's own key they are
+/// issued to, where its start told one (D252), taken as its host's answers are.
+#[derive(Debug, Default)]
+struct Leases {
+    each: HashMap<u32, Holding>,
+    released: bool,
+    key: Option<[u8; 32]>,
 }
 
 /// Each ask of a kind awaited, by its id, and its answer once it came, or why its host
 /// refused it (D241, D247).
 type Awaited<T> = HashMap<u32, Option<Result<T, String>>>;
+
+/// A save's outcome as its host said it (D259): saved, or refused and why.
+type Saved = Result<(), (wire::SaveRefusal, String)>;
 
 /// A numbered ask of the session's, answered by its id (D241, D247): its kind; the ask and
 /// its send, as a refusal names them; where its answer is awaited; what its host's refusal
@@ -106,9 +145,42 @@ struct Asked<T> {
 }
 
 impl State {
+    /// A session's state before its host has answered, for a request staging `members`:
+    /// those whose stdin it asks for named, for their flows to be made with its start.
+    fn asking(members: &[wire::MemberStage]) -> State {
+        State {
+            asked_inputs: members
+                .iter()
+                .filter(|m| m.input)
+                .map(|m| (m.kind, m.name.clone()))
+                .collect(),
+            ..State::default()
+        }
+    }
+
     /// The host is gone and has said all it will.
     fn gone(&self) -> bool {
         self.exited && self.answered
+    }
+
+    /// The run's end, once it has come: its host's word, or its host gone without one, said
+    /// in its last diagnostics; kept as first seen, so that every later look, a stop's among
+    /// them, sees the same.
+    fn end_seen(&mut self) -> Option<RunEnd> {
+        if self.end.is_none() && self.gone() {
+            self.end = Some(RunEnd::Failed(format!(
+                "the run host exited without its run's end{}",
+                quoted(&self.said)
+            )));
+        }
+        self.end.clone()
+    }
+
+    /// The run's end once its stop has been waited for ([`Session::stop`]): the end seen, or
+    /// `Stopped` where none has come.
+    fn stopped(&mut self) -> RunEnd {
+        self.end_seen()
+            .unwrap_or_else(|| self.end.insert(RunEnd::Stopped).clone())
     }
 }
 
@@ -128,13 +200,45 @@ struct Shared {
     /// The host's stdin: closed once the run's end has come, which the host takes as the
     /// last of its owner, and by `stop`.
     to_host: Mutex<Option<io::PipeWriter>>,
+    /// What leases the run's credentials (D242), where its spec gave one: set as its run's
+    /// request is sent (`Begun::create`), a warm host's (D253's pools) only once its run comes.
+    lessor: Mutex<Option<RunLessor>>,
+    /// The references the run's grants name: no other is leased.
+    granted: Mutex<Vec<String>>,
+    /// Where the host's diagnostics are written whole, once its caller has named a file
+    /// ([`ImageGuest::keep_diagnostics`]).
+    said_to: Mutex<Option<std::fs::File>>,
 }
 
 impl Shared {
+    /// The host's diagnostics written whole to `to` from now on, after what is kept of them
+    /// until now, under the lock their keeper writes each part under ([`keep_said`]): so that
+    /// each part is in what is kept now or written after, and once.
+    fn keep_diagnostics(&self, mut to: std::fs::File) -> io::Result<()> {
+        let mut said_to = lock(&self.said_to);
+        let kept: Vec<u8> = lock(&self.state).said.iter().copied().collect();
+        to.write_all(&kept)?;
+        *said_to = Some(to);
+        Ok(())
+    }
+
     fn send(&self, kind: u8, payload: &[u8]) -> io::Result<()> {
         let frame = wire::frame(kind, payload).map_err(io::Error::other)?;
         match lock(&self.to_host).as_mut() {
             Some(stdin) => stdin.write_all(&frame).and_then(|()| stdin.flush()),
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    /// Sends a frame as its header, then its payload, never copied into one buffer: a payload
+    /// holding a credential's value (D242) is its caller's to wipe.
+    fn send_parts(&self, kind: u8, payload: &[u8]) -> io::Result<()> {
+        let header = wire::header(kind, payload.len()).map_err(io::Error::other)?;
+        match lock(&self.to_host).as_mut() {
+            Some(stdin) => stdin
+                .write_all(&header)
+                .and_then(|()| stdin.write_all(payload))
+                .and_then(|()| stdin.flush()),
             None => Err(io::ErrorKind::BrokenPipe.into()),
         }
     }
@@ -266,6 +370,55 @@ impl Shared {
                 })
             });
         lock(&self.state).resizes.remove(&id);
+        answer
+    }
+
+    /// Asks the run's microVM saved whole at `to` (D259) and waits at most `patience` for its
+    /// host's answer; its ask awaited from before it is sent until it is answered or given up,
+    /// as [`room`](Self::room)'s is.
+    fn save(&self, to: &str, patience: Duration) -> Result<(), ImageRefusal> {
+        let id = {
+            let mut state = lock(&self.state);
+            if let Some(end) = &state.end {
+                return Err(ImageRefusal::Ended(end.clone()));
+            }
+            state.next_ask = state.next_ask.wrapping_add(1);
+            let id = state.next_ask;
+            state.saves.insert(id, None);
+            id
+        };
+        let answer = wire::SaveAsk { id, to: to.into() }
+            .encode()
+            .map_err(|e| ImageRefusal::Spec {
+                what: "a save",
+                why: e.to_string(),
+            })
+            .and_then(|ask| {
+                self.send(wire::to_host::SAVE, &ask)
+                    .map_err(|e| ImageRefusal::Os {
+                        what: "the run host's save",
+                        kind: e.kind(),
+                    })
+            })
+            .and_then(|()| {
+                self.wait(patience, |s| {
+                    if let Some(answer) = s.saves.get_mut(&id).and_then(Option::take) {
+                        return Some(answer.map_err(|(cause, why)| ImageRefusal::Save(cause, why)));
+                    }
+                    if let Some(end) = &s.end {
+                        return Some(Err(ImageRefusal::Ended(end.clone())));
+                    }
+                    s.gone()
+                        .then(|| Err(ImageRefusal::Host("it exited without answering".into())))
+                })
+                .unwrap_or_else(|| {
+                    Err(ImageRefusal::Unsupported {
+                        what: "a save",
+                        why: format!("no answer within {patience:?}"),
+                    })
+                })
+            });
+        lock(&self.state).saves.remove(&id);
         answer
     }
 
@@ -408,17 +561,25 @@ pub(super) struct Session {
     /// The period its VM's governor holds a rate over, as its host said it as the run
     /// started (D247).
     rate_period: Duration,
+    /// How its microVM started, as its host said it (D253).
+    started_from: wire::StartedFrom,
 }
 
-impl Session {
-    pub(super) fn start(
-        spec: &ImageSpec,
-        request: &wire::Request,
-        patience: Duration,
-    ) -> Result<Session, ImageRefusal> {
-        let binary = spec
-            .binary
-            .clone()
+/// A run host started, its threads reading its answers, keeping its last diagnostics and
+/// waiting for its exit: a session's before its run has started.
+pub(super) struct Begun {
+    shared: Arc<Shared>,
+    host: Arc<shards_ipc::Child>,
+    /// Whether it ends the host as it drops: until its run's session holds the host.
+    armed: bool,
+}
+
+impl Begun {
+    /// Starts `binary` (`spec.binary`'s, else `SHARDS_BIN`, else `shards` on `PATH`) as the
+    /// run host (`api-run`), its environment this process's with `env` over it.
+    pub(super) fn begin(binary: Option<&Path>, env: &[(OsString, OsString)]) -> Result<Begun, ImageRefusal> {
+        let binary = binary
+            .map(Path::to_path_buf)
             .or_else(|| std::env::var_os("SHARDS_BIN").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("shards"));
         let os = |what: &'static str| move |e: io::Error| ImageRefusal::Os { what, kind: e.kind() };
@@ -427,46 +588,130 @@ impl Session {
             to_host,
             from_host,
             said,
-        } = start_host(&binary, &[OsStr::new("api-run")], &spec.env)?;
+        } = start_host(&binary, &[OsStr::new("api-run")], env)?;
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
             to_host: Mutex::new(Some(to_host)),
+            lessor: Mutex::new(None),
+            granted: Mutex::new(Vec::new()),
+            said_to: Mutex::new(None),
         });
         // Shared: the session and its exit watcher, which outlives this call.
         let host = Arc::new(process);
+        let begun = Begun {
+            shared,
+            host,
+            armed: true,
+        };
         let threads = (|| {
-            let (watcher, watched) = (shared.clone(), host.clone());
+            let (watcher, watched) = (begun.shared.clone(), begun.host.clone());
             std::thread::Builder::new()
                 .name("shards-api-image-exit".into())
                 .spawn(move || watch(&watcher, &watched))
                 .map_err(os("the run host's watcher"))?;
-            let reader = shared.clone();
+            let reader = begun.shared.clone();
             std::thread::Builder::new()
                 .name("shards-api-image".into())
                 .spawn(move || read_answers(&reader, from_host))
                 .map_err(os("the run host's reader"))?;
-            let tail = shared.clone();
+            let tail = begun.shared.clone();
             std::thread::Builder::new()
                 .name("shards-api-image-said".into())
                 .spawn(move || keep_said(&tail, said))
-                .map_err(os("the run host's diagnostics"))?;
-            let payload = request.encode().map_err(|e| ImageRefusal::Spec {
-                what: "the spec",
-                why: e.to_string(),
-            })?;
-            shared
-                .send(wire::to_host::CREATE, &payload)
-                .map_err(os("the run host's request"))
+                .map_err(os("the run host's diagnostics"))
+                .map(drop)
         })();
+        if let Err(e) = threads {
+            begun.end();
+            return Err(e);
+        }
+        Ok(begun)
+    }
+
+    /// The host's process, for its pool to end it while it starts warm (D253's pools).
+    pub(super) fn process(&self) -> Arc<shards_ipc::Child> {
+        self.host.clone()
+    }
+
+    /// Ends the host at once, and its channel.
+    fn end(&self) {
+        kill(&self.host);
+        lock(&self.shared.to_host).take();
+    }
+
+    /// Sends the host the run `request` (`CREATE`), its leases' `lessor` (D242) and the
+    /// references its grants name set first, and its members whose stdin it asks for named,
+    /// for their flows to be made with its start (`take`): none of them can be asked of or
+    /// answered sooner than the request.
+    pub(super) fn create(
+        &self,
+        lessor: Option<RunLessor>,
+        request: &wire::Request,
+    ) -> Result<(), ImageRefusal> {
+        *lock(&self.shared.lessor) = lessor;
+        *lock(&self.shared.granted) = request.credentials.iter().map(|g| g.reference.clone()).collect();
+        lock(&self.shared.state).asked_inputs = State::asking(&request.members).asked_inputs;
+        self.send(wire::to_host::CREATE, request)
+    }
+
+    /// Sends the host `request`, as a run's (`create`) or a warm host's exemplar (`WARM`).
+    pub(super) fn send(&self, kind: u8, request: &wire::Request) -> Result<(), ImageRefusal> {
+        let payload = request.encode().map_err(|e| ImageRefusal::Spec {
+            what: "the spec",
+            why: e.to_string(),
+        })?;
+        self.shared.send(kind, &payload).map_err(|e| ImageRefusal::Os {
+            what: "the run host's request",
+            kind: e.kind(),
+        })
+    }
+
+    /// Waits for a warm host's microVM to be ready (`WARMED`, D253's pools): how it started;
+    /// else why not, the host ended.
+    pub(super) fn warmed(&self) -> Result<wire::StartedFrom, ImageRefusal> {
+        let outcome = self.shared.wait(Duration::MAX, |s| {
+            if let Some(from) = s.warmed {
+                return Some(Ok(from));
+            }
+            if s.refused.is_some() {
+                if !(s.gone() && s.said_all) {
+                    return None;
+                }
+                return s.refused.take().map(|r| Err(with_said(r, &s.said)));
+            }
+            s.gone().then(|| {
+                Err(ImageRefusal::Host(format!(
+                    "it exited before it was warm{}",
+                    quoted(&s.said)
+                )))
+            })
+        });
+        let warmed = outcome.unwrap_or_else(|| Err(ImageRefusal::Host("no word of its warmth".into())));
+        if warmed.is_err() {
+            self.end();
+        }
+        warmed
+    }
+
+    /// Waits at most `patience` for the start of the run `request` it was sent: the run's
+    /// session; else why not, the host ended, and whether it refused the run as one of
+    /// another microVM's than its warm one (`Cause::Unfit`, D253's pools).
+    pub(super) fn started(
+        mut self,
+        request: &wire::Request,
+        patience: Duration,
+    ) -> Result<Session, (ImageRefusal, bool)> {
+        // The host is the session's from here, ended by it, or here where its run does not
+        // start.
+        self.armed = false;
+        let (shared, host) = (self.shared.clone(), self.host.clone());
+        drop(self);
         let end_it = |shared: &Shared| {
             kill(&host);
             lock(&shared.to_host).take();
         };
-        if let Err(e) = threads {
-            end_it(&shared);
-            return Err(e);
-        }
+        let unfit = |shared: &Shared| lock(&shared.state).unfit;
         // Started, refused, or gone: whichever comes first, within the caller's patience. A
         // refusal is the host's last word, told once it has exited and said all it will.
         let outcome = shared.wait(patience, |s| {
@@ -496,40 +741,31 @@ impl Session {
             Some(Ok(started)) => started,
             Some(Err(e)) => {
                 end_it(&shared);
-                return Err(e);
+                return Err((e, unfit(&shared)));
             }
             None => {
                 end_it(&shared);
                 let mut state = lock(&shared.state);
                 // Refused, by a host that has not yet exited: its refusal still.
                 if let Some(r) = state.refused.take() {
-                    return Err(with_said(r, &state.said));
+                    return Err((with_said(r, &state.said), state.unfit));
                 }
                 let said = quoted(&state.said);
-                return Err(ImageRefusal::Boot(format!(
-                    "the run did not start within {patience:?}{said}"
-                )));
+                return Err((
+                    ImageRefusal::Boot(format!("the run did not start within {patience:?}{said}")),
+                    false,
+                ));
             }
         };
-        // Each member whose stdin its spec asked for, by its index in the host's answer.
-        {
-            let mut state = lock(&shared.state);
-            for m in request.members.iter().filter(|m| m.input) {
-                if let Some(info) = started
-                    .members
-                    .iter()
-                    .find(|i| i.kind == m.kind && i.name == m.name)
-                {
-                    state.inputs.entry(info.index).or_default();
-                }
-            }
-        }
         // Its endpoint told exactly where one was asked for (D252): a host that binds none for
         // a run that asked, or one for a run that did not, broke the channel's contract.
         if request.control.is_some() != started.control.is_some() {
             end_it(&shared);
-            return Err(ImageRefusal::Host(
-                "the run host's start told an agent-control endpoint other than the run asked".into(),
+            return Err((
+                ImageRefusal::Host(
+                    "the run host's start told an agent-control endpoint other than the run asked".into(),
+                ),
+                false,
             ));
         }
         // Each member whose terminal its spec asked for (D244), by its index likewise.
@@ -555,39 +791,101 @@ impl Session {
             nesting: request.nesting,
             terminals,
             rate_period: started.rate_period,
+            started_from: started.from,
         };
-        session.pump_outputs()?;
+        session.pump_outputs().map_err(|e| (e, false))?;
         Ok(session)
     }
+}
 
-    /// A pipe for each running member's channels, and the thread that fills it as its
-    /// bytes come, granting the host room for as many more as it took.
-    fn pump_outputs(&self) -> Result<(), ImageRefusal> {
-        let mut outputs = lock(&self.outputs);
-        for m in self.members.iter().filter(|m| m.runs) {
-            for channel in [Channel::Stdout, Channel::Stderr] {
-                let (reader, writer) = io::pipe().map_err(|e| ImageRefusal::Os {
-                    what: "a member's pipe",
-                    kind: e.kind(),
-                })?;
-                outputs.insert((m.index, channel), reader);
-                let shared = self.shared.clone();
-                let member = m.index;
-                std::thread::Builder::new()
-                    .name("shards-api-member".into())
-                    .spawn(move || pump(&shared, member, channel, writer))
-                    .map_err(|e| ImageRefusal::Os {
-                        what: "a member's pump",
-                        kind: e.kind(),
-                    })?;
-                self.shared
-                    .credit(member, channel, AHEAD)
-                    .map_err(|e| ImageRefusal::Os {
-                        what: "the run host's credit",
-                        kind: e.kind(),
-                    })?;
-            }
+/// The run hosts the `shards` binary starts, for [`super::ImagePools`] (D253's pools): warm
+/// ones with a run's exemplar (`WARM`), handed their run as it comes (`CREATE`), and one for a
+/// run at once.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ShardsHosts;
+
+impl super::pool::Hosts for ShardsHosts {
+    type Starting = Begun;
+    type Warm = Begun;
+    type Kill = Arc<shards_ipc::Child>;
+
+    fn begin(
+        &self,
+        host: &super::pool::HostOf,
+        exemplar: &wire::Request,
+    ) -> Result<(Begun, Arc<shards_ipc::Child>), ImageRefusal> {
+        let begun = Begun::begin(host.binary.as_deref(), &host.env)?;
+        if let Err(e) = begun.send(wire::to_host::WARM, exemplar) {
+            begun.end();
+            return Err(e);
         }
+        let process = begun.process();
+        Ok((begun, process))
+    }
+
+    fn warmed(&self, starting: Begun) -> Result<Begun, ImageRefusal> {
+        starting.warmed().map(|_| starting)
+    }
+
+    fn kill(&self, kill: &Arc<shards_ipc::Child>) {
+        self::kill(kill);
+    }
+
+    fn take(
+        &self,
+        warm: Begun,
+        spec: &ImageSpec,
+        request: &wire::Request,
+        patience: Duration,
+    ) -> Result<Box<dyn ImageGuest>, super::pool::Taken> {
+        use super::pool::Taken;
+        if let Err(e) = warm.create(spec.lessor.clone(), request) {
+            warm.end();
+            return Err(Taken::Refused(e));
+        }
+        match warm.started(request, patience) {
+            Ok(session) => Ok(Box::new(session)),
+            Err((_, true)) => Err(Taken::Unfit),
+            Err((refused, false)) => Err(Taken::Refused(refused)),
+        }
+    }
+
+    fn fresh(
+        &self,
+        spec: &ImageSpec,
+        request: &wire::Request,
+        patience: Duration,
+    ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+        Ok(Box::new(Session::start(spec, request, patience)?))
+    }
+}
+
+impl Drop for Begun {
+    /// A host whose run never started, a warm one its pool keeps no more among them, ends
+    /// with it: a session holds its own host once started (`started`), which ends it with
+    /// itself.
+    fn drop(&mut self) {
+        if self.armed {
+            self.end();
+        }
+    }
+}
+
+impl Session {
+    pub(super) fn start(
+        spec: &ImageSpec,
+        request: &wire::Request,
+        patience: Duration,
+    ) -> Result<Session, ImageRefusal> {
+        let begun = Begun::begin(spec.binary.as_deref(), &spec.env)?;
+        begun.create(spec.lessor.clone(), request)?;
+        begun.started(request, patience).map_err(|(refused, _)| refused)
+    }
+
+    /// Its running members' outputs ([`pumped`]).
+    fn pump_outputs(&self) -> Result<(), ImageRefusal> {
+        let pumped = pumped(&self.shared, &self.members)?;
+        lock(&self.outputs).extend(pumped);
         Ok(())
     }
 
@@ -642,6 +940,40 @@ impl Session {
     }
 }
 
+/// A member's channel, by its index, and the pipe its bytes come out of ([`pumped`]).
+type Pumped = ((u32, Channel), io::PipeReader);
+
+/// A pipe for each of `members`' running members' channels, and the thread that fills it as
+/// its bytes come, the host granted room for its first [`AHEAD`] bytes and for as many more as
+/// each part took ([`pump`]). A credit that cannot go is no refusal: the host's channel is
+/// closed, as the run's end closes it (`read_answers`), or broken, and the run started all the
+/// same, its end its session's to tell (`State::end_seen`), as `pump` takes its own credits'
+/// (WHP at 3a05bc3f1: a template's run of `exit 3`, restored, ended before its first credit
+/// went, and its boot was refused `BrokenPipe`).
+fn pumped(shared: &Arc<Shared>, members: &[MemberInfo]) -> Result<Vec<Pumped>, ImageRefusal> {
+    let mut outputs = Vec::new();
+    for m in members.iter().filter(|m| m.runs) {
+        for channel in [Channel::Stdout, Channel::Stderr] {
+            let (reader, writer) = io::pipe().map_err(|e| ImageRefusal::Os {
+                what: "a member's pipe",
+                kind: e.kind(),
+            })?;
+            outputs.push(((m.index, channel), reader));
+            let pumping = shared.clone();
+            let member = m.index;
+            std::thread::Builder::new()
+                .name("shards-api-member".into())
+                .spawn(move || pump(&pumping, member, channel, writer))
+                .map_err(|e| ImageRefusal::Os {
+                    what: "a member's pump",
+                    kind: e.kind(),
+                })?;
+            let _ = shared.credit(member, channel, AHEAD);
+        }
+    }
+    Ok(outputs)
+}
+
 /// Moves member `member`'s `channel` into `writer` as its bytes come, and grants the host
 /// room for each part once written; ends at the channel's end, closing the pipe. A caller
 /// that let go of its end drops the rest, as a closed pipe drops `docker run`'s output,
@@ -673,7 +1005,9 @@ fn pump(shared: &Shared, member: u32, channel: Channel, mut writer: io::PipeWrit
 /// the room the host gave, and its end once the caller closes its pipe; ends with the input,
 /// the run or the host, dropping its pipe's read end so that the caller's writes fail then.
 fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
-    let mut buf = vec![0u8; AHEAD as usize];
+    // What the caller types into the member, a credential as often as not (D242): wiped here
+    // once sent, and the buffer as it goes.
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; AHEAD as usize]);
     loop {
         // Room first: nothing is read of the caller that its host has no room for.
         let room = shared.wait(Duration::MAX, |s| {
@@ -704,26 +1038,45 @@ fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
         if let Some(flow) = lock(&shared.state).inputs.get_mut(&member) {
             flow.room = flow.room.saturating_sub(n as u64);
         }
-        let mut payload = Vec::with_capacity(4 + n);
-        payload.extend_from_slice(&wire::Input::head(member));
-        payload.extend_from_slice(buf.get(..n).unwrap_or_default());
-        if shared.send(wire::to_host::INPUT, &payload).is_err() {
+        if send_input(shared, member, buf.get_mut(..n).unwrap_or_default()).is_err() {
             return;
         }
     }
 }
 
+/// Sends `typed`, bytes for member `member`'s stdin, as one `INPUT` frame in its parts, never
+/// copied whole into one (`send_parts`), then wipes them where they were read; the frame's
+/// own copy is wiped as it drops (D242).
+fn send_input(shared: &Shared, member: u32, typed: &mut [u8]) -> io::Result<()> {
+    let mut payload = zeroize::Zeroizing::new(Vec::with_capacity(4 + typed.len()));
+    payload.extend_from_slice(&wire::Input::head(member));
+    payload.extend_from_slice(typed);
+    zeroize::Zeroize::zeroize(typed);
+    shared.send_parts(wire::to_host::INPUT, &payload)
+}
+
 /// Reads the host's answers until it closes its stdout, each into the state; one that
 /// breaks the channel's contract ends the session as a failed run. The run's end closes
-/// the host's stdin: the host then ends.
-fn read_answers(shared: &Shared, mut from_host: io::PipeReader) {
+/// the host's stdin: the host then ends. Every lease the run was given is released as its
+/// host says the run released them, or as its answers end where it never says so (D242).
+fn read_answers(shared: &Arc<Shared>, mut from_host: io::PipeReader) {
     let failed = loop {
         let (kind, payload) = match wire::read_frame(&mut from_host) {
             Ok(Some(frame)) => frame,
             Ok(None) => break None,
             Err(e) => break Some(format!("its answers: {e}")),
         };
-        match take(shared, kind, &payload) {
+        let taken = match kind {
+            wire::to_client::LEASE => lease_asked(shared, &payload).map(|()| false),
+            wire::to_client::RELEASED => wire::released(&payload)
+                .map(|()| {
+                    release(shared);
+                    false
+                })
+                .map_err(|e| e.to_string()),
+            _ => take(shared, kind, &payload),
+        };
+        match taken {
             Ok(true) => {
                 lock(&shared.to_host).take();
             }
@@ -734,6 +1087,7 @@ fn read_answers(shared: &Shared, mut from_host: io::PipeReader) {
     if failed.is_some() {
         lock(&shared.to_host).take();
     }
+    release(shared);
     let mut state = lock(&shared.state);
     if let Some(why) = failed {
         state
@@ -751,9 +1105,36 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
     let mut state = lock(&shared.state);
     let mut ended = false;
     match kind {
-        k::STARTED => state.started = Some(wire::Started::decode(payload).map_err(bad)?),
+        k::STARTED => {
+            let started = wire::Started::decode(payload).map_err(bad)?;
+            // The run's own key, which its leases are issued to (D242), known before any ask.
+            state.leases.key = started.control.map(|at| at.vm);
+            // Each asked member's flow, by its index in the start, made under this lock: the
+            // host gives it room as soon as its input connection comes, which this reader
+            // may take before the caller waiting for the start runs again.
+            let State {
+                asked_inputs, inputs, ..
+            } = &mut *state;
+            for (kind, name) in asked_inputs.iter() {
+                if let Some(info) = started
+                    .members
+                    .iter()
+                    .find(|i| i.kind == *kind && i.name == *name)
+                {
+                    inputs.entry(info.index).or_default();
+                }
+            }
+            state.started = Some(started);
+        }
+        k::WARMED => {
+            let from = wire::read_warmed(payload).map_err(bad)?;
+            if state.warmed.replace(from).is_some() {
+                return Err("a host warm twice".into());
+            }
+        }
         k::REFUSED => {
             let r = wire::Refused::decode(payload).map_err(bad)?;
+            state.unfit = r.cause == wire::Cause::Unfit;
             state.refused = Some(match r.cause {
                 wire::Cause::Request => ImageRefusal::Spec {
                     what: "the request",
@@ -766,6 +1147,10 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
                     what: "the run host",
                     why: r.why,
                 },
+                wire::Cause::Unfit => ImageRefusal::Host(format!(
+                    "a warm run host of another microVM's than the run's: {}",
+                    r.why
+                )),
             });
         }
         k::OUTPUT => {
@@ -815,6 +1200,12 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
                 *awaited = Some(answer.result);
             }
         }
+        k::SAVED => {
+            let answer = wire::SaveAnswer::decode(payload).map_err(bad)?;
+            if let Some(awaited) = state.saves.get_mut(&answer.id) {
+                *awaited = Some(answer.result);
+            }
+        }
         k::READY => state.ready = Some(wire::ready(payload).map_err(bad)?),
         k::INPUT_ROOM => {
             let room = wire::InputRoom::decode(payload).map_err(bad)?;
@@ -850,7 +1241,141 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
     Ok(ended)
 }
 
-/// Keeps the host's last diagnostics until they end.
+/// A lease its host asks (D242), asked of the run's lessor on a thread of its own, so that
+/// no answer of the host's waits on it; refused at once once the run has released its
+/// leases. One of a run with no lessor, of a reference no grant of the run names, or by an id
+/// the run holds a lease by breaks the channel's contract.
+fn lease_asked(shared: &Arc<Shared>, payload: &[u8]) -> Result<(), String> {
+    let ask = wire::LeaseAsk::decode(payload).map_err(|e| e.to_string())?;
+    let Some(lessor) = lock(&shared.lessor).clone() else {
+        return Err("a lease asked of a run with no lessor".into());
+    };
+    if !lock(&shared.granted).contains(&ask.reference) {
+        return Err(format!(
+            "a lease of {}, which no grant of the run names",
+            ask.reference
+        ));
+    }
+    // Asked under the run's own key, where its start told one.
+    let key = {
+        let mut state = lock(&shared.state);
+        if state.leases.released {
+            drop(state);
+            answer_lease(shared, ask.id, Err(LeaseRefusal::Ended));
+            return Ok(());
+        }
+        match state.leases.each.entry(ask.id) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(format!("a lease asked by {}, an id the run holds one by", ask.id));
+            }
+            std::collections::hash_map::Entry::Vacant(asked) => {
+                asked.insert(Holding::Asked);
+            }
+        }
+        state.leases.key
+    };
+    let id = ask.id;
+    let asking = Arc::clone(shared);
+    let spawned = std::thread::Builder::new()
+        .name("shards-api-lease".into())
+        .spawn(move || {
+            let got = lessor.0.lease(&ask.reference, key);
+            let result = settle(&asking, &*lessor.0, ask.id, got, Instant::now());
+            answer_lease(&asking, ask.id, result);
+        });
+    if spawned.is_err() {
+        lock(&shared.state).leases.each.remove(&id);
+        let why = "no thread to ask its lessor on".to_string();
+        answer_lease(shared, id, Err(LeaseRefusal::Unavailable(why)));
+    }
+    Ok(())
+}
+
+/// What lease `id`, as the run's lessor answered it (`got`), becomes at `now` (R04): given,
+/// kept for its release, living what is left of it; refused as the lessor said; or, given
+/// after the run released its leases or with nothing of it left, released at once and
+/// refused as ended or lapsed.
+fn settle(
+    shared: &Shared,
+    lessor: &dyn Lessor,
+    id: u32,
+    got: Result<Leased, LeaseRefusal>,
+    now: Instant,
+) -> Result<wire::Lease, LeaseRefusal> {
+    let mut state = lock(&shared.state);
+    state.leases.each.remove(&id);
+    let leased = got?;
+    // Its life past a u64 of nanoseconds (584 years) is said as that much.
+    let lives = leased
+        .until
+        .checked_duration_since(now)
+        .and_then(|left| NonZeroU64::new(u64::try_from(left.as_nanos()).unwrap_or(u64::MAX)));
+    let refused = match lives {
+        _ if state.leases.released => LeaseRefusal::Ended,
+        None => LeaseRefusal::Lapsed,
+        Some(lives) => {
+            state.leases.each.insert(id, Holding::Given(leased.lease.clone()));
+            return Ok(wire::Lease {
+                value: leased.value,
+                lives,
+            });
+        }
+    };
+    drop(state);
+    lessor.release(&leased.lease);
+    Err(refused)
+}
+
+/// Tells the run's host lease `id`'s answer (`LEASED`), every copy of its value wiped once
+/// sent; one past the channel's bound is told unavailable, its lease released with the run's.
+fn answer_lease(shared: &Shared, id: u32, result: Result<wire::Lease, LeaseRefusal>) {
+    let answer = wire::LeaseAnswer { id, result };
+    let encoded = answer.encode().map(zeroize::Zeroizing::new);
+    drop(answer);
+    let payload = encoded.or_else(|e| {
+        let refused = wire::LeaseAnswer {
+            id,
+            result: Err(LeaseRefusal::Unavailable(format!("its value: {e}"))),
+        };
+        refused.encode().map(zeroize::Zeroizing::new)
+    });
+    // A host gone is told nothing: the run's end releases the lease.
+    if let Ok(payload) = payload {
+        let _ = shared.send_parts(wire::to_host::LEASED, &payload);
+    }
+}
+
+/// Releases every lease the run was given (D242), once; a lease given after is released as
+/// it comes ([`settle`]).
+fn release(shared: &Shared) {
+    let given: Vec<String> = {
+        let mut state = lock(&shared.state);
+        if state.leases.released {
+            return;
+        }
+        state.leases.released = true;
+        shared.changed.notify_all();
+        state
+            .leases
+            .each
+            .drain()
+            .filter_map(|(_, held)| match held {
+                Holding::Given(lease) => Some(lease),
+                Holding::Asked => None,
+            })
+            .collect()
+    };
+    let lessor = lock(&shared.lessor).clone();
+    if let Some(lessor) = lessor {
+        for lease in given {
+            lessor.0.release(&lease);
+        }
+    }
+}
+
+/// Keeps the host's last diagnostics until they end, and writes each part whole to the file
+/// its caller named for them, where it has named one ([`Shared::keep_diagnostics`]): kept and
+/// written under that file's lock, which naming a file takes first.
 fn keep_said(shared: &Shared, mut said: io::PipeReader) {
     let keep = said_kept();
     let mut buf = [0u8; 4096];
@@ -858,10 +1383,18 @@ fn keep_said(shared: &Shared, mut said: io::PipeReader) {
         if n == 0 {
             break;
         }
-        let mut state = lock(&shared.state);
-        state.said.extend(buf.get(..n).unwrap_or_default());
-        let over = state.said.len().saturating_sub(keep);
-        state.said.drain(..over);
+        let part = buf.get(..n).unwrap_or_default();
+        let mut said_to = lock(&shared.said_to);
+        {
+            let mut state = lock(&shared.state);
+            state.said.extend(part);
+            let over = state.said.len().saturating_sub(keep);
+            state.said.drain(..over);
+        }
+        // A part its file refuses is lost to it alone: the tail keeps it.
+        if let Some(to) = said_to.as_mut() {
+            let _ = to.write_all(part);
+        }
     }
     lock(&shared.state).said_all = true;
     shared.changed.notify_all();
@@ -1031,6 +1564,10 @@ impl ImageGuest for Session {
         self.rate_period
     }
 
+    fn started_from(&self) -> wire::StartedFrom {
+        self.started_from
+    }
+
     fn resize(
         &self,
         member: &MemberName,
@@ -1086,6 +1623,14 @@ impl ImageGuest for Session {
         })
     }
 
+    fn save(&self, to: &Path, patience: Duration) -> Result<(), ImageRefusal> {
+        let to = to.to_str().ok_or_else(|| ImageRefusal::Spec {
+            what: "a save's directory",
+            why: format!("{}: not UTF-8", to.display()),
+        })?;
+        self.shared.save(to, patience)
+    }
+
     fn wait_ready(&self, seen: Option<Ready>, timeout: Duration) -> Result<Option<Ready>, ImageRefusal> {
         self.shared
             .wait(timeout, |s| ready_past(s, self.nesting, seen))
@@ -1096,33 +1641,28 @@ impl ImageGuest for Session {
         // Asked of the host, which kills its VM at once and says the run's end; a host that
         // cannot be asked is killed itself, and its VM's link closing ends the VM's run
         // (`STOP_ORDER`). A run that has ended is not asked: its host is cleaning up.
-        let ended = lock(&self.shared.state).end.is_some();
+        let ended = lock(&self.shared.state).end_seen().is_some();
         if !ended && self.shared.send(wire::to_host::STOP, &[]).is_err() {
             kill(&self.host);
         }
         // The run's end comes as its VM goes, which the host kills at once; or the host is
         // gone. The host's own exit after (its cleanup) is the watcher's to reap.
-        self.shared
-            .wait(Duration::MAX, |s| (s.end.is_some() || s.gone()).then_some(()));
+        self.shared.wait(Duration::MAX, |s| s.end_seen().map(|_| ()));
         lock(&self.shared.to_host).take();
-        let mut state = lock(&self.shared.state);
-        state.end.get_or_insert(RunEnd::Stopped);
+        lock(&self.shared.state).stopped();
         self.shared.changed.notify_all();
         Ok(())
     }
 
     fn wait_for(&self, timeout: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.shared.wait(timeout, |s| {
-            if let Some(end) = &s.end {
-                return Some(end.clone());
-            }
-            s.gone().then(|| {
-                RunEnd::Failed(format!(
-                    "the run host exited without its run's end{}",
-                    quoted(&s.said)
-                ))
-            })
-        }))
+        Ok(self.shared.wait(timeout, State::end_seen))
+    }
+
+    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+        self.shared.keep_diagnostics(to).map_err(|e| ImageRefusal::Os {
+            what: "the run host's diagnostics",
+            kind: e.kind(),
+        })
     }
 }
 
@@ -1152,7 +1692,174 @@ mod tests {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
             to_host: Mutex::new(None),
+            lessor: Mutex::new(None),
+            granted: Mutex::new(Vec::new()),
+            said_to: Mutex::new(None),
         }
+    }
+
+    /// A member's typed stdin goes to its host as one `INPUT` frame and is wiped where it was
+    /// read (D242). Do: send typed bytes from a buffer of the test's. Expect: the buffer all
+    /// zeros after; the host reads one `INPUT` frame of the member's bytes, and nothing more.
+    #[test]
+    fn a_members_typed_input_is_wiped_where_it_was_read_once_sent() {
+        let (mut host, to_host) = io::pipe().unwrap();
+        let s = shared();
+        *lock(&s.to_host) = Some(to_host);
+        let mut typed = *b"sk-ant-typed-in-1234";
+        send_input(&s, 4, &mut typed).unwrap();
+        assert!(
+            typed.iter().all(|&b| b == 0),
+            "the typed bytes were left where they were read"
+        );
+        drop(lock(&s.to_host).take());
+        let mut frame = Vec::new();
+        let (kind, len) = wire::read_frame_into(&mut host, &mut frame).unwrap().unwrap();
+        assert_eq!(kind, wire::to_host::INPUT);
+        let input = wire::Input::decode(&frame[..len]).unwrap();
+        assert_eq!(
+            (input.member, input.bytes.0.as_slice()),
+            (4, b"sk-ant-typed-in-1234".as_slice())
+        );
+        assert!(wire::read_frame_into(&mut host, &mut frame).unwrap().is_none());
+    }
+
+    /// Do have a run host write more diagnostics than are kept to quote, its caller naming a
+    /// file for them partway, then end them. Expect: the file holding what was kept until it
+    /// was named and everything after, whole and once; what is kept to quote still their last
+    /// alone (Hex: the cause of a grants-none run had gone from the tail).
+    #[test]
+    fn a_hosts_diagnostics_are_written_whole_to_the_file_its_caller_names() {
+        let shared = shared();
+        let (said, mut host) = io::pipe().unwrap();
+        let dir = shards_testdir::TempDir::new("api-said").unwrap();
+        let path = dir.join("diagnostics");
+        let before = b"shards api-run: before its file\n".to_vec();
+        let after: Vec<u8> = (0..said_kept() * 2).map(|i| b'a' + (i % 26) as u8).collect();
+        std::thread::scope(|s| {
+            let keeping = s.spawn(|| keep_said(&shared, said));
+            host.write_all(&before).unwrap();
+            // What the host wrote is kept before its file is named.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while lock(&shared.state).said.len() < before.len() {
+                assert!(Instant::now() < deadline, "its first words were never kept");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            shared
+                .keep_diagnostics(std::fs::File::create(&path).unwrap())
+                .unwrap();
+            host.write_all(&after).unwrap();
+            drop(host);
+            keeping.join().unwrap();
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), [&before[..], &after[..]].concat());
+        let kept: Vec<u8> = lock(&shared.state).said.iter().copied().collect();
+        assert_eq!(kept, after[after.len() - said_kept()..]);
+    }
+
+    /// Do pump the outputs of a run whose end came before them, its host's channel closed by
+    /// it, as a run that ends at once has (WHP at 3a05bc3f1: a template's run of `exit 3`,
+    /// restored, ended before its first credit went). Expect: a pipe for each channel of each
+    /// running member alone, each ending as the run has, and no refusal: the run started, and
+    /// its end is the session's to tell, never a boot refused `BrokenPipe`.
+    #[test]
+    fn a_run_ended_before_its_first_credit_still_has_its_outputs() {
+        let shared = Arc::new(shared());
+        lock(&shared.state).end = Some(RunEnd::Exited(3));
+        let member = |index, runs| MemberInfo {
+            index,
+            kind: wire::MemberKind::Harness,
+            name: format!("m{index}"),
+            runs,
+        };
+        let outputs = pumped(&shared, &[member(1, true), member(2, false)]).unwrap();
+        let channels: Vec<(u32, Channel)> = outputs.iter().map(|(key, _)| *key).collect();
+        assert_eq!(channels, [(1, Channel::Stdout), (1, Channel::Stderr)]);
+        for (key, mut reader) in outputs {
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).unwrap();
+            assert!(rest.is_empty(), "{key:?}");
+        }
+        assert_eq!(lock(&shared.state).end_seen(), Some(RunEnd::Exited(3)));
+    }
+
+    /// Do see a run's host gone without its run's end, as `wait_for` sees it, then stop the
+    /// run, as `stop` does once its wait is over; and stop one whose host said its end. Expect:
+    /// the end first seen, in the host's last words, kept through the stop and after, never
+    /// `Stopped` (Hex: `wait_for` read the host's failure, then `stop` turned it `Stopped`);
+    /// the host's own end kept likewise.
+    #[test]
+    fn a_runs_end_once_seen_is_kept_through_its_stop() {
+        let mut state = State {
+            exited: true,
+            answered: true,
+            said: b"shards api-run: its VM's link: reset\n"
+                .iter()
+                .copied()
+                .collect(),
+            ..State::default()
+        };
+        let seen = RunEnd::Failed(
+            "the run host exited without its run's end: shards api-run: its VM's link: reset".into(),
+        );
+        assert_eq!(state.end_seen(), Some(seen.clone()));
+        assert_eq!(state.stopped(), seen);
+        assert_eq!(state.end_seen(), Some(seen));
+        let mut said = State {
+            end: Some(RunEnd::Exited(3)),
+            exited: true,
+            answered: true,
+            ..State::default()
+        };
+        assert_eq!(said.stopped(), RunEnd::Exited(3));
+        assert_eq!(said.end_seen(), Some(RunEnd::Exited(3)));
+    }
+
+    /// A member's stdin has its flow as the run's start is taken, under the lock that answer
+    /// is taken in: the host gives it room (`INPUT_ROOM`) as soon as its input connection
+    /// comes, which this session's reader may take before the caller waiting for the start
+    /// runs again; a room for a member with no flow breaks the channel. A member whose stdin
+    /// was not asked for has none.
+    #[test]
+    fn a_stdins_room_right_after_the_start_is_its_members() {
+        let stage = |name: &str, input: bool| wire::MemberStage {
+            kind: wire::MemberKind::Harness,
+            name: name.into(),
+            env: Vec::new(),
+            files: Vec::new(),
+            workdir: None,
+            input,
+            terminal: false,
+            args: Vec::new(),
+        };
+        let s = Shared {
+            state: Mutex::new(State::asking(&[stage("codex", true), stage("other", false)])),
+            changed: Condvar::new(),
+            to_host: Mutex::new(None),
+            lessor: Mutex::new(None),
+            granted: Mutex::new(Vec::new()),
+            said_to: Mutex::new(None),
+        };
+        let info = |index, name: &str| MemberInfo {
+            index,
+            kind: wire::MemberKind::Harness,
+            name: name.into(),
+            runs: true,
+        };
+        let started = wire::Started {
+            members: vec![info(0, "other"), info(1, "codex")],
+            published: Vec::new(),
+            control: None,
+            rate_period: Duration::from_millis(100),
+            from: wire::StartedFrom::Booted,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(take(&s, wire::to_client::STARTED, &started), Ok(false));
+        let room = |member, bytes| wire::InputRoom { member, bytes }.encode();
+        assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(1, 5)), Ok(false));
+        assert_eq!(lock(&s.state).inputs[&1].room, 5);
+        assert!(take(&s, wire::to_client::INPUT_ROOM, &room(0, 5)).is_err());
     }
 
     /// A member's stdin's room and end are taken as its host says them: room adds up, an
@@ -1194,6 +1901,9 @@ mod tests {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
             to_host: Mutex::new(Some(to_host)),
+            lessor: Mutex::new(None),
+            granted: Mutex::new(Vec::new()),
+            said_to: Mutex::new(None),
         });
         lock(&s.state).inputs.insert(1, InputFlow::default());
         let (reader, mut writer) = io::pipe().unwrap();
@@ -1210,9 +1920,9 @@ mod tests {
         let (kind, first) = wire::read_frame(&mut from_host).unwrap().unwrap();
         assert_eq!(kind, wire::to_host::INPUT);
         let first = wire::Input::decode(&first).unwrap();
-        assert_eq!((first.member, first.bytes.as_slice()), (1, &payload[..7]));
+        assert_eq!((first.member, first.bytes.0.as_slice()), (1, &payload[..7]));
         assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(1024)), Ok(false));
-        let mut got = first.bytes;
+        let mut got = first.bytes.0.clone();
         loop {
             let (kind, frame) = wire::read_frame(&mut from_host).unwrap().unwrap();
             if kind == wire::to_host::INPUT_END {
@@ -1226,7 +1936,7 @@ mod tests {
                 break;
             }
             assert_eq!(kind, wire::to_host::INPUT);
-            got.extend(wire::Input::decode(&frame).unwrap().bytes);
+            got.extend_from_slice(&wire::Input::decode(&frame).unwrap().bytes.0);
         }
         assert_eq!(got, payload);
         feeding.join().unwrap();
@@ -1518,6 +2228,76 @@ mod tests {
         assert!(lock(&s.state).resizes.is_empty());
     }
 
+    /// A save's answer is kept for the ask awaiting it alone, as a room's is (D259): one for an
+    /// ask no longer awaited is dropped; one that is no answer breaks the channel. A save no
+    /// host hears is refused, typed, and leaves no ask awaited; a run that has ended is saved
+    /// no more.
+    #[test]
+    fn a_saves_answer_is_kept_for_its_awaited_ask_alone() {
+        let s = shared();
+        lock(&s.state).saves.insert(4, None);
+        let saved = |id, result| wire::SaveAnswer { id, result }.encode().unwrap();
+        assert_eq!(take(&s, wire::to_client::SAVED, &saved(4, Ok(()))), Ok(false));
+        assert_eq!(lock(&s.state).saves.get(&4), Some(&Some(Ok(()))));
+        let refused = Err((wire::SaveRefusal::State, "a save of it is under way".to_string()));
+        assert_eq!(take(&s, wire::to_client::SAVED, &saved(5, refused)), Ok(false));
+        assert!(
+            !lock(&s.state).saves.contains_key(&5),
+            "an answer no ask awaits is dropped"
+        );
+        assert!(take(&s, wire::to_client::SAVED, &[0, 0, 0, 4, 1, 9]).is_err());
+        let s = shared();
+        assert_eq!(
+            s.save("/home/u/.local/share/shards/saves/s1", BOUND),
+            Err(ImageRefusal::Os {
+                what: "the run host's save",
+                kind: io::ErrorKind::BrokenPipe
+            })
+        );
+        assert!(lock(&s.state).saves.is_empty());
+        lock(&s.state).end = Some(RunEnd::Stopped);
+        assert_eq!(
+            s.save("/home/u/.local/share/shards/saves/s1", BOUND),
+            Err(ImageRefusal::Ended(RunEnd::Stopped))
+        );
+        assert!(lock(&s.state).saves.is_empty());
+    }
+
+    /// A save is asked of the run's host on the run's own channel, its directory whole, and
+    /// its answer is the host's, typed (D259): a refusal comes back as `ImageRefusal::Save` by
+    /// what refused it, a save made as done, each to its own ask, and no ask is left awaited.
+    #[test]
+    fn a_save_rides_the_runs_channel_and_comes_back_typed() {
+        let mut h = hosted(None, &[]);
+        let to = "/home/u/.local/share/shards/saves/s1";
+        for result in [
+            Err((
+                wire::SaveRefusal::Destination,
+                "outside the run's home".to_string(),
+            )),
+            Ok(()),
+        ] {
+            let shared = Arc::clone(&h.shared);
+            let asking = std::thread::spawn(move || shared.save(to, BOUND));
+            let (kind, payload) = wire::read_frame(&mut h.sent).unwrap().unwrap();
+            assert_eq!(kind, wire::to_host::SAVE);
+            let ask = wire::SaveAsk::decode(&payload).unwrap();
+            assert_eq!(ask.to, to);
+            let answer = wire::SaveAnswer {
+                id: ask.id,
+                result: result.clone(),
+            };
+            says(&mut h.host, wire::to_client::SAVED, &answer.encode().unwrap());
+            assert_eq!(
+                asking.join().unwrap(),
+                result.map_err(|(cause, why)| ImageRefusal::Save(cause, why))
+            );
+        }
+        assert!(lock(&h.shared.state).saves.is_empty());
+        drop(h.host);
+        h.reader.join().unwrap();
+    }
+
     /// A room no host hears is refused, typed, and leaves no ask awaited; a run that has
     /// ended is told none (D241).
     #[test]
@@ -1648,5 +2428,272 @@ mod tests {
             gone.wait(BOUND, |st| ready_past(st, true, None)),
             Some(Err(ImageRefusal::Host(_)))
         ));
+    }
+
+    const CLAUDE: &str = "anthropic/claude-max";
+    const CHATGPT: &str = "openai/chatgpt";
+    const VALUE: &str = "sk-ant-lease-test-value";
+
+    /// What a simulated orchestrator's lessor did: each lease it gave, each it was told
+    /// released, and the asks it was in.
+    #[derive(Default)]
+    struct Ledger {
+        given: Vec<String>,
+        released: Vec<String>,
+        entered: usize,
+        /// The key each ask came under.
+        keys: Vec<Option<[u8; 32]>>,
+        /// Its answers held until a test lets them go.
+        held: bool,
+    }
+
+    /// A simulated orchestrator answering its run's leases (D242): each lease named by its
+    /// reference and number, its value `VALUE`, living an hour.
+    #[derive(Default)]
+    struct Orchestrator {
+        ledger: Mutex<Ledger>,
+        changed: Condvar,
+    }
+
+    impl Orchestrator {
+        /// Whether `done` comes to hold of its ledger within [`BOUND`].
+        fn until(&self, done: impl Fn(&Ledger) -> bool) -> bool {
+            let deadline = Instant::now() + BOUND;
+            let mut l = lock(&self.ledger);
+            while !done(&l) {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return false;
+                }
+                l = self.changed.wait_timeout(l, left).unwrap().0;
+            }
+            true
+        }
+    }
+
+    impl Lessor for Orchestrator {
+        fn lease(&self, reference: &str, key: Option<[u8; 32]>) -> Result<Leased, LeaseRefusal> {
+            let mut l = lock(&self.ledger);
+            l.entered += 1;
+            l.keys.push(key);
+            self.changed.notify_all();
+            while l.held {
+                l = self.changed.wait(l).unwrap();
+            }
+            let lease = format!("{reference}#{}", l.given.len());
+            l.given.push(lease.clone());
+            Ok(Leased {
+                lease,
+                value: wire::Secret::from(VALUE),
+                until: Instant::now() + Duration::from_secs(3600),
+            })
+        }
+
+        fn release(&self, lease: &str) {
+            lock(&self.ledger).released.push(lease.into());
+            self.changed.notify_all();
+        }
+    }
+
+    /// A session's state over pipes standing for its host's stdin, read back as `sent`, and
+    /// stdout, written as `host`; its reader taking what the test writes as its host does.
+    struct Hosted {
+        shared: Arc<Shared>,
+        sent: io::PipeReader,
+        host: io::PipeWriter,
+        reader: std::thread::JoinHandle<()>,
+    }
+
+    fn hosted(lessor: Option<Arc<Orchestrator>>, granted: &[&str]) -> Hosted {
+        let (sent, to_host) = io::pipe().unwrap();
+        let (from_host, host) = io::pipe().unwrap();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+            to_host: Mutex::new(Some(to_host)),
+            lessor: Mutex::new(lessor.map(|l| RunLessor(l))),
+            granted: Mutex::new(granted.iter().map(|g| (*g).to_string()).collect()),
+            said_to: Mutex::new(None),
+        });
+        let reader = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || read_answers(&shared, from_host))
+        };
+        Hosted {
+            shared,
+            sent,
+            host,
+            reader,
+        }
+    }
+
+    fn says(host: &mut io::PipeWriter, kind: u8, payload: &[u8]) {
+        host.write_all(&wire::frame(kind, payload).unwrap()).unwrap();
+    }
+
+    fn ask(host: &mut io::PipeWriter, id: u32, reference: &str) {
+        let ask = wire::LeaseAsk {
+            id,
+            reference: reference.into(),
+        };
+        says(host, wire::to_client::LEASE, &ask.encode().unwrap());
+    }
+
+    /// The next lease's answer the session sent its host.
+    fn answered(sent: &mut io::PipeReader) -> wire::LeaseAnswer {
+        let (kind, payload) = wire::read_frame(sent).unwrap().unwrap();
+        assert_eq!(kind, wire::to_host::LEASED);
+        wire::LeaseAnswer::decode(&payload).unwrap()
+    }
+
+    /// A run with grants, its leases asked by its host on their first use and given by a
+    /// simulated orchestrator, then ended each way a run ends (D242). Do: ask two leases;
+    /// end the run as its host says it ended, as the orchestrator stops it, and as its host's
+    /// channel closes without saying so. Expect: nothing given before the first ask; each ask
+    /// answered with the orchestrator's value and what is left of its hour; the first two
+    /// ends releasing every lease as the host says the run released them, before its end; the
+    /// third releasing none until the channel closes, then every one; each lease released
+    /// once.
+    #[test]
+    fn a_runs_leases_are_given_as_asked_and_released_at_each_end() {
+        for end in ["exited", "stopped", "channel closed"] {
+            let orchestrator = Arc::new(Orchestrator::default());
+            let mut h = hosted(Some(Arc::clone(&orchestrator)), &[CLAUDE, CHATGPT]);
+            assert!(
+                lock(&orchestrator.ledger).given.is_empty(),
+                "leased before its first use"
+            );
+            for (id, reference) in [(1, CLAUDE), (2, CHATGPT)] {
+                ask(&mut h.host, id, reference);
+                let answer = answered(&mut h.sent);
+                assert_eq!(answer.id, id);
+                let lease = answer.result.unwrap();
+                assert_eq!(lease.value, wire::Secret::from(VALUE));
+                assert!(Duration::from_nanos(lease.lives.get()) <= Duration::from_secs(3600));
+            }
+            assert_eq!(lock(&orchestrator.ledger).given.len(), 2, "{end}");
+            let all_released = |l: &Ledger| l.released.len() == 2;
+            match end {
+                "exited" => {
+                    says(&mut h.host, wire::to_client::RELEASED, &[]);
+                    assert!(
+                        orchestrator.until(all_released),
+                        "{end}: not released as its host said"
+                    );
+                    says(
+                        &mut h.host,
+                        wire::to_client::ENDED,
+                        &RunEnd::Exited(0).encode().unwrap(),
+                    );
+                }
+                "stopped" => {
+                    h.shared.send(wire::to_host::STOP, &[]).unwrap();
+                    let (kind, _) = wire::read_frame(&mut h.sent).unwrap().unwrap();
+                    assert_eq!(kind, wire::to_host::STOP);
+                    says(&mut h.host, wire::to_client::RELEASED, &[]);
+                    assert!(
+                        orchestrator.until(all_released),
+                        "{end}: not released as its host said"
+                    );
+                    says(
+                        &mut h.host,
+                        wire::to_client::ENDED,
+                        &RunEnd::Stopped.encode().unwrap(),
+                    );
+                }
+                _ => assert!(lock(&orchestrator.ledger).released.is_empty()),
+            }
+            drop(h.host);
+            h.reader.join().unwrap();
+            let l = lock(&orchestrator.ledger);
+            let (mut given, mut released) = (l.given.clone(), l.released.clone());
+            given.sort();
+            released.sort();
+            assert_eq!(released, given, "{end}: each lease released once");
+        }
+    }
+
+    /// A run's leases are asked under its own key where its start told one (D252's endpoint,
+    /// D238's key, D242's leases), and under none where it told none. Do: start a run whose
+    /// host tells an endpoint and its key, and one whose host tells none, and ask a lease of
+    /// each. Expect: the lessor asked under that key, then under none.
+    #[test]
+    fn a_lease_is_asked_under_the_runs_own_key_where_it_has_one() {
+        for key in [Some([7u8; 32]), None] {
+            let orchestrator = Arc::new(Orchestrator::default());
+            let mut h = hosted(Some(Arc::clone(&orchestrator)), &[CLAUDE]);
+            let started = wire::Started {
+                members: Vec::new(),
+                published: Vec::new(),
+                control: key.map(|vm| wire::ControlAt {
+                    address: "127.0.0.1:4433".parse().unwrap(),
+                    vm,
+                }),
+                rate_period: Duration::from_millis(100),
+                from: wire::StartedFrom::Booted,
+            };
+            says(&mut h.host, wire::to_client::STARTED, &started.encode().unwrap());
+            ask(&mut h.host, 1, CLAUDE);
+            assert!(answered(&mut h.sent).result.is_ok());
+            assert_eq!(lock(&orchestrator.ledger).keys, [key]);
+            drop(h.host);
+            h.reader.join().unwrap();
+        }
+    }
+
+    /// A lease given after the run released its leases is released at once (D242). Do: hold
+    /// the orchestrator's answer to an ask; have the host say the run released its leases;
+    /// then let the answer go, and ask again. Expect: the answer told the host as the run's
+    /// end, its lease released, and the next ask refused at once as ended, its lessor never
+    /// asked.
+    #[test]
+    fn a_lease_given_after_the_runs_release_is_released_as_it_comes() {
+        let orchestrator = Arc::new(Orchestrator::default());
+        lock(&orchestrator.ledger).held = true;
+        let mut h = hosted(Some(Arc::clone(&orchestrator)), &[CLAUDE]);
+        ask(&mut h.host, 1, CLAUDE);
+        assert!(orchestrator.until(|l| l.entered == 1));
+        says(&mut h.host, wire::to_client::RELEASED, &[]);
+        assert_eq!(
+            h.shared.wait(BOUND, |s| s.leases.released.then_some(())),
+            Some(())
+        );
+        lock(&orchestrator.ledger).held = false;
+        orchestrator.changed.notify_all();
+        assert_eq!(answered(&mut h.sent).result, Err(LeaseRefusal::Ended));
+        assert!(orchestrator.until(|l| l.released == l.given && l.given.len() == 1));
+        ask(&mut h.host, 2, CLAUDE);
+        assert_eq!(answered(&mut h.sent).result, Err(LeaseRefusal::Ended));
+        assert_eq!(lock(&orchestrator.ledger).entered, 1);
+        drop(h.host);
+        h.reader.join().unwrap();
+    }
+
+    /// Do: have the host ask a lease of a reference no grant of the run names, one of a run
+    /// with no lessor, and one by an id it holds a lease by. Expect: each breaks the
+    /// channel's contract, its run failed, and nothing leased.
+    #[test]
+    fn a_lease_the_run_was_not_granted_breaks_the_channel() {
+        for (lessor, twice) in [(true, false), (false, false), (true, true)] {
+            let orchestrator = Arc::new(Orchestrator::default());
+            let mut h = hosted(lessor.then(|| Arc::clone(&orchestrator)), &[CLAUDE]);
+            if twice {
+                ask(&mut h.host, 1, CLAUDE);
+                assert!(answered(&mut h.sent).result.is_ok());
+                ask(&mut h.host, 1, CLAUDE);
+            } else {
+                ask(&mut h.host, 1, if lessor { "github/token" } else { CLAUDE });
+            }
+            // Its channel then closes: a run its ask did not break ends with no end of its own.
+            drop(h.host);
+            h.reader.join().unwrap();
+            assert!(
+                matches!(lock(&h.shared.state).end, Some(RunEnd::Failed(_))),
+                "{lessor} {twice}"
+            );
+            let l = lock(&orchestrator.ledger);
+            assert_eq!(l.given.len(), usize::from(twice));
+            assert_eq!(l.released, l.given, "a lease outlived its channel");
+        }
     }
 }

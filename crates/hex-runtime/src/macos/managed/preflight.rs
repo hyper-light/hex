@@ -139,6 +139,7 @@ impl MacRuntime {
                                 generation,
                             },
                             cause: LifecycleCause::Uncertain,
+                            why: None,
                         })?;
                     NativeRecord::Pool(
                         pools

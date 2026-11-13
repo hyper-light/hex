@@ -124,11 +124,14 @@ pub(crate) fn in_this_boot(record: BoxRecord) -> BoxRecord {
 }
 
 /// Flushes the state directory `dir` after the boot session marker's rename or removal, so it outlives a
-/// host crash; apart from the records' own counted flushes ([`Store::syncs`]).
+/// host crash; apart from the records' own counted flushes ([`Store::syncs`]). On Windows the directory is
+/// opened as FlushFileBuffers asks ([`hex_runtime::windows::sys::flush_directory`]).
 fn sync_marker_dir(dir: &Path) -> Result<(), Refusal> {
-    File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| Refusal::os("flushing the boot session marker's directory", e))
+    #[cfg(windows)]
+    let flushed = hex_runtime::windows::sys::flush_directory(dir);
+    #[cfg(not(windows))]
+    let flushed = File::open(dir).and_then(|d| d.sync_all());
+    flushed.map_err(|e| Refusal::os("flushing the boot session marker's directory", e))
 }
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
@@ -435,6 +438,27 @@ impl Store {
         let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
         let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
         let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        // A run's words where it failed (D249) and how its microVM started (D253) are facts as its exit is, a Shards
+        // image VM's written through here (joint plan step 12).
+        let ended = lifecycle_fact(
+            current.ended.take(),
+            record.ended.clone(),
+            true,
+            &record.spec.id,
+        )?;
+        let started_from = lifecycle_fact(
+            current.started_from,
+            record.started_from,
+            true,
+            &record.spec.id,
+        )?;
+        // The file its run host's diagnostics are kept in (D258), named with its start's intent alone.
+        let diagnostics = lifecycle_fact(
+            current.diagnostics.take(),
+            record.diagnostics.clone(),
+            introducing,
+            &record.spec.id,
+        )?;
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
@@ -448,6 +472,9 @@ impl Store {
         current.slot = slot;
         current.run = run;
         current.exit = exit;
+        current.ended = ended;
+        current.started_from = started_from;
+        current.diagnostics = diagnostics;
         current.native_scope = native_scope;
         // Both writers count monotonically: publishing a backend completion cannot discard a
         // disconnect counted by the existing socket owner while native I/O was in flight.
@@ -1036,7 +1063,7 @@ fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
 }
 
 /// A stale absence preserves an observed fact; two different positive facts are uncertainty.
-fn lifecycle_fact<T: Copy + PartialEq>(
+fn lifecycle_fact<T: PartialEq>(
     current: Option<T>,
     proposed: Option<T>,
     introducing: bool,
@@ -1352,6 +1379,117 @@ mod tests {
         assert_eq!(store.get(&original.spec.id).unwrap(), deleting);
         store.remove_lifecycle(&original.spec.id).unwrap();
         assert!(store.read_lifecycle(&original.spec.id).unwrap().is_none());
+    }
+
+    /// Joint plan step 12 (AC-T7.4.1): the VM adapters' lifecycle writes keep how a box's run ended, in its runtime's
+    /// words (D249, `BoxRecord::ended`), and how its microVM started (D253, `BoxRecord::started_from`), as they keep its
+    /// exit: a Shards image VM writes both through them. Do write a Ready record, then it with how its microVM started,
+    /// then with its exit and its run's words, then as a writer that read it before either; then other words, and
+    /// another start. Expect each fact kept as written, a stale writer's absence keeping it, and another value refused
+    /// as uncertain, the record as it was.
+    #[test]
+    fn w12_lifecycle_writes_keep_a_runs_words_and_how_its_vm_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut stale = record("image-words");
+        stale.phase = Phase::Creating;
+        store.put_lifecycle(&stale).unwrap();
+        stale.phase = Phase::Ready;
+        store.put_lifecycle(&stale).unwrap();
+        let started = BoxRecord {
+            started_from: Some(hex_api::StartedFrom::Restored),
+            ..stale.clone()
+        };
+        store.put_lifecycle(&started).unwrap();
+        let words = "its VM failed: the guest's kernel panicked";
+        let ended = BoxRecord {
+            exit: Some(hex_api::Exit::Unknown),
+            ended: Some(words.to_owned()),
+            ..started.clone()
+        };
+        store.put_lifecycle(&ended).unwrap();
+        let read = || store.read_lifecycle(&stale.spec.id).unwrap().unwrap();
+        let kept = read();
+        assert_eq!(
+            (kept.started_from, kept.exit, kept.ended.as_deref()),
+            (
+                Some(hex_api::StartedFrom::Restored),
+                Some(hex_api::Exit::Unknown),
+                Some(words)
+            )
+        );
+        store.put_lifecycle(&stale).unwrap();
+        assert_eq!(read(), kept, "a stale writer's absence keeps both");
+        let other_words = BoxRecord {
+            ended: Some("other words".to_owned()),
+            ..ended.clone()
+        };
+        assert!(store.put_lifecycle(&other_words).is_err());
+        let other_start = BoxRecord {
+            started_from: Some(hex_api::StartedFrom::Booted),
+            ..ended.clone()
+        };
+        assert!(store.put_lifecycle(&other_start).is_err());
+        assert_eq!(read(), kept);
+    }
+
+    /// Joint plan step 12 (D258; AC-T7.4.1): a Shards image VM's record names the file its run host's diagnostics are
+    /// kept in as its start's intent is written (its record's step from Creating to Ready), and the VM adapters' later
+    /// writes keep it. Do write a Creating record, then it Ready naming its file; then as a writer that read it before,
+    /// then naming another file; then another box's Ready record naming one after its start. Expect the file kept as
+    /// named, a stale writer's absence keeping it, and another file refused as uncertain, as is one named past a start.
+    #[test]
+    fn w12_lifecycle_writes_keep_the_file_a_vms_start_names_for_its_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut created = record("image-diagnostics");
+        created.phase = Phase::Creating;
+        store.put_lifecycle(&created).unwrap();
+        let file = dir
+            .path()
+            .join("image-diagnostics")
+            .join("image-diagnostics.log");
+        let started = BoxRecord {
+            phase: Phase::Ready,
+            diagnostics: Some(file.clone()),
+            ..created.clone()
+        };
+        store.put_lifecycle(&started).unwrap();
+        let named = |id: &str| {
+            store
+                .read_lifecycle(&BoxId::new(id).unwrap())
+                .unwrap()
+                .unwrap()
+                .diagnostics
+        };
+        assert_eq!(named("image-diagnostics"), Some(file.clone()));
+        let stale = BoxRecord {
+            phase: Phase::Ready,
+            ..created.clone()
+        };
+        store.put_lifecycle(&stale).unwrap();
+        assert_eq!(
+            named("image-diagnostics"),
+            Some(file.clone()),
+            "a stale writer's absence keeps it"
+        );
+        let other = BoxRecord {
+            diagnostics: Some(file.with_file_name("other.log")),
+            ..started.clone()
+        };
+        assert!(store.put_lifecycle(&other).is_err());
+        let mut late = record("image-late");
+        late.phase = Phase::Creating;
+        store.put_lifecycle(&late).unwrap();
+        late.phase = Phase::Ready;
+        store.put_lifecycle(&late).unwrap();
+        let named_late = BoxRecord {
+            diagnostics: Some(file.with_file_name("image-late.log")),
+            ..late.clone()
+        };
+        assert!(store.put_lifecycle(&named_late).is_err());
+        assert_eq!(named("image-late"), None);
+        assert_eq!(named("image-diagnostics"), Some(file));
     }
 
     /// The names of the records in the runtime record directory `run`'s shards, sorted.
@@ -1849,6 +1987,31 @@ mod tests {
         assert!(!store.before_this_boot(Some(&now)));
         assert!(!store.before_this_boot(None));
         assert_eq!(fs::read_to_string(&marker).unwrap(), this_boot);
+        assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
+    }
+
+    /// T-T7.1.2 on every OS: a node of an earlier boot left the boot session marker. Do: take it. Expect: that
+    /// boot's session, and the marker's change made with its directory flushed: naming this boot where the host's
+    /// session is read, gone where it isn't (Windows'), so no later node takes a record of this boot for an earlier
+    /// one's. Windows refused the flush of the directory opened for reading alone: "Access is denied" (os error 5).
+    #[test]
+    fn t_t7_1_2_an_earlier_boots_marker_is_taken_and_its_change_flushed_on_every_os() {
+        let earlier = "00000000-0000-0000-0000-000000000000";
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let marker = dir.path().join("state").join(BOOT_MARKER);
+        fs::write(&marker, format!("{earlier}\n")).unwrap();
+        assert_eq!(
+            store.take_boot_marker(),
+            Ok(Some(BootSession::new(earlier).unwrap()))
+        );
+        match store.boot() {
+            Some(now) => assert_eq!(
+                fs::read_to_string(&marker).unwrap(),
+                format!("{}\n", now.as_str())
+            ),
+            None => assert!(!marker.exists(), "the marker outlived its taking"),
+        }
         assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
     }
 
