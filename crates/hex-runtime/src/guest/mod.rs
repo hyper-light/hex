@@ -14,6 +14,7 @@ mod gpu_pool;
 pub mod held;
 pub mod hosted;
 mod image;
+mod leases;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
@@ -492,6 +493,9 @@ pub struct GuestRuntime {
     joins: Mutex<Option<Arc<dyn Joins>>>,
     /// Shards' image boot, for the Shards class on Agentfile images ([`GuestRuntime::with_images`]).
     image: Option<image::ImageBoot>,
+    /// What leases its image VMs' credentials, its orchestrator's (joint plan step 33; [`GuestRuntime::with_lessors`]):
+    /// none, so a box granting a credential is refused as it is created.
+    lessors: Option<Arc<dyn hex_api::lease::Lessors>>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -602,6 +606,7 @@ impl GuestRuntime {
             gpu_observer: None,
             joins: Mutex::new(None),
             image: None,
+            lessors: None,
         }
     }
 

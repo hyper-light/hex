@@ -471,6 +471,9 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         },
         last_resort: None,
         ended: None,
+        // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
+        // Red: none shown yet.
+        credentials: Vec::new(),
     })
 }
 
@@ -788,8 +791,9 @@ impl GuestRuntime {
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
-            // No credential granted by reference (D242): a box's spec names none, so nothing leases one.
-            credentials: Vec::new(),
+            // Its credentials by reference (D242), as its spec grants them and no other (joint plan step 33); their
+            // lessor is its run's, made as it starts ([`GuestRuntime::run_lessor`]).
+            credentials: super::leases::lowered(image)?,
             lessor: None,
             binary: Some(self.config.binary.clone()),
             env,
@@ -1001,6 +1005,8 @@ impl GuestRuntime {
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
             crate::grants::program(image)?;
+            // As are credentials no one can lease here (joint plan step 33).
+            self.can_lease(image)?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
@@ -1038,7 +1044,10 @@ impl GuestRuntime {
                 "a Shards image record of another class".to_owned(),
             ));
         };
-        let spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        let mut spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        // The run's lessor, its orchestrator's, made before any effect (joint plan step 33): a run granting no
+        // credential has none and asks nothing.
+        spec.lessor = self.run_lessor(&id, shards)?;
         // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));

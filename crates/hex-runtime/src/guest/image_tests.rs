@@ -219,6 +219,38 @@ struct ModelRun {
             std::io::PipeWriter,
         )>,
     >,
+    /// The run's lessor as its boot was given it (D242), and each lease its run host was given through it, by its
+    /// lessor's name (joint plan step 33): the model's run host gives every one back as the run ends, once, as Shards'
+    /// session does (`session::release`).
+    lessor: Mutex<Option<shards_api::image::RunLessor>>,
+    given: Mutex<Vec<String>>,
+}
+
+impl ModelRun {
+    /// The run host's ask of credential `reference` (D242), as it relays its network process's first use of it: put to
+    /// the run's lessor under no key, the lease it gives kept for the run's end.
+    fn ask(
+        &self,
+        reference: &str,
+    ) -> Result<shards_api::image::Leased, shards_api::image::LeaseRefusal> {
+        let lessor = self.lessor.lock().unwrap().clone();
+        let lessor = lessor.ok_or_else(|| {
+            shards_api::image::LeaseRefusal::Unavailable("the run has no lessor".to_owned())
+        })?;
+        let leased = lessor.0.lease(reference, None)?;
+        self.given.lock().unwrap().push(leased.lease.clone());
+        Ok(leased)
+    }
+
+    /// The run's end as Shards' session meets it: every lease it was given, given back once.
+    fn release(&self) {
+        let given: Vec<String> = self.given.lock().unwrap().drain(..).collect();
+        if let Some(lessor) = self.lessor.lock().unwrap().clone() {
+            for lease in given {
+                lessor.0.release(&lease);
+            }
+        }
+    }
 }
 
 /// The orchestrator's ends of a member's stdin, stdout and stderr, each taken once.
@@ -365,6 +397,7 @@ impl ImageGuest for ModelGuest {
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
+        self.run.release();
         Ok(())
     }
     fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
@@ -523,6 +556,7 @@ impl Images for ModelImages {
     ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
         self.patience.lock().unwrap().push(patience);
+        *self.run.lessor.lock().unwrap() = spec.lessor.clone();
         let gate = self.gate.lock().unwrap();
         let gate = self
             .opened
@@ -2356,4 +2390,135 @@ fn a_guest_path_call_scans_the_records_once() {
         counted.iter().all(|(_, refused, n)| *refused && *n == 1),
         "each call: refused, and its scans of the records: {counted:?}"
     );
+}
+
+/// Claude Code's harness as kiln boots it (joint plan step 33's example): its providers by name, by TCP, and its
+/// account's credential toward both; and the model's image naming what the harness reaches.
+fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::CredentialGrant>) {
+    use hex_api::{CredentialGrant, Destination, Grant, Member, MemberKind, Ports, Proto};
+    images.names(
+        shards_api::image::MemberKind::Harness,
+        "claude",
+        &["api.anthropic.com:443", "platform.claude.com:443"],
+    );
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let egress = |host: &str| Grant::Egress {
+        member: claude.clone(),
+        to: Destination::Name(host.to_owned()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 443,
+            last: 443,
+        },
+    };
+    let credentials = vec![CredentialGrant {
+        member: claude.clone(),
+        reference: "anthropic/ada".to_owned(),
+        toward: vec![
+            "api.anthropic.com".to_owned(),
+            "platform.claude.com".to_owned(),
+        ],
+    }];
+    let mut spec = spec(name, None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![egress("api.anthropic.com"), egress("platform.claude.com")];
+        image.credentials = credentials.clone();
+    }
+    (spec, credentials)
+}
+
+/// AC-T7.7.2, joint plan step 33 (its step 6; Shards' D242; docs/design/credential-grants.md C3, C4): do create and
+/// start a harness VM granting its credential toward its two providers, on a node whose orchestrator gave it lessors
+/// over a simulated broker; then ask the credential as Shards' run host relays its egress's first use, and stop the VM.
+/// Expect: the boot asked exactly the box's credential, one grant toward both hosts and a lessor; inspect showing every
+/// credential grant as the record holds it; the ask answered with the broker's value, held there; a host the grant
+/// doesn't name carrying no credential (Shards' decision passes it bare); and the lease given back as the run ends.
+#[test]
+fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_lessors() {
+    use hex_api::lease::sim::SimLessors;
+    let images = ModelImages::new();
+    let broker = SimLessors::new();
+    broker.hold("anthropic/ada", b"sk-ant-api03-real").unwrap();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let runtime = runtime.with_lessors(Arc::new(broker.clone()));
+    let (spec, credentials) = credentialed(&images, "image-credentials");
+    let id = runtime.create(spec).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].credentials,
+        vec![shards_api::image::CredentialGrant {
+            reference: "anthropic/ada".to_owned(),
+            toward: vec![
+                "api.anthropic.com".to_owned(),
+                "platform.claude.com".to_owned()
+            ],
+        }]
+    );
+    assert!(asked[0].lessor.is_some());
+    assert_eq!(runtime.inspect(&id).unwrap().credentials, credentials);
+    match &record(&owner, &id).unwrap().spec.class {
+        ClassSpec::ShardsImage(image) => assert_eq!(image.credentials, credentials),
+        other => panic!("a Shards image VM recorded as {other:?}"),
+    }
+    assert_eq!(
+        shards_api::image::decide(
+            &asked[0].credentials,
+            "api.anthropic.com",
+            "api.anthropic.com"
+        ),
+        shards_api::image::Fill::With("anthropic/ada".to_owned())
+    );
+    assert_eq!(
+        shards_api::image::decide(&asked[0].credentials, "evil.example", "evil.example"),
+        shards_api::image::Fill::Pass
+    );
+    let leased = images.run.ask("anthropic/ada").unwrap();
+    assert_eq!(leased.value.0, b"sk-ant-api03-real");
+    assert!(broker.holds(&leased.lease).unwrap());
+    assert!(matches!(
+        images.run.ask("anthropic/none"),
+        Err(shards_api::image::LeaseRefusal::Denied(_))
+    ));
+    runtime.signal(&id, Signal::KILL).unwrap();
+    assert!(
+        !broker.holds(&leased.lease).unwrap(),
+        "the run's lease outlived its end"
+    );
+    assert_eq!(broker.given_back().unwrap(), 1);
+}
+
+/// AC-T7.7.2, joint plan step 33 (C2, C3): do create a harness VM granting a credential on a node its orchestrator gave
+/// no lessors, and, on one it did, a VM granting a credential toward a host its egress grants don't reach (beyond what
+/// its image is let reach). Expect each refused before any record: the first as the node's configuration
+/// (`Unconfigured`), the second as invalid credentials; and nothing booted.
+#[test]
+fn w33_a_credential_no_one_here_can_lease_or_beyond_its_egress_is_refused_before_any_record() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let (spec, _) = credentialed(&images, "image-unleased");
+    let id = spec.id.clone();
+    assert!(matches!(
+        runtime.create(spec),
+        Err(Refusal::Unconfigured { what, .. }) if what.contains("credentials")
+    ));
+    assert!(record(&owner, &id).is_none());
+    let runtime = runtime.with_lessors(Arc::new(hex_api::lease::sim::SimLessors::new()));
+    let (mut spec, _) = credentialed(&images, "image-beyond");
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.credentials[0]
+            .toward
+            .push("api.github.com".to_owned());
+    }
+    let id = spec.id.clone();
+    assert!(matches!(
+        runtime.create(spec),
+        Err(Refusal::Invalid { what: "credentials", why }) if why.contains("api.github.com")
+    ));
+    assert!(record(&owner, &id).is_none());
+    assert!(images.asked.lock().unwrap().is_empty());
 }

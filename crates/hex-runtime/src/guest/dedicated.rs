@@ -303,6 +303,7 @@ mod tests {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            credentials: Vec::new(),
         }
     }
 
