@@ -1323,13 +1323,21 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
-    /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own
-    /// (D191, D247's `ImageGuest::rate_period`). Original (red): refused, typed, while Hex reads none.
+    /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
+    /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
+    /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.
     pub fn rate_period(&self, id: &BoxId) -> Result<std::time::Duration, Refusal> {
-        let _ = id;
-        Err(Refusal::Awaits {
-            needs: hex_api::Upstream::RatePeriod,
-        })
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.rate_period_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "rate_period",
+                why: format!(
+                    "box {id} isn't a Shards image box: only its VM's governor holds a rate over a period"
+                ),
+            }),
+        }
     }
 
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

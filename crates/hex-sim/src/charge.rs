@@ -92,7 +92,8 @@ impl Cpu {
 pub struct Sample {
     /// The VMM's CPU over the reading's span.
     pub cpu: Cpu,
-    /// The time since the reading before. A reading is never charged over less than the window.
+    /// The time since the reading before. A reading is never charged over less than the window its node reads over
+    /// ([`Node::set_window`]).
     pub span: Duration,
     /// The most memory the VMM held in the window, as the census reads it, its guest's touched RAM included.
     pub mem_bytes: u64,
@@ -307,6 +308,17 @@ fn ceiling_of(classes: &BTreeMap<ClassKey, Record>, class: &ClassKey) -> [u64; 3
     [past(a0, o0), past(a1, o1), past(a2, o2)]
 }
 
+/// A node's window (C1): some time, where it has one.
+fn check_window(window: Option<Duration>) -> Result<(), ChargeError> {
+    if window.is_some_and(|window| window.is_zero()) {
+        return Err(ChargeError::Invalid {
+            what: "a node's window",
+            why: "a window of no time",
+        });
+    }
+    Ok(())
+}
+
 /// `cpu` over `over` nanoseconds, in milli-CPU, rounded up.
 fn milli_of(cpu: Duration, over: u128) -> Result<u64, ChargeError> {
     cpu.as_nanos()
@@ -375,8 +387,8 @@ pub struct Budget {
     pub room: i64,
 }
 
-/// A fleet's memory against its budget (C5): what its VMs hold, the fastest growth of that on record in one window,
-/// and the budget, in bytes.
+/// A fleet's memory against its budget (C5): what its VMs hold, the fastest growth of that on record over one window,
+/// the one its node reads over now ([`Node::growth`]), and the budget, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pressure {
     pub held: u64,
@@ -457,27 +469,30 @@ pub fn with_mutant<T>(m: Option<Mutant>, f: impl FnOnce() -> T) -> T {
 /// each VM by its record's place in the node's start order (`hex-node`'s `Lifetime`), never by anything random.
 #[derive(Debug, Clone)]
 pub struct Node<K> {
-    window: Duration,
+    /// The window it reads over now (C1), none while its shell holds no cap whose period sets one.
+    window: Option<Duration>,
     budget: [u64; 3],
     bounds: Bounds,
     vms: BTreeMap<K, Vm>,
     classes: BTreeMap<ClassKey, Record>,
     clock: u64,
-    /// The fastest growth of what its VMs hold, over one window, on its record (C5): learned, only rising.
-    growth: u64,
+    /// The fastest growth of what its VMs hold on its record (C5), as the bytes one window grew by and that window's
+    /// length: learned, only rising as a rate, so a window that changes with the caps its node holds (C1) neither
+    /// shrinks nor swells it ([`Node::growth`]).
+    growth: Option<(u64, Duration)>,
     /// This window's growth so far.
     grew: u64,
 }
 
 impl<K: Ord + Copy> Node<K> {
-    /// A node enforcing CPU over `window` (C1), its fleet's budget `budget` (C7).
-    pub fn new(window: Duration, budget: Amounts, bounds: Bounds) -> Result<Self, ChargeError> {
-        if window.is_zero() {
-            return Err(ChargeError::Invalid {
-                what: "a node's window",
-                why: "a window of no time",
-            });
-        }
+    /// A node reading its VMs over `window` (C1), none until its shell holds a cap whose period sets one, its fleet's
+    /// budget `budget` (C7). Refused for a window of no time.
+    pub fn new(
+        window: Option<Duration>,
+        budget: Amounts,
+        bounds: Bounds,
+    ) -> Result<Self, ChargeError> {
+        check_window(window)?;
         Ok(Self {
             window,
             budget: dims(budget),
@@ -485,7 +500,7 @@ impl<K: Ord + Copy> Node<K> {
             vms: BTreeMap::new(),
             classes: BTreeMap::new(),
             clock: 0,
-            growth: 0,
+            growth: None,
             grew: 0,
         })
     }
@@ -496,16 +511,19 @@ impl<K: Ord + Copy> Node<K> {
         self.budget = dims(budget);
     }
 
-    /// Original (joint plan step 14, red): a node reads over the window it was made with, and a new one is taken
-    /// nowhere.
+    /// The window the node reads over from now (C1: a learner's window is the longest period of the caps it holds, an
+    /// image VM's its run's own, re-read each window; none while it holds none): each reading after it is charged over
+    /// at least it, and the fastest growth on record is projected over it (C5). Its shell sets it after a window's
+    /// readings and their settling, before the window's last resort. Refused for a window of no time.
     pub fn set_window(&mut self, window: Option<Duration>) -> Result<(), ChargeError> {
-        let _ = window;
+        check_window(window)?;
+        self.window = window;
         Ok(())
     }
 
-    /// The window the node reads over (C1).
+    /// The window the node reads over now (C1).
     pub fn window(&self) -> Option<Duration> {
-        Some(self.window)
+        self.window
     }
 
     pub fn budget(&self) -> Amounts {
@@ -664,7 +682,10 @@ impl<K: Ord + Copy> Node<K> {
 
     /// The VM `id`'s reading for a window (C1).
     pub fn observe(&mut self, id: K, sample: &Sample) -> Result<(), ChargeError> {
-        let window = self.window;
+        let window = self.window.ok_or(ChargeError::Invalid {
+            what: "a VM's reading",
+            why: "its node reads over no window",
+        })?;
         let vm = self.vms.get_mut(&id).ok_or(ChargeError::Unknown)?;
         let cpu = sample.cpu.total(vm.vcpus)?;
         let over = sample.span.max(window).as_nanos();
@@ -741,7 +762,18 @@ impl<K: Ord + Copy> Node<K> {
     /// then raised toward it only into room no booking holds and, for memory and disk, no VM holds, higher bands
     /// first and, within a band, the earliest begun first (by `K`).
     pub fn settle(&mut self) -> Result<(), ChargeError> {
-        self.growth = self.growth.max(self.grew);
+        // This window's growth, over the window its readings were charged over, where it is the fastest on record.
+        if let Some(window) = self.window
+            && self.grew > 0
+        {
+            let faster = self.growth.is_none_or(|(bytes, over)| {
+                u128::from(self.grew).saturating_mul(over.as_nanos())
+                    > u128::from(bytes).saturating_mul(window.as_nanos())
+            });
+            if faster {
+                self.growth = Some((self.grew, window));
+            }
+        }
         self.grew = 0;
         for vm in self.vms.values_mut() {
             vm.booking = each(
@@ -1062,12 +1094,13 @@ impl<K: Ord + Copy> Node<K> {
             .values()
             .map(|vm| vm.held)
             .fold(0u64, |total, [_, mem, _]| total.saturating_add(mem));
+        let growth = self.growth();
         let fleet = Pressure {
             held,
-            growth: self.growth,
+            growth,
             budget,
         };
-        if held.saturating_add(self.growth) <= budget {
+        if held.saturating_add(growth) <= budget {
             return Ok(Resort::Held);
         }
         let budgets = self.budgets()?;
@@ -1118,9 +1151,19 @@ impl<K: Ord + Copy> Node<K> {
             .unwrap_or(Resort::Within(fleet)))
     }
 
-    /// The fastest growth of what the fleet's VMs hold over one window, on this node's record.
+    /// The fastest growth of what the fleet's VMs hold on this node's record (C5), over the window it reads over now:
+    /// the rate on record over that window's length, rounded up; as it was seen where the node reads over none.
     pub fn growth(&self) -> u64 {
-        self.growth
+        let Some((bytes, over)) = self.growth else {
+            return 0;
+        };
+        let Some(now) = self.window else {
+            return bytes;
+        };
+        let projected = u128::from(bytes)
+            .saturating_mul(now.as_nanos())
+            .div_ceil(over.as_nanos().max(1));
+        u64::try_from(projected).unwrap_or(u64::MAX)
     }
 
     /// The VM ended or was deleted: its booking frees; its class keeps what it learned.

@@ -22,7 +22,7 @@ fn class_of(n: u8, cpu: u64, mem: u64) -> ClassKey {
 
 fn node(budget: Amounts) -> Node<u32> {
     Node::new(
-        WINDOW,
+        Some(WINDOW),
         budget,
         Bounds {
             vms: 64,
@@ -598,7 +598,7 @@ fn w14_the_fastest_growth_is_learned_from_the_windows() {
 #[test]
 fn w14_classes_past_their_bound_forget_the_oldest_without_a_live_vm() {
     let mut n: Node<u32> = Node::new(
-        WINDOW,
+        Some(WINDOW),
         res(16_000, 64 * GIB, 0),
         Bounds { vms: 8, classes: 2 },
     )

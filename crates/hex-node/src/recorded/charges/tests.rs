@@ -76,7 +76,7 @@ struct Record {
     usage: RefCell<BTreeMap<String, Usage>>,
     /// Each image VM's host use, as the test sets it, and each room it was told, in order.
     host: RefCell<BTreeMap<String, HostUse>>,
-    /// Each image VM's run's rate period, as the test sets it: refused for a VM it sets none for.
+    /// Each image VM's run's rate period, as the test sets it: the platform's window for a VM it sets none for.
     periods: RefCell<BTreeMap<String, Duration>>,
     rooms: RefCell<Vec<(String, i64)>>,
     rates: RefCell<Vec<(String, u64)>>,
@@ -106,11 +106,12 @@ impl Managed for Record {
     }
 
     fn rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
-        self.periods
+        Ok(self
+            .periods
             .borrow()
             .get(record.spec.id.as_str())
             .copied()
-            .ok_or_else(|| Refusal::Broken("no such run".into()))
+            .unwrap_or(WINDOW))
     }
 
     fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
@@ -165,12 +166,6 @@ impl Record {
 
 const WINDOW: Duration = Duration::from_millis(300);
 
-/// A learner of every VM, each kind's cap's period taken.
-const LEARNS: Learns = Learns {
-    managed: true,
-    images: true,
-};
-
 /// Joint plan step 14 (AC-T7.4.1), C4 on macOS and Windows: a capping platform's node caps each managed VM at its
 /// water-filled share. Do run a window of three Shards VMs of 16-CPU allocations, each booked at 4 CPUs, in a 24-CPU
 /// fleet budget, then a window in which the first uses its whole 16-CPU cap, the second 1 CPU and the third 2; then
@@ -186,7 +181,7 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
         io.set(record.spec.id.as_str(), 0, GIB);
     }
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
     assert_eq!(
@@ -244,7 +239,7 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     for record in &vms {
         io.set(record.spec.id.as_str(), 0, GIB);
     }
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     io.refuse_rates.set(true);
     let start = Instant::now();
     assert_eq!(
@@ -278,7 +273,7 @@ fn w14_a_cold_class_is_carried_at_its_admission() {
         ..cost()
     };
     let receipt = census.allocate(CapacityResources::default()).unwrap();
-    let learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let learned = learner
         .learned(Class::Shards, &[census], &[])
         .unwrap()
@@ -333,7 +328,7 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
     for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
@@ -418,7 +413,7 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
     for (name, held) in [
@@ -525,7 +520,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
 /// the class's capacity answer to carry its two latest ends, latest first, and the oldest forgotten once a third came.
 #[test]
 fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
-    let mut learner = Learner::new(WINDOW, res(20, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(20, 64 * GIB)).unwrap();
     let why = |held: u64| charge::Excess {
         held,
         budget: GIB,
@@ -598,7 +593,7 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
@@ -658,7 +653,7 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
         io.set(record.spec.id.as_str(), 0, 2 * GIB);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &vms, budget, start).unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
@@ -695,7 +690,7 @@ fn w14_a_capping_learner_holds_its_machines_population_of_vms_of_as_many_classes
         own("vm-4", 4),
     );
     let machine = res(20, 64 * GIB);
-    let mut learner = Learner::new(WINDOW, machine, LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), machine).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &[one, two.clone()], machine, start)
@@ -796,7 +791,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         .borrow_mut()
         .insert("img-1".to_owned(), use_at(0, 0, 16, GIB));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, std::slice::from_ref(&vm), budget, start)
@@ -845,7 +840,7 @@ fn w14_a_census_free_class_starts_cold_and_learns_its_vmm_overhead() {
     let records = std::slice::from_ref(&record);
     let io = Record::default();
     io.set("vm-1", 0, GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let envelope = res(16_000, 8 * GIB);
     let ceilings = |learner: &Learner| {
         learner
@@ -905,7 +900,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         },
     );
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     learner
         .window(&io, &records, res(24_000, 64 * GIB), Instant::now())
         .unwrap();
@@ -936,9 +931,10 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
 }
 
 /// Joint plan step 14 (C4; AC-T7.4.1): a window books off the fleet's budget every box it doesn't learn. Do sort a
-/// managed VM, a Shards image VM, a process box capped at 2 CPUs and 1 GiB and an ended image VM, for a learner that
-/// learns managed VMs alone, then for one that learns both. Expect, alone, the managed VM learned, the image VM booked
-/// whole at its 16-CPU, 8 GiB allocation and the box at its caps, the ended VM nowhere; with both, the image VM learned.
+/// managed VM, a Shards image VM, a process box capped at 2 CPUs and 1 GiB and an ended image VM, for a learner whose
+/// platform has no window for managed VMs, then for one whose platform has one. Expect, with none, the image VM learned
+/// (its cap's period its run's own), the managed VM booked whole at its 16-CPU, 8 GiB allocation and the box at its
+/// caps, the ended VM nowhere; with one, the managed VM learned too.
 #[test]
 fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
     let boxed = BoxRecord::new(
@@ -976,18 +972,11 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
             .map(|r| r.spec.id.as_str().to_owned())
             .collect()
     };
-    let alone = sort(
-        records(),
-        Learns {
-            managed: true,
-            images: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(ids(&alone), ["vm-1"]);
-    assert_eq!(alone.whole, res(16_000, 8 * GIB));
-    assert_eq!(alone.native, res(2_000, GIB));
-    let both = sort(records(), LEARNS).unwrap();
+    let unmanaged = sort(records(), false).unwrap();
+    assert_eq!(ids(&unmanaged), ["img-1"]);
+    assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
+    assert_eq!(unmanaged.native, res(2_000, GIB));
+    let both = sort(records(), true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
@@ -1026,7 +1015,7 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
         .borrow_mut()
         .insert("img-2".to_owned(), Duration::from_millis(500));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &[short.clone(), long], budget, start)
@@ -1079,7 +1068,10 @@ fn w14_the_learners_thread_waits_out_its_window_and_with_none_for_a_box_to_begin
     let window = Duration::from_millis(40);
     let asked = Instant::now();
     assert_eq!(wait(&waits, Some(window)).unwrap(), Waited::Look);
-    assert!(asked.elapsed() >= window, "a beginning doesn't cut a window short");
+    assert!(
+        asked.elapsed() >= window,
+        "a beginning doesn't cut a window short"
+    );
     begun.try_send(()).unwrap();
     assert_eq!(wait(&waits, None).unwrap(), Waited::Look);
     drop(begun);
@@ -1177,7 +1169,10 @@ impl crate::recorded::Recover for Images {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.0.periods.lock().unwrap().get(record.spec.id.as_str()) {
             Some(period) => Ok(*period),
-            None => Err(Refusal::NotRunning(record.spec.id.try_clone()?, "rate_period")),
+            None => Err(Refusal::NotRunning(
+                record.spec.id.try_clone()?,
+                "rate_period",
+            )),
         }
     }
 }
@@ -1196,7 +1191,8 @@ static WOKEN: hex_core::patience::Patience =
 fn w14_a_node_with_no_platform_window_learns_its_image_vms_over_their_runs_periods() {
     let dir = tempfile::tempdir().unwrap();
     let images = Images::default();
-    let node = std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     node.start_charges().unwrap();
     assert_eq!(node.learn_window(), None, "no window while it holds no VM");
     images

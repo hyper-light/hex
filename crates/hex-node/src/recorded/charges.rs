@@ -4,10 +4,12 @@
 //! at its water-filled share (`charge::Node::rates`): a managed VM through its native owner, macOS's managed control's
 //! rate or Windows' job's hard cap ([`crate::recorded::Recover::set_managed_rate`], over the platform's window,
 //! [`crate::recorded::Recover::charge_window`]); a Shards image VM through its rate (`Runtime::rate`, Shards' D247,
-//! over its period, [`crate::recorded::Recover::image_rate_period`]), its cost read from its run host (`Runtime::host_use`,
-//! D241) and its guest told its room, its budget less what it holds (`Runtime::room`, D188). A VM of a kind whose cap's
-//! period it can't take is booked whole off the fleet's budget, as a native box books its caps ([`sort`]). Every VM it
-//! learns so keeps at least its booking and the caps fit the fleet's CPU budget, as Linux's weights hold them (C4).
+//! over its run's own period, read each window, [`crate::recorded::Recover::image_rate_period`]), its cost read from
+//! its run host (`Runtime::host_use`, D241) and its guest told its room, its budget less what it holds (`Runtime::room`,
+//! D188). A managed VM on a platform with no window is booked whole off the fleet's budget, as a native box books its
+//! caps ([`sort`]); with no window of its own and no image VM held, the learner waits for a box to begin ([`wait`]).
+//! Every VM it learns so keeps at least its booking and the caps fit the fleet's CPU budget, as Linux's weights hold
+//! them (C4).
 //! Neither platform can hold a managed VM's memory at a budget below its ceiling: macOS ends a process past its
 //! footprint limit and Windows refuses a commit past a job's, and neither throttles at a level as `memory.high` does,
 //! so a managed VM's budget is refused, typed, naming that (C5); an image VM's guest holds itself within its room. Its
@@ -127,15 +129,6 @@ pub(crate) fn running_image(record: &BoxRecord) -> bool {
         && record.exit.is_none()
 }
 
-/// Which VMs a learner learns (C1): those of a kind whose cap's period it reads over. A managed VM's cap is its
-/// platform's ([`crate::recorded::Recover::charge_window`]), an image VM's its rate's
-/// ([`crate::recorded::Recover::image_rate_period`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Learns {
-    pub(crate) managed: bool,
-    pub(crate) images: bool,
-}
-
 /// A window's view of the node's records (C3, C4): the VMs it learns; what each VM it doesn't books, whole, its
 /// receipt's allocation, as no cap holds it below; and what the native boxes book, their caps.
 #[derive(Debug, Default)]
@@ -145,10 +138,12 @@ pub(crate) struct Sorted {
     pub(crate) native: CapacityResources,
 }
 
-/// Sorts `records` for a window of a learner that learns `learns` ([`Sorted`]).
+/// Sorts `records` for a window of a learner ([`Sorted`]): it learns each VM whose cap's period it reads over (C1), a
+/// managed VM where its platform has a window (`managed`, [`crate::recorded::Recover::charge_window`]) and every image
+/// VM, its cap's period its run's own ([`crate::recorded::Recover::image_rate_period`]).
 pub(crate) fn sort(
     records: impl IntoIterator<Item = BoxRecord>,
-    learns: Learns,
+    managed: bool,
 ) -> Result<Sorted, Refusal> {
     let overflow = || Refusal::Invalid {
         what: "a node's boxes' bookings",
@@ -157,9 +152,9 @@ pub(crate) fn sort(
     let mut sorted = Sorted::default();
     for record in records {
         let kind = if running(&record) {
-            Some(learns.managed)
+            Some(managed)
         } else if running_image(&record) {
-            Some(learns.images)
+            Some(true)
         } else {
             None
         };
@@ -199,24 +194,32 @@ pub(crate) enum Waited {
     Gone,
 }
 
-/// Waits for the learner's next window (C1). Original (red): out its window, a message on `ended` ending it as its
-/// sender's drop does; with no window, refused, typed.
+/// Waits for the learner's next window (C1): out its window where it has one, a box's beginning told on `ended`
+/// meanwhile changing nothing, as the window's end reads every VM it then holds; with none (a node with no platform
+/// window holding no image VM), until a box begins. Gone once its node has gone, `ended`'s sender dropped with it.
+/// Refused, typed, where it can't wait.
 pub(crate) fn wait(
     ended: &hex_wait::mpsc::Receiver<()>,
     window: Option<Duration>,
 ) -> Result<Waited, Refusal> {
+    let failed = |why| Refusal::os("waiting out the charge learner's window", why);
     let Some(window) = window else {
-        return Err(Refusal::Awaits {
-            needs: Upstream::RatePeriod,
-        });
+        return match ended.recv() {
+            Ok(()) => Ok(Waited::Look),
+            Err(hex_wait::mpsc::RecvError::Disconnected) => Ok(Waited::Gone),
+            Err(hex_wait::mpsc::RecvError::Failed(why)) => Err(failed(why)),
+        };
     };
-    match ended.recv_timeout(window) {
-        Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => Ok(Waited::Look),
-        Ok(()) | Err(hex_wait::mpsc::RecvTimeoutError::Disconnected) => Ok(Waited::Gone),
-        Err(hex_wait::mpsc::RecvTimeoutError::Failed(why)) => Err(Refusal::os(
-            "waiting out the charge learner's window",
-            why,
-        )),
+    // A window the clock can't add to now bounds nothing: its wait is for its node's end alone.
+    let end = Instant::now().checked_add(window);
+    loop {
+        let left = end.map_or(window, |end| end.saturating_duration_since(Instant::now()));
+        match ended.recv_timeout(left) {
+            Ok(()) => {}
+            Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => return Ok(Waited::Look),
+            Err(hex_wait::mpsc::RecvTimeoutError::Disconnected) => return Ok(Waited::Gone),
+            Err(hex_wait::mpsc::RecvTimeoutError::Failed(why)) => return Err(failed(why)),
+        }
     }
 }
 
@@ -648,14 +651,18 @@ struct Vm {
     rate: u64,
     /// The room its guest was told last, an image VM's (D188): none until it is first told.
     room: Option<i64>,
+    /// The period its cap holds over, an image VM's its run's own as last read (D247): none for a managed VM, whose cap
+    /// holds over its platform's window.
+    period: Option<Duration>,
 }
 
 /// The node's learner (module docs).
 pub(crate) struct Learner {
     node: charge::Node<Lifetime>,
     vms: BTreeMap<Scope, Vm>,
-    /// Which VMs it learns: each other running VM is booked whole off the fleet's budget ([`sort`]).
-    learns: Learns,
+    /// Its platform's window for the managed VMs it caps (C1, [`crate::recorded::Recover::charge_window`]): none where
+    /// the platform derives none, its managed VMs booked whole off the fleet's budget ([`sort`]).
+    managed: Option<Duration>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
     /// Why no VM's memory budget is held on this platform (C5), typed.
@@ -698,17 +705,17 @@ fn vcpus(allocation: hex_api::Allocation) -> Result<u32, Refusal> {
 }
 
 impl Learner {
-    /// A learner over `window` on a machine of `machine`, learning `learns`.
+    /// A learner on a machine of `machine` whose platform caps managed VMs over `managed`, none where it derives no
+    /// window: it reads over that until it holds an image VM whose run's period is longer (C1).
     pub(crate) fn new(
-        window: Duration,
+        managed: Option<Duration>,
         machine: CapacityResources,
-        learns: Learns,
     ) -> Result<Self, Refusal> {
         let bounds = bounds(machine)?;
         Ok(Self {
-            node: charge::Node::new(window, machine, bounds).map_err(refused)?,
+            node: charge::Node::new(managed, machine, bounds).map_err(refused)?,
             vms: BTreeMap::new(),
-            learns,
+            managed,
             fault: None,
             last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unheld: Refusal::Platform {
@@ -721,14 +728,25 @@ impl Learner {
         })
     }
 
-    /// Which VMs it learns.
-    pub(crate) fn learns(&self) -> Learns {
-        self.learns
+    /// Whether it learns managed VMs: where their platform has a window (C1).
+    pub(crate) fn manages(&self) -> bool {
+        self.managed.is_some()
     }
 
-    /// The window it reads over next (C1). Original (red): the one it was made with.
+    /// The window it reads over next (C1): the longest of its platform's and the periods of the image VMs it holds,
+    /// none while it holds none and its platform has none ([`wait`]).
     pub(crate) fn next_window(&self) -> Option<Duration> {
         self.node.window()
+    }
+
+    /// The longest period of the caps it holds now (C1): its platform's for managed VMs and each image VM's its run's
+    /// own, as last read.
+    fn longest(&self) -> Option<Duration> {
+        self.vms
+            .values()
+            .filter_map(|vm| vm.period)
+            .chain(self.managed)
+            .max()
     }
 
     /// One window (C1 to C5, C7) read at `now`: the VMs it learns `running` now (their records, [`sort`]), within the
@@ -741,6 +759,9 @@ impl Learner {
         now: Instant,
     ) -> Result<(), Refusal> {
         let outcome = self.learn(io, running, budget, now);
+        // Its next window is the longest period of the caps it holds whatever this one reached (C1); one that settled
+        // set it already, before its last resort.
+        let outcome = outcome.and(self.node.set_window(self.longest()).map_err(refused));
         self.fault = outcome.as_ref().err().cloned();
         outcome
     }
@@ -775,7 +796,16 @@ impl Learner {
             let Some(allocation) = record.spec.allocation else {
                 continue;
             };
-            // A VM ending between the listing and its read is read no more; the next listing ends it.
+            // An image VM's cap holds over its run's own period, read each window (C1; D247).
+            let period = if running_image(record) {
+                match io.rate_period(record) {
+                    Ok(period) => Some(period),
+                    Err(_) => continue,
+                }
+            } else {
+                None
+            };
+            // A VM ending between the listing and its reads is read no more; the next listing ends it.
             let Ok(read) = Read::of(io, record) else {
                 continue;
             };
@@ -804,6 +834,7 @@ impl Learner {
                 used.insert(vm.lifetime, (milli, vm.rate));
                 vm.last = (read.cpu_ns, now);
                 vm.guest_ns = read.guest_ns;
+                vm.period = period;
                 continue;
             }
             let class = match record.spec.class.class() {
@@ -833,6 +864,7 @@ impl Learner {
                     guest_ns: read.guest_ns,
                     rate: allocation.resources.cpu_milli,
                     room: None,
+                    period,
                 },
             );
             let intent = record
@@ -844,6 +876,8 @@ impl Learner {
         }
         self.node.set_budget(budget);
         self.node.settle().map_err(refused)?;
+        // The window it reads over next (C1), the one its last resort projects the growth on record over (C5).
+        self.node.set_window(self.longest()).map_err(refused)?;
         let rates = self
             .node
             .rates(budget.cpu_milli, &used, u64::from(hex_api::MIN_CPU_MILLI))

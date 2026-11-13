@@ -1218,35 +1218,31 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): a running image VM's rate period is its own run's, as its run host said
 /// it as the run started (D247's `ImageGuest::rate_period`), the window the node's charge learner caps it over, never a
-/// number of Hex's. Do start two image VMs whose run hosts say 70 ms and 130 ms and ask each its period; then ask one
-/// made and not started, and a box the runtime doesn't hold. Expect each its own run's period; the one not started
-/// refused NotRunning, naming the call; the one not held NoSuchBox.
+/// number of Hex's. Do start two image VMs whose run hosts say 70 ms and 130 ms, each on a runtime of its own (so
+/// neither boot waits at a bound the other's answer taught, decision 9), and ask each its period; then ask one made and
+/// not started, and a box the runtime doesn't hold. Expect each its own run's period; the one not started refused
+/// NotRunning, naming the call; the one not held NoSuchBox.
 #[test]
 fn w14_a_running_vms_rate_period_is_its_own_runs() {
-    let images = ModelImages::new();
-    let (runtime, _owner) = model_runtime(&images, waits());
-    let mut ids = Vec::new();
-    for (name, ms) in [("image-period-a", 70), ("image-period-b", 130)] {
+    let started = |name: &str, ms: u64| {
+        let images = ModelImages::new();
         *images.period.lock().unwrap() = Duration::from_millis(ms);
+        let (runtime, owner) = model_runtime(&images, waits());
         let id = runtime.create(spec(name, None)).unwrap().id;
         runtime.start(&id).unwrap();
-        ids.push(id);
-    }
-    assert_eq!(
-        runtime.rate_period(&ids[0]).unwrap(),
-        Duration::from_millis(70)
-    );
-    assert_eq!(
-        runtime.rate_period(&ids[1]).unwrap(),
-        Duration::from_millis(130)
-    );
-    let made = runtime.create(spec("image-period-c", None)).unwrap().id;
+        (runtime, owner, id)
+    };
+    let (first, _first_owner, a) = started("image-period-a", 70);
+    let (second, _second_owner, b) = started("image-period-b", 130);
+    assert_eq!(first.rate_period(&a).unwrap(), Duration::from_millis(70));
+    assert_eq!(second.rate_period(&b).unwrap(), Duration::from_millis(130));
+    let made = first.create(spec("image-period-c", None)).unwrap().id;
     assert!(matches!(
-        runtime.rate_period(&made),
+        first.rate_period(&made),
         Err(Refusal::NotRunning(_, "rate_period"))
     ));
     assert!(matches!(
-        runtime.rate_period(&BoxId::new("image-period-none").unwrap()),
+        first.rate_period(&BoxId::new("image-period-none").unwrap()),
         Err(Refusal::NoSuchBox(_))
     ));
 }

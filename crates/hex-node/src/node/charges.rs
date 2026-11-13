@@ -367,7 +367,7 @@ impl Learner {
             why: format!("{} has no parent", parent.display()),
         })?;
         Ok(Self {
-            node: charge::Node::new(WINDOW, machine, bounds).map_err(refused)?,
+            node: charge::Node::new(Some(WINDOW), machine, bounds).map_err(refused)?,
             vms: BTreeMap::new(),
             machine: machine.cpu_milli,
             fleet: (BoxCgroup::at(fleet.to_path_buf()), Vec::new()),

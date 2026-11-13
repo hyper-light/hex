@@ -261,12 +261,17 @@ pub trait Recover: Runtime {
     }
 
     /// Joint plan step 14 (C1): the period Shards image VM `record`'s rate holds over (Shards' D247, its hold D191's
-    /// governor), the window the charge learner caps it through its rate over. Original (red): refused, typed, while
-    /// Shards' API says none (`Awaits(RatePeriod)`), so the learner books image VMs whole.
+    /// governor), its run's own as its run host said it as the run started: the window the charge learner caps it
+    /// through its rate over, read each window, never a number of Hex's. Refused, typed, by a native owner that runs
+    /// no image VM.
     fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
-        let _ = record;
-        Err(Refusal::Awaits {
-            needs: hex_api::Upstream::RatePeriod,
+        Err(Refusal::Invalid {
+            what: "rate_period",
+            why: format!(
+                "box {} isn't a Shards image VM this native owner runs: only a guest's image VM holds a rate over its \
+                 run's period",
+                record.spec.id
+            ),
         })
     }
 
@@ -390,8 +395,8 @@ struct Books {
     /// The boot session the store's records were written in before this node opened it, as its marker said
     /// ([`Store::take_boot_marker`]): what tells a torn record from an earlier boot (T-T7.1.2).
     last_boot: Option<hex_core::record::BootSession>,
-    /// Joint plan step 14: the charge learner of the managed VMs, where the node's platform caps them, and the end its
-    /// window's thread waits on beside the window: dropped with the node.
+    /// Joint plan step 14: the charge learner of the node's VMs, where its platform caps them, and the sender its
+    /// thread waits on beside its window: told each box's beginning (`Recorded::begun`), and dropped with the node.
     charges: std::sync::OnceLock<(
         Mutex<charges::Learner>,
         Mutex<hex_wait::mpsc::SyncSender<()>>,
@@ -1701,6 +1706,18 @@ impl Drop for ForwardTurn {
 }
 
 impl<R: Recover> Recorded<R> {
+    /// Tells the charge learner a box has begun (joint plan step 14, C1): one waiting for a box, with no window of its
+    /// platform's and no image VM held, runs a window; one waiting out its window reads it at the window's end. Nothing
+    /// where no learner runs.
+    fn begun(&self) {
+        if let Some((_, begun)) = self.books.charges.get()
+            && let Ok(begun) = begun.lock()
+        {
+            // Full: a beginning is told already. Gone: the learner has stopped, its failure kept.
+            let _ = begun.try_send(());
+        }
+    }
+
     /// Native methods use this same owner. A backend registered with Books enters it itself;
     /// route changes between the initial read and acquisition are refused before native I/O.
     fn method_turn(&self, id: &BoxId) -> Result<Option<Turn<'_>>, Refusal> {
@@ -2060,65 +2077,51 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
 
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's VMs, a thread that runs a window each
-    /// time its window passes, until the node is gone, and says its window and what of the rule it can't hold, typed:
-    /// a managed VM's memory budget, and each kind of VM it books whole for want of its cap's period. Its window is the
-    /// longest of the periods its caps hold over: the platform's for managed VMs (`Recover::charge_window`), their rate's
-    /// for Shards image VMs (`Recover::image_rate_period`); a kind whose period is refused it doesn't learn. Refused,
-    /// typed, where it can take neither: the node runs on, its VMs booked whole, as before.
-    pub fn start_charges(self: &Arc<Self>) -> Result<(std::time::Duration, Vec<Refusal>), Refusal> {
+    /// time its window passes, until the node is gone, and says its platform's window for managed VMs and what of the
+    /// rule it can't hold, typed: a managed VM's memory budget, or, where the platform derives no window
+    /// (`Recover::charge_window`), why its managed VMs are booked whole. Its window is the longest of the periods its
+    /// caps hold over, re-read each window: the platform's for managed VMs and each image VM's its run's own
+    /// (`Recover::image_rate_period`); with neither, it waits for a box to begin (`charges::wait`).
+    pub fn start_charges(
+        self: &Arc<Self>,
+    ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
         let managed = self.runtime.charge_window();
-        // Original (red): no run's period is read.
-        let images: Result<std::time::Duration, Refusal> = Err(Refusal::Awaits {
-            needs: hex_api::Upstream::RatePeriod,
-        });
-        let window = match (&managed, &images) {
-            (Ok(managed), Ok(images)) => (*managed).max(*images),
-            (Ok(managed), Err(_)) => *managed,
-            (Err(_), Ok(images)) => *images,
-            (Err(why), Err(_)) => return Err(why.clone()),
-        };
-        let learns = charges::Learns {
-            managed: managed.is_ok(),
-            images: images.is_ok(),
-        };
-        let learner = charges::Learner::new(window, self.machine()?, learns)?;
+        let learner = charges::Learner::new(managed.as_ref().ok().copied(), self.machine()?)?;
+        let window = learner.next_window();
         let mut unheld = Vec::new();
         unheld
-            .try_reserve_exact(3)
+            .try_reserve_exact(1)
             .map_err(|_| Refusal::Exhausted {
                 what: "the charge learner's refusals",
-                bound: 3,
+                bound: 1,
             })?;
-        if learns.managed {
-            unheld.push(learner.unheld().clone());
-        }
-        unheld.extend(managed.err());
-        unheld.extend(images.err());
-        // Nothing is sent on it: the end is its sender's drop, with the node.
-        let (end, ended) = hex_wait::mpsc::sync_channel(1)
-            .map_err(|why| Refusal::os("making the charge learner's end", why))?;
+        unheld.push(match managed {
+            Ok(_) => learner.unheld().clone(),
+            Err(why) => why,
+        });
+        // Each box's beginning is told on it ([`Recorded::begun`]); its end is its sender's drop, with the node.
+        let (begun, waits) = hex_wait::mpsc::sync_channel(1)
+            .map_err(|why| Refusal::os("making the charge learner's wake", why))?;
         self.books
             .charges
-            .set((Mutex::new(learner), Mutex::new(end)))
+            .set((Mutex::new(learner), Mutex::new(begun)))
             .map_err(|_| broken("the charge learner is started already"))?;
         let node = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("hex-charges".to_owned())
             .spawn(move || {
+                let mut next = window;
                 loop {
-                    match ended.recv_timeout(window) {
-                        Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => {}
-                        Ok(()) | Err(hex_wait::mpsc::RecvTimeoutError::Disconnected) => return,
-                        Err(hex_wait::mpsc::RecvTimeoutError::Failed(why)) => {
-                            // It can't wait out a window: it says so where its failures are kept, and stops.
+                    match charges::wait(&waits, next) {
+                        Ok(charges::Waited::Look) => {}
+                        Ok(charges::Waited::Gone) => return,
+                        Err(why) => {
+                            // It can't wait for a window: it says so where its failures are kept, and stops.
                             if let Some(node) = node.upgrade()
                                 && let Some((learner, _)) = node.books.charges.get()
                                 && let Ok(mut learner) = learner.lock()
                             {
-                                learner.failed(Refusal::os(
-                                    "waiting out the charge learner's window",
-                                    why,
-                                ));
+                                learner.failed(why);
                             }
                             return;
                         }
@@ -2126,7 +2129,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                     let Some(node) = node.upgrade() else {
                         return;
                     };
-                    node.learn_window();
+                    next = node.learn_window();
                 }
             })
             .map_err(|e| Refusal::os("starting the charge learner", e))?;
@@ -2160,7 +2163,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let sorted = match charges::sort(records.into_values().flatten(), learner.learns()) {
+        let sorted = match charges::sort(records.into_values().flatten(), learner.manages()) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
@@ -2416,7 +2419,9 @@ impl<R: Recover> Runtime for Recorded<R> {
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
         if self.runtime.owns_records(&spec)? {
-            return self.counted(self.runtime.create(spec)?);
+            let info = self.runtime.create(spec)?;
+            self.begun();
+            return self.counted(info);
         }
         let _lifecycle = self
             .books
@@ -2454,12 +2459,15 @@ impl<R: Recover> Runtime for Recorded<R> {
         // cleanup; keep Creating and its exact claims even when the backend could not publish.
         let info = self.runtime.create(spec)?;
         self.books.store.made(&record)?;
+        self.begun();
         self.counted(info)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         let _lifecycle = self.method_turn(id)?;
-        self.runtime_at(id)?.start(id)
+        self.runtime_at(id)?.start(id)?;
+        self.begun();
+        Ok(())
     }
 
     /// Its runtime's to refuse: none this wraps makes a box for one program's life (macOS's and Windows' refuse a
@@ -2996,6 +3004,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
 
     fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
         self.host().charge_window()
+    }
+
+    /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247).
+    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        self.guest().rate_period(&record.spec.id)
     }
 
     fn launch_managed(
