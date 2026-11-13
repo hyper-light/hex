@@ -88,6 +88,9 @@ struct State {
     /// Each resize asked and still awaited, by its ask's id, and its answer once it came
     /// (D244), held as [`rooms`](Self::rooms) is.
     resizes: HashMap<u32, Option<Result<(), String>>>,
+    /// Each save asked and still awaited, by its ask's id, and its answer once it came (D259),
+    /// held as [`rooms`](Self::rooms) is.
+    saves: HashMap<u32, Option<Saved>>,
     next_ask: u32,
     /// The run's own command's readiness under the nesting grant (D234), as its init last
     /// said it: init owns it, and moves it by D234's table.
@@ -126,6 +129,9 @@ struct Leases {
 /// Each ask of a kind awaited, by its id, and its answer once it came, or why its host
 /// refused it (D241, D247).
 type Awaited<T> = HashMap<u32, Option<Result<T, String>>>;
+
+/// A save's outcome as its host said it (D259): saved, or refused and why.
+type Saved = Result<(), (wire::SaveRefusal, String)>;
 
 /// A numbered ask of the session's, answered by its id (D241, D247): its kind; the ask and
 /// its send, as a refusal names them; where its answer is awaited; what its host's refusal
@@ -364,6 +370,55 @@ impl Shared {
                 })
             });
         lock(&self.state).resizes.remove(&id);
+        answer
+    }
+
+    /// Asks the run's microVM saved whole at `to` (D259) and waits at most `patience` for its
+    /// host's answer; its ask awaited from before it is sent until it is answered or given up,
+    /// as [`room`](Self::room)'s is.
+    fn save(&self, to: &str, patience: Duration) -> Result<(), ImageRefusal> {
+        let id = {
+            let mut state = lock(&self.state);
+            if let Some(end) = &state.end {
+                return Err(ImageRefusal::Ended(end.clone()));
+            }
+            state.next_ask = state.next_ask.wrapping_add(1);
+            let id = state.next_ask;
+            state.saves.insert(id, None);
+            id
+        };
+        let answer = wire::SaveAsk { id, to: to.into() }
+            .encode()
+            .map_err(|e| ImageRefusal::Spec {
+                what: "a save",
+                why: e.to_string(),
+            })
+            .and_then(|ask| {
+                self.send(wire::to_host::SAVE, &ask)
+                    .map_err(|e| ImageRefusal::Os {
+                        what: "the run host's save",
+                        kind: e.kind(),
+                    })
+            })
+            .and_then(|()| {
+                self.wait(patience, |s| {
+                    if let Some(answer) = s.saves.get_mut(&id).and_then(Option::take) {
+                        return Some(answer.map_err(|(cause, why)| ImageRefusal::Save(cause, why)));
+                    }
+                    if let Some(end) = &s.end {
+                        return Some(Err(ImageRefusal::Ended(end.clone())));
+                    }
+                    s.gone()
+                        .then(|| Err(ImageRefusal::Host("it exited without answering".into())))
+                })
+                .unwrap_or_else(|| {
+                    Err(ImageRefusal::Unsupported {
+                        what: "a save",
+                        why: format!("no answer within {patience:?}"),
+                    })
+                })
+            });
+        lock(&self.state).saves.remove(&id);
         answer
     }
 
@@ -827,34 +882,10 @@ impl Session {
         begun.started(request, patience).map_err(|(refused, _)| refused)
     }
 
-    /// A pipe for each running member's channels, and the thread that fills it as its
-    /// bytes come, granting the host room for as many more as it took.
+    /// Its running members' outputs ([`pumped`]).
     fn pump_outputs(&self) -> Result<(), ImageRefusal> {
-        let mut outputs = lock(&self.outputs);
-        for m in self.members.iter().filter(|m| m.runs) {
-            for channel in [Channel::Stdout, Channel::Stderr] {
-                let (reader, writer) = io::pipe().map_err(|e| ImageRefusal::Os {
-                    what: "a member's pipe",
-                    kind: e.kind(),
-                })?;
-                outputs.insert((m.index, channel), reader);
-                let shared = self.shared.clone();
-                let member = m.index;
-                std::thread::Builder::new()
-                    .name("shards-api-member".into())
-                    .spawn(move || pump(&shared, member, channel, writer))
-                    .map_err(|e| ImageRefusal::Os {
-                        what: "a member's pump",
-                        kind: e.kind(),
-                    })?;
-                self.shared
-                    .credit(member, channel, AHEAD)
-                    .map_err(|e| ImageRefusal::Os {
-                        what: "the run host's credit",
-                        kind: e.kind(),
-                    })?;
-            }
-        }
+        let pumped = pumped(&self.shared, &self.members)?;
+        lock(&self.outputs).extend(pumped);
         Ok(())
     }
 
@@ -909,6 +940,40 @@ impl Session {
     }
 }
 
+/// A member's channel, by its index, and the pipe its bytes come out of ([`pumped`]).
+type Pumped = ((u32, Channel), io::PipeReader);
+
+/// A pipe for each of `members`' running members' channels, and the thread that fills it as
+/// its bytes come, the host granted room for its first [`AHEAD`] bytes and for as many more as
+/// each part took ([`pump`]). A credit that cannot go is no refusal: the host's channel is
+/// closed, as the run's end closes it (`read_answers`), or broken, and the run started all the
+/// same, its end its session's to tell (`State::end_seen`), as `pump` takes its own credits'
+/// (WHP at 3a05bc3f1: a template's run of `exit 3`, restored, ended before its first credit
+/// went, and its boot was refused `BrokenPipe`).
+fn pumped(shared: &Arc<Shared>, members: &[MemberInfo]) -> Result<Vec<Pumped>, ImageRefusal> {
+    let mut outputs = Vec::new();
+    for m in members.iter().filter(|m| m.runs) {
+        for channel in [Channel::Stdout, Channel::Stderr] {
+            let (reader, writer) = io::pipe().map_err(|e| ImageRefusal::Os {
+                what: "a member's pipe",
+                kind: e.kind(),
+            })?;
+            outputs.push(((m.index, channel), reader));
+            let pumping = shared.clone();
+            let member = m.index;
+            std::thread::Builder::new()
+                .name("shards-api-member".into())
+                .spawn(move || pump(&pumping, member, channel, writer))
+                .map_err(|e| ImageRefusal::Os {
+                    what: "a member's pump",
+                    kind: e.kind(),
+                })?;
+            let _ = shared.credit(member, channel, AHEAD);
+        }
+    }
+    Ok(outputs)
+}
+
 /// Moves member `member`'s `channel` into `writer` as its bytes come, and grants the host
 /// room for each part once written; ends at the channel's end, closing the pipe. A caller
 /// that let go of its end drops the rest, as a closed pipe drops `docker run`'s output,
@@ -940,7 +1005,9 @@ fn pump(shared: &Shared, member: u32, channel: Channel, mut writer: io::PipeWrit
 /// the room the host gave, and its end once the caller closes its pipe; ends with the input,
 /// the run or the host, dropping its pipe's read end so that the caller's writes fail then.
 fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
-    let mut buf = vec![0u8; AHEAD as usize];
+    // What the caller types into the member, a credential as often as not (D242): wiped here
+    // once sent, and the buffer as it goes.
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; AHEAD as usize]);
     loop {
         // Room first: nothing is read of the caller that its host has no room for.
         let room = shared.wait(Duration::MAX, |s| {
@@ -971,13 +1038,21 @@ fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
         if let Some(flow) = lock(&shared.state).inputs.get_mut(&member) {
             flow.room = flow.room.saturating_sub(n as u64);
         }
-        let mut payload = Vec::with_capacity(4 + n);
-        payload.extend_from_slice(&wire::Input::head(member));
-        payload.extend_from_slice(buf.get(..n).unwrap_or_default());
-        if shared.send(wire::to_host::INPUT, &payload).is_err() {
+        if send_input(shared, member, buf.get_mut(..n).unwrap_or_default()).is_err() {
             return;
         }
     }
+}
+
+/// Sends `typed`, bytes for member `member`'s stdin, as one `INPUT` frame in its parts, never
+/// copied whole into one (`send_parts`), then wipes them where they were read; the frame's
+/// own copy is wiped as it drops (D242).
+fn send_input(shared: &Shared, member: u32, typed: &mut [u8]) -> io::Result<()> {
+    let mut payload = zeroize::Zeroizing::new(Vec::with_capacity(4 + typed.len()));
+    payload.extend_from_slice(&wire::Input::head(member));
+    payload.extend_from_slice(typed);
+    zeroize::Zeroize::zeroize(typed);
+    shared.send_parts(wire::to_host::INPUT, &payload)
 }
 
 /// Reads the host's answers until it closes its stdout, each into the state; one that
@@ -1122,6 +1197,12 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
         k::RESIZED => {
             let answer = wire::ResizeAnswer::decode(payload).map_err(bad)?;
             if let Some(awaited) = state.resizes.get_mut(&answer.id) {
+                *awaited = Some(answer.result);
+            }
+        }
+        k::SAVED => {
+            let answer = wire::SaveAnswer::decode(payload).map_err(bad)?;
+            if let Some(awaited) = state.saves.get_mut(&answer.id) {
                 *awaited = Some(answer.result);
             }
         }
@@ -1542,6 +1623,14 @@ impl ImageGuest for Session {
         })
     }
 
+    fn save(&self, to: &Path, patience: Duration) -> Result<(), ImageRefusal> {
+        let to = to.to_str().ok_or_else(|| ImageRefusal::Spec {
+            what: "a save's directory",
+            why: format!("{}: not UTF-8", to.display()),
+        })?;
+        self.shared.save(to, patience)
+    }
+
     fn wait_ready(&self, seen: Option<Ready>, timeout: Duration) -> Result<Option<Ready>, ImageRefusal> {
         self.shared
             .wait(timeout, |s| ready_past(s, self.nesting, seen))
@@ -1609,6 +1698,32 @@ mod tests {
         }
     }
 
+    /// A member's typed stdin goes to its host as one `INPUT` frame and is wiped where it was
+    /// read (D242). Do: send typed bytes from a buffer of the test's. Expect: the buffer all
+    /// zeros after; the host reads one `INPUT` frame of the member's bytes, and nothing more.
+    #[test]
+    fn a_members_typed_input_is_wiped_where_it_was_read_once_sent() {
+        let (mut host, to_host) = io::pipe().unwrap();
+        let s = shared();
+        *lock(&s.to_host) = Some(to_host);
+        let mut typed = *b"sk-ant-typed-in-1234";
+        send_input(&s, 4, &mut typed).unwrap();
+        assert!(
+            typed.iter().all(|&b| b == 0),
+            "the typed bytes were left where they were read"
+        );
+        drop(lock(&s.to_host).take());
+        let mut frame = Vec::new();
+        let (kind, len) = wire::read_frame_into(&mut host, &mut frame).unwrap().unwrap();
+        assert_eq!(kind, wire::to_host::INPUT);
+        let input = wire::Input::decode(&frame[..len]).unwrap();
+        assert_eq!(
+            (input.member, input.bytes.0.as_slice()),
+            (4, b"sk-ant-typed-in-1234".as_slice())
+        );
+        assert!(wire::read_frame_into(&mut host, &mut frame).unwrap().is_none());
+    }
+
     /// Do have a run host write more diagnostics than are kept to quote, its caller naming a
     /// file for them partway, then end them. Expect: the file holding what was kept until it
     /// was named and everything after, whole and once; what is kept to quote still their last
@@ -1640,6 +1755,32 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), [&before[..], &after[..]].concat());
         let kept: Vec<u8> = lock(&shared.state).said.iter().copied().collect();
         assert_eq!(kept, after[after.len() - said_kept()..]);
+    }
+
+    /// Do pump the outputs of a run whose end came before them, its host's channel closed by
+    /// it, as a run that ends at once has (WHP at 3a05bc3f1: a template's run of `exit 3`,
+    /// restored, ended before its first credit went). Expect: a pipe for each channel of each
+    /// running member alone, each ending as the run has, and no refusal: the run started, and
+    /// its end is the session's to tell, never a boot refused `BrokenPipe`.
+    #[test]
+    fn a_run_ended_before_its_first_credit_still_has_its_outputs() {
+        let shared = Arc::new(shared());
+        lock(&shared.state).end = Some(RunEnd::Exited(3));
+        let member = |index, runs| MemberInfo {
+            index,
+            kind: wire::MemberKind::Harness,
+            name: format!("m{index}"),
+            runs,
+        };
+        let outputs = pumped(&shared, &[member(1, true), member(2, false)]).unwrap();
+        let channels: Vec<(u32, Channel)> = outputs.iter().map(|(key, _)| *key).collect();
+        assert_eq!(channels, [(1, Channel::Stdout), (1, Channel::Stderr)]);
+        for (key, mut reader) in outputs {
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).unwrap();
+            assert!(rest.is_empty(), "{key:?}");
+        }
+        assert_eq!(lock(&shared.state).end_seen(), Some(RunEnd::Exited(3)));
     }
 
     /// Do see a run's host gone without its run's end, as `wait_for` sees it, then stop the
@@ -1779,9 +1920,9 @@ mod tests {
         let (kind, first) = wire::read_frame(&mut from_host).unwrap().unwrap();
         assert_eq!(kind, wire::to_host::INPUT);
         let first = wire::Input::decode(&first).unwrap();
-        assert_eq!((first.member, first.bytes.as_slice()), (1, &payload[..7]));
+        assert_eq!((first.member, first.bytes.0.as_slice()), (1, &payload[..7]));
         assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(1024)), Ok(false));
-        let mut got = first.bytes;
+        let mut got = first.bytes.0.clone();
         loop {
             let (kind, frame) = wire::read_frame(&mut from_host).unwrap().unwrap();
             if kind == wire::to_host::INPUT_END {
@@ -1795,7 +1936,7 @@ mod tests {
                 break;
             }
             assert_eq!(kind, wire::to_host::INPUT);
-            got.extend(wire::Input::decode(&frame).unwrap().bytes);
+            got.extend_from_slice(&wire::Input::decode(&frame).unwrap().bytes.0);
         }
         assert_eq!(got, payload);
         feeding.join().unwrap();
@@ -2085,6 +2226,76 @@ mod tests {
             Err(ImageRefusal::Ended(RunEnd::Stopped))
         );
         assert!(lock(&s.state).resizes.is_empty());
+    }
+
+    /// A save's answer is kept for the ask awaiting it alone, as a room's is (D259): one for an
+    /// ask no longer awaited is dropped; one that is no answer breaks the channel. A save no
+    /// host hears is refused, typed, and leaves no ask awaited; a run that has ended is saved
+    /// no more.
+    #[test]
+    fn a_saves_answer_is_kept_for_its_awaited_ask_alone() {
+        let s = shared();
+        lock(&s.state).saves.insert(4, None);
+        let saved = |id, result| wire::SaveAnswer { id, result }.encode().unwrap();
+        assert_eq!(take(&s, wire::to_client::SAVED, &saved(4, Ok(()))), Ok(false));
+        assert_eq!(lock(&s.state).saves.get(&4), Some(&Some(Ok(()))));
+        let refused = Err((wire::SaveRefusal::State, "a save of it is under way".to_string()));
+        assert_eq!(take(&s, wire::to_client::SAVED, &saved(5, refused)), Ok(false));
+        assert!(
+            !lock(&s.state).saves.contains_key(&5),
+            "an answer no ask awaits is dropped"
+        );
+        assert!(take(&s, wire::to_client::SAVED, &[0, 0, 0, 4, 1, 9]).is_err());
+        let s = shared();
+        assert_eq!(
+            s.save("/home/u/.local/share/shards/saves/s1", BOUND),
+            Err(ImageRefusal::Os {
+                what: "the run host's save",
+                kind: io::ErrorKind::BrokenPipe
+            })
+        );
+        assert!(lock(&s.state).saves.is_empty());
+        lock(&s.state).end = Some(RunEnd::Stopped);
+        assert_eq!(
+            s.save("/home/u/.local/share/shards/saves/s1", BOUND),
+            Err(ImageRefusal::Ended(RunEnd::Stopped))
+        );
+        assert!(lock(&s.state).saves.is_empty());
+    }
+
+    /// A save is asked of the run's host on the run's own channel, its directory whole, and
+    /// its answer is the host's, typed (D259): a refusal comes back as `ImageRefusal::Save` by
+    /// what refused it, a save made as done, each to its own ask, and no ask is left awaited.
+    #[test]
+    fn a_save_rides_the_runs_channel_and_comes_back_typed() {
+        let mut h = hosted(None, &[]);
+        let to = "/home/u/.local/share/shards/saves/s1";
+        for result in [
+            Err((
+                wire::SaveRefusal::Destination,
+                "outside the run's home".to_string(),
+            )),
+            Ok(()),
+        ] {
+            let shared = Arc::clone(&h.shared);
+            let asking = std::thread::spawn(move || shared.save(to, BOUND));
+            let (kind, payload) = wire::read_frame(&mut h.sent).unwrap().unwrap();
+            assert_eq!(kind, wire::to_host::SAVE);
+            let ask = wire::SaveAsk::decode(&payload).unwrap();
+            assert_eq!(ask.to, to);
+            let answer = wire::SaveAnswer {
+                id: ask.id,
+                result: result.clone(),
+            };
+            says(&mut h.host, wire::to_client::SAVED, &answer.encode().unwrap());
+            assert_eq!(
+                asking.join().unwrap(),
+                result.map_err(|(cause, why)| ImageRefusal::Save(cause, why))
+            );
+        }
+        assert!(lock(&h.shared.state).saves.is_empty());
+        drop(h.host);
+        h.reader.join().unwrap();
     }
 
     /// A room no host hears is refused, typed, and leaves no ask awaited; a run that has

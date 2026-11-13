@@ -70,10 +70,11 @@ fn unconfigured() -> Refusal {
     }
 }
 
-/// `image`'s credential grants as Shards' run host takes them (C4): one for each credential, toward every host its
-/// grants name, each once, in order. Shards' grant is its run's, its network process ending the TLS of a granted host's
-/// flows whichever member's they are (D242), so each member's grant of a credential is one of the run's. Checked again
-/// here (C2), so no boot asks for one the check refuses; each the box's, Hex adding none.
+/// `image`'s credential grants as Shards' run host takes them (C4): one for each credential and placeholder, toward
+/// every host its grants with that placeholder name, each once, in order. Shards' grant is its run's, its network
+/// process ending the TLS of a granted host's flows whichever member's they are and filling a value in only where its
+/// grant's placeholder stands (D242), so each member's grant of a credential is one of the run's, by its placeholder.
+/// Checked again here (C2), so no boot asks for one the check refuses; each the box's, Hex adding none.
 pub(super) fn lowered(image: &ShardsImage) -> Result<Vec<CredentialGrant>, Refusal> {
     hex_api::check_credentials(&image.credentials, &image.grants)?;
     let exhausted = |bound: usize| Refusal::Exhausted {
@@ -85,20 +86,24 @@ pub(super) fn lowered(image: &ShardsImage) -> Result<Vec<CredentialGrant>, Refus
         .iter()
         .try_fold(0usize, |n, grant| n.checked_add(grant.toward.len()))
         .ok_or_else(|| exhausted(usize::MAX))?;
-    let mut each: Vec<(&str, &str)> = Vec::new();
+    let mut each: Vec<(&str, &str, &str)> = Vec::new();
     each.try_reserve_exact(hosts)
         .map_err(|_| exhausted(hosts))?;
     for grant in &image.credentials {
         for host in &grant.toward {
-            each.push((grant.reference.as_str(), host.as_str()));
+            each.push((
+                grant.reference.as_str(),
+                grant.placeholder.as_str(),
+                host.as_str(),
+            ));
         }
     }
     each.sort_unstable();
     each.dedup();
     let mut lowered: Vec<CredentialGrant> = Vec::new();
-    for (reference, host) in each {
+    for (reference, placeholder, host) in each {
         match lowered.last_mut() {
-            Some(last) if last.reference == reference => {
+            Some(last) if last.reference == reference && last.placeholder == placeholder => {
                 last.toward.try_reserve(1).map_err(|_| exhausted(hosts))?;
                 last.toward.push(host.to_owned());
             }
@@ -107,6 +112,7 @@ pub(super) fn lowered(image: &ShardsImage) -> Result<Vec<CredentialGrant>, Refus
                 lowered.push(CredentialGrant {
                     reference: reference.to_owned(),
                     toward: vec![host.to_owned()],
+                    placeholder: placeholder.to_owned(),
                 });
             }
         }

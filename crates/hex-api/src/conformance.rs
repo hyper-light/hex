@@ -269,7 +269,7 @@ pub const IMAGE_CASES: &[Case] = &[
     },
     Case {
         id: "HEX-IMG-8",
-        says: "create of a VM granting its member a credential toward a host no egress grant of its own reaches by name over TCP, toward no host, by a reference no store names, twice, a second credential toward one host, or toward a host another member reaches ungranted, is refused Invalid naming credentials, making nothing; a VM granting a credential toward its member's own egress hosts is made, and inspect shows its every credential grant, or, where its node leases no credentials, it is refused Unconfigured, making nothing",
+        says: "create of a VM granting its member a credential toward a host no egress grant of its own reaches by name over TCP, toward no host, by a reference no store names, twice, with a placeholder no request could carry, with another credential's placeholder, or toward a host another member reaches ungranted, is refused Invalid naming credentials, making nothing; a VM granting its member credentials toward its own egress hosts, two toward one host each by its own placeholder, is made, and inspect shows its every credential grant, or, where its node leases no credentials, it is refused Unconfigured, making nothing",
         run: image_credentials,
     },
 ];
@@ -1414,9 +1414,10 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
 }
 
 /// HEX-IMG-8 (joint plan step 33, AC-T7.7.2; Shards' D242; docs/design/credential-grants.md C2, C4): a credential grant
-/// grants no egress and names exactly whose flows its value is filled into, so one that could never be filled in as it
-/// says is refused, naming credentials, before anything is made. One that can is made where its node leases credentials,
-/// and inspect shows it as the record holds it, or refused as its node's configuration where it leases none.
+/// grants no egress and names exactly whose flows its value is filled into, where its own placeholder stands, so one
+/// that could never be filled in as it says is refused, naming credentials, before anything is made. Those that can,
+/// two toward one host among them, each by its own placeholder, are made where its node leases credentials, and inspect
+/// shows them as the record holds them, or refused as its node's configuration where it leases none.
 fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = id("image-credentials")?;
     let _ = rt.delete(&id);
@@ -1437,10 +1438,19 @@ fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             last: 443,
         },
     };
+    // Placeholders as kiln's broker mints them (Shards' D242): a visible marker, then 256 random bits in hex; one for
+    // each credential here.
+    let placeholder = |reference: &str| match reference {
+        "anthropic/team" => {
+            "kiln-placeholder-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+        _ => "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
     let credential = |member: &Member, reference: &str, toward: &[&str]| CredentialGrant {
         member: member.clone(),
         reference: reference.to_owned(),
         toward: toward.iter().map(|h| (*h).to_owned()).collect(),
+        placeholder: placeholder(reference).to_owned(),
     };
     let granted =
         |grants: Vec<Grant>, credentials: Vec<CredentialGrant>| -> Result<BoxSpec, String> {
@@ -1477,9 +1487,19 @@ fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         ),
         (
             providers(),
+            vec![CredentialGrant {
+                placeholder: "kiln placeholder".to_owned(),
+                ..credential(&claude, "anthropic/ada", &["api.anthropic.com"])
+            }],
+        ),
+        (
+            providers(),
             vec![
                 credential(&claude, "anthropic/ada", &["api.anthropic.com"]),
-                credential(&claude, "anthropic/team", &["api.anthropic.com"]),
+                CredentialGrant {
+                    placeholder: placeholder("anthropic/ada").to_owned(),
+                    ..credential(&claude, "anthropic/team", &["platform.claude.com"])
+                },
             ],
         ),
         (
@@ -1508,11 +1528,14 @@ fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             format!("a refused create ({credentials:?}) made {left:?}")
         })?;
     }
-    let credentials = vec![credential(
-        &claude,
-        "anthropic/ada",
-        &["api.anthropic.com", "platform.claude.com"],
-    )];
+    let credentials = vec![
+        credential(
+            &claude,
+            "anthropic/ada",
+            &["api.anthropic.com", "platform.claude.com"],
+        ),
+        credential(&claude, "anthropic/team", &["api.anthropic.com"]),
+    ];
     match rt.create(granted(providers(), credentials.clone())?) {
         Ok(_) => {
             let shown = rt.inspect(&id).map_err(|e| format!("inspect: {e}"));

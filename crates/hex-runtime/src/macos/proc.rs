@@ -184,7 +184,7 @@ impl BoxProc {
 
     fn observation_refusal(&self) -> Refusal {
         if let Some(members) = &self.members {
-            return members.uncertain();
+            return members.uncertain("its controller's end couldn't be observed");
         }
         let text = "native controller observation has no canonical member owner";
         let mut why = String::new();

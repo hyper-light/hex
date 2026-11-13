@@ -24,20 +24,19 @@ pub(super) struct Receipt {
     process: Mutex<BoxProc>,
 }
 
-fn uncertain(record: NativeRecord<'_>) -> Refusal {
-    record.refusal(hex_api::LifecycleCause::Uncertain)
-}
-
 fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
     if record.class()? != Class::Shards {
-        return Err(uncertain(record));
+        return Err(record
+            .uncertain("its record isn't a Shards VM's, which Windows host bounds are made for"));
     }
-    let allocation = record.allocation().ok_or_else(|| uncertain(record))?;
+    let allocation = record.allocation().ok_or_else(|| {
+        record.uncertain("its record holds no allocation to bound its Windows host by")
+    })?;
     allocation.guest()?;
     let bounds = Bounds {
-        cpu_max_milli: Some(
-            u32::try_from(allocation.resources.cpu_milli).map_err(|_| uncertain(record))?,
-        ),
+        cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).map_err(|_| {
+            record.uncertain("its allocation's CPU is past a Windows host bound's")
+        })?),
         memory_max: Some(allocation.resources.mem_bytes),
         ..Bounds::default()
     };
@@ -171,7 +170,9 @@ fn quote(line: &mut Vec<u16>, bound: usize, word: &OsStr) -> Result<(), Refusal>
 }
 
 fn job_name(runtime: &WinRuntime, record: NativeRecord<'_>) -> Result<Option<String>, Refusal> {
-    let scope = record.scope().ok_or_else(|| uncertain(record))?;
+    let scope = record
+        .scope()
+        .ok_or_else(|| record.uncertain("its record names no native scope to name its job by"))?;
     let Some(node) = runtime.node.as_ref() else {
         return Ok(None);
     };
@@ -254,13 +255,15 @@ pub(super) fn launch(
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     let crate::devices::ManagedLaunch::Shards(plan) = launch else {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its Windows launch isn't a Shards launch"));
     };
-    let paths = plan.runtime_paths().ok_or_else(|| uncertain(record))?;
+    let paths = plan
+        .runtime_paths()
+        .ok_or_else(|| record.uncertain("its Windows launch plan has no runtime paths"))?;
     let deadline = Instant::now()
         .checked_add(patience)
         .filter(|_| patience != Duration::MAX && !patience.is_zero())
-        .ok_or_else(|| uncertain(record))?;
+        .ok_or_else(|| record.uncertain("its Windows launch's patience isn't a finite time"))?;
     let deadline = crate::devices::check_managed_report(
         Some(&runtime.catalog),
         record,
@@ -269,7 +272,9 @@ pub(super) fn launch(
         deadline,
     )?;
     let request = plan.gpu_report_request();
-    record.scope().ok_or_else(|| uncertain(record))?;
+    record.scope().ok_or_else(|| {
+        record.uncertain("its record names no native scope as its Windows launch begins")
+    })?;
     let bounds = host_bounds(record)?;
     let shards_api::LaunchIo {
         stdout,
@@ -285,11 +290,16 @@ pub(super) fn launch(
         .map_err(|error| Refusal::os("preparing the private VM report handle", error))?;
     let report_words = match (request, report.as_ref()) {
         (Some(request), Some(writer)) => Some(
-            shards_api::physical::report_arguments(request.scope(), writer)
-                .map_err(|_| uncertain(record))?,
+            shards_api::physical::report_arguments(request.scope(), writer).map_err(|_| {
+                record.uncertain("its Windows native report's arguments couldn't be made")
+            })?,
         ),
         (None, None) => None,
-        _ => return Err(uncertain(record)),
+        _ => {
+            return Err(
+                record.uncertain("its Windows launch's report descriptor and request disagree")
+            );
+        }
     };
     // Prepare every argument, path and stream before a native controller can exist.
     let vsock = copy_path(plan.vsock())?;
@@ -321,12 +331,16 @@ pub(super) fn launch(
     let held = Held::Process(Arc::clone(&boxed));
     if runtime.holding.made(record.owner(), held.clone())? {
         boxed.not_submitted()?;
-        return Err(uncertain(record));
+        return Err(record.uncertain(
+            "its job's keeper was made before its Windows launch, so it wasn't submitted cleanly",
+        ));
     }
     let result = (|| {
         if Instant::now() >= deadline {
             boxed.not_submitted()?;
-            return Err(uncertain(record));
+            return Err(
+                record.uncertain("its Windows launch's deadline passed before it was submitted")
+            );
         }
         boxed.bind_vm(name.as_deref())?;
         // The existing passive keeper holds this same job before any VM/helper exists.
@@ -343,7 +357,7 @@ pub(super) fn launch(
         let started = sys::created(&process)
             .map_err(|error| Refusal::os("reading the VM controller's birth", error))?;
         if pid == 0 || started == 0 {
-            return Err(uncertain(record));
+            return Err(record.uncertain("its Windows VM controller's pid or start is zero"));
         }
         let identity = Identity {
             pid,
@@ -354,20 +368,29 @@ pub(super) fn launch(
             identity,
             process: Mutex::new(BoxProc::new(process, pid, boxed.shared())),
         };
-        boxed.managed.set(receipt).map_err(|_| uncertain(record))?;
+        boxed
+            .managed
+            .set(receipt)
+            .map_err(|_| record.uncertain("its Windows controller's receipt was set before"))?;
         let identity = &boxed
             .managed
             .get()
-            .ok_or_else(|| uncertain(record))?
+            .ok_or_else(|| {
+                record.uncertain("its Windows controller's receipt vanished as it was published")
+            })?
             .identity;
         publish(identity)?;
         if Instant::now() >= deadline {
-            return Err(uncertain(record));
+            return Err(record.uncertain(
+                "its Windows launch's deadline passed as its controller was published",
+            ));
         }
         sys::resume(&thread)
             .map_err(|error| Refusal::os("resuming the recorded VM controller", error))?;
         if !runtime.holding.ready(record.owner())? {
-            return Err(uncertain(record));
+            return Err(
+                record.uncertain("its Windows VM keeper wasn't ready after its controller resumed")
+            );
         }
         Ok(shards_api::managed_receipt(Arc::clone(&boxed)))
     })();
@@ -385,14 +408,18 @@ pub(super) fn attach(
     record: NativeRecord<'_>,
     identity: Option<&Identity>,
 ) -> Result<ManagedReceipt, Refusal> {
-    record.scope().ok_or_else(|| uncertain(record))?;
+    record.scope().ok_or_else(|| {
+        record.uncertain("its record names no native scope as it is attached on Windows")
+    })?;
     if identity.is_none()
         && !matches!(
             record.stage(),
             NativeStage::Creating | NativeStage::Deleting
         )
     {
-        return Err(uncertain(record));
+        return Err(record.uncertain(
+            "its Windows job box isn't a VM's, or isn't its record's scope, as it is attached",
+        ));
     }
     let boxed = match existing(runtime, record)? {
         Some(boxed) => boxed,
@@ -402,7 +429,11 @@ pub(super) fn attach(
         match boxed.managed.get() {
             Some(receipt) if receipt.identity == *expected => {}
             None if boxed.recovered() && same_init(boxed.original_init(), expected) => {}
-            _ => return Err(uncertain(record)),
+            _ => {
+                return Err(record.uncertain(
+                    "its Windows controller isn't the one it expected as it is attached",
+                ));
+            }
         }
     }
     // A recovered scope without its controller has no usable identity; its API view can only clean
@@ -423,12 +454,14 @@ fn existing(
     let Ok(at) = super::owner_index(&boxes, record.owner()) else {
         return Ok(None);
     };
-    let (_, slot) = boxes.get(at).ok_or_else(|| uncertain(record))?;
+    let (_, slot) = boxes
+        .get(at)
+        .ok_or_else(|| record.uncertain("its Windows slot vanished as it was found"))?;
     match slot.physical() {
         Some(Held::Process(boxed)) if boxed.matches_vm(record, commitment) => {
             Ok(Some(Arc::clone(boxed)))
         }
-        _ => Err(uncertain(record)),
+        _ => Err(record.uncertain("its Windows slot isn't a VM's with its record's scope")),
     }
 }
 
@@ -440,7 +473,7 @@ pub(super) fn set_rate(
     rate: u64,
 ) -> Result<(), Refusal> {
     existing(runtime, record)?
-        .ok_or_else(|| uncertain(record))?
+        .ok_or_else(|| record.uncertain("its node holds no Windows VM slot to set its rate on"))?
         .set_cpu_cap(rate, runtime.processors)
 }
 
@@ -448,9 +481,10 @@ pub(super) fn set_rate(
 /// terminated as the receipt's own stop terminates it; its end is observed as any other. Only a VM this node holds is
 /// ended: one it hasn't taken back is refused, uncertain.
 pub(super) fn stop(runtime: &WinRuntime, record: NativeRecord<'_>) -> Result<(), Refusal> {
-    let boxed = existing(runtime, record)?.ok_or_else(|| uncertain(record))?;
+    let boxed = existing(runtime, record)?
+        .ok_or_else(|| record.uncertain("its node holds no Windows VM slot to stop"))?;
     if !boxed.is_vm() {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its Windows slot isn't a VM's as it is stopped"));
     }
     boxed
         .stop_managed()
@@ -512,11 +546,13 @@ fn cold(
     if let Some(identity) = identity
         && !same_init(record.init(), identity)
     {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its cold Windows controller isn't its record's"));
     }
-    let name = job_name(runtime, record)?.ok_or_else(|| uncertain(record))?;
+    let name = job_name(runtime, record)?.ok_or_else(|| {
+        record.uncertain("its record names no native scope to name its cold job by")
+    })?;
     let Some(keeping) = runtime.holding.keeper.as_ref() else {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its node runs no Windows VM keeper to take it back"));
     };
     let path = super::keeper::vm::path(&keeping.state, record.owner())?;
     let vsock = identity
@@ -531,9 +567,10 @@ fn cold(
         Some(&name),
         &runtime.holding,
     )?;
-    let held = super::keeper::vm::read(&path)?.ok_or_else(|| uncertain(record))?;
+    let held = super::keeper::vm::read(&path)?
+        .ok_or_else(|| record.uncertain("its Windows VM keeper holds no record of it"))?;
     if !held.commits(boxed.vm_commitment()) {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its Windows VM keeper's record commits another scope"));
     }
     let _keeper = keeping
         .keeper
@@ -541,22 +578,22 @@ fn cold(
         .map_err(|_| pending("native keeper lock is poisoned"))?;
     let process = sys::open_process(held.pid)
         .map_err(|error| Refusal::os("opening the committed VM keeper", error))?
-        .ok_or_else(|| uncertain(record))?;
+        .ok_or_else(|| record.uncertain("its committed Windows VM keeper is gone"))?;
     if sys::created(&process)
         .map_err(|error| Refusal::os("checking the committed VM keeper birth", error))?
         != held.started
         || sys::wait(&process, 0)
             .map_err(|error| Refusal::os("observing the committed VM keeper lifetime", error))?
     {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its committed Windows VM keeper isn't the process it named"));
     }
     let job = sys::Job::open(&name)
         .map_err(|error| Refusal::os("opening the committed native VM scope", error))?
-        .ok_or_else(|| uncertain(record))?;
+        .ok_or_else(|| record.uncertain("its committed Windows job is gone"))?;
     if !sys::same_in(&process, held.value, job.borrowed())
         .map_err(|error| Refusal::os("checking the committed native VM kernel object", error))?
     {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its committed Windows job isn't the kernel object it named"));
     }
     boxed.adopt_vm(job)?;
     runtime.holding.reserve(record.owner(), &[], None, None)?;
@@ -573,15 +610,18 @@ fn cold(
         )?;
         if let (Some(identity), Some(vsock)) = (identity, vsock) {
             match controller(&boxed, identity, vsock) {
-                Ok(receipt) => boxed.managed.set(receipt).map_err(|_| uncertain(record))?,
-                Err(error) => boxed
-                    .observation_failure
-                    .set(error)
-                    .map_err(|_| uncertain(record))?,
+                Ok(receipt) => boxed.managed.set(receipt).map_err(|_| {
+                    record.uncertain("its cold Windows controller's receipt was set before")
+                })?,
+                Err(error) => boxed.observation_failure.set(error).map_err(|_| {
+                    record.uncertain("its cold Windows controller's failure was set before")
+                })?,
             }
         }
         if cancelled || !runtime.holding.ready(record.owner())? {
-            return Err(uncertain(record));
+            return Err(record.uncertain(
+                "its cold Windows take-back was cancelled, or its keeper wasn't ready",
+            ));
         }
         Ok(())
     })();
@@ -597,12 +637,14 @@ pub(super) fn finalize(
     record: NativeRecord<'_>,
     identity: Option<&Identity>,
 ) -> Result<(), Refusal> {
-    record.scope().ok_or_else(|| uncertain(record))?;
+    record.scope().ok_or_else(|| {
+        record.uncertain("its record names no native scope as it is finalized on Windows")
+    })?;
     if !matches!(
         record.stage(),
         NativeStage::Deleting | NativeStage::Released
     ) {
-        return Err(uncertain(record));
+        return Err(record.uncertain("it isn't deleting or released as it is finalized on Windows"));
     }
     let boxed = match existing(runtime, record)? {
         Some(boxed) => boxed,
@@ -614,17 +656,22 @@ pub(super) fn finalize(
         (Some(expected), None)
             if boxed.recovered() && same_init(boxed.original_init(), expected) => {}
         (None, None) => {}
-        _ => return Err(uncertain(record)),
+        _ => {
+            return Err(record
+                .uncertain("its Windows controller isn't the one it expected as it is finalized"));
+        }
     }
     // This query retains keeper/slot ownership. Only the durable Released caller may discharge it.
     if !matches!(
-        boxed.terminal().map_err(|_| uncertain(record))?,
+        boxed.terminal().map_err(
+            |_| record.uncertain("its Windows scope's end couldn't be read as it is finalized")
+        )?,
         Some(ManagedEnd {
             scope: TerminalScope::Released,
             ..
         })
     ) {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its Windows scope isn't released as it is finalized"));
     }
     boxed.release_scope()
 }
@@ -636,9 +683,11 @@ fn finalized_keeper_is_gone(
     record: NativeRecord<'_>,
 ) -> Result<bool, Refusal> {
     let Some(keeping) = runtime.holding.keeper.as_ref() else {
-        return Err(uncertain(record));
+        return Err(record.uncertain("its node runs no Windows VM keeper to prove its end"));
     };
-    let scope = record.scope().ok_or_else(|| uncertain(record))?;
+    let scope = record.scope().ok_or_else(|| {
+        record.uncertain("its record names no native scope as its keeper's end is proven")
+    })?;
     let commitment = record.commitment()?;
     let path = super::keeper::vm::path(&keeping.state, record.owner())?;
     let _keeper = keeping
@@ -650,7 +699,9 @@ fn finalized_keeper_is_gone(
         return Ok(true);
     };
     if !held.commits(Some((scope, commitment))) {
-        return Err(uncertain(record));
+        return Err(record.uncertain(
+            "its Windows VM keeper's record commits another scope as its end is proven",
+        ));
     }
     if let Some(process) = sys::open_process(held.pid)
         .map_err(|error| Refusal::os("observing the finalized VM keeper", error))?
