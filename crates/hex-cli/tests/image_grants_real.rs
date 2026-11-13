@@ -5,8 +5,8 @@
 //! (`image_grants_probe/probe.rs`; its context made by `scripts/grants-probe/build.sh`, whose header says what its
 //! Agentfile grants).
 //!
-//! - **What awaits Shards is refused, typed.** The probe granted its provider by name, or the host's service, is
-//!   refused `Awaits(MemberDestinations)` at create, and nothing is made (N4).
+//! - **A destination its image grants not refuses the boot.** The probe granted a name its image doesn't grant is made,
+//!   and its start refused `Invalid`, past the image's grants: Shards' run host refused it before anything started.
 //! - **No grant, no network.** A VM granted nothing runs a command, in its image's own shell, that ends 0 only where
 //!   `lo` is its one interface: with no NIC, no name is answered and no packet leaves. A VM of its members alone
 //!   granted nothing runs with no network process (Shards' `shards-net`, one per networked microVM, D36), and no
@@ -18,6 +18,10 @@
 //!   it came in on that port and that none of its own egress connected: its provider and an ungranted name, the
 //!   host's service, and the image's port egress, every one its image grants dropped by Hex's narrowing. No process of
 //!   the run holds a flow past the host's loopback, and the host's service, a listener of this test's, took nothing.
+//! - **Its granted destinations alone, reached.** A VM of its members alone is granted that publish and, by TCP, the
+//!   probe's provider by name and the host's service (kiln's endpoint, `host.docker.internal`): the probe says it
+//!   reached both, its ungranted name and the image's port egress nowhere, and the host's service, this test's
+//!   listener, took its connection (N4: the run host holds every member to its reach of the destinations kept).
 //! - **A publish reaching the run's own command stops it.** A VM with a command of its own is granted a publish of a
 //!   port its image gives no member, which Shards gives that command (D122): its start is refused `Invalid`, naming
 //!   the run's own command, the VM is stopped, and no run host is left.
@@ -28,14 +32,18 @@
 //! the run says so (`GRANTS-OWED`), while every check of the VM itself, its inspect and the host's service runs alike.
 //!
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`: on Linux
-//! inside a cgroup delegated to this binary (`HEX_DELEGATED`); with image_real's node inputs (`SHARDS_BIN`,
-//! `SHARDS_KERNEL`, the node's `HEX_GUEST_*`, `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a
-//! short path where the node's socket lies, `HEX_IMAGE_WAIT_MS` and `HEX_WAITS_CENSUS_MAX`), and the probe's:
+//! inside a cgroup delegated to this binary (`HEX_DELEGATED`); with image_real's node inputs (`SHARDS_BIN`, which
+//! must be Hex's `shards`, `scripts/shards-gpu/build.sh`'s, whose run host holds each member to its reach;
+//! `SHARDS_KERNEL` and `SHARDS_INIT`, the kernel the run hosts boot and the init beside it, which Shards takes
+//! together, the init the `shards` build carries (build.sh's `shards-init`); the node's `HEX_GUEST_*`,
+//! `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a short path where the node's socket lies,
+//! `HEX_IMAGE_WAIT_MS` and `HEX_WAITS_CENSUS_MAX`), and the probe's:
 //! - the probe image, in the node's Shards home before the node starts: `HEX_GRANTS_CONTEXT`, the context
 //!   `scripts/grants-probe/build.sh` made, built there; or else `HEX_GRANTS_IMAGE`, `NAME@sha256:...`, pulled there;
 //! - the recipe's own inputs, as it was given them: `HEX_GRANTS_MEMBER`, `HEX_GRANTS_PORT`,
-//!   `HEX_GRANTS_UNGRANTED_PORT`, `HEX_GRANTS_PROVIDER`, `HEX_GRANTS_UNGRANTED`, `HEX_GRANTS_HOST_PORT` (where this
-//!   test listens on the host's loopback for the probe's try) and `HEX_GRANTS_OPEN`;
+//!   `HEX_GRANTS_UNGRANTED_PORT`, `HEX_GRANTS_PROVIDER` (a provider this host reaches at TCP 443),
+//!   `HEX_GRANTS_UNGRANTED`, `HEX_GRANTS_HOST_PORT` (where this test listens on the host's loopback for the probe's
+//!   try) and `HEX_GRANTS_OPEN`;
 //! - `HEX_GRANTS_COMMAND_PORT`: a TCP port the image gives no member, nor declares as egress.
 //!
 //! Run: `cargo test --release --locked -p hex-cli --test image_grants_real -- --ignored --nocapture` with those set.
@@ -57,7 +65,7 @@ use std::time::Duration;
 
 use hex_api::{
     Allocation, Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Destination, Exit, Grant,
-    Member, MemberKind, Ports, Proto, Receiver, Refusal, Runtime, ShardsImage, Signal, Upstream,
+    Member, MemberKind, Ports, Proto, Receiver, Refusal, Runtime, ShardsImage, Signal,
 };
 use hex_client::Client;
 use hex_core::patience::Patience;
@@ -536,36 +544,41 @@ fn stop_and_delete(client: &Client, id: &BoxId) {
     client.delete(id).unwrap();
 }
 
-/// Joint plan step 15 (N4): do create the probe granted, in turn, its provider by name and the host's service, each
-/// by TCP at the port its image grants; expect each refused `Awaits(MemberDestinations)` and nothing made.
-fn destinations_await_shards(client: &Client, probe: &Probe, allocation: Allocation) {
-    let tcp = |port| Ports {
-        proto: Proto::Tcp,
-        first: port,
-        last: port,
-    };
-    for grant in [
-        Grant::Egress {
+/// Joint plan step 15 (N4): do create, then start, the probe granted by TCP a name its image grants not (its ungranted
+/// name). Expect it made, and its start refused Invalid, past the image's grants: Shards' run host refused it before
+/// anything started, so the box ended and holds nothing.
+fn a_destination_its_image_grants_not_refuses_the_boot(
+    client: &Client,
+    probe: &Probe,
+    allocation: Allocation,
+) {
+    let spec = image_box(
+        "grants-wider",
+        &probe.image,
+        allocation,
+        None,
+        vec![Grant::Egress {
             member: probe.member.clone(),
-            to: Destination::Name(probe.provider.clone()),
-            ports: tcp(443),
-        },
-        Grant::Host {
-            member: probe.member.clone(),
-            ports: tcp(probe.host_port),
-        },
-    ] {
-        let spec = image_box("grants-awaits", &probe.image, allocation, None, vec![grant]);
-        let id = spec.id.clone();
-        assert_eq!(
-            client.create(spec),
-            Err(Refusal::Awaits {
-                needs: Upstream::MemberDestinations
-            })
-        );
-        assert_eq!(client.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
-    }
-    eprintln!("GRANTS-CHECK-1 a destination awaits Shards (MemberDestinations), nothing made");
+            to: Destination::Name(probe.ungranted.clone()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }],
+    );
+    let id = spec.id.clone();
+    client.create(spec).unwrap();
+    let refused = client.start(&id);
+    eprintln!("GRANTS-CHECK-1 {id} start: {refused:?}");
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { what: "shards image", why }) if why.contains("past the image's grants")),
+        "{refused:?}"
+    );
+    let ended = client.inspect(&id).unwrap();
+    assert_eq!(ended.state, BoxState::Empty);
+    assert!(ended.published.is_empty());
+    client.delete(&id).unwrap();
 }
 
 /// Joint plan step 15, T-T7.7.1: do run a VM granted nothing whose command, in its image's own shell, ends 0 only where
@@ -720,6 +733,106 @@ fn one_publish_published_alone(client: &Client, node: u32, probe: &Probe, alloca
     stop_and_delete(client, &id);
 }
 
+/// Joint plan step 15, AC-T7.7.2 (N4): do run a VM of its members alone granted the probe's publish and, by TCP, its
+/// provider by name and the host's service at the port its image grants as `host.docker.internal`, while this test
+/// listens there on the host's loopback. Expect: inspect shows the three grants and the publish reaching the probe;
+/// the probe says it came in on its port, reached its provider and the host's service, and its ungranted name and the
+/// image's port egress nowhere; and the host's service took the probe's connection. So a harness reaches exactly its
+/// granted provider and kiln's endpoint.
+fn granted_destinations_are_reached_alone(client: &Client, probe: &Probe, allocation: Allocation) {
+    let service = TcpListener::bind((Ipv4Addr::LOCALHOST, probe.host_port)).unwrap();
+    service.set_nonblocking(true).unwrap();
+    let tcp = |port| Ports {
+        proto: Proto::Tcp,
+        first: port,
+        last: port,
+    };
+    let grants = vec![
+        publish(probe, probe.port),
+        Grant::Egress {
+            member: probe.member.clone(),
+            to: Destination::Name(probe.provider.clone()),
+            ports: tcp(443),
+        },
+        Grant::Host {
+            member: probe.member.clone(),
+            ports: tcp(probe.host_port),
+        },
+    ];
+    let spec = image_box(
+        "grants-reach",
+        &probe.image,
+        allocation,
+        None,
+        grants.clone(),
+    );
+    let id = spec.id.clone();
+    client.create(spec).unwrap();
+    client.start(&id).unwrap();
+    let shown = client.inspect(&id).unwrap();
+    eprintln!(
+        "GRANTS-CHECK-4 {id} granted {:?}, published {:?}",
+        shown.grants, shown.published
+    );
+    assert_eq!(shown.grants, grants);
+    let [published] = shown.published.as_slice() else {
+        panic!("published ports: {:?}", shown.published);
+    };
+    assert_eq!(published.receiver, Receiver::Named { port: probe.port });
+    let at = published.at;
+    let mut answer = String::new();
+    let looks = hex_testkit::waits::until(
+        &MEMBER_ANSWERED,
+        &format!("the probe's answer at {at}"),
+        || {
+            answer.clear();
+            TcpStream::connect(at)
+                .and_then(|mut c| c.read_to_string(&mut answer))
+                .is_ok()
+                && !answer.is_empty()
+        },
+    )
+    .unwrap();
+    eprintln!("GRANTS-CHECK-4 the probe said {answer:?} after {looks} looks");
+    let report = Report::parse(&answer).unwrap();
+    assert_eq!(report.ingress, probe.port);
+    let outcome = |label: &str| {
+        report
+            .egress
+            .iter()
+            .find(|(target, _)| target.label == label)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or_else(|| panic!("no {label} target in {answer:?}"))
+    };
+    assert_eq!(
+        outcome("provider"),
+        Outcome::Connected,
+        "its granted provider"
+    );
+    assert_eq!(
+        outcome("host"),
+        Outcome::Connected,
+        "the host's service, kiln's endpoint"
+    );
+    assert_ne!(
+        outcome("ungranted"),
+        Outcome::Connected,
+        "a name no grant names"
+    );
+    assert_ne!(
+        outcome("open"),
+        Outcome::Connected,
+        "the image's port egress, dropped"
+    );
+    assert!(
+        service.accept().is_ok(),
+        "the host's service at {} took no connection",
+        probe.host_port
+    );
+    eprintln!("GRANTS-CHECK-4 {id}: its provider and the host's service reached, nothing else");
+    stop_and_delete(client, &id);
+}
+
 /// Joint plan step 15 (N6): do create, then start, a VM with a command of its own granted a publish of a port its
 /// image gives no member, which Shards gives that command (D122). Expect: the start refused Invalid naming the run's
 /// own command, the box ended by KILL with nothing published, and no run host left under the node.
@@ -742,7 +855,7 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
     let id = spec.id.clone();
     client.create(spec).unwrap();
     let refused = client.start(&id);
-    eprintln!("GRANTS-CHECK-4 {id} start: {refused:?}");
+    eprintln!("GRANTS-CHECK-5 {id} start: {refused:?}");
     assert!(
         matches!(&refused, Err(Refusal::Invalid { what: "grants", why }) if why.contains("the run's own command")),
         "{refused:?}"
@@ -902,6 +1015,9 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
     let shards = PathBuf::from(input("SHARDS_BIN"));
     let kernel = PathBuf::from(input("SHARDS_KERNEL"));
     assert!(kernel.is_file(), "SHARDS_KERNEL {kernel:?} is no file");
+    // A kernel goes with its init in Shards (`--kernel` and `--init` together); the node's run hosts inherit both.
+    let init = PathBuf::from(input("SHARDS_INIT"));
+    assert!(init.is_file(), "SHARDS_INIT {init:?} is no file");
     let wait = Duration::from_millis(number("HEX_IMAGE_WAIT_MS"));
     assert!(!wait.is_zero(), "HEX_IMAGE_WAIT_MS is 0");
     let work = PathBuf::from(input("HEX_IMAGE_WORK"));
@@ -961,9 +1077,10 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
             "{:?}",
             client.classes()
         );
-        destinations_await_shards(&client, &probe, allocation);
+        a_destination_its_image_grants_not_refuses_the_boot(&client, &probe, allocation);
         no_grant_no_network(&client, pid, &probe, allocation);
         one_publish_published_alone(&client, pid, &probe, allocation);
+        granted_destinations_are_reached_alone(&client, &probe, allocation);
         a_publish_reaching_the_runs_own_command_stops_it(&client, pid, &probe, allocation);
         let _ = done.send(client.list().unwrap());
     });
