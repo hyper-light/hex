@@ -1016,6 +1016,7 @@ fn unused(io: &Record, name: &str, held: u64) {
             footprint_bytes: held,
             resident_bytes: held,
             guest_ns: vec![0; 16],
+            window: Duration::ZERO,
         },
     );
 }
@@ -1174,6 +1175,7 @@ impl hex_api::Runtime for Images {
             footprint_bytes: GIB,
             resident_bytes: GIB,
             guest_ns: Vec::new(),
+            window: Duration::ZERO,
         })
     }
 }
