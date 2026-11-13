@@ -344,9 +344,7 @@ impl ImageGuest for ModelGuest {
         let end = self.run.end.lock().unwrap().clone();
         Ok(end.or_else(|| {
             self.run.gone.lock().unwrap().as_ref().map(|said| {
-                RunEnd::Failed(format!(
-                    "the run host exited without its run's end: {said}"
-                ))
+                RunEnd::Failed(format!("the run host exited without its run's end: {said}"))
             })
         }))
     }
@@ -625,6 +623,9 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
 /// makes either, so each measures, for its fact alone (hex_testkit::waits).
 static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
 static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
+/// A run whose host exited without its run's end, reaped through its stop and shown Empty: a fact of its own, measuring
+/// alike.
+static HOST_GONE_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_host_gone_shown");
 
 /// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
@@ -745,7 +746,7 @@ fn a_run_whose_host_exited_without_its_end_ends_in_its_hosts_words() {
     runtime.start(&id).unwrap();
     let said = "init: the microVM's last words";
     *images.run.gone.lock().unwrap() = Some(said.to_owned());
-    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    let info = shown(&runtime, &id, BoxState::Empty, &HOST_GONE_SHOWN);
     let words = format!("the run host exited without its run's end: {said}");
     assert_eq!(
         (info.exit, info.ended.as_deref()),
