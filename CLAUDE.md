@@ -136,7 +136,6 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
   membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit, and
   `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped,
-  and its user, so a capacity holder's declared process group is proved that holder's (CV12),
   and `proc_pidinfo(PROC_PIDTASKINFO)` whether a member has a thread running or waiting for a core, so a run
   that gave it none shows nothing of its rate; `proc_pidinfo(PROC_PIDLISTTHREADS, PROC_PIDTHREADINFO)` read
   a VM process's threads by name and CPU, and `PROC_PIDREGIONINFO`/`PROC_PIDREGIONPATHINFO` its memory map
@@ -235,10 +234,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   disposal of a different object, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). Its HCS request
   wake event is reset before scanning durable requests (`ResetEvent`), and the keeper waits on its
   stop and request events together (`WaitForMultipleObjects`), retaining native creation ownership
-  after the node ends without periodically probing the request folder. For a capacity holder's declared job
-  (docs/design/capacity-view.md CV12) it opens the job to read (`OpenJobObjectW`), proves its owner
-  (`GetKernelObjectSecurity`, `GetSecurityDescriptorOwner`, `IsValidSid`, `GetLengthSid`) and reads its members'
-  private memory (`OpenProcess`, `K32GetProcessMemoryInfo`). `windows-sys` binds these as `unsafe` foreign
+  after the node ends without periodically probing the request folder. `windows-sys` binds these as `unsafe` foreign
   functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
