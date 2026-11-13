@@ -169,7 +169,7 @@ mod unavailable_cause {
                 "only qualified backing observation causes may be encoded",
             ));
         }
-        let Refusal::Backing { key, cause } = value else {
+        let Refusal::Backing { key, cause, .. } = value else {
             return Err(serde::ser::Error::custom(
                 "unavailable observation has no backing identity",
             ));
@@ -188,6 +188,7 @@ mod unavailable_cause {
         let cause = Refusal::Backing {
             key: value.key,
             cause: value.cause,
+            why: None,
         };
         if !BackendUnavailable::qualified(crate::Class::Firecracker, &cause) {
             return Err(de::Error::custom(
@@ -244,7 +245,7 @@ impl BackendUnavailable {
         if let Some(backing) = backing {
             offer.check_backing(backing)?;
         }
-        let Refusal::Backing { key, cause } = &self.cause else {
+        let Refusal::Backing { key, cause, .. } = &self.cause else {
             return Err(invalid_report("unavailable route has no backing identity"));
         };
         if self.backend != offer.key.backend_class() || offer.backing != Some(*key) {
@@ -263,16 +264,30 @@ impl BackendUnavailable {
 
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         self.check()?;
-        let Refusal::Backing { key, cause } = &self.cause else {
+        let Refusal::Backing { key, cause, why } = &self.cause else {
             return Err(invalid_report(
                 "unavailable observation has no backing identity",
             ));
+        };
+        let why = match why {
+            None => None,
+            Some(why) => {
+                let mut text = String::new();
+                text.try_reserve_exact(why.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "native backing refusal reason bytes",
+                        bound: why.len(),
+                    })?;
+                text.push_str(why);
+                Some(text)
+            }
         };
         Ok(Self {
             backend: self.backend,
             cause: Refusal::Backing {
                 key: *key,
                 cause: *cause,
+                why,
             },
         })
     }
@@ -806,6 +821,35 @@ mod tests {
 mod unavailable_tests {
     use super::*;
 
+    /// Joint plan step 14, (B): an unavailable VM backend keeps its refusal's reason, the refusing site's words, in its
+    /// JSON form as on the wire. Do encode one, Uncertain with a reason. Expect the reason under its cause's `why`, and
+    /// the diagnostic read back as it was, its clone the same.
+    #[test]
+    fn w14_b_an_unavailable_backends_reason_is_kept() {
+        let diagnostic = BackendUnavailable::from_refusal(
+            crate::Class::Shards,
+            Refusal::Backing {
+                key: crate::BackingKey {
+                    pool: [1; 32],
+                    generation: [2; 16],
+                },
+                cause: crate::LifecycleCause::Uncertain,
+                why: Some("its scope's end wasn't seen after its stop".to_owned()),
+            },
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(
+            encoded["cause"]["why"],
+            serde_json::json!("its scope's end wasn't seen after its stop")
+        );
+        assert_eq!(
+            serde_json::from_value::<BackendUnavailable>(encoded).unwrap(),
+            diagnostic
+        );
+        assert_eq!(diagnostic.try_clone().unwrap(), diagnostic);
+    }
+
     /// AC-T7.4.1: explicit VM uncertainty cannot fabricate GPUs or hide invalid native authority.
     #[test]
     fn qualified_vm_unavailable_is_bounded_unique_and_preserves_actual_report() {
@@ -815,6 +859,7 @@ mod unavailable_tests {
                 generation: [2; 16],
             },
             cause: crate::LifecycleCause::Uncertain,
+            why: None,
         };
         let mut report = PhysicalReport {
             authority: "actual-native-owner".into(),
@@ -874,6 +919,7 @@ mod unavailable_tests {
                         generation: [2; 16],
                     },
                     cause,
+                    why: None,
                 },
             )
             .unwrap();
@@ -882,7 +928,12 @@ mod unavailable_tests {
                 serde_json::from_value::<BackendUnavailable>(encoded.clone()).unwrap(),
                 diagnostic
             );
-            encoded["cause"]["why"] = serde_json::json!("general refusal text must not decode");
+            assert!(
+                encoded["cause"].get("why").is_none(),
+                "no reason, no field (append-only)"
+            );
+            // Its refusal's reason (joint plan step 14) is its own field; any other text still refuses.
+            encoded["cause"]["text"] = serde_json::json!("general refusal text must not decode");
             assert!(serde_json::from_value::<BackendUnavailable>(encoded).is_err());
         }
         let first = BackendUnavailable::from_refusal(crate::Class::Firecracker, refused()).unwrap();
@@ -954,6 +1005,7 @@ mod unavailable_tests {
             Refusal::Backing {
                 key,
                 cause: LifecycleCause::Pending,
+                why: None,
             },
         )
         .unwrap();
@@ -968,6 +1020,7 @@ mod unavailable_tests {
             Refusal::Backing {
                 key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             },
         )
         .unwrap();

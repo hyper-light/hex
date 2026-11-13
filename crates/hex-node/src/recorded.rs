@@ -546,6 +546,7 @@ pub(crate) fn check_single_consumer(
             return Err(Refusal::Backing {
                 key: source,
                 cause: hex_api::LifecycleCause::Busy,
+                why: None,
             });
         }
     }
@@ -738,6 +739,7 @@ pub(crate) fn preflight_records(
         return Err(Refusal::Backing {
             key: duplicate,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         });
     }
     scopes.sort_unstable();
@@ -774,7 +776,7 @@ impl Transaction<'_> {
                     Err(error) => error,
                 }
             }
-            TransactionOwner::Pool(key) => Refusal::Backing { key: *key, cause },
+            TransactionOwner::Pool(key) => Refusal::Backing { key: *key, cause, why: None },
         }
     }
     fn box_id(&self) -> Result<&BoxId, Refusal> {
@@ -832,6 +834,7 @@ impl Transaction<'_> {
                     return Err(Refusal::Backing {
                         key,
                         cause: hex_api::LifecycleCause::Pending,
+                        why: None,
                     });
                 }
                 operation(native)
@@ -879,11 +882,13 @@ impl Transaction<'_> {
                             .ok_or(Refusal::Backing {
                                 key,
                                 cause: hex_api::LifecycleCause::Uncertain,
+                                why: None,
                             })?;
                     if pool.phase != hex_api::BackingPhase::Released || pool.exit.is_none() {
                         return Err(Refusal::Backing {
                             key,
                             cause: hex_api::LifecycleCause::Pending,
+                            why: None,
                         });
                     }
                     route.check_backing_parts(
@@ -1198,6 +1203,7 @@ pub(crate) fn handoff_transaction(
     let refused = || Refusal::Backing {
         key: *source,
         cause: hex_api::LifecycleCause::Uncertain,
+        why: None,
     };
     let pool = store.read_pool(&source.pool)?.ok_or_else(refused)?;
     pool.check()?;
@@ -1288,6 +1294,7 @@ fn check_pool_claims(
     let refused = || Refusal::Backing {
         key: record.key,
         cause: hex_api::LifecycleCause::Busy,
+        why: None,
     };
     let catalog = catalog.ok_or_else(refused)?;
     let boxes = store.all()?;
@@ -2338,6 +2345,7 @@ impl<R: Recover> Runtime for Recorded<R> {
             .ok_or(Refusal::Backing {
                 key: *key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             })?;
         let mut result = None;
         hex_runtime::devices::Books::with_pool_transaction(

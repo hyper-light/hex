@@ -159,7 +159,7 @@ fn subset_handoff_reservation_and_cancel_keep_full_source_and_native_gate() {
         tx.put(&BoxRecord::new(spec.clone(),Phase::Creating,Vec::new()))?;
         let canonical=tx.read(&id)?.unwrap(); assert!(canonical.native_scope.is_some());
         assert_eq!(canonical.spec.devices,[devices()[0]]);
-        assert!(matches!(tx.managed_usage(),Err(Refusal::Backing {key,cause:hex_api::LifecycleCause::Pending}) if key==pool.key));
+        assert!(matches!(tx.managed_usage(),Err(Refusal::Backing { key,cause:hex_api::LifecycleCause::Pending, why: None }) if key==pool.key));
         assert_eq!(calls.get(),0);
         let source=tx.read_pool(&pool.key)?.unwrap();
         assert_eq!(source.devices,devices());

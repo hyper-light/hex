@@ -2921,7 +2921,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             });
             Ok(())
         }
-        Refusal::Backing { key, cause } => {
+        Refusal::Backing { key, cause, .. } => {
             w.reserve_fixed(1 + BACKING_KEY_BYTES + 1)?;
             w.u8(10);
             put_backing_key(w, *key)?;
@@ -3070,6 +3070,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 3 => LifecycleCause::Retired,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
+            why: None,
         },
         11 => Refusal::Connect {
             port: r.u32()?,

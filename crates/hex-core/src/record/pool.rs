@@ -63,7 +63,11 @@ pub struct PoolRecord {
 }
 
 fn refused(key: BackingKey, cause: LifecycleCause) -> Refusal {
-    Refusal::Backing { key, cause }
+    Refusal::Backing {
+        key,
+        cause,
+        why: None,
+    }
 }
 
 impl PoolRecord {

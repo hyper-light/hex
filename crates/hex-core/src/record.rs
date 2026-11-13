@@ -208,6 +208,7 @@ impl BoxRecord {
             Some(key) => Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Retired,
+                why: None,
             },
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,

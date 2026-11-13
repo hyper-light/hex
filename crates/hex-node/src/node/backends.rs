@@ -43,6 +43,7 @@ fn project_initialized_routes(
             return Err(Refusal::Backing {
                 key: pool.key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             });
         }
     }
@@ -628,6 +629,7 @@ impl Node {
             let refused = || Refusal::Backing {
                 key: record.key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             };
             match record.execution {
                 Execution::Firecracker => {
@@ -701,6 +703,7 @@ impl Node {
             let refused = || Refusal::Backing {
                 key: record.key,
                 cause: LifecycleCause::Uncertain,
+                why: None,
             };
             match record.execution {
                 Execution::Firecracker => self
@@ -780,7 +783,7 @@ impl Node {
     /// Dispatch from the retained configuration/generation before entering its method/native turn.
     /// A current offer cannot replace a recovered grant or choose a different VM implementation.
     pub(super) fn pool_backend(&self, key: &BackingKey) -> Result<&dyn Runtime, Refusal> {
-        let refused = |cause| Refusal::Backing { key: *key, cause };
+        let refused = |cause| Refusal::Backing { key: *key, cause, why: None };
         let record = self
             .store
             .read_pool(&key.pool)?
@@ -958,6 +961,7 @@ fn preflight_backend(
         Some(source) => Err(Refusal::Backing {
             key: source.key,
             cause: LifecycleCause::Uncertain,
+            why: None,
         }),
     }
 }

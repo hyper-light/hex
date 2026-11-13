@@ -9,7 +9,7 @@ use hex_core::record::{NativeRecord, PoolRecord};
 use sha2::{Digest, Sha256};
 
 fn refused(key: BackingKey, cause: LifecycleCause) -> Refusal {
-    Refusal::Backing { key, cause }
+    Refusal::Backing { key, cause, why: None }
 }
 
 fn observer_cost(config: &Config) -> Result<RuntimeCost, Refusal> {

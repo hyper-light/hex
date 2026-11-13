@@ -182,6 +182,7 @@ impl Turns {
             self.try_hold_owner(OwnerRef::Pool(&key.pool), devices, || Refusal::Backing {
                 key: *key,
                 cause: hex_api::LifecycleCause::Busy,
+                why: None,
             })?;
         Ok(Turn {
             turns: self,

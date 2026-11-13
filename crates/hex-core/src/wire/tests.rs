@@ -2964,11 +2964,13 @@ fn route_wire_backing_refusals_preserve_key_and_cause() {
         let expected = Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         });
         let bytes = answer(207, &expected, MAX_MESSAGE).unwrap();
-        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1);
+        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1 + 1);
         assert_eq!(bytes[HEADER_BYTES], 10);
-        assert_eq!(bytes.last(), Some(&tag));
+        assert_eq!(bytes[bytes.len() - 2], tag);
+        assert_eq!(bytes.last(), Some(&0), "no reason, a byte 0");
         assert_eq!(
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             expected
@@ -3165,12 +3167,14 @@ fn route_wire_hostile_route_and_backing_tags_are_redacted() {
         &Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause: LifecycleCause::Uncertain,
+            why: None,
         }),
         MAX_MESSAGE,
     )
     .unwrap();
-    // 3 is Retired (joint plan step 14); 4 is no cause.
-    *bytes.last_mut().unwrap() = 4;
+    // 3 is Retired (joint plan step 14); 4 is no cause. The cause is the byte before its reason's option tag.
+    let cause = bytes.len() - 2;
+    bytes[cause] = 4;
     let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
     assert!(matches!(
         fault,
@@ -3416,6 +3420,12 @@ fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() 
         Answer::Refused(Refusal::Backing {
             key: route_wire_key(),
             cause: LifecycleCause::Pending,
+            why: None,
+        }),
+        Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Uncertain,
+            why: Some("its stop's end wasn't seen".to_owned()),
         }),
     ] {
         let bytes = answer(214, &expected, MAX_MESSAGE).unwrap();
@@ -3631,8 +3641,14 @@ fn snapshot_refusal_and_exit_match_canonical_answer_bytes() {
         inputs.push(Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         });
     }
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its record names another generation".to_owned()),
+    });
     for refusal in inputs {
         let ordinary = Answer::Refused(refusal);
         let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
@@ -3664,6 +3680,12 @@ fn snapshot_bounds_include_scalar_trailers_before_allocation() {
     inputs.push(Refusal::Backing {
         key: route_wire_key(),
         cause: LifecycleCause::Uncertain,
+        why: None,
+    });
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its receipt is missing".to_owned()),
     });
     for refusal in inputs {
         let ordinary = Answer::Refused(refusal);
@@ -3739,15 +3761,84 @@ fn physical_unavailable(backend: Class, cause: LifecycleCause) -> BackendUnavail
         Refusal::Backing {
             key: route_wire_key(),
             cause,
+            why: None,
         },
     )
     .unwrap()
 }
 
+/// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a backing's refusal
+/// carries the refusing site's reason, appended after its cause, and its message says it. Do send a Backing refusal,
+/// Uncertain, with a reason. Expect it read back as sent; the reason's option tag (1) after the cause, then its length
+/// and bytes, so one with none (a byte 0) is a byte longer than before; and its message ending with the reason.
+#[test]
+fn w14_b_a_backing_refusal_carries_its_reason() {
+    let why = "its scope's end wasn't seen after its stop";
+    let reasoned = Answer::Refused(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some(why.to_owned()),
+    });
+    let bytes = answer(216, &reasoned, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        bytes.len(),
+        HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1 + 1 + 4 + why.len()
+    );
+    let reason = bytes.len() - why.len() - 4 - 1;
+    assert_eq!(bytes[reason], 1, "its reason's option tag");
+    assert_eq!(&bytes[bytes.len() - why.len()..], why.as_bytes());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        reasoned
+    );
+    let Answer::Refused(refusal) = &reasoned else {
+        panic!("owned refusal fixture changed its variant");
+    };
+    assert!(
+        refusal.to_string().ends_with(&format!("Uncertain: {why}")),
+        "{refusal}"
+    );
+}
+
+/// Joint plan step 14, (B): an unavailable VM backend's refusal keeps its reason in the physical report. Do report a
+/// Firecracker backend unavailable, Uncertain, with a reason. Expect the report read back as sent, the observation's
+/// bytes its class tag and its refusal's own.
+#[test]
+fn w14_b_an_unavailable_backends_reason_travels_in_the_physical_report() {
+    let mut report = example_physical_report();
+    report.unavailable = vec![
+        BackendUnavailable::from_refusal(
+            Class::Firecracker,
+            Refusal::Backing {
+                key: route_wire_key(),
+                cause: LifecycleCause::Uncertain,
+                why: Some("its pool record names another generation".to_owned()),
+            },
+        )
+        .unwrap(),
+    ];
+    let expected = Answer::PhysicalReport(report);
+    let bytes = answer(221, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
+    let Answer::PhysicalReport(report) = &expected else {
+        panic!("owned physical report changed its variant");
+    };
+    let canonical = snapshot_refusal(&report.unavailable[0].cause, MAX_MESSAGE).unwrap();
+    assert!(bytes.ends_with(&canonical[HEADER_BYTES..]));
+    assert_eq!(answer(221, &expected, bytes.len()).unwrap(), bytes);
+    assert!(matches!(
+        answer(221, &expected, bytes.len() - 1),
+        Err(Fault::Oversized { .. })
+    ));
+}
+
 /// Qualified observer failures append to, rather than replace, actual native identity and load.
 #[test]
 fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
-    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 51);
+    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 52);
     for cause in [
         LifecycleCause::Pending,
         LifecycleCause::Busy,
@@ -3904,6 +3995,7 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
             cause: Refusal::Backing {
                 key: route_wire_key(),
                 cause: LifecycleCause::Pending,
+                why: None,
             },
         },
         BackendUnavailable {
@@ -4053,6 +4145,12 @@ fn connect_refusal_reserves_its_whole_body_before_writing() {
     refusals.push(Refusal::Backing {
         key: route_wire_key(),
         cause: LifecycleCause::Busy,
+        why: None,
+    });
+    refusals.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+        why: Some("its scope's end wasn't seen after its stop".to_owned()),
     });
     for refusal in &refusals {
         let mut sized = Writer::new(MAX_MESSAGE);
