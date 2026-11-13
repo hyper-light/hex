@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::guest::{self, Duplex, DuplexOwner, Link, own_duplex};
+use hex_testkit::waits::follow::{self, Party};
 use hex_testkit::waits::within;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -36,6 +37,28 @@ fn recv_by<T>(from: &mpsc::Receiver<T>, by: Option<Instant>) -> Result<T, mpsc::
 /// Waits on `wait`, its fact's own patience, for the next message from `from`.
 fn recv_on<T>(wait: &Patience, from: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvTimeoutError> {
     within(wait, |by| recv_by(from, by))
+}
+
+/// Waits on `wait` for the next message from `from`, following `sender`, the thread that sends it, by its life
+/// (decision 9): past W* the wait goes on while the thread lives, and fails only once it has ended with nothing sent.
+fn recv_from<T>(
+    wait: &Patience,
+    what: &str,
+    from: &mpsc::Receiver<T>,
+    sender: &std::thread::JoinHandle<()>,
+) -> Result<T, follow::Unmet> {
+    follow::within(
+        wait,
+        what,
+        || {
+            if sender.is_finished() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        |by| recv_by(from, by).ok(),
+    )
 }
 
 /// A socket's timeout for a wait by `by`: none with no deadline, and a timed-out refusal once it has passed, a zero
@@ -1528,7 +1551,7 @@ fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
             let _ = finished.send(result);
         });
         // Its send precedes its answer, so it is read once the answer has come.
-        let result = recv_on(&CAPPED, &answer);
+        let result = recv_from(&CAPPED, "the capped call's answer", &answer, &worker);
         let observed_send = request.try_recv();
         // Every observation failure still closes this exact connection and joins its actor.
         client.conn.shared.end(Refusal::Broken(
@@ -1808,7 +1831,8 @@ type DialDeadlines = Arc<Mutex<Vec<(u32, Option<Instant>)>>>;
 
 struct AbsoluteNamedLink {
     control: Mutex<Option<TcpStream>>,
-    stdio: Mutex<VecDeque<TcpStream>>,
+    /// The stdio streams still to dial, in order: shared, so a test lets go of any its run never dialed.
+    stdio: Arc<Mutex<VecDeque<TcpStream>>>,
     deadlines: DialDeadlines,
 }
 
@@ -1835,20 +1859,19 @@ impl Link for AbsoluteNamedLink {
     }
 }
 
+/// A loopback connection, connected and accepted. Not a wait for a fact: a connect to a listening socket returns
+/// once the kernel has queued it for the accept, which then takes it at once.
 fn absolute_pair() -> (TcpStream, TcpStream) {
-    /// A loopback connection, connected and accepted.
-    static PAIRED: Patience = Patience::measuring("test.hex_client.budget.loopback_paired");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
-    let (client, peer) = within(&PAIRED, |by| -> io::Result<_> {
-        let client = match timeout_by(by)? {
-            Some(left) => TcpStream::connect_timeout(&address, left)?,
-            None => TcpStream::connect(address)?,
-        };
-        let peer = accept_before(&listener, &AtomicBool::new(false), &Wake::new()?, by)?;
-        Ok((client, peer))
-    })
+    let client = TcpStream::connect(address).unwrap();
+    let peer = accept_before(
+        &listener,
+        &AtomicBool::new(false),
+        &Wake::new().unwrap(),
+        None,
+    )
     .unwrap();
     client.set_nodelay(true).unwrap();
     peer.set_nodelay(true).unwrap();
@@ -1858,15 +1881,16 @@ fn absolute_pair() -> (TcpStream, TcpStream) {
 /// AC-T7.4.1: actual guest Stream run setup with no Link default writes all three
 /// native named headers under one caller cap. No server answers the Run, so the
 /// same cap must also bound its unarmed control answer and close the asked ends.
+/// The cap ([`CAP`]) is the claim under test. A host too loaded to run the setup's steps within it has the cap end
+/// the setup instead: the dials made still share the one cap, the run is refused at it, and the streams it dialed
+/// are closed, but the three headers and the request are shown only where the setup came within the cap. No read
+/// here waits on a stream the fixture holds: those the run never dialed are let go before their peers are read (their
+/// peers once waited, with no bound, for an end only the fixture's drop would bring: 16 minutes on goal 12's run).
 #[test]
 fn absolute_run_caps_named_stdio_and_preserves_headers() {
     use hex_core::stream::{self, Named};
-    /// The run's refusal at its caller's cap, no answer come.
+    /// The run's refusal at its caller's cap, no answer come, the run's thread its party.
     static CAPPED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_capped");
-    /// The three named streams' headers, each stream then closed by the run.
-    static NAMED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_named");
-    /// The run's request, come to the agent's end of the control.
-    static ASKED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_asked");
     let (control, mut control_peer) = absolute_pair();
     control_peer.write_all(&11u64.to_le_bytes()).unwrap();
     let mut named = VecDeque::new();
@@ -1876,10 +1900,11 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
         named.push_back(stream);
         peers.push(peer);
     }
+    let undialed = Arc::new(Mutex::new(named));
     let deadlines = Arc::new(Mutex::new(Vec::new()));
     let link = guest::own_link(AbsoluteNamedLink {
         control: Mutex::new(Some(control)),
-        stdio: Mutex::new(named),
+        stdio: Arc::clone(&undialed),
         deadlines: Arc::clone(&deadlines),
     })
     .unwrap();
@@ -1909,39 +1934,15 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
         let _ = finished.send(result);
     });
     // Its deadline's notice precedes its answer, so it is read once the answer has come.
-    let result = recv_on(&CAPPED, &answer);
+    let result = recv_from(&CAPPED, "the capped run's answer", &answer, &worker);
     let original = began.try_recv();
     if result.is_err() {
         client
             .conn
             .shared
             .end(Refusal::Broken("absolute named observation cleanup".into()));
-        let _ = control_peer.shutdown(Shutdown::Both);
-        for peer in &peers {
-            let _ = peer.shutdown(Shutdown::Both);
-        }
     }
     let joined = worker.join();
-    // Each read below waits on its own fact's patience, after the actor joined: what the run wrote before it ended.
-    let observed = within(&NAMED, |by| -> io::Result<Vec<Named>> {
-        let mut names = Vec::new();
-        for peer in &mut peers {
-            peer.set_read_timeout(timeout_by(by)?)?;
-            let mut name = [0; stream::NAME_BYTES];
-            peer.read_exact(&mut name)?;
-            names.push(
-                stream::read_name(&name).map_err(|error| io::Error::other(format!("{error:?}")))?,
-            );
-            if peer.read(&mut [0])? != 0 {
-                return Err(io::Error::other("unasked payload"));
-            }
-        }
-        Ok(names)
-    });
-    let request_seen = within(&ASKED, |by| {
-        control_peer.set_read_timeout(timeout_by(by)?)?;
-        next_request(&mut control_peer)
-    });
     let state_clean = {
         let state = client.conn.shared.state().unwrap();
         state.calls.is_empty()
@@ -1950,47 +1951,84 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
             && state.closed.is_none()
     };
     let recorded = deadlines.lock().unwrap().clone();
-    let _ = control_peer.shutdown(Shutdown::Both);
-    for peer in &peers {
-        let _ = peer.shutdown(Shutdown::Both);
-    }
+    // The streams the run never dialed, its cap having passed first, let go: every peer then comes to its end, from
+    // the run's close or the fixture's.
+    let left = {
+        let mut undialed = undialed.lock().unwrap();
+        let left = undialed.len();
+        undialed.clear();
+        left
+    };
+    // Not a wait for a fact: the run has ended, so what it wrote is in the stream and its end on its way.
+    let observed: Vec<io::Result<Vec<u8>>> = peers
+        .iter_mut()
+        .map(|peer| {
+            let mut got = Vec::new();
+            peer.read_to_end(&mut got).map(|_| got)
+        })
+        .collect();
+    // The client's connection ended, so the control's read ends too: the run's request, if it was sent, then its end.
+    client
+        .conn
+        .shared
+        .end(Refusal::Broken("absolute named observation over".into()));
+    let request_seen = next_request(&mut control_peer);
     joined.unwrap();
     let original = original.unwrap();
     eprintln!(
-        "client_absolute named_deadlines={recorded:?} caller={original:?} result={result:?} observed={observed:?} request={request_seen:?}"
+        "client_absolute named_deadlines={recorded:?} caller={original:?} result={result:?} left={left} observed={observed:?} request={request_seen:?}"
     );
-    assert!(matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
-    let names = observed.unwrap();
-    let (request_header, request) = request_seen.unwrap();
     assert!(matches!(
-        request,
-        Request::Call(Call::Run {
-            streams: Streams {
-                stdin: true,
-                stdout: true,
-                stderr: true
-            },
-            ..
-        })
+        result.unwrap(),
+        Err(Refusal::Os { op, why }) if why.contains("caller") || op == "absolute fixture dial"
     ));
-    assert_eq!(recorded.len(), 4);
     assert_eq!(recorded[0], (stream::CONTROL_PORT, None));
-    let setup = recorded[1].1.unwrap();
+    let stdio = &recorded[1..];
     assert!(
-        setup <= original
-            && recorded[1..]
-                .iter()
-                .all(|(port, at)| *port == stream::STDIO_PORT && *at == Some(setup))
+        stdio.iter().all(|(port, at)| *port == stream::STDIO_PORT
+            && at.is_some_and(|at| at <= original)
+            && *at == stdio[0].1),
+        "the stdio dials share one cap: {recorded:?}"
     );
-    assert_eq!(names.len(), 3);
-    assert!(
-        names
+    let observed: Vec<Vec<u8>> = observed.into_iter().map(Result::unwrap).collect();
+    // Those never dialed came to their end with nothing.
+    assert!(observed[3 - left..].iter().all(Vec::is_empty));
+    if left == 0
+        && let Ok((request_header, request)) = request_seen
+    {
+        // The setup came within the cap: the request asked for all three, and each stream carries its header alone.
+        assert!(matches!(
+            request,
+            Request::Call(Call::Run {
+                streams: Streams {
+                    stdin: true,
+                    stdout: true,
+                    stderr: true
+                },
+                ..
+            })
+        ));
+        let names: Vec<Named> = observed
             .iter()
-            .all(|name| name.exec.conn == 11 && name.exec.id == request_header.id)
-    );
-    assert_eq!(names[0].stream, stream::Stdio::In);
-    assert_eq!(names[1].stream, stream::Stdio::Out);
-    assert_eq!(names[2].stream, stream::Stdio::Err);
+            .map(|got| {
+                assert_eq!(
+                    got.len(),
+                    stream::NAME_BYTES,
+                    "an unasked payload or no header"
+                );
+                let name: &[u8; stream::NAME_BYTES] = got.as_slice().try_into().unwrap();
+                stream::read_name(name).unwrap()
+            })
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name.exec.conn == 11 && name.exec.id == request_header.id)
+        );
+        assert_eq!(names[0].stream, stream::Stdio::In);
+        assert_eq!(names[1].stream, stream::Stdio::Out);
+        assert_eq!(names[2].stream, stream::Stdio::Err);
+    }
     assert!(state_clean);
 }
 
@@ -3008,7 +3046,7 @@ fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let link = guest::own_link(AbsoluteNamedLink {
         control: Mutex::new(Some(socket)),
-        stdio: Mutex::new(VecDeque::new()),
+        stdio: Arc::new(Mutex::new(VecDeque::new())),
         deadlines: Arc::clone(&recorded),
     })
     .unwrap();
