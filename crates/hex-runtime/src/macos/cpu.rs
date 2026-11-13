@@ -87,6 +87,16 @@ impl Control {
     pub(super) fn held(&mut self) -> Result<(), Failure> {
         self.budget.held()
     }
+
+    /// Original (joint plan step 14, 2c, red): a hold's measured response is taken nowhere.
+    pub(super) fn learn(&mut self, response: Duration) -> Result<(), Failure> {
+        self.budget.learn(response)
+    }
+
+    /// Original (joint plan step 14, 2c, red): when a scope's credit ran out is read nowhere.
+    pub(super) fn ran_out(&self) -> Option<Instant> {
+        None
+    }
     pub(super) fn permit(&mut self) -> Result<(), Failure> {
         match self.budget.mode {
             Mode::Prepared => Err(Failure::Transition),
@@ -426,6 +436,51 @@ mod tests {
         assert_eq!(budget.burst, 4000 * 20, "only rising");
         assert_eq!(budget.learn(Duration::ZERO), Err(Failure::Envelope));
         assert_eq!(budget.burst, 4000 * 20);
+    }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): a hold's response, measured once the hold is issued, tops up that
+    /// hold's own allowance where it is slower than the one it paid, so what a scope ran past its stop is charged; a
+    /// faster one changes nothing. Do run a scope at 1 CPU of 4 with a 10 ns response until it is held, then learn that
+    /// its stop took 30 ns, then 20 ns. Expect its debt 4 CPUs over 20 ns more than the hold paid, and no more.
+    #[test]
+    fn a_held_scopes_slower_stop_tops_up_its_hold() {
+        let mut budget = Budget::new(1000, 4000, Duration::from_nanos(10)).unwrap();
+        budget.start().unwrap();
+        budget
+            .observe(Duration::from_nanos(14), Duration::ZERO)
+            .unwrap();
+        budget.held().unwrap();
+        let paid = budget.credit;
+        budget.learn(Duration::from_nanos(30)).unwrap();
+        assert_eq!(budget.credit, paid - 4000 * 20);
+        budget.learn(Duration::from_nanos(20)).unwrap();
+        assert_eq!(budget.credit, paid - 4000 * 20);
+    }
+
+    /// Joint plan step 14 (2c): a hold's response is from when its scope's credit ran out, which the control reads off
+    /// its own last observation, whatever woke its watcher: its credit's overrun at the rate it is spent past its earning
+    /// (the maximum less the rate), rounded up so a response is never short. Do run a scope at 1 CPU of 4 with a 10 ns
+    /// response from full credit, then observe it 14 ns on. Expect its credit (40,000, spent at 3,000 a ns) to have run
+    /// out 13.33 ns after its start, so 13 ns rounded up from the observation's 0.67 ns overrun; and none before, with
+    /// credit left.
+    #[test]
+    fn a_scopes_credit_ran_out_when_its_overrun_says() {
+        let at = Instant::now();
+        let mut control = Control::new(1000, 4000, Duration::from_nanos(10), Duration::ZERO).unwrap();
+        control.start(at, Duration::ZERO).unwrap();
+        assert_eq!(control.ran_out(), None, "credit left");
+        let later = at + Duration::from_nanos(14);
+        assert!(matches!(
+            control.observe(later, Duration::ZERO).unwrap(),
+            Decision::Hold(_)
+        ));
+        let ran_out = control.ran_out().unwrap();
+        assert_eq!(
+            ran_out,
+            later - Duration::from_nanos(1),
+            "{:?} after the start",
+            ran_out.saturating_duration_since(at)
+        );
     }
 
     /// Joint plan step 14 (AC-T7.4.1), C4 on macOS: a scope's rate becomes its water-filled share. Do run a scope at 1
