@@ -2516,7 +2516,8 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | the slowest answer seen; past it the run-out told and the seed followed by its life, its pidfd, to its answer or its end, never killed as hung; before the first answer, and from a run-out to the next, followed from the start (it was 2 × max(record, seen) until 2026-11-13) | the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same; past it the busy seeds followed by their life, a create refused only when no seed can come | the same record: a create in line waits for a busy seed's answer |
-| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned; past it the run-out told and the init followed by its life, its sync pipe, claim socket and pidfd, to its word or its end, never killed as hung | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
+| a park's wait for its init's word that it is parked (createpool `PARKS`) | the seeds' hang bound, the park failed and its init killed past it | learned; past it the run-out told and the init followed by its life, its socket and pidfd, to its word or its end | MEASURING: no census run has the `parked.park` rows yet |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned; past it, the holder followed to its let-go (2026-11-13: a refusal there failed HEX-SOCK-6's concurrent changes) | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take; past it, the holder followed to its let-go | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 904.705 ms<!-- /record --> |
@@ -2539,8 +2540,8 @@ seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
 the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
 for its named consumer alone: a spec a seed can't serve (the classic reasons).
-A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
-the claim borrows the request, whose descriptors stay the runtime's.
+A parked init that refuses its claim or ends before its first word falls back to a seed's clone: the claim borrows the
+request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node running out more often than the answers it has seen allow (each answer
 outrunning the slowest of `n` with chance at most `1 / (n + 1)`), refusing calls and record writes that would have

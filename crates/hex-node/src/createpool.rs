@@ -40,10 +40,9 @@ use hex_api::Refusal;
 use hex_core::demand::Learned;
 use hex_core::seed::{Answer, Create, Failed, Fixed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
-use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
+use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked, first_readable};
 use hex_runtime::linux::oci::seed as rt_seed;
 use hex_runtime::linux::oci::{OciError, mntns};
-use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
 /// Where a node's create seeds work (goal 5 plan step 2): in the one mount namespace the node prunes at `At`'s
@@ -473,13 +472,17 @@ impl Parker {
                 shared.done(id, proc);
                 let pid = i32::try_from(pid)
                     .map_err(|_| OciError::Broken("a parked init's pid out of range".to_owned()))?;
-                // Held from here, so ended and reaped if it never says it is parked, which it does within
-                // the hang bound the seeds' answers taught.
+                // Held from here, so ended and reaped if it ends before it says it is parked, as it does within
+                // PARKS's W* and past it by its life (decision 9).
                 let parked = Parked::new(pid, pidfd, ours, flags);
-                // The hang bound once a seed has answered; before, and from a run-out to the next, the wait follows
-                // the init, ending at its word or its end (decision 9).
-                let patience = shared.lock()?.seeds.deadlines().1;
-                parked.wait_parked(patience, || {})?;
+                let began = Instant::now();
+                let patience = PARKS.deadline();
+                parked.wait_parked(patience, || {
+                    if let Some(window) = patience {
+                        PARKS.ran_out(window);
+                    }
+                })?;
+                PARKS.answered(began.elapsed());
                 Ok(parked)
             }
             Ok((Answer::Refused { failed, why }, _)) => {
@@ -996,6 +999,12 @@ fn wait_answer(
     }
 }
 
+/// A park's wait for its init's word that it is parked, from the seed's answer that cloned it: W*, the slowest such word
+/// this node has seen (decision 9), a bound only while words come within it; past it the run-out is told and the wait
+/// follows the init by its life alone, on its socket and pidfd, to its word or its end ([`Parked::wait_parked`]). Its
+/// own wait, never the seeds' hang bound it borrowed until 2026-11-13. No record is read.
+static PARKS: hex_core::patience::Patience = hex_core::patience::Patience::measuring("parked.park");
+
 /// A claim's wait for its parked init's first word on its sync pipe, from the claim's send (the lead's (A) of
 /// 2026-11-09: no early answer): the init's ready on a root node's pruned path, its ask for its user namespace's maps
 /// on a rootless node's classic one. W*, the slowest such word this node has seen (decision 9), is a bound only while
@@ -1045,34 +1054,6 @@ fn claim_round(
         _ => Err(Trip::Broken(OciError::Broken(
             "a claimed init ended before its first word".to_owned(),
         ))),
-    }
-}
-
-/// Which of `fds` turns readable first within `patience`, the earliest in the list where several have: `None` past it,
-/// and with none (a wait following its party) it waits until one does. A peer's end (`POLLHUP`) counts, for the read
-/// that says so, as does a process's end on its pidfd. `op` names the poll in its error.
-fn first_readable(
-    fds: &[BorrowedFd<'_>],
-    patience: Option<Duration>,
-    op: &'static str,
-) -> Result<Option<usize>, OciError> {
-    let deadline = patience.and_then(|p| Instant::now().checked_add(p));
-    loop {
-        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        let ts = left.map(|left| Timespec {
-            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: i64::from(left.subsec_nanos()),
-        });
-        let mut polled: Vec<PollFd<'_>> = fds
-            .iter()
-            .map(|fd| PollFd::new(fd, PollFlags::IN))
-            .collect();
-        match rustix::event::poll(&mut polled, ts.as_ref()) {
-            Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
-            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),
-            Ok(_) | Err(rustix::io::Errno::INTR) => {}
-            Err(e) => return Err(OciError::os(op, e)),
-        }
     }
 }
 

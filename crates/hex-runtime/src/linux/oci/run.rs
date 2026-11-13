@@ -654,32 +654,31 @@ impl Parked {
         self.held.as_ref().map(|h| h.0)
     }
 
-    /// Waits up to `patience` for the init to say on its socket that it is parked: its effective capabilities
-    /// emptied, waiting for its claim (`seed::parked`). Behavior kept here: `past` is unused, and none waits until
-    /// the word.
+    /// Waits for the init to say on its socket that it is parked (its effective capabilities emptied, waiting for its
+    /// claim: `seed::parked`), as decision 9 waits (the person's ruling of 2026-11-13: W* is a bound only while answers
+    /// come within it): within `patience`, and past it, `past` told (the run-out, once), by the init's life alone, on
+    /// its socket and its pidfd, until its word or its end, refused then. With no `patience` it follows the init from
+    /// the start.
     pub fn wait_parked(
         &self,
         patience: Option<std::time::Duration>,
-        _past: impl FnOnce(),
+        past: impl FnOnce(),
     ) -> Result<(), OciError> {
-        let patience = patience.unwrap_or(std::time::Duration::MAX);
-        let Some((_, _, socket)) = &self.held else {
+        let Some((_, pidfd, socket)) = &self.held else {
             return Err(OciError::Broken("a parked init no longer held".to_owned()));
         };
-        let mut fds = [rustix::event::PollFd::new(
-            socket,
-            rustix::event::PollFlags::IN,
-        )];
-        let timeout = rustix::event::Timespec {
-            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: patience.subsec_nanos().into(),
-        };
-        let ready = rustix::event::poll(&mut fds, Some(&timeout))
-            .map_err(|e| OciError::os("waiting for an init to park", e))?;
-        if ready == 0 {
-            return Err(OciError::Broken(format!(
-                "an init didn't say it was parked within {patience:?}"
-            )));
+        const OP: &str = "waiting for an init to park";
+        let watched = [socket.as_fd(), pidfd.as_fd()];
+        let mut first = first_readable(&watched, patience, OP)?;
+        if first.is_none() {
+            // Past its bound: no sample (Karn's point), the run-out told once, and the init followed by its life.
+            past();
+            first = first_readable(&watched, None, OP)?;
+        }
+        if first != Some(0) {
+            return Err(OciError::Broken(
+                "an init ended before it said it was parked".to_owned(),
+            ));
         }
         match super::seed::recv_answer(socket.as_fd())? {
             (hex_core::seed::Answer::Started { .. }, Some(_)) => Ok(()),
@@ -692,6 +691,34 @@ impl Parked {
     /// The init's pid, pidfd and claim socket, the caller's from here.
     pub fn take(mut self) -> Option<(i32, OwnedFd, OwnedFd)> {
         self.held.take()
+    }
+}
+
+/// Which of `fds` turns readable first within `patience`, the earliest in the list where several have: `None` past it,
+/// and with none (a wait following its party) it waits until one does. A peer's end (`POLLHUP`) counts, for the read
+/// that says so, as does a process's end on its pidfd. `op` names the poll in its error.
+pub fn first_readable(
+    fds: &[BorrowedFd<'_>],
+    patience: Option<std::time::Duration>,
+    op: &'static str,
+) -> Result<Option<usize>, OciError> {
+    let deadline = patience.and_then(|p| std::time::Instant::now().checked_add(p));
+    loop {
+        let left = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        let ts = left.map(|left| rustix::event::Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        });
+        let mut polled: Vec<rustix::event::PollFd<'_>> = fds
+            .iter()
+            .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+            .collect();
+        match rustix::event::poll(&mut polled, ts.as_ref()) {
+            Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
+            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os(op, e)),
+        }
     }
 }
 

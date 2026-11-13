@@ -172,7 +172,9 @@ Production, a W* that still ends something:
    refusing the map ("writing uid_map failed: Operation not permitted", 2026-11-13). Done: the claim follows the init
    past W* by its life (its sync pipe, claim socket and pidfd), the run-out told; `Patience::expired` went with it.
 3. **A park's wait for its init's word** (hex-node `createpool::Parker::park`, `Parked::wait_parked`): bounded by
-   `seeds.hang`'s W*, past it the park fails and its init is killed. Owed: it follows the init past W*.
+   `seeds.hang`'s W*, a bound learned from another wait, past it the park failed and its init was killed. Done: the
+   wait learns its own W* (`createpool::PARKS`, `parked.park`) and past it follows the init by its life (its socket and
+   pidfd) to its word or its end, the run-out told.
 4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
    still tentative at the settle's W*, or a dump read past the answers' W*, is thrown away, counted, and another read.
    Owed: past W* each follows the namespace (the kernel's rtnetlink, its notices) to its settle or answer.
