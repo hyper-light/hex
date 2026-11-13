@@ -2416,6 +2416,8 @@ mod tests {
 
     /// AC-T7.4.1: reserve possible fixed encoding forms without promoting a currently unavailable
     /// service into fresh OCI eligibility. Initialization unknowns refuse before collector mutation.
+    /// An `oci` form not initialized (its service unavailable, or Containers off) still offers its
+    /// `process` route, which needs neither, so the node still takes `process` boxes (joint plan step 13).
     #[test]
     fn encoding_upper_bound_does_not_advertise_an_unavailable_oci_service() {
         let enabled = BTreeSet::new();
@@ -2440,9 +2442,13 @@ mod tests {
             learned: None,
         };
         native_route_offer(&mut unavailable, Class::Oci, false).unwrap();
-        assert!(
-            unavailable.routes.is_empty(),
-            "encoding room cannot grant fresh native OCI"
+        let (process, _) =
+            crate::devices::native_route_keys(Class::Process, native_platform()).unwrap();
+        let offered: Vec<_> = unavailable.routes.iter().map(|route| route.key).collect();
+        assert_eq!(
+            offered,
+            [process],
+            "encoding room cannot grant fresh native OCI, and the process route needs no service"
         );
         assert!(unavailable.device_routes.is_empty() && unavailable.backings.is_empty());
         let disabled = BTreeSet::from([WindowsFeature::Containers]);
