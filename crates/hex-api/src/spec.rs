@@ -348,16 +348,24 @@ pub struct ImageMember {
     /// After the working directory (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Whether it has an MCP bridge of its own (Shards' D254, `MemberSpec::mcp`): `/run/shards/mcp`, a stdio server its
+    /// harness's MCP config names as a command, each connection to which reaches its run's controller as a lane of the
+    /// run's agent-control endpoint. So it needs that endpoint: a node that asks none of its run refuses a member asking
+    /// one, by this field, as Shards' own check does. None by default. After the run-time arguments (append-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp: bool,
 }
 
 impl ImageMember {
-    /// `member`, given nothing over its image's, in its image's working directory, its image's command alone.
+    /// `member`, given nothing over its image's, in its image's working directory, its image's command alone, with no
+    /// MCP bridge.
     pub fn new(member: crate::Member) -> Self {
         Self {
             member,
             env: Vec::new(),
             workdir: None,
             args: Vec::new(),
+            mcp: false,
         }
     }
 
@@ -1351,6 +1359,7 @@ mod tests {
                 String::new(),
                 "claude-opus-4".to_owned(),
             ],
+            mcp: false,
         };
         let agent = ImageMember::new(crate::Member {
             kind: crate::MemberKind::Agent,
@@ -1417,6 +1426,31 @@ mod tests {
             name: "Claude".to_owned(),
         });
         assert!(refused(bad_name).1.contains("members[0].member.name"));
+    }
+
+    /// Joint plan step 12, Shards' D254 (AC-T7.4.1): a member's MCP bridge, asked or not. Do write a member asking none
+    /// and one asking one as JSON, and read each back. Expect the first's JSON to leave `mcp` out, so that a member
+    /// written before the field reads as asking none, and the second's to say it; each read back whole.
+    #[test]
+    fn w12_a_members_mcp_bridge_is_left_out_of_its_json_unless_asked() {
+        let none = ImageMember::new(crate::Member {
+            kind: crate::MemberKind::Harness,
+            name: "claude".to_owned(),
+        });
+        let asked = ImageMember {
+            mcp: true,
+            ..none.clone()
+        };
+        let json = serde_json::to_value(&none).unwrap();
+        assert!(json.get("mcp").is_none(), "{json}");
+        assert_eq!(serde_json::from_value::<ImageMember>(json).unwrap(), none);
+        let json = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            json.get("mcp"),
+            Some(&serde_json::Value::Bool(true)),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_value::<ImageMember>(json).unwrap(), asked);
     }
 
     /// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): the host directories an image VM's guest sees, each a share

@@ -2938,6 +2938,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
                 args: r.list(|r| r.string("member argument"))?,
+                mcp: false,
             })
         })?,
         shares: r.list(|r| {
