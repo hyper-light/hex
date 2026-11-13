@@ -493,7 +493,13 @@ window, which would under-count Hex here.
   held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
   records once it has ended, the holder's own. HEX-CV-2H (`capacity_view::two_hosts`, ignored phases, ROOT's): the same
   across two hosts, either on Linux, macOS or Windows, the scheduler killed by its pid and the lane's UDP port dropped
-  and healed.
+  and healed. Run notes: where the keeper's host admits no port the lane could bind (00aad's ufw), the scheduler binds
+  loopback and a rootless UDP relay on that host forwards the holder's datagrams to it and its own back, the holder's
+  `HEX_CV_ADDR` the relay's; the partition is then the relay dropping the holder's datagrams while its flag file stands,
+  still delivering the keeper's: the same one-way drop as an INPUT rule on the keeper's port. The keeper hears nothing
+  and ends the link once its idle timeout passes; the holder, still hearing the keeper's keep-alives until then, ends
+  its own an idle timeout later. The holder checks the scheduler's certificate by its name, so the relay's address
+  changes nothing it proves.
 - ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
   `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), and HEX-CV-2H on two real machines.
 
