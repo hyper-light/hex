@@ -784,3 +784,120 @@ fn a_member_that_ended_before_its_watch_is_reported() {
         "a member ended before its watch wasn't reported"
     );
 }
+
+/// The variable under which the descriptor check runs, in a test process of its own.
+const DESCRIPTORS_ALONE: &str = "HEX_MACOS_DESCRIPTORS_ALONE";
+
+/// A process box of `rt`'s, made for the descriptor check, its program `script` in `/bin/sh` given `stdio`.
+fn descriptors_box(rt: &MacRuntime, name: &str, stdio: Stdio) -> Box<dyn Proc> {
+    let id = BoxId::new(name).expect("an id");
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+        owner: None,
+        band: 0,
+    })
+    .expect("create");
+    rt.exec(
+        &id,
+        Program {
+            args: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "read _; echo said".to_owned(),
+            ],
+            env: vec![],
+            cwd: None,
+            user: None,
+        },
+        stdio,
+    )
+    .expect("exec")
+}
+
+/// Ada and ROOT (2026-11-12), joint plan step 12, CLAUDE.md §12: no descriptor the node's process makes is left
+/// without close-on-exec, so a program started any way, a Shards image VM's run host among them, holds none of the
+/// node's. Do run a process box's program through the macOS runtime, rootless and through a box helper (the daemon
+/// the tests stand in), its stdin and stdout pipes of this process's, in a test process of its own (other tests'
+/// descriptors aren't this one's to judge). Expect: no descriptor past stdio that this process holds now and didn't
+/// before is without close-on-exec, while the programs run and their watches are live.
+#[test]
+fn every_descriptor_the_runtime_makes_is_close_on_exec() {
+    if std::env::var_os(DESCRIPTORS_ALONE).is_none() {
+        let alone = Command::new(std::env::current_exe().expect("this test's binary"))
+            .args([
+                "--exact",
+                "macos::tests::every_descriptor_the_runtime_makes_is_close_on_exec",
+                "--test-threads=1",
+            ])
+            .env(DESCRIPTORS_ALONE, "1")
+            .output()
+            .expect("the check, alone");
+        assert!(
+            alone.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&alone.stdout),
+            String::from_utf8_lossy(&alone.stderr)
+        );
+        return;
+    }
+    let me = i32::try_from(std::process::id()).expect("a pid");
+    // What this process held before, inherited from what started it: not the runtime's.
+    let before = super::sys::inheritable_descriptors(me).expect("this process's descriptors");
+    let model = super::machine_model().expect("this Mac's model");
+    let rates = hex_core::watch::seed(&model);
+    let rootless = MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .expect("a macOS runtime");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sock = dir.path().join("helper.sock");
+    let listener = helper_daemon::bind(&sock).expect("bind");
+    thread::spawn(move || {
+        let daemon = Daemon::new(Shells::default(), vec![7000], 64);
+        let _ = daemon.serve_listener(listener.as_fd());
+    });
+    let helped = MacRuntime::detect(
+        NonZeroU64::new(1 << 40).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        hex_core::watch::lateness_seed(&model),
+        &sock,
+    )
+    .expect("a box-user runtime");
+    let mut running = Vec::new();
+    for (rt, name) in [(&rootless, "mac-fds-rootless"), (&helped, "mac-fds-helped")] {
+        let (stdin, hold) = std::io::pipe().expect("pipe");
+        let (said, stdout) = std::io::pipe().expect("pipe");
+        let program = descriptors_box(
+            rt,
+            name,
+            Stdio {
+                stdin: Some(stdin),
+                stdout: Some(stdout),
+                ..Stdio::null()
+            },
+        );
+        running.push((program, hold, said));
+    }
+    let now = super::sys::inheritable_descriptors(me).expect("this process's descriptors");
+    let made: Vec<(i32, u32)> = now.into_iter().filter(|d| !before.contains(d)).collect();
+    for (mut program, hold, mut said) in running {
+        drop(hold);
+        let mut line = String::new();
+        BufReader::new(&mut said)
+            .read_line(&mut line)
+            .expect("its line");
+        assert_eq!(program.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(0)));
+    }
+    assert!(
+        made.is_empty(),
+        "descriptors (number, kind) a spawn that inherits would hand on: {made:?}"
+    );
+}
