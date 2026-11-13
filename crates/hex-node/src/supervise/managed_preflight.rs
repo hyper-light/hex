@@ -62,7 +62,9 @@ impl Supervisor {
         for native in &natives {
             let position = by_owner
                 .binary_search_by(|entry| entry.record.owner().cmp(&native.owner.as_ref()))
-                .map_err(|_| native.uncertain("its supervised managed VM has no retained record"))?;
+                .map_err(|_| {
+                    native.uncertain("its supervised managed VM has no retained record")
+                })?;
             let record = by_owner
                 .get(position)
                 .ok_or_else(|| native.uncertain("its retained record vanished as it was found"))?
@@ -75,9 +77,9 @@ impl Supervisor {
                         start_ticks: identity.started,
                     })
             }) {
-                return Err(native.uncertain(
-                    "its supervised controller isn't the one its record names",
-                ));
+                return Err(
+                    native.uncertain("its supervised controller isn't the one its record names")
+                );
             }
         }
         preflight(root, &expected)
