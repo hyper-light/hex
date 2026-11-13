@@ -213,7 +213,12 @@ fn runs_past_the_budget_are_refused(node: &Node, hard: u64) {
     for (id, proc) in ran {
         let _ = node.signal(&id, Signal::KILL);
         drop(proc);
-        node.delete(&id).expect("deleting a run's box");
+        // A run's box goes once its program ends (decision 7): the delete removes it, waits for that removal and
+        // answers as it went, or finds it gone already.
+        match node.delete(&id) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => {}
+            Err(e) => panic!("deleting a run's box: {e:?}"),
+        }
     }
     assert!(
         matches!(&refused, Refusal::Exhausted { bound, .. } if *bound == budget),

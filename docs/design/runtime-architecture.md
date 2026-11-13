@@ -2195,8 +2195,11 @@ wrapper each box keeps (f13).
   parties can meet the end: the caller's own wait (no hop through another thread), the supervising thread (a
   caller that let go), or a delete. Each claims the run under the supervisor's lock, and only the claimer removes
   the box. It reaps the program, ends what is left (`cgroup.kill`, bounded by the node's learned wait for a box
-  to empty, decision 9), removes the cgroup, then the record, and publishes the end. The others wait for that.
-  So a box is removed once, and never after another box has taken its id.
+  to empty, decision 9), removes the cgroup, then the record, and publishes the end. The others wait for that:
+  a delete that finds the run claimed waits under the box's turn for the claimer's word and answers as the removal
+  went, where the box's record still names that run's program, and removes the box itself only where the claimer
+  stopped without a word (its claim's drop says so). So a box is removed once, and never after another box has taken
+  its id.
 - **One record write.** The run writes its record once, after the clone, naming the program by pid and start
   time (`BoxRecord::run`, appended). The steps are `RUN_STEPS`: the cgroup, the program, the record. A crash
   before the record leaves a cgroup no record names, which recovery removes. After a restart, a run whose

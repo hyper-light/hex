@@ -30,7 +30,7 @@ mod managed_preflight;
 mod run;
 #[cfg(all(debug_assertions, feature = "test-controls"))]
 pub use run::RemovalHold;
-pub use run::{Run, RunProc};
+pub use run::{Claimed, Run, RunProc, Said, Taken};
 
 /// What [`Refusal::Exhausted`] names the supervisor's budget: its pidfds, one for each live `oci` box's init and
 /// one for each run's program (decision 7), each box holding one at most.

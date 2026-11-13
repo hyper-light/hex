@@ -1990,15 +1990,16 @@ impl Runtime for Node {
         // The record names the program by its start time too, so recovery never takes a later
         // process given its pid for it. A program that ended already is a zombie until reaped, its
         // start time still there.
-        let mut record = BoxRecord::new(spec, Phase::Ready, Vec::new());
-        record.run = Some(ProcId {
+        let program = ProcId {
             pid,
             start_ticks: i32::try_from(pid).ok().and_then(start_time).unwrap_or(0),
-        });
+        };
+        let mut record = BoxRecord::new(spec, Phase::Ready, Vec::new());
+        record.run = Some(program);
         let watched = match self.store.put(&record) {
             Ok(()) => self
                 .supervisor
-                .watch_run(slot, &id, pid, pidfd, cg, self.root.names()),
+                .watch_run(slot, &id, program, pidfd, cg, self.root.names()),
             Err(e) => Err((e, pidfd)),
         };
         drop(spawning);
@@ -2183,15 +2184,30 @@ impl Runtime for Node {
         // gone, and scrubs nothing it's doing.
         let _turn: Turn<'_> = self.turns.take(id)?;
         // A run's box is this delete's to remove once its run is taken, so the run's own removal doesn't race
-        // it; its caller is told how the delete went.
-        let run = self.supervisor.take_run(id)?;
-        let deleted = self.delete_box(id);
-        match &run {
-            Some(run) => {
-                self.supervisor.ended_run(run, deleted.clone())?;
+        // it; its caller is told how the delete went. A run another claimer took (its program's end) is that
+        // claimer's to remove: this delete waits for its word, under the box's turn so nothing else of the box
+        // moves meanwhile, and answers as the removal went, removing the box itself only where the claimer
+        // stopped without a word (runtime goal 7). A box made again under the id since names another program in
+        // its record, or none, and the old claimer touches it no more.
+        match self.supervisor.take_run(id)? {
+            supervise::Taken::Mine(run) => {
+                let deleted = self.delete_box(id);
+                run.deleted(deleted.clone())?;
                 deleted
             }
-            None => deleted,
+            supervise::Taken::Theirs(run) => {
+                if self.record(id)?.and_then(|record| record.run) != Some(run.program()) {
+                    return self.delete_box(id);
+                }
+                #[cfg(all(debug_assertions, feature = "test-controls"))]
+                self.supervisor.waiting_on_removal()?;
+                match run.said()? {
+                    supervise::Said::Removed(_) => Ok(()),
+                    supervise::Said::Failed(why) => Err(why),
+                    supervise::Said::Abandoned => self.delete_box(id),
+                }
+            }
+            supervise::Taken::NoRun => self.delete_box(id),
         }
     }
 }
