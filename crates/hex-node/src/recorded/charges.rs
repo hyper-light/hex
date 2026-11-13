@@ -903,7 +903,8 @@ impl Learner {
     }
 
     /// Gives `capacity`, `class`'s capacity answer, what this learner carries (C2, C8), fitted to one message: the
-    /// priors of the profiles it offers (its own and its routes'), and the holdings of its VMs among `records`.
+    /// priors of the profiles it offers (its own and its routes'), and the holdings of its VMs among `records`, managed
+    /// and Shards image VMs alike.
     pub(crate) fn answer<'a>(
         &self,
         class: Class,
@@ -921,7 +922,7 @@ impl Learner {
         costs.extend(capacity.routes.iter().filter_map(|route| route.cost));
         let running: Vec<BoxRecord> = records
             .into_iter()
-            .filter(|record| running(record))
+            .filter(|record| running(record) || running_image(record))
             .cloned()
             .collect();
         capacity.learned = self.learned(class, &costs, &running)?;
