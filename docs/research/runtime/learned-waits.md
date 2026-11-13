@@ -45,7 +45,10 @@ it.
   the run-out told. A wedged party that stays alive is ended by its caller's own deadline or its owner's stop, never by
   a guess at how long its next advance may take. Stall judgment stays only where progress is continuous work toward
   the answer at a scale the window can see: Shards' Part B for a VM's boot (no CPU over a whole boot-scale W*), for
-  the image boot and the hosted boot once it is vendored.
+  the image boot and the hosted boot once it is vendored. The tests' waits follow life alone too
+  (`hex_testkit::waits::follow`: copy::tests' copier was refused at 44 µs of standing CPU time against a 42.9 µs
+  window), and `hex_core::patience::Follow`, which judged a stall over W* or the longest gap a wait had measured, is
+  removed with `Party::Alive` and `Stopped`: nothing in Hex judges a stall of measured progress.
 - **RFC 6298's back-off, considered and dropped.** RFC 6298 §5.5 (sha256 of the rfc-editor.org text
   `f3a6d937c0a7653bd431fdbbdcd7920f4e9d9cdb6134fa9db7a74b90d215edf6`): "(5.5) The host MUST set RTO <- RTO * 2 ("back
   off the timer")." Its factor is a cited number, not an estimate of what is seen (Ada, 2026-11-06, as the Hex lead
@@ -93,11 +96,10 @@ checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
    dials until it. The design, HEX-GUEST-33's liveness-sliced dial: before the first boot, and after one that ran out,
    the budget follows the guest's VM (`Budget::following(party)` beside `Budget::new(bound)`, its deadline an
    `Option<Instant>`). The VM's liveness is its process's end, an event on every OS (a pidfd on Linux,
-   `EVFILT_PROC`/`NOTE_EXIT` on macOS, a process handle on Windows); its progress is its CPU time
-   (`/proc/<pid>/stat`, `proc_pid_rusage`, `GetProcessTimes`), given to `Follow::look`. Shards'
-   `connect_once_before(port, at)` takes a finite instant, so the dial is cut into slices at the follower's own
-   instants: `Follow::stalls_after()` once the VM has shown a gap between advances, before that the next look its own
-   events give (its exit, its console's bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
+   `EVFILT_PROC`/`NOTE_EXIT` on macOS, a process handle on Windows). A stall of its boot is Shards' Part B's to judge
+   (no CPU over a whole boot-scale W*), once vendored, not Hex's. Shards' `connect_once_before(port, at)` takes a
+   finite instant, so the dial is cut into slices at the next look the VM's own events give (its exit, its console's
+   bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
    or its VM's end (`Option<Instant>`, `None` for "until either"), with no slices; Shards is ROOT's to change. Then
    `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
    alone.
@@ -120,8 +122,8 @@ checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
    `macos_process_box.rs`, `helper_daemon/tests.rs`). Made plainly `measuring`, the first answer in a test binary
    would bound every later wait for that fact in it, and a test fails at a run-out where production follows. The
    design: `hex_testkit::waits::until` and `within` take the fact's party (`impl FnMut() -> Party`: a `Proc`'s
-   `try_wait`, a cgroup's populated count, a pid's CPU time) and follow it with `Follow` before the first answer and
-   after a run-out; a run-out is told to the census and never fails a test, which fails at its party's end or stall.
+   `try_wait`, a cgroup's populated count, a thread's life) and follow it by its life alone before the first answer
+   and after a run-out; a run-out is told to the census and never fails a test, which fails only at its party's end.
    Then the constants, the doubles, `seeded` and `test-seeds` go: eighteen seeded statics in six Linux-only files
    (`oci_box.rs`, `oci_reuse.rs`, `node_socket.rs`, `oci_spec_box.rs`, `serve/linux_tests.rs`, `netcheck/tests.rs`)
    and the rest in hex-client, hex-node, hex-runtime and hex-testkit.

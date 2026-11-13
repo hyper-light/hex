@@ -2454,12 +2454,12 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   costs nothing and each one under it costs something, whatever `C`, and the least of the free ones is the slowest
   answer itself. Nothing is added past it: no bound past the slowest of `n` answers holds whatever their distribution
   (Wilks, 1941), and the next answer outruns them with chance at most `1 / (n + 1)`.
-- **Following** (the cold start): before a wait's first answer it has no bound and follows its party: it lasts while
-  the party is alive and advancing, and is refused, typed, at the party's death, a reset of its connection, or a stall
-  of its own measured progress, no advance for longer than the longest gap between advances this wait has measured
-  (`patience::Follow`, `Party`, `Stopped`); before it has measured such a gap only the party's end refuses it. The
-  party's liveness is the shell's to read (a pidfd, a process handle, a connection's state) and its progress a count
-  that only rises while it works (its CPU time, bytes sent, entries listed). No time is picked and none is recorded.
+- **Following** (the cold start): before a wait's first answer it has no bound and follows its party by its life: it
+  lasts while the party lives, and is refused, typed, only at the party's death or a reset of its connection. The
+  party's liveness is the shell's to read (a pidfd, a process handle, a connection's state). No stall of its progress
+  is judged: one judged over W*, or at the slowest gap seen, refuses healthy parties (`learned-waits.md`, decision 9's
+  bound), so a VM's boot alone, whose progress is continuous work at a scale its window sees, is judged so, by
+  Shards' Part B. No time is picked and none is recorded.
 - **After a run-out**: a wait that ran out is no sample (Karn's point), nor is a party taken for dead or hung, and the
   tail it ran into is unknown, the cold start's case: the next wait follows its party again (`Patience::ran_out`, which
   tells the census, and `Patience::expired`, which doesn't), its answer comes in uncensored, and the bound rises to it.
@@ -2474,12 +2474,10 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   `#[cfg(test)]`, seeds `conformance::PATIENCE` and `ENDS` from per-class end records. `Patience::seeded` exists for
   tests alone (`cfg(test)`, or hex-core's `test-seeds` feature, which only hex-testkit's dependency turns on, a
   dev-dependency everywhere, as `crates/hex-core/tests/test_seeds_dev_only.rs` holds every manifest to), for the tests'
-  own waits under the lead's rule of 2026-11-08, owed as well. Each owed piece's design, and each shell's progress
-  count for `Follow` (a following wait now waits on its party's end alone), are in
+  own waits under the lead's rule of 2026-11-08, owed as well. Each owed piece's design is in
   `docs/research/runtime/learned-waits.md` ("Owed").
-- **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
-  to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
-  made); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a
+- **No caller failure where an alternative exists**: a seed past its bound is followed by its life, never retired
+  (2026-11-13); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a
   deadline waits on to it, the learned bound's end a run-out it records (`Patience::ran_out`); only where there is no
   alternative (a record write, a client's call with no caller's deadline) is the caller refused, by type. (AC-T7.4.1,
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
