@@ -82,6 +82,10 @@ pub struct Status {
     /// Reads that held any of the box's members stopped across their wait ([`watch::Watch::runs`];
     /// observability: what the hold costs the box).
     pub holds: u64,
+    /// CPU holds whose response went unmeasured (joint plan step 14, 2c): a member that ended, left or couldn't be
+    /// read meanwhile, or a measurement its control refused. Each is no sample, never the scope's refusal; counted here
+    /// so none goes unseen.
+    pub unmeasured_holds: u64,
 }
 
 /// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
@@ -2247,20 +2251,24 @@ impl Watcher {
             Some(super::cpu::Decision::Run(wait)) => wait,
             Some(super::cpu::Decision::Hold(_)) => {
                 // Its response runs from when its credit ran out, read off the observation that held it (2c).
-                let ran_out = scope.cpu_ran_out(owner)?;
+                let ran_out = scope.cpu_ran_out(owner).ok().flatten();
                 *held = self.state.apply(&self.order, &[], &self.last)?;
                 scope.cpu_held(owner)?;
                 // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
-                // every member it holds reads stopped, followed with no timer while they live. A member that ended or
-                // left meanwhile, or a response of no time, is no sample (Karn's point).
-                if let Some(from) = ran_out
-                    && let Some(stopped) = stopped_after(&self.order, sys::run_state)?
-                    && let Some(response) = stopped
-                        .checked_duration_since(from)
-                        .filter(|response| !response.is_zero())
-                {
-                    scope.cpu_learn(owner, response)?;
-                    self.shared.observe_cpu_response(response)?;
+                // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
+                // didn't take its stop, ended, left or couldn't be read, a response of no time, or one its control or the
+                // helper refuses, is no sample (Karn's point): counted, never the scope's refusal.
+                let learned = ran_out
+                    .zip(stopped_after(&self.order, sys::run_state))
+                    .and_then(|(from, stopped)| stopped.checked_duration_since(from))
+                    .filter(|response| !response.is_zero())
+                    .is_some_and(|response| {
+                        scope.cpu_learn(owner, response).is_ok()
+                            && self.shared.observe_cpu_response(response).is_ok()
+                    });
+                if !learned {
+                    let mut status = self.state.status()?;
+                    status.unmeasured_holds = status.unmeasured_holds.saturating_add(1);
                 }
                 match scope.cpu_decision(owner)? {
                     Some(super::cpu::Decision::Hold(wait)) => Some(wait),
@@ -2688,9 +2696,9 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
 /// its own (`/usr/bin/yes`, one busy thread, as `macos_cpu_response`'s member) runs under a control at Hex's least CPU
 /// bound, `hex_api::MIN_CPU_MILLI` (the kernel's least quota, 1 ms a 100 ms period: the least the learner caps any VM
 /// at, so the charge window's cycle is the one at it; this control's quantum is a milli-CPU, so it holds it), from the
-/// cold response. Once its credit runs out it is held, followed by liveness with no timer, and its response is a
-/// hold's: from its credit's running out to its read stop. None where the spinner ended first, or the stop took no
-/// time.
+/// cold response. Once its credit runs out it is held, and its response is a hold's: from its credit's running out to
+/// its stop, read once ([`stopped_after`]). None where the spinner ended first, didn't take its stop, or the stop took
+/// no time.
 fn probe_response() -> Result<Option<Duration>, Refusal> {
     let mut spinner = super::command::Command::new("/usr/bin/yes")
         .stdin(super::command::Stdio::null())
@@ -2758,35 +2766,30 @@ fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
         .ok_or_else(|| Refusal::os("the CPU response probe's spinner", "its pid"))?;
     rustix::process::kill_process(target, rustix::process::Signal::STOP)
         .map_err(|error| Refusal::os("holding the CPU response probe", io::Error::from(error)))?;
-    let stopped = stopped_after(&[pid], sys::run_state)?;
+    let stopped = stopped_after(&[pid], sys::run_state);
     Ok(ran_out
         .zip(stopped)
         .and_then(|(from, at)| at.checked_duration_since(from))
         .filter(|response| !response.is_zero()))
 }
 
-/// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer
-/// while it lives, as `macos_cpu_response` reads a stop; none where one ended or left meanwhile, so its hold is no
-/// sample.
+/// When every member of `order` read stopped (joint plan step 14, 2c), each read once after its stop was sent and never
+/// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it with the default action (`psignal_internal`,
+/// bsd/kern/kern_sig.c), so a member that reads anything else there didn't take its stop, and a wait for it to read
+/// stopped could last as long as it lives (Studio r214: one read live for the 5 s after its stop, and its watcher, spinning
+/// on it, missed the release's stop). None where one reads live, ended, left or couldn't be read (ROOT, 2026-11-13: a
+/// measurement that fails or can't be trusted is no sample, never the scope's refusal), so its hold is no sample.
 fn stopped_after(
     order: &[u32],
     run_state: impl Fn(i32) -> std::io::Result<Option<sys::Run>>,
-) -> Result<Option<Instant>, Refusal> {
+) -> Option<Instant> {
     for &member in order {
-        let Ok(pid) = i32::try_from(member) else {
-            return Ok(None);
-        };
-        loop {
-            match run_state(pid)
-                .map_err(|error| Refusal::os("reading a held member's run state", error))?
-            {
-                Some(sys::Run::Stopped) => break,
-                Some(sys::Run::Live) => std::thread::yield_now(),
-                Some(sys::Run::Ended) | None => return Ok(None),
-            }
+        let pid = i32::try_from(member).ok()?;
+        if run_state(pid).ok()? != Some(sys::Run::Stopped) {
+            return None;
         }
     }
-    Ok(Some(Instant::now()))
+    Some(Instant::now())
 }
 
 #[cfg(test)]
@@ -2795,28 +2798,50 @@ mod hold_response_tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
-    /// Joint plan step 14 (2c): a hold's stop is followed until every member it holds reads stopped, and a member that
-    /// ended or left meanwhile makes the hold no sample. Do read members 11 and 12, the second live for two reads before
-    /// it stops; then 11 and 13, the second gone. Expect an instant after both stopped, 12 read three times; then none.
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): a hold's stop is read once a member, after the stop is sent, and never
+    /// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it, so a member that reads anything else
+    /// there didn't take its stop, and a wait for it to read stopped can last as long as the member does. On the Studio
+    /// (r214) a member read live 76 µs after its stop was sent and for the 5 s after, while the watcher spun on it and
+    /// never acted on the release's stop (macos_pool_restart, refused Uncertain). Do read members 11 and 12 after their
+    /// stops, 12 live at its first read and stopped at any later one; then 11 and 13, 13 gone; then 11 and 14, both
+    /// stopped. Expect no sample with 12 read once; none; then an instant after both read stopped, each read once.
     #[test]
-    fn w14_a_holds_stop_is_followed_until_every_member_reads_stopped() {
+    fn w14_a_holds_stop_is_read_once_and_a_member_it_didnt_stop_is_no_sample() {
         let reads = RefCell::new(BTreeMap::<i32, u32>::new());
         let read = |pid: i32| {
             let mut reads = reads.borrow_mut();
             let n = reads.entry(pid).or_insert(0);
             *n += 1;
             Ok(match (pid, *n) {
-                (11, _) => Some(sys::Run::Stopped),
-                (12, 1 | 2) => Some(sys::Run::Live),
+                (11 | 14, _) => Some(sys::Run::Stopped),
+                (12, 1) => Some(sys::Run::Live),
                 (12, _) => Some(sys::Run::Stopped),
                 _ => None,
             })
         };
+        assert_eq!(stopped_after(&[11, 12], read), None);
+        assert_eq!(
+            reads.borrow().get(&12),
+            Some(&1),
+            "read once, never followed"
+        );
+        assert_eq!(stopped_after(&[11, 13], read), None);
         let before = Instant::now();
-        let stopped = stopped_after(&[11, 12], read).unwrap().unwrap();
+        let stopped = stopped_after(&[11, 14], read).unwrap();
         assert!(stopped >= before);
-        assert_eq!(reads.borrow().get(&12), Some(&3));
-        assert_eq!(stopped_after(&[11, 13], read).unwrap(), None);
+        assert_eq!(reads.borrow().get(&14), Some(&1));
+    }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13: a hold's measurement that fails is no sample, never the scope's
+    /// refusal): a member's run state that can't be read, as after a node's restart when the node is no longer its
+    /// members' parent, leaves the hold unmeasured. Do read a member whose run state read fails. Expect no sample, not
+    /// an error.
+    #[test]
+    fn w14_a_holds_stop_that_cant_be_read_is_no_sample() {
+        let read = |_: i32| -> std::io::Result<Option<sys::Run>> {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        };
+        assert_eq!(stopped_after(&[11], read), None);
     }
 }
 
