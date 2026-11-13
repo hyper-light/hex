@@ -2069,8 +2069,10 @@ fn w12_a_delete_follows_its_stop_past_the_stops_w_star() {
 /// Kiln's choice (b) (ROOT, 2026-11-13: the delete's wait follows the boot until its party's end, and says so there):
 /// a delete following a boot is refused only where the boot's thread ends with no answer, so neither its run's start
 /// nor its run host's end is known. Do: start a VM whose boot is held past a 1 ns W*, its start Pending; delete it as
-/// the boot is held; then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the
-/// node's broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
+/// the boot is held, its own wait past a 1 ns W* too, so it follows the boot once it has asked its stop; wake the held
+/// boot as the OS may wake a condition variable's waiter unasked (a signal's EINTR, the step-39 agent's finding of
+/// 2026-11-13); then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the node's
+/// broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
 #[test]
 fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
     let images = ModelImages::new();
@@ -2078,6 +2080,10 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
     let held = ImageWaits {
         boot: Patience::seeded(
             "test.hex_runtime.image_boot_deleted_abandoned",
+            Duration::from_nanos(1),
+        ),
+        delete_boot: Patience::seeded(
+            "test.hex_runtime.image_delete_boot_abandoned",
             Duration::from_nanos(1),
         ),
         ..waits().unwrap()
@@ -2099,10 +2105,15 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
         hex_testkit::waits::until(
             &DELETE_FOLLOWS_ABANDONED,
             "the delete following the boot",
-            || {
-                deleting.is_finished()
-                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
-            },
+            || deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none(),
+        )
+        .unwrap();
+        // The wake the test never opened, its stop come: the held boot looks again, and answers as it then finds.
+        images.poke();
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_ABANDONED,
+            "the held boot looking again",
+            || deleting.is_finished() || images.stopped.load(Ordering::SeqCst) > 0,
         )
         .unwrap();
         images.abandon.store(true, Ordering::SeqCst);
