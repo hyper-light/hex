@@ -8,6 +8,15 @@ per (call kind, class), never set by constants." Serves CP-T7.3 (the control pla
 person's directives it holds to (the plan's header): "all such communications should be AESGCM256 bidirectional
 encrypted"; "Hex and Kiln's load balancer are peer-to-peer"; no arbitrary constants, only learned and derived values.
 
+Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): decided 2026-11-12, Q12
+2026-11-13; the step met 2026-11-13 (Hex ROOT's goal for it). Live: the transport and the node's listener
+(`1f38bd36`), a connection's end ending its bridges (`3045b824`), a stream cut short told as cut (Q11; `3c44c7f6`,
+`a10f7fe7`), a Windows node dialable (`7e48ef7d`), the lanes a node grants a peer (Q8; `49500736`) and the node's
+links report (Q12; `09431b42`). HEX-QUIC-25 passed across Linux and macOS at `3045b824`, both its kill and its
+partition halves, and the QUIC conformance suite passed on Windows at `7e48ef7d`. Merged on Hex's main: one
+hyper-quic, from hyper-raft's main `045cf3ff` (Q1; `8aa7c028`), and the bridge shared with hex-client (`a8f6bfe4`).
+Owed: HEX-QUIC-27 on Windows, and the lanes raised on a live connection that Q8 asks of hyper-transport.
+
 Each decision says what it chose, its sources, the alternatives, and what would falsify it (CLAUDE.md §5, R02).
 
 ## Q1. How Hex takes hyper-transport
