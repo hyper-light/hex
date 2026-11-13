@@ -11,7 +11,9 @@
 //! past read at once and the next taken from the clock. A run is bounded by its own samples: it ends once they span
 //! 10 s, however long each read took. Each run says its cadence (n, p50, p99 and max of the gaps between its reads) and
 //! is refused where its longest gap isn't shorter than the step it tells the CPU time's steps by: there a gap may be
-//! the sampler's own (ROOT's r563, whose sampler at normal priority read every 41 ms behind 31 spinners). The first run is uncapped: the longest
+//! the sampler's own (ROOT's r563, whose sampler at normal priority read every 41 ms behind 31 spinners). Each says too
+//! what the machine ran beside the job (`GetSystemTimes`: busy, and busy less the job's), so a low rate tells other
+//! work from the job held back. The first run is uncapped: the longest
 //! gap between two of its CPU time's steps is the accounting's own step (Windows charges CPU time as its clock ticks),
 //! so a gap longer than that in a capped run is the cap stopping the job. Then one run per cap, 10%, 20% and 50% of
 //! the machine (`JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`, 1,000, 2,000 and 5,000 of 10,000). For each it prints one
@@ -103,9 +105,10 @@ fn nul() -> OwnedHandle {
 }
 
 /// One run: a job capped at `cap` (none uncapped) running `threads` spinners, its CPU time in 100 ns read every
-/// [`EVERY`] on `timer` until its reads span [`FOR`], each with its time since the run's start.
+/// [`EVERY`] on `timer` until its reads span [`FOR`], each with its time since the run's start; and the machine's
+/// busy CPU over them, in 100 ns.
 #[cfg(windows)]
-fn run(cap: Option<u32>, threads: u32, timer: &HighResTimer) -> Vec<(Duration, u64)> {
+fn run(cap: Option<u32>, threads: u32, timer: &HighResTimer) -> (Vec<(Duration, u64)>, u128) {
     let job = Job::create().unwrap();
     job.configure(&Limits {
         memory: None,
@@ -141,6 +144,7 @@ fn run(cap: Option<u32>, threads: u32, timer: &HighResTimer) -> Vec<(Duration, u
     }
     let count = usize::try_from(FOR.as_micros() / EVERY.as_micros()).unwrap();
     let mut samples = Vec::with_capacity(count + 1);
+    let machine = sys::system_times().unwrap();
     let start = Instant::now();
     samples.push((Duration::ZERO, cpu()));
     // Bounded by its own reads: it ends once they span FOR. A read past its deadline takes the next from the clock,
@@ -154,9 +158,10 @@ fn run(cap: Option<u32>, threads: u32, timer: &HighResTimer) -> Vec<(Duration, u
         let past = u32::try_from(at.as_micros() / EVERY.as_micros()).unwrap();
         due = start + EVERY * (past + 1);
     }
+    let machine = busy(machine, sys::system_times().unwrap());
     job.terminate(hex_core::job::TERMINATED).unwrap();
     assert!(sys::wait(&started.process, u32::MAX).unwrap());
-    samples
+    (samples, machine)
 }
 
 /// The nearest-rank `q`-quantile (per mille) of `values`, and their count and max: ceil(q n / 1000)-th smallest.
@@ -221,8 +226,9 @@ fn per_machine(cpu: u128, span: Duration, processors: u32) -> u128 {
 /// The machine's busy CPU (in 100 ns) between two of its `GetSystemTimes` readings, each its idle, kernel and user
 /// time: Windows counts idle time within kernel time, so busy is kernel and user less idle.
 fn busy(before: [u64; 3], after: [u64; 3]) -> u128 {
-    let _ = (before, after);
-    0
+    let [idle, kernel, user]: [u128; 3] =
+        std::array::from_fn(|i| u128::from(after[i].saturating_sub(before[i])));
+    (kernel + user).saturating_sub(idle)
 }
 
 /// The gaps between the reads of consecutive samples: the sampler's own cadence.
@@ -283,15 +289,30 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
         };
         per_machine(u128::from(last.1 - first.1), last.0 - first.0, processors)
     };
-    let uncapped = run(None, threads, &timer);
+    // What the machine ran over a run besides the job (ROOT, at e35e4811's rerun): its busy CPU, and that less the
+    // job's, each per RATE_SCALE of the machine, so a low rate tells other work from the job held back.
+    let machine = |samples: &[(Duration, u64)], busy: u128| -> String {
+        let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
+            return String::new();
+        };
+        let span = last.0 - first.0;
+        let others = busy.saturating_sub(u128::from(last.1 - first.1));
+        format!(
+            "machine_busy={}/10000 others={}/10000",
+            per_machine(busy, span, processors),
+            per_machine(others, span, processors)
+        )
+    };
+    let (uncapped, busy) = run(None, threads, &timer);
     keep("uncapped", &uncapped);
     let at = steps(&uncapped);
     let step = at.windows(2).map(|p| p[1] - p[0]).max().unwrap_or_default();
     let kept = cadence(&uncapped, step);
     println!(
-        "HEX-CHARGE-WINDOW processors={processors} spinners={threads} uncapped rate={}/10000 accounting_step={step:?} \
-         steps={} cadence[{}]",
+        "HEX-CHARGE-WINDOW processors={processors} spinners={threads} uncapped rate={}/10000 {} \
+         accounting_step={step:?} steps={} cadence[{}]",
         rate(&uncapped),
+        machine(&uncapped, busy),
         at.len(),
         kept.as_deref().unwrap_or_else(String::as_str)
     );
@@ -304,13 +325,14 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
             demand > u64::from(cap),
             "{threads} spinners of {processors} processors ask {demand}/10000, not past the cap {cap}/10000"
         );
-        let samples = run(Some(cap), threads, &timer);
+        let (samples, busy) = run(Some(cap), threads, &timer);
         keep(&cap.to_string(), &samples);
         let kept = cadence(&samples, step);
         let (mut runs, mut stops, mut periods) = cycles(&samples, step);
         println!(
-            "HEX-CHARGE-WINDOW cap={cap}/10000 rate={}/10000 runs[{}] stops[{}] periods[{}] cadence[{}]",
+            "HEX-CHARGE-WINDOW cap={cap}/10000 rate={}/10000 {} runs[{}] stops[{}] periods[{}] cadence[{}]",
             rate(&samples),
+            machine(&samples, busy),
             quantiles(&mut runs),
             quantiles(&mut stops),
             quantiles(&mut periods),
