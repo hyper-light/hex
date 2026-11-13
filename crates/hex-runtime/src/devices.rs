@@ -343,9 +343,14 @@ pub fn managed_scope_id(record: &BoxRecord) -> Result<BoxId, Refusal> {
 }
 
 pub fn managed_native_scope_id(record: NativeRecord<'_>) -> Result<BoxId, Refusal> {
-    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
-    let scope = record.scope().ok_or_else(refused)?;
-    let room = scope.bytes().len().checked_mul(2).ok_or_else(refused)?;
+    let scope = record
+        .scope()
+        .ok_or_else(|| record.uncertain("its record names no native scope to name it by"))?;
+    let room = scope
+        .bytes()
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| record.uncertain("its native scope's name overflowed"))?;
     let mut name = String::new();
     name.try_reserve_exact(room)
         .map_err(|_| Refusal::Exhausted {
@@ -357,7 +362,7 @@ pub fn managed_native_scope_id(record: NativeRecord<'_>) -> Result<BoxId, Refusa
             let byte = b"0123456789abcdef"
                 .get(usize::from(digit))
                 .copied()
-                .ok_or_else(refused)?;
+                .ok_or_else(|| record.uncertain("its native scope's name took a digit past hex"))?;
             name.push(char::from(byte));
         }
     }
@@ -415,7 +420,6 @@ pub fn check_managed_report(
     writer: bool,
     deadline: Instant,
 ) -> Result<Instant, Refusal> {
-    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
     match record {
         NativeRecord::Box(record) => record.spec.check()?,
         NativeRecord::Pool(record) => record.check()?,
@@ -425,7 +429,9 @@ pub fn check_managed_report(
         || record.init().is_some()
         || record.scope().is_none()
     {
-        return Err(refused());
+        return Err(record.uncertain(
+            "its launch plan isn't its record's class, or it isn't a fresh creation with a native scope",
+        ));
     }
     let request = match plan {
         ManagedLaunch::Shards(prepared) => prepared.gpu_report_request(),
@@ -439,7 +445,13 @@ pub fn check_managed_report(
         required,
     )?;
     let deadline = if let Some(request) = request {
-        check_report_selection(catalog.ok_or_else(refused)?, record, request.selected())?;
+        check_report_selection(
+            catalog.ok_or_else(|| {
+                record.uncertain("its node holds no device catalog to check its report by")
+            })?,
+            record,
+            request.selected(),
+        )?;
         deadline.min(request.deadline())
     } else {
         deadline
@@ -464,7 +476,9 @@ fn check_report_scope(
                 .is_none_or(|scope| *scope.bytes() != requested)
         })
     {
-        return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+        return Err(record.uncertain(
+            "its launch's report scope, writer or requirement disagree with its record",
+        ));
     }
     Ok(())
 }
@@ -474,10 +488,10 @@ fn check_report_selection(
     record: NativeRecord<'_>,
     selected: &[shards_api::PhysicalGpu],
 ) -> Result<(), Refusal> {
-    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
-    shards_api::physical::check_selection(selected).map_err(|_| refused())?;
+    shards_api::physical::check_selection(selected)
+        .map_err(|_| record.uncertain("its report's GPU selection isn't valid"))?;
     if selected.len() != record.devices().len() {
-        return Err(refused());
+        return Err(record.uncertain("its report selects another count of GPUs than its record's"));
     }
     let mut indexed = Vec::new();
     indexed
@@ -500,9 +514,13 @@ fn check_report_selection(
             .binary_search_by_key(id, |entry| entry.info.id)
             .ok()
             .and_then(|at| indexed.get(at))
-            .ok_or_else(refused)?;
+            .ok_or_else(|| {
+                record.uncertain("its record names a GPU its node's catalog doesn't hold")
+            })?;
         let Some(Binding::ShardsGpu { physical }) = entry.binding(Route::ShardsGpu) else {
-            return Err(refused());
+            return Err(
+                record.uncertain("its record names a GPU its catalog binds to no Shards route")
+            );
         };
         expected.push(*physical);
     }
@@ -514,7 +532,9 @@ fn check_report_selection(
             .iter()
             .any(|physical| expected.binary_search(physical).is_err())
     {
-        return Err(refused());
+        return Err(
+            record.uncertain("its report selects a GPU twice, or one its record doesn't name")
+        );
     }
     Ok(())
 }
@@ -1027,10 +1047,15 @@ impl Catalog {
             let record = pools
                 .iter()
                 .find(|record| record.key == key)
-                .ok_or_else(|| record_error(key))?;
+                .ok_or_else(|| {
+                    record_error(key, "its GPU family's current backing has no record")
+                })?;
             record.check()?;
             if record.phase == hex_api::BackingPhase::Released {
-                return Err(record_error(key));
+                return Err(record_error(
+                    key,
+                    "its GPU family's current backing is released",
+                ));
             }
         }
         let aliases = if configured.is_empty() {
@@ -1251,7 +1276,12 @@ impl Catalog {
                     let boxed = records
                         .get(id)
                         .and_then(|record| record.as_ref().ok())
-                        .ok_or_else(|| record_error(record.key))?;
+                        .ok_or_else(|| {
+                            record_error(
+                                record.key,
+                                "the box holding its devices has no readable record",
+                            )
+                        })?;
                     if !matches!(
                         boxed.phase,
                         hex_core::record::Phase::Creating | hex_core::record::Phase::Deleting
@@ -1260,13 +1290,21 @@ impl Catalog {
                         || boxed.exit.is_some()
                         || !self.handoff(&boxed.spec, record)?
                     {
-                        return Err(record_error(record.key));
+                        return Err(record_error(
+                            record.key,
+                            "the box holding its devices isn't a pending handoff of it",
+                        ));
                     }
                     // The pending Box is only a consuming reference. The original native
                     // observer still owns every full-P conflict until its actual scope Released.
                     holder = Some(hex_api::DeviceHolder::Backing(record.key));
                 }
-                Some(hex_api::DeviceHolder::Backing(_)) => return Err(record_error(record.key)),
+                Some(hex_api::DeviceHolder::Backing(_)) => {
+                    return Err(record_error(
+                        record.key,
+                        "another backing holds its devices",
+                    ));
+                }
             }
         }
         Ok(holder)
@@ -1331,12 +1369,22 @@ impl Catalog {
             let pool = pools
                 .iter()
                 .find(|pool| pool.key == source)
-                .ok_or_else(|| record_error(source))?;
+                .ok_or_else(|| {
+                    record_error(source, "the handoff's source backing has no record")
+                })?;
             if !self.handoff(spec, pool)? {
-                return Err(record_error(source));
+                return Err(record_error(
+                    source,
+                    "the box isn't a handoff its source backing allows",
+                ));
             }
             for (other, record) in records {
-                let record = record.as_ref().map_err(|_| record_error(source))?;
+                let record = record.as_ref().map_err(|_| {
+                    record_error(
+                        source,
+                        "a box record couldn't be read as its handoff was checked",
+                    )
+                })?;
                 if other != &spec.id
                     && record.spec.route.is_some_and(|route| {
                         route.backing == Some(source)
@@ -1402,11 +1450,12 @@ impl Catalog {
     }
 }
 
-fn record_error(key: hex_api::BackingKey) -> Refusal {
+/// Backing `key` refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)).
+fn record_error(key: hex_api::BackingKey, why: &str) -> Refusal {
     Refusal::Backing {
         key,
         cause: hex_api::LifecycleCause::Uncertain,
-        why: None,
+        why: Some(why.to_owned()),
     }
 }
 
@@ -1969,7 +2018,8 @@ mod report_tests {
             (None, false, true),
         ] {
             assert!(
-                matches!(check_report_scope(record, scope, writer, required), Err(Refusal::Backing { key, cause:LifecycleCause::Uncertain, why: None }) if key == pool.key)
+                matches!(check_report_scope(record, scope, writer, required), Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain, why: Some(why) })
+                    if key == pool.key && why == "its launch's report scope, writer or requirement disagree with its record")
             );
         }
         // CPU/Firecracker's separate factual RPC path supplies no Shards writer or request.

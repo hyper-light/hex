@@ -253,9 +253,10 @@ struct State {
 }
 
 impl State {
-    fn uncertain(&self) -> Refusal {
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)).
+    fn uncertain(&self, why: &str) -> Refusal {
         if let Some(scope) = &self.vm {
-            return scope.refusal(self.id.as_ref());
+            return scope.uncertain(self.id.as_ref(), why);
         }
         match &self.id {
             OwnerKey::Box(id) => super::managed::uncertain(id),
@@ -471,7 +472,10 @@ impl State {
         let mut held = self.held()?;
         sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
         for at in 0..held.stopped.len() {
-            let member = held.stopped.at(at).ok_or_else(|| self.uncertain())?;
+            let member = held
+                .stopped
+                .at(at)
+                .ok_or_else(|| self.uncertain("its hold's entry vanished as it was let go"))?;
             if pids.contains(&member.pid) {
                 self.signal_stopped(member, sys::MemberSignal::Continue)?;
             }
@@ -490,12 +494,12 @@ impl State {
             .iter()
             .find(|member| i32::try_from(member.pid) == Ok(pid))
             .map(|member| member.started)
-            .ok_or_else(|| self.uncertain())?;
+            .ok_or_else(|| self.uncertain("its member isn't in the read that listed it"))?;
         let group = self
             .pgid
             .lock()
-            .map_err(|_| self.uncertain())?
-            .ok_or_else(|| self.uncertain())?;
+            .map_err(|_| self.uncertain("its group is poisoned as a member is held"))?
+            .ok_or_else(|| self.uncertain("it has no group as a member is held"))?;
         if !self.in_scope(scope, pid, birth, group)? {
             return Ok(None);
         }
@@ -562,15 +566,17 @@ impl State {
     ) -> Result<Option<Stopped>, Refusal> {
         if let Some(scope) = &self.vm {
             self.validate_vm_scope()?;
-            let token = member.native.ok_or_else(|| self.uncertain())?;
+            let token = member
+                .native
+                .ok_or_else(|| self.uncertain("its held member has no token to signal it by"))?;
             let group = self
                 .pgid
                 .lock()
-                .map_err(|_| self.uncertain())?
-                .ok_or_else(|| self.uncertain())?;
+                .map_err(|_| self.uncertain("its group is poisoned as a member is signalled"))?
+                .ok_or_else(|| self.uncertain("it has no group as a member is signalled"))?;
             if token.pid() != member.pid {
                 scope.failed(shards_api::ProcessFailure::DifferentScope);
-                return Err(self.uncertain());
+                return Err(self.uncertain("its member's token names another pid"));
             }
             if !self.in_scope(scope, member.pid, token.birth(), group)? {
                 return Ok(None);
@@ -637,7 +643,7 @@ impl State {
             Some(_) if gone(pid, birth)? => Ok(false),
             Some(_) => {
                 scope.failed(shards_api::ProcessFailure::DifferentScope);
-                Err(self.uncertain())
+                Err(self.uncertain("its member left its scope's group alive"))
             }
         }
     }
@@ -964,8 +970,8 @@ struct ReadRun {
 pub struct Members(Arc<State>);
 
 impl Members {
-    pub(super) fn uncertain(&self) -> Refusal {
-        self.0.uncertain()
+    pub(super) fn uncertain(&self, why: &str) -> Refusal {
+        self.0.uncertain(why)
     }
     /// Tells the box a member ended: when `sigkill` and its `peak` (read from its zombie before the reap)
     /// reached the cap, counts a memory end once ([`State::killed_by_cap`]). A clean exit, another signal,
@@ -1090,7 +1096,7 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's watcher"))?;
         if held.is_some() {
-            return Err(self.state.uncertain());
+            return Err(self.state.uncertain("its watcher was started before"));
         }
         *held = Some(watcher);
         Ok(())
@@ -1143,7 +1149,9 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's group"))?;
         if pgid.is_some() {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its held program's group was introduced before"));
         }
         let mut armed = self
             .state
@@ -1154,7 +1162,10 @@ impl ProcessBox {
             armed.reserve(1)?;
         }
         self.scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope for its held program")
+            })?
             .held(self.owner())?;
         let pid = sys::spawn_suspended(spawn, 0, self.state.clamp)
             .map_err(|error| Refusal::os("creating the held native VM controller", error))?;
@@ -1164,7 +1175,9 @@ impl ProcessBox {
             armed.insert(pid)?;
         }
         if pid <= 0 {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its held program's pid isn't a process's"));
         }
         Ok(pid)
     }
@@ -1177,16 +1190,23 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's group"))?
             .is_some()
         {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its group was introduced, so it was submitted"));
         }
         self.scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope to refuse its submission")
+            })?
             .not_submitted(self.owner())
     }
 
     pub(super) fn introduce_group(&self, pid: i32, started: u64) -> Result<(), Refusal> {
         if pid <= 0 || started == 0 {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its controller's pid or start is zero as its group is introduced"));
         }
         {
             let mut group = self
@@ -1195,7 +1215,9 @@ impl ProcessBox {
                 .lock()
                 .map_err(|_| poisoned("a box's group"))?;
             if group.is_some_and(|old| old != pid) {
-                return Err(self.state.uncertain());
+                return Err(self
+                    .state
+                    .uncertain("its group was introduced as another pid"));
             }
             *group = Some(pid);
         }
@@ -1206,7 +1228,9 @@ impl ProcessBox {
                 .lock()
                 .map_err(|_| poisoned("a box's leader"))?;
             if birth.is_some_and(|old| old != started) {
-                return Err(self.state.uncertain());
+                return Err(self
+                    .state
+                    .uncertain("its leader was introduced at another start"));
             }
             *birth = Some(started);
         }
@@ -1225,42 +1249,60 @@ impl ProcessBox {
     /// or continue its members by it.
     pub(super) fn set_managed_rate(&self, rate: u64) -> Result<(), Refusal> {
         self.scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope to set a rate on")
+            })?
             .set_cpu_rate(self.owner(), rate)?;
         self.state.wake()
     }
 
     pub(super) fn resume_managed(&self) -> Result<(), Refusal> {
-        let (pid, _) = self.group()?.ok_or_else(|| self.state.uncertain())?;
+        let (pid, _) = self
+            .group()?
+            .ok_or_else(|| self.state.uncertain("it has no group to resume"))?;
         let decision = self
             .scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope to start its CPU control")
+            })?
             .start_cpu(self.owner())?;
         self.scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope to mark running")
+            })?
             .running(self.owner())?;
         if matches!(decision, super::cpu::Decision::Hold(_)) {
             // The controller is already natively suspended. Earn the same startup debt before
             // any CONT; the existing watcher resumes it from its retained audit-token Hold entry.
             self.scope()
-                .ok_or_else(|| self.state.uncertain())?
+                .ok_or_else(|| {
+                    self.state
+                        .uncertain("it has no native scope to hold at its start")
+                })?
                 .cpu_held(self.owner())?;
             return self.state.wake();
         }
         if decision == super::cpu::Decision::Prepared {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its CPU control is still prepared as it resumes"));
         }
         let mut held = self.state.held()?;
-        let member = held
-            .stopped
-            .get(&pid)
-            .ok_or_else(|| self.state.uncertain())?;
+        let member = held.stopped.get(&pid).ok_or_else(|| {
+            self.state
+                .uncertain("its controller isn't held as it resumes")
+        })?;
         if self
             .state
             .signal_stopped(member, sys::MemberSignal::Continue)?
             .is_none()
         {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its controller was gone as it was continued"));
         }
         held.stopped.remove(&pid);
         drop(held);
@@ -1303,7 +1345,10 @@ impl ProcessBox {
 
     pub(super) fn finalize_watcher(&self, end: shards_api::ManagedEnd) -> Result<(), Refusal> {
         self.scope()
-            .ok_or_else(|| self.state.uncertain())?
+            .ok_or_else(|| {
+                self.state
+                    .uncertain("it has no native scope to finalize its watcher")
+            })?
             .finalizing(end, self.owner())?;
         self.state.stop.store(true, Ordering::SeqCst);
         self.state.wake()?;
@@ -1313,7 +1358,9 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's watcher"))?
             .take()
         {
-            watcher.join().map_err(|_| self.state.uncertain())?;
+            watcher
+                .join()
+                .map_err(|_| self.state.uncertain("its watcher thread ended by a panic"))?;
         }
         Ok(())
     }
@@ -1321,7 +1368,7 @@ impl ProcessBox {
     pub fn id(&self) -> Result<&BoxId, Refusal> {
         match &self.state.id {
             OwnerKey::Box(id) => Ok(id),
-            OwnerKey::Pool(_) => Err(self.state.uncertain()),
+            OwnerKey::Pool(_) => Err(self.state.uncertain("a pool's scope has no box id")),
         }
     }
 
@@ -1488,20 +1535,30 @@ impl ProcessBox {
         };
         let helper = managed_helper_usage()?;
         if let Some(pgid) = pgid {
-            let mut pids = self.scope_pids.lock().map_err(|_| self.state.uncertain())?;
+            let mut pids = self.scope_pids.lock().map_err(|_| {
+                self.state
+                    .uncertain("its scope's members are poisoned as its usage is read")
+            })?;
             if sys::group(pgid, &mut pids)
                 .map_err(|error| Refusal::os("listing strict managed usage", error))?
             {
-                return Err(self.state.uncertain());
+                return Err(self.state.uncertain(
+                    "its scope's members passed the listing's room as its usage was read",
+                ));
             }
             let own = rustix::process::getpid().as_raw_nonzero().get();
             for &pid in pids.iter() {
                 if pid == own {
-                    return Err(self.state.uncertain());
+                    return Err(self
+                        .state
+                        .uncertain("its helper is listed among its scope's members"));
                 }
                 let usage = sys::rusage(pid)
                     .map_err(|error| Refusal::os("reading strict managed usage", error))?
-                    .ok_or_else(|| self.state.uncertain())?;
+                    .ok_or_else(|| {
+                        self.state
+                            .uncertain("a member of its scope vanished as its usage was read")
+                    })?;
                 live.add(usage, !(usage.ended && pid == pgid));
             }
         }
@@ -1555,7 +1612,9 @@ impl ProcessBox {
     /// each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
         if self.is_managed() {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("a managed scope is deleted through its helper, never directly"));
         }
         self.state.stop.store(true, Ordering::SeqCst);
         self.state.wake()?;
@@ -2062,12 +2121,18 @@ impl Watcher {
                 native
                     .vm
                     .as_ref()
-                    .ok_or_else(|| native.uncertain())?
+                    .ok_or_else(|| {
+                        native.uncertain("its watcher has no native scope to permit a run")
+                    })?
                     .cpu_permit(native.id.as_ref())?;
                 true
             }
             Some(super::cpu::Decision::Hold(_)) => false,
-            Some(super::cpu::Decision::Prepared) => return Err(native.uncertain()),
+            Some(super::cpu::Decision::Prepared) => {
+                return Err(
+                    native.uncertain("its CPU control is still prepared as its watcher reads")
+                );
+            }
         };
         let mut reading = Reading {
             members: storage(self.maximum)?,
@@ -2303,7 +2368,11 @@ impl Watcher {
         let decision = scope.cpu_decision(owner)?;
         let wait = match decision {
             None => return Ok(next),
-            Some(super::cpu::Decision::Prepared) => return Err(self.state.uncertain()),
+            Some(super::cpu::Decision::Prepared) => {
+                return Err(self
+                    .state
+                    .uncertain("its CPU control is still prepared as its watcher paces it"));
+            }
             Some(super::cpu::Decision::Run(wait)) => wait,
             Some(super::cpu::Decision::Hold(_)) => {
                 // Its response runs from when its credit ran out, read off the observation that held it (2c).
@@ -2338,7 +2407,11 @@ impl Watcher {
                         self.state.wake()?;
                         None
                     }
-                    _ => return Err(self.state.uncertain()),
+                    _ => {
+                        return Err(self.state.uncertain(
+                            "its CPU control decided neither a hold nor a run after its hold",
+                        ));
+                    }
                 }
             }
         };
@@ -2455,7 +2528,8 @@ impl Watcher {
             {
                 continue;
             }
-            let pid = i32::try_from(member.pid).map_err(|_| self.state.uncertain())?;
+            let pid = i32::try_from(member.pid)
+                .map_err(|_| self.state.uncertain("its member's pid is past an i32"))?;
             match sys::rusage(pid)
                 .map_err(|error| Refusal::os("reading a gone member's rusage", error))?
             {
@@ -2533,7 +2607,10 @@ impl Watcher {
             )
         }) && let Some(scope) = &self.state.vm
         {
-            scope.notify().map_err(|_| self.state.uncertain())?;
+            scope.notify().map_err(|_| {
+                self.state
+                    .uncertain("its scope's notification failed as an exit was counted")
+            })?;
         }
         Ok(())
     }
@@ -2613,23 +2690,29 @@ impl Watcher {
 
     fn end_managed_scope(&mut self) -> Result<(), Refusal> {
         self.state.validate_vm_scope()?;
-        let scope = self
-            .state
-            .vm
-            .as_ref()
-            .ok_or_else(|| self.state.uncertain())?;
-        let group = *self.state.pgid.lock().map_err(|_| self.state.uncertain())?;
+        let scope = self.state.vm.as_ref().ok_or_else(|| {
+            self.state
+                .uncertain("its watcher has no native scope to end")
+        })?;
+        let group = *self.state.pgid.lock().map_err(|_| {
+            self.state
+                .uncertain("its group is poisoned as its scope is ended")
+        })?;
         let Some(pgid) = group else {
             return if scope.no_submission(self.state.id.as_ref())? {
                 Ok(())
             } else {
-                Err(self.state.uncertain())
+                Err(self
+                    .state
+                    .uncertain("it has no group, though it was submitted, as its scope is ended"))
             };
         };
         if sys::group(pgid, &mut self.pids)
             .map_err(|error| Refusal::os("listing owned scope to stop", error))?
         {
-            return Err(self.state.uncertain());
+            return Err(self
+                .state
+                .uncertain("its group passed the listing's room as its scope was ended"));
         }
         for &pid in &self.pids {
             // A member gone since the listing (ended or reaped: one the scope's own end let finish, as a

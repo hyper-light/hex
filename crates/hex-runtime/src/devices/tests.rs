@@ -601,6 +601,40 @@ fn subset_handoff_keeps_full_pool_holder_and_one_consumer_until_scope_released()
     );
 }
 
+/// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a device catalog's
+/// backing refusal says why, in its refusing site's own words. Do ask the unheld subset of a GPU family whose current
+/// backing has no record, then of one whose current backing is released. Expect each refused Uncertain with its key and
+/// its own reason.
+#[test]
+fn w14_b_a_family_whose_current_backing_is_gone_or_released_says_why() {
+    use hex_api::{BackingPhase, LifecycleCause};
+    let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t4096\tvfio\t0000:01:00.0\t7\ngpu\t257\tb\t4096\tvfio\t0000:01:00.1\t7\ngpu\t512\tc\t8192\thcs\tPCIROOT(0)#PCI(0200)\t\n").unwrap();
+    let id = |key| DeviceId {
+        kind: DeviceKind::Gpu,
+        key,
+    };
+    let full = [id(256), id(512)];
+    let released = pool(BackingPhase::Released);
+    let key = released.key;
+    let records = Records::new();
+    let gone = catalog
+        .unheld_subset(&full, Some(key), &records, &[])
+        .unwrap_err();
+    assert!(
+        matches!(&gone, Refusal::Backing { key: got, cause: LifecycleCause::Uncertain, why: Some(why) }
+            if *got == key && why == "its GPU family's current backing has no record"),
+        "{gone:?}"
+    );
+    let ended = catalog
+        .unheld_subset(&full, Some(key), &records, std::slice::from_ref(&released))
+        .unwrap_err();
+    assert!(
+        matches!(&ended, Refusal::Backing { key: got, cause: LifecycleCause::Uncertain, why: Some(why) }
+            if *got == key && why == "its GPU family's current backing is released"),
+        "{ended:?}"
+    );
+}
+
 /// AC-T7.4.1: provisioning uses one canonical unheld set, independent of telemetry/workload selection.
 #[test]
 fn deterministic_family_complement_respects_current_claims_references_and_group_aliases() {
