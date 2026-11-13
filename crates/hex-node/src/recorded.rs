@@ -2206,29 +2206,10 @@ impl Books {
         let Some((learner, _)) = self.charges.get() else {
             return Ok(());
         };
-        let mut costs = Vec::new();
-        costs
-            .try_reserve_exact(capacity.routes.len().saturating_add(1))
-            .map_err(|_| Refusal::Exhausted {
-                what: "a capacity answer's cost profiles",
-                bound: capacity.routes.len(),
-            })?;
-        costs.extend(capacity.cost);
-        costs.extend(capacity.routes.iter().filter_map(|route| route.cost));
-        let running: Vec<BoxRecord> = records
-            .values()
-            .flatten()
-            .filter(|record| charges::running(record))
-            .cloned()
-            .collect();
-        capacity.learned = learner
+        learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
-            .learned(class, &costs, &running)?;
-        hex_core::wire::fit_learned(capacity).map_err(|e| Refusal::Invalid {
-            what: "a capacity answer",
-            why: e.to_string(),
-        })
+            .answer(class, capacity, records.values().flatten())
     }
 
     /// The same Store identity backs both initialized backend capacities and the native report.
