@@ -109,7 +109,7 @@ impl Bounds {
 /// The descriptors a macOS or Windows node holds at `bounds`, each by its bound and named: the socket's connections
 /// at their most, the one past them it accepts to refuse and its own; the program places' streams; the programs it
 /// watches; the hosted VMs' lanes and controllers; and `beside`, what the process held at its start, where its OS's
-/// reading of it is given (Windows' waits on Ada's word for its `GetProcessHandleCount`, CLAUDE.md §12).
+/// reading of it is given.
 pub fn terms(bounds: Bounds, own: Own, beside: Option<u64>) -> [(&'static str, u64); 5] {
     let of = |n: usize, each: u64| u64::try_from(n).unwrap_or(u64::MAX).saturating_mul(each);
     [
