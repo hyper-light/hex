@@ -284,7 +284,7 @@ impl GuestRuntime {
                 })?;
             // Release the Box/device turns BEFORE entering the SAME owner's
             // Pool transaction. Both canonical claims remain during handoff.
-            let released = self.stop_gpu_for_handoff(key, &pending, budget)?;
+            let released = self.stop_gpu_for_handoff(key, &pending)?;
             if released.key != key
                 || released.phase != hex_api::BackingPhase::Released
                 || released.devices != source.devices

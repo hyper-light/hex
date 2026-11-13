@@ -1328,6 +1328,7 @@ impl ManagedVm {
                     generation: *self.scope.bytes(),
                 },
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             },
         }
     }
@@ -2170,7 +2171,7 @@ mod tests {
         record.key.generation = [4; 16];
         assert!(matches!(
             native.matches_record(NativeRecord::Pool(&record)),
-            Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain })
+            Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain, why: None })
                 if key == record.key
         ));
         record.key.generation = [2; 16];

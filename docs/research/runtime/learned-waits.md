@@ -73,7 +73,10 @@ is wired:
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
+| `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
+| `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
+| `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
 alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
@@ -91,8 +94,9 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    `hex_client::guest::shards::RECORDS` takes `bench/native/guest/records.tsv` by `include_str!`; `recorded_boot`
    reads this host class's `boot_ready` row (with none, the slowest of any class's; where no class has one, refused
    "record one first"); and `hex_runtime::guest::first_dial_bound`, the larger of it and the slowest boot seen, makes
-   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (fifteen
-   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs), as `ShardsGuest::dial_before(port, None)`
+   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (nine
+   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs; the six that bounded a managed scope's stop went
+   to `managed.stop` on 2026-11-13, ROOT's (C) of joint plan step 14), as `ShardsGuest::dial_before(port, None)`
    dials until it. The design, HEX-GUEST-33's liveness-sliced dial: before the first boot, and after one that ran out,
    the budget follows the guest's VM (`Budget::following(party)` beside `Budget::new(bound)`, its deadline an
    `Option<Instant>`). The VM's liveness is its process's end, an event on every OS (a pidfd on Linux,
@@ -172,7 +176,9 @@ Production, a W* that still ends something:
    refusing the map ("writing uid_map failed: Operation not permitted", 2026-11-13). Done: the claim follows the init
    past W* by its life (its sync pipe, claim socket and pidfd), the run-out told; `Patience::expired` went with it.
 3. **A park's wait for its init's word** (hex-node `createpool::Parker::park`, `Parked::wait_parked`): bounded by
-   `seeds.hang`'s W*, past it the park fails and its init is killed. Owed: it follows the init past W*.
+   `seeds.hang`'s W*, a bound learned from another wait, past it the park failed and its init was killed. Done: the
+   wait learns its own W* (`createpool::PARKS`, `parked.park`) and past it follows the init by its life (its socket and
+   pidfd) to its word or its end, the run-out told.
 4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
    still tentative at the settle's W*, or a dump read past the answers' W*, is thrown away, counted, and another read.
    Owed: past W* each follows the namespace (the kernel's rtnetlink, its notices) to its settle or answer.

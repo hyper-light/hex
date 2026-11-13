@@ -14,6 +14,7 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: *key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -23,12 +24,14 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: grant.key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
     fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
         Err(Refusal::Backing {
             key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -145,6 +148,16 @@ pub trait Runtime: Send + Sync {
     /// its last read failed). A box already gone is refused `NoSuchBox`, never answered with a use made up.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
         self.delete(id).map(|()| None)
+    }
+
+    /// Box `id` once its start has come to its end: a box still booting is followed to its boot's answer as decision 9
+    /// has a wait follow its party (its W* told when passed, refused only at the party's end, no timer), then answered as
+    /// [`Runtime::inspect`] answers it, its run started; or its run's own failure, [`Refusal::Failed`] in its runtime's
+    /// words, where it never started. A box not booting is answered at once, as `inspect` answers it, as is every box of
+    /// a class whose start answers only once its box runs (kiln's HexVms adapter, ROOT 2026-11-13: a start past W*
+    /// answers Pending, and its caller waits here rather than polling).
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.inspect(id)
     }
 
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
@@ -330,6 +343,24 @@ impl RouteKey {
             ));
         }
         Ok(())
+    }
+}
+
+/// A node VM's run (joint plan step 39): a VM the node runs for itself, its `oci` class's guest under shards-init, never
+/// a box. Minted by the node's store as the VM is booked, it names the VM's record and its receipt among the node's
+/// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one and no
+/// wire input parses one, as hex-core's wire neither writes nor reads it, so no box API can name the node's VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeRun([u8; 16]);
+
+impl NodeRun {
+    /// The run `bytes` name, as its node's store minted it.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn bytes(&self) -> &[u8; 16] {
+        &self.0
     }
 }
 
@@ -1510,6 +1541,7 @@ impl Capacity {
                 return Err(Refusal::Backing {
                     key,
                     cause: LifecycleCause::Pending,
+                    why: None,
                 });
             }
         }
@@ -1982,13 +2014,29 @@ fn per_vcpu<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u64
     )
 }
 
+/// A refusal's reason as its message gives it: `: why` after the rest, or nothing where it gives none.
+struct Said<'a>(&'a Option<String>);
+
+impl std::fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(why) => write!(f, ": {why}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("native backing {key:?}: {cause:?}")]
+    /// Native backing `key` refused for `cause`, and `why` in the refusing site's own words where it gives them (joint
+    /// plan step 14; ROOT, 2026-11-13: an `Uncertain` with no reason is a CLAUDE.md §3 gap). Appended (the wire IDENTITY
+    /// moves); `None` where a site has no reason to give past its cause.
+    #[error("native backing {key:?}: {cause:?}{}", Said(.why))]
     Backing {
         key: BackingKey,
         cause: LifecycleCause,
+        why: Option<String>,
     },
 
     #[error("{what} isn't valid: {why}")]
@@ -2960,7 +3008,7 @@ mod route_tests {
         c.routes[0].backing = Some(backing.key);
         spec.route.as_mut().unwrap().backing = Some(backing.key);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause:LifecycleCause::Pending }) if key == backing.key)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == backing.key)
         );
         c.backings[0].phase = BackingPhase::Live;
         c.validate_route(&spec).unwrap();
@@ -3064,7 +3112,7 @@ mod route_tests {
         assert_eq!(c.validate_route(&spec).unwrap(), fresh);
         spec.route.as_mut().unwrap().backing = Some(parent);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending }) if key == parent)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == parent)
         );
         spec.route.as_mut().unwrap().backing = Some(BackingKey {
             generation: [9; 16],

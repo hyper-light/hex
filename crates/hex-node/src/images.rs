@@ -240,6 +240,9 @@ impl Runtime for ImageRuntime {
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
         self.class.delete_with_host_use(id)
     }
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.class.started(id)
+    }
 }
 
 #[cfg(test)]

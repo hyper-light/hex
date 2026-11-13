@@ -306,7 +306,8 @@ fn drain_failure(key: hex_api::BackingKey, why: Refusal) -> Result<Refusal, Refu
                 cause @ (hex_api::LifecycleCause::Pending
                 | hex_api::LifecycleCause::Busy
                 | hex_api::LifecycleCause::Uncertain),
-        } if actual == key => Ok(Refusal::Backing { key, cause }),
+            why,
+        } if actual == key => Ok(Refusal::Backing { key, cause, why }),
         other => Err(other),
     }
 }
@@ -333,7 +334,7 @@ fn encoded_cleanup_failures(failures: Vec<Refusal>) -> Result<Vec<Vec<u8>>, Refu
 /// Bootstrap has no control reply yet; the existing CLI reporter receives the same exact identity
 /// and qualified cause. Fixed hexadecimal widths make its allocation bound independent of input.
 fn cleanup_report(why: &Refusal) -> Result<String, Refusal> {
-    let Refusal::Backing { key, cause } = why else {
+    let Refusal::Backing { key, cause, .. } = why else {
         return Err(capacity::invalid(
             "cleanup diagnostic is not a backing refusal",
         ));

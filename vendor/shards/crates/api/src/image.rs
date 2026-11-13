@@ -33,7 +33,7 @@ pub mod wire;
 pub use wire::{
     Bound, Channel, ControlAsk, ControlAt, CredentialGrant, Fill, GuestTimes, HostUse, Keep, LeaseRefusal,
     MemberInfo, MemberKind, MemberReach, Microvm, Narrowing, PlugRefusal, Proto, Publish, Ready, Receiving,
-    RunEnd, Secret, SocketGrant, StartedFrom, Stats, StatsScope, VcpuTime, decide,
+    RunEnd, SaveRefusal, Secret, SocketGrant, StartedFrom, Stats, StatsScope, VcpuTime, decide,
 };
 
 /// A credential's lease, as a run's [`Lessor`] gives it (D242): what its release names it
@@ -177,9 +177,10 @@ pub struct ImageSpec {
     /// D246), which the run host refuses the run unless every member reaches exactly.
     pub egress: Narrowing,
     /// The run's credential grants (D242): each a credential named by reference (a secret
-    /// in the orchestrator's store, never a value) and the hosts the injector may fill it
-    /// in toward. Empty for a run with none (default deny). An orchestrator keeps or drops
-    /// the image's, never adds one.
+    /// in the orchestrator's store, never a value), the hosts the injector may fill it in
+    /// toward, and the placeholder the orchestrator gives the member that uses it, which the
+    /// injector fills the value in where it stands. Empty for a run with none (default
+    /// deny). An orchestrator keeps or drops the image's, never adds one.
     pub credentials: Vec<CredentialGrant>,
     /// What answers the run's credential leases, for this run alone (D242): needed by a run
     /// with credential grants, which is refused without one; a run with none asks nothing.
@@ -256,6 +257,8 @@ pub enum ImageRefusal {
     Rate(String),
     /// A member's terminal its run's init did not size (D244), in its words.
     Terminal(String),
+    /// A save its run's host refused (D259), by what refused it.
+    Save(SaveRefusal, String),
 }
 
 impl std::fmt::Display for ImageRefusal {
@@ -273,6 +276,7 @@ impl std::fmt::Display for ImageRefusal {
             Self::Room(why) => write!(f, "the run's room: {why}"),
             Self::Rate(why) => write!(f, "the run's rate: {why}"),
             Self::Terminal(why) => write!(f, "a member's terminal: {why}"),
+            Self::Save(cause, why) => write!(f, "the save: {cause:?}: {why}"),
         }
     }
 }
@@ -389,6 +393,17 @@ pub trait ImageGuest: Send + Sync {
     /// What is plugged in at `at` let go of: unmounted in its member, refused while anything
     /// there uses it ([`PlugRefusal::Busy`]), then taken off the microVM.
     fn unplug(&self, at: &str, patience: Duration) -> Result<(), ImageRefusal>;
+    /// The run's microVM saved whole and left running (D176, D259): its memory, its vCPUs'
+    /// and devices' state, its run's swap and its writable layer, as the daemon's `save vm`
+    /// saves one, in a snapshot directory (`shards_vmm::snapshot`'s: `current` naming the
+    /// generation, whose `memory`, `state`, `swap`, `layer-head`, `layer` and `window-heads`
+    /// they are) at `to`, which the save makes: absolute, beneath the run's home (its
+    /// `SHARDS_HOME`), beneath no directory its guest reaches (its shares, what is plugged
+    /// into it, the home's volumes), and with nothing there yet. It holds every value its
+    /// guest holds: it is its owner's alone, asked on the run's own channel and written
+    /// nowhere else, and its owner's to remove. Waits at most `patience`; refused as
+    /// [`ImageRefusal::Save`], by what refused it: a path not UTF-8 as [`ImageRefusal::Spec`].
+    fn save(&self, to: &std::path::Path, patience: Duration) -> Result<(), ImageRefusal>;
     /// Ends it at once: its VM's process is killed, and [`wait_for`](Self::wait_for) then
     /// returns [`RunEnd::Stopped`], or the end the run had come to before: its command's, or
     /// its host's failure, in its words, as `wait_for` saw it. Never refused, as a VM left
@@ -576,7 +591,8 @@ fn request(spec: &ImageSpec) -> Result<wire::Request, ImageRefusal> {
     // each host it is filled in toward is a DNS name as D236 names a destination's host by
     // name, or host.docker.internal, reusing shards_dns' RFC rules; never an address, never a
     // port, and never localhost. The hosts are stored lowered, so the
-    // injector's case-insensitive decision rests on a lowered store.
+    // injector's case-insensitive decision rests on a lowered store. Each placeholder is one
+    // credential's alone.
     let mut credentials = Vec::with_capacity(spec.credentials.len());
     for grant in &spec.credentials {
         if grant.reference.is_empty() {
@@ -617,8 +633,15 @@ fn request(spec: &ImageSpec) -> Result<wire::Request, ImageRefusal> {
         credentials.push(wire::CredentialGrant {
             reference: grant.reference.clone(),
             toward,
+            placeholder: grant.placeholder.clone(),
         });
     }
+    // Each placeholder stands where its member sends the credential: a bearer token, and no
+    // other credential's, so that the injector knows which value it is.
+    shards_dns::credential::check(&credentials).map_err(|refused| ImageRefusal::Spec {
+        what: "a credential grant",
+        why: refused.to_string(),
+    })?;
     // Its grants' values come by lease alone (D242): a run with grants and nothing to lease
     // them could never fill one.
     if !credentials.is_empty() && spec.lessor.is_none() {
@@ -687,6 +710,10 @@ fn request(spec: &ImageSpec) -> Result<wire::Request, ImageRefusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A placeholder as kiln's broker mints one: a visible marker, then 256 random bits in hex.
+    const PLACEHOLDER: &str =
+        "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn spec() -> ImageSpec {
         ImageSpec {
@@ -779,6 +806,7 @@ mod tests {
         spec.credentials = vec![CredentialGrant {
             reference: "anthropic/claude-max".into(),
             toward: vec!["API.anthropic.com".into(), "platform.claude.com".into()],
+            placeholder: PLACEHOLDER.into(),
         }];
         spec.lessor = lessor();
         let r = request(&spec).unwrap();
@@ -818,6 +846,26 @@ mod tests {
         let mut ok = spec.clone();
         ok.credentials[0].toward = vec!["host.docker.internal".into()];
         assert!(request(&ok).is_ok(), "host.docker.internal was refused");
+        // Its placeholder rides with it; one that is no bearer token is refused.
+        assert_eq!(r.credentials[0].placeholder, PLACEHOLDER);
+        for placeholder in ["", "two words", "a:b"] {
+            let mut bad = spec.clone();
+            bad.credentials[0].placeholder = placeholder.into();
+            assert!(
+                matches!(request(&bad), Err(ImageRefusal::Spec { .. })),
+                "{placeholder:?} was taken as a placeholder"
+            );
+        }
+        // One placeholder for two credentials is refused, as the injector could not tell
+        // which it stands for; one credential granted twice with it is two grants of one.
+        let mut twice = spec.clone();
+        twice.credentials.push(CredentialGrant {
+            reference: "anthropic/console".into(),
+            ..spec.credentials[0].clone()
+        });
+        assert!(matches!(request(&twice), Err(ImageRefusal::Spec { .. })));
+        twice.credentials[1].reference = "anthropic/claude-max".into();
+        assert!(request(&twice).is_ok());
     }
 
     /// Do: ask a run with credential grants and no lessor, with one, and a run with neither
@@ -830,6 +878,7 @@ mod tests {
         granted.credentials = vec![CredentialGrant {
             reference: "anthropic/claude-max".into(),
             toward: vec!["api.anthropic.com".into()],
+            placeholder: PLACEHOLDER.into(),
         }];
         assert!(matches!(
             request(&granted),
