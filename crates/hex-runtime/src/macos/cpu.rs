@@ -170,6 +170,13 @@ impl Budget {
         })
     }
 
+    /// Original (joint plan step 14, 2c, red): the response is the census row's, fixed, and a hold's measured one is
+    /// taken nowhere.
+    pub(super) fn learn(&mut self, response: Duration) -> Result<(), Failure> {
+        let _ = response;
+        Ok(())
+    }
+
     /// A new rate for the same scope (joint plan step 14, C4 on macOS): its credit and any debt stay, and its burst,
     /// which its maximum and response make; only what it earns from now changes. Refused outside 1 to its maximum, as
     /// [`Budget::new`] refuses.
@@ -402,6 +409,23 @@ mod tests {
             .unwrap();
         budget.resume().unwrap();
         assert!(cycle(4000, 4000, Duration::from_nanos(10)).is_err());
+    }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): the control's response is learned from its holds, the slowest seen,
+    /// only rising (decision 9: no census row seeds it), and its burst, the most a scope runs past its stop, with it. Do
+    /// make a scope's budget at 1 CPU of 4 with a 10 ns response, then learn a hold's 20 ns response, then a 5 ns one,
+    /// then one of no time. Expect the burst 4 CPUs over 20 ns once the slower is learned, unchanged by the faster, and
+    /// the response of no time refused, the burst as it was.
+    #[test]
+    fn the_control_learns_its_response_from_its_holds_the_slowest_seen() {
+        let mut budget = Budget::new(1000, 4000, Duration::from_nanos(10)).unwrap();
+        assert_eq!(budget.burst, 4000 * 10);
+        budget.learn(Duration::from_nanos(20)).unwrap();
+        assert_eq!(budget.burst, 4000 * 20);
+        budget.learn(Duration::from_nanos(5)).unwrap();
+        assert_eq!(budget.burst, 4000 * 20, "only rising");
+        assert_eq!(budget.learn(Duration::ZERO), Err(Failure::Envelope));
+        assert_eq!(budget.burst, 4000 * 20);
     }
 
     /// Joint plan step 14 (AC-T7.4.1), C4 on macOS: a scope's rate becomes its water-filled share. Do run a scope at 1
