@@ -178,7 +178,7 @@ pub fn load_runtime_evidence(
     }
     let (responses, rest) = cpu::split(&evidence)?;
     let native = images::parse(rest, cost.id)?;
-    Ok((cost, native, responses))
+    Ok((cost.census_free(), native, responses))
 }
 
 impl GuestConfig {
