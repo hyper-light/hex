@@ -702,7 +702,8 @@ fn udp_sockets(pid: u32) -> usize {
 
 /// HEX-QUIC-23's body: `hex node enroll` begins the node's enrollment, the simulator CA answers its request as kiln's
 /// CA would, and `hex node --quic` serves the suite over QUIC, at the address it says before its `ready`, holding the
-/// UDP socket it binds, both ends of a client's connection at TLS13_AES_256_GCM_SHA384.
+/// UDP socket it binds, both ends of a client's connection at TLS13_AES_256_GCM_SHA384: the client's from its endpoint,
+/// the node's as `hex node links` says it (Q12, HEX-QUIC-31).
 fn configured(box_root: Option<&Path>) {
     let dir = scratch("cli-");
     let credentials = dir.path().join("credentials");
@@ -786,6 +787,33 @@ fn configured(box_root: Option<&Path>) {
     assert_eq!(
         client_end.negotiated(peer).unwrap().unwrap().0,
         hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384
+    );
+    let asked = Command::new(hex())
+        .args(["node", "links", "--socket"])
+        .arg(dir.path().join("node.sock"))
+        .output()
+        .expect("hex node links");
+    assert!(
+        asked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&asked.stderr)
+    );
+    // Every link the node reports is at AES-256-GCM under a hybrid group, its client's among them: the probe's may
+    // be reported still, its close not yet come.
+    let said = String::from_utf8(asked.stdout).unwrap();
+    let peer = |line: &str| {
+        ["secp384r1MLKEM1024", "X25519MLKEM768", "secp256r1MLKEM768"]
+            .iter()
+            .find_map(|group| {
+                line.strip_suffix(&format!(" suite TLS13_AES_256_GCM_SHA384 group {group}"))?
+                    .strip_prefix("link ")
+            })
+            .map(str::to_owned)
+    };
+    let peers: Vec<Option<String>> = said.lines().map(peer).collect();
+    assert!(
+        peers.iter().all(Option::is_some) && peers.contains(&Some("client.cli.test".to_owned())),
+        "hex node links said {said:?}"
     );
     let failures = conformance::run(&client, &fixture());
     assert!(
