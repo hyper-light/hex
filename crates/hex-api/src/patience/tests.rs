@@ -72,19 +72,6 @@ fn after_a_run_out_the_next_wait_follows_and_learns_its_uncensored_answer() {
     assert_eq!(p.deadline(), None);
 }
 
-/// A party taken for dead or hung at the bound (a parked init's silence): no sample, nothing for the census, but the
-/// next wait follows its party. Do: answer a wait in 5 ms, then take its party for hung. Expect: no bound, the slowest
-/// still 5 ms; the next answer, 1 ms, bounding it at the slowest seen, 5 ms, again.
-#[test]
-fn a_party_taken_for_hung_makes_the_next_wait_follow_without_a_sample() {
-    let p = Patience::measuring("test");
-    p.answered(ms(5));
-    p.expired();
-    assert_eq!((p.deadline(), p.slowest()), (None, Some(ms(5))));
-    p.answered(ms(1));
-    assert_eq!(p.deadline(), Some(ms(5)));
-}
-
 /// A host slower than any answer seen. Do: answer a wait in 1 ms, then make calls that each take 25 ms, every wait
 /// answered within its bound, run out at it, or followed to its answer. Expect: one run-out, the next wait following to
 /// the 25 ms answer, and none after; the bound the slowest answer, 25 ms, with nothing added.
@@ -138,7 +125,6 @@ fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
     p.answered(ms(7));
     p.answered(ms(9));
     p.ran_out(ms(20));
-    p.expired();
     let told: Vec<Sample> = TOLD
         .lock()
         .unwrap()
