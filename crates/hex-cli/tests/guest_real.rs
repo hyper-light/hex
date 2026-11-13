@@ -143,8 +143,10 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         |name: &str, default: u64| std::env::var(name).map_or(default, |v| v.parse().unwrap());
     let config = GuestConfig {
         binary: given("SHARDS_BIN").unwrap(),
-        kernel: given("HEX_GUEST_KERNEL").unwrap(),
-        initrd: given("HEX_GUEST_INITRD").unwrap(),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: given("HEX_GUEST_KERNEL").unwrap(),
+            initrd: given("HEX_GUEST_INITRD").unwrap(),
+        },
         // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
         // idles.
         vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),

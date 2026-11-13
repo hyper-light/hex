@@ -256,8 +256,10 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     // The run's two shares and nothing else (§6a): the suite's /etc binds name the lab's own /etc.
     let config = GuestConfig {
         binary: given("SHARDS_BIN").unwrap(),
-        kernel: given("HEX_GUEST_KERNEL").unwrap(),
-        initrd: given("HEX_GUEST_INITRD").unwrap(),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: given("HEX_GUEST_KERNEL").unwrap(),
+            initrd: given("HEX_GUEST_INITRD").unwrap(),
+        },
         // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
         // idles.
         vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),

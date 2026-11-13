@@ -854,8 +854,10 @@ fn simulated_guest(agent: &Agent, exe: &str) -> SimulatedGuest {
     let config = GuestConfig {
         // A simulated guest boots nothing: no binary, kernel or initramfs is read.
         binary: PathBuf::from("/nonexistent/shards"),
-        kernel: PathBuf::from("/nonexistent/kernel"),
-        initrd: PathBuf::from("/nonexistent/initrd"),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: PathBuf::from("/nonexistent/kernel"),
+            initrd: PathBuf::from("/nonexistent/initrd"),
+        },
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
         gpu: false,
