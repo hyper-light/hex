@@ -11,14 +11,14 @@
 //! VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
 //! D230) (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, CapacityResources, Learned, MAX_LEARNED_HOLDINGS, Refusal,
-    RuntimeCost, Upstream, Usage,
+    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedEnd, MAX_LEARNED_HOLDINGS,
+    Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_runtime::linux::cgroup::BoxCgroup;
@@ -26,7 +26,9 @@ use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
-use crate::recorded::charges::{LastResort, Scope, write_ends};
+use crate::recorded::charges::{
+    LastResort, Lifetime, Reach, Scope, Writes, record_last_resort, write_ends,
+};
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
 pub(super) const WINDOW: Duration = Duration::from_micros(CPU_PERIOD_US);
@@ -44,12 +46,17 @@ pub(super) trait Cgroups {
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
     /// Kills every process in a VM's cgroup (C5's last resort), through the descriptor its native owner pinned.
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
+    /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
+    /// lifetime, before its end (C5, intent first): whether it was written.
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
-/// The kernel's cgroups.
-pub(super) struct Kernel;
+/// The kernel's cgroups, and the node's records.
+pub(super) struct Kernel<'a> {
+    pub(super) store: &'a crate::store::Store,
+}
 
-impl Cgroups for Kernel {
+impl Cgroups for Kernel<'_> {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal> {
         cgroup.managed_usage()
     }
@@ -81,6 +88,29 @@ impl Cgroups for Kernel {
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
         cgroup.kill()
     }
+
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        record_last_resort(self.store, id, scope, Some(end))
+    }
+}
+
+/// The last resort's reach on Linux: a VM's record through the node's records, its end through its cgroup's kill.
+struct Kills<'a, C> {
+    io: &'a C,
+    vms: &'a BTreeMap<Scope, Vm>,
+}
+
+impl<C: Cgroups> Reach for Kills<'_, C> {
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        self.io.intend(id, scope, end)
+    }
+
+    fn end(&self, scope: &Scope) -> Result<(), Refusal> {
+        let vm = self.vms.get(scope).ok_or_else(|| {
+            Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
+        })?;
+        self.io.kill(&vm.cgroup)
+    }
 }
 
 fn refused(why: ChargeError) -> Refusal {
@@ -94,9 +124,21 @@ fn refused(why: ChargeError) -> Refusal {
     }
 }
 
+/// What the learner reads of a VM's record when it first meets it (C2, C3, C5): its class, its receipt, its band and
+/// its place in the node's start order, and why the last resort is ending it, where its record says so.
+pub(super) struct Met {
+    pub(super) class: Class,
+    pub(super) allocation: Allocation,
+    pub(super) band: u8,
+    pub(super) started: Option<u64>,
+    pub(super) intent: Option<LearnedEnd>,
+}
+
 /// One VM the learner reads.
 struct Vm {
     id: BoxId,
+    /// How the core holds it: its place in the node's start order and its scope (C3).
+    lifetime: Lifetime,
     class: Class,
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
@@ -109,7 +151,7 @@ struct Vm {
 
 /// The node's learner (module docs).
 pub(super) struct Learner {
-    node: charge::Node<Scope>,
+    node: charge::Node<Lifetime>,
     vms: BTreeMap<Scope, Vm>,
     /// The machine's CPU in milli-CPU: the scale every weight is on (C4).
     machine: u64,
@@ -346,14 +388,14 @@ impl Learner {
         })
     }
 
-    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt
-    /// and band; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
-    /// within the fleet's `budget`. A failure is kept until a window passes.
+    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt,
+    /// band and any intent; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in
+    /// order), within the fleet's `budget`. A failure is kept until a window passes.
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -367,7 +409,7 @@ impl Learner {
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -380,9 +422,12 @@ impl Learner {
             .copied()
             .collect();
         for scope in gone {
-            self.node.end(&scope).map_err(refused)?;
+            if let Some(vm) = self.vms.get(&scope) {
+                self.node.end(&vm.lifetime).map_err(refused)?;
+            }
             self.vms.remove(&scope);
             self.rooms.remove(&scope);
+            self.last.gone(&scope);
         }
         for (id, scope, cgroup) in running {
             // A VM ending between the listing and its read is read no more; the next listing ends it.
@@ -393,7 +438,7 @@ impl Learner {
                 let (before, at) = vm.last;
                 self.node
                     .observe(
-                        scope,
+                        vm.lifetime,
                         &Sample {
                             cpu: Cpu::Whole(Duration::from_micros(
                                 usage.cpu_usec.saturating_sub(before),
@@ -407,13 +452,21 @@ impl Learner {
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
-            let Some((class, allocation, band)) = record(&id)? else {
+            let Some(Met {
+                class,
+                allocation,
+                band,
+                started,
+                intent,
+            }) = record(&id)?
+            else {
                 continue;
             };
             let receipt = allocation.booking();
+            let lifetime = Lifetime::of(scope, started);
             self.node
                 .track(
-                    scope,
+                    lifetime,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
                     band,
                     vcpus(allocation)?,
@@ -435,6 +488,7 @@ impl Learner {
                 scope,
                 Vm {
                     id,
+                    lifetime,
                     class,
                     receipt,
                     cgroup,
@@ -442,6 +496,7 @@ impl Learner {
                     written: hex_core::cgroup::writes(&created, &[])?,
                 },
             );
+            self.last.met(class, scope, intent)?;
         }
         // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget, and its CPU
         // is at most what the units the boxes leave carry.
@@ -476,29 +531,24 @@ impl Learner {
         Ok(())
     }
 
-    /// The last resort (C5), once the placement holds what it can: the VM the core's verdict chooses ended by killing
-    /// its cgroup, as `LastResort` holds one end at a time.
+    /// The last resort (C5), once the placement holds what it can: the VM it chooses, why written into its record
+    /// first, ended by killing its cgroup, as `LastResort` holds one end at a time.
     fn last_resort(&mut self, io: &impl Cgroups) -> Result<(), Refusal> {
         let vms = &self.vms;
         self.last.window(
             &self.node,
             |scope| vms.get(scope).map(|vm| (vm.class, &vm.id)),
-            |scope| {
-                let vm = vms.get(scope).ok_or_else(|| {
-                    Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
-                })?;
-                io.kill(&vm.cgroup)
-            },
+            &Kills { io, vms },
         )
     }
 
-    /// Takes the ends not yet in their boxes' records, oldest first (C5).
-    pub(super) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, hex_api::LearnedEnd)> {
+    /// Takes the writes into VMs' records not yet made, oldest first (C5).
+    pub(super) fn unrecorded(&mut self) -> Writes {
         self.last.unrecorded()
     }
 
-    /// Keeps `left`, ends whose record writes failed, for the next window (C5).
-    pub(super) fn keep_unrecorded(&mut self, left: VecDeque<(BoxId, Scope, hex_api::LearnedEnd)>) {
+    /// Keeps `left`, writes that failed, for the next window (C5).
+    pub(super) fn keep_unrecorded(&mut self, left: Writes) {
         self.last.keep_unrecorded(left);
     }
 
@@ -511,8 +561,8 @@ impl Learner {
         scale: &Scale,
     ) -> Result<(), Refusal> {
         let placed = self.node.placement(self.machine).map_err(refused)?;
-        for (scope, bounds) in &placed.vms {
-            if let Some(vm) = self.vms.get_mut(scope) {
+        for (lifetime, bounds) in &placed.vms {
+            if let Some(vm) = self.vms.get_mut(&lifetime.scope) {
                 rewrite(io, &vm.cgroup, bounds, &mut vm.written)?;
             }
         }
@@ -601,9 +651,9 @@ impl Learner {
                 what: "a class's learned holdings",
                 bound: self.vms.len(),
             })?;
-        for (scope, vm) in &self.vms {
+        for vm in self.vms.values() {
             if vm.class == class {
-                vms.push((*scope, &vm.id, vm.receipt));
+                vms.push((vm.lifetime, &vm.id, vm.receipt));
             }
         }
         crate::recorded::charges::learned(&self.node, class, costs, vms, self.last.ended(class)?)
@@ -647,7 +697,7 @@ impl Node {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
-        let record = |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
+        let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
             let Some(record) = self.record(id)? else {
                 return Ok(None);
             };
@@ -656,13 +706,20 @@ impl Node {
                 hex_api::Class::Firecracker => Class::Firecracker,
                 hex_api::Class::Process | hex_api::Class::Oci => return Ok(None),
             };
-            Ok(record
-                .spec
-                .allocation
-                .map(|allocation| (class, allocation, record.spec.band)))
+            let Some(allocation) = record.spec.allocation else {
+                return Ok(None);
+            };
+            Ok(Some(Met {
+                class,
+                allocation,
+                band: record.spec.band,
+                started: record.started,
+                intent: record.last_resort,
+            }))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
+        let io = Kernel { store: &self.store };
+        let _ = learner.window(&io, running, record, &held, budget, Instant::now());
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
         let ends = learner.unrecorded();
@@ -674,6 +731,14 @@ impl Node {
             learner.keep_unrecorded(left);
             learner.failed(why);
         }
+    }
+
+    /// The window the node's charge learner reads over, where one runs (C1): its VM backends' learner's.
+    pub fn charge_window(&self) -> Option<Duration> {
+        self.backends
+            .get()
+            .and_then(|b| b.learner.as_ref())
+            .map(|_| WINDOW)
     }
 
     /// What `class`'s capacity answer carries of the learner (C8), fitted to one message.
