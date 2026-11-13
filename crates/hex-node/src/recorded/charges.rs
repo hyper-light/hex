@@ -825,21 +825,17 @@ impl Learner {
             let Some(allocation) = record.spec.allocation else {
                 continue;
             };
-            // An image VM's cap holds over its run's own period, read each window (C1; D247).
-            let period = if running_image(record) {
-                match io.rate_period(record) {
-                    Ok(period) => Some(period),
-                    Err(_) => continue,
-                }
-            } else {
-                None
-            };
-            // A VM its node can't read counts whole, at its receipt, against the fleet's budget this window, its learner
-            // untouched (ROOT, 2026-11-13: never starving its neighbours by holding nothing): no sample taken, its
-            // booking as it was, and the failure told ([`Learner::unread`]). One that ended since its listing is ended
-            // by the next.
-            let read = match Read::of(io, record) {
-                Ok(read) => read,
+            // Each window reads the VM's use and an image VM's period, its run's own, which its cap holds over (C1;
+            // D247). A VM either read fails for counts whole, at its receipt, against the fleet's budget this window,
+            // its learner untouched (ROOT, 2026-11-13: never starving its neighbours by holding nothing): no sample
+            // taken, its booking as it was, and the failure told ([`Learner::unread`]). One that ended since its
+            // listing is ended by the next.
+            let reading = running_image(record)
+                .then(|| io.rate_period(record))
+                .transpose()
+                .and_then(|period| Read::of(io, record).map(|read| (period, read)));
+            let (period, read) = match reading {
+                Ok(reading) => reading,
                 Err(why) => {
                     let booked = self
                         .vms

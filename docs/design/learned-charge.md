@@ -366,8 +366,9 @@ reaches the view settled with goal 13 the same day:
   VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
 - On macOS and Windows the learner is `hex_node::recorded::charges`, started by `Recorded::start_charges` (hex-cli
   on both): a thread that waits on the node's end beside the window, and once a window reads each running VM it learns
-  (`recorded::charges::Learns`: a kind whose cap's period it takes), learns as Linux's does, and caps each VM at its
-  water-filled share. A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
+  (`recorded::charges::sort`: a managed VM where its platform has a window, and every image VM), learns as Linux's
+  does, and caps each VM at its water-filled share. A VM whose use or period it can't read counts whole, at its
+  receipt, against the fleet's budget until it reads, the failure told (`0e401dbe`). A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
   (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's whole key and its
   rate) sets its control's rate, its debt kept and what came before charged at the old rate; on Windows the job's hard
   cap, at least the machine's least. A Shards image VM, its lifetime its place in its node's start order
