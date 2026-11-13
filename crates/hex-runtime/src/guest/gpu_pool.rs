@@ -1530,6 +1530,7 @@ mod tests {
             row: Mutex::new(None),
             shared: Mutex::new(None),
             native_report: Some(Capacity {
+                own: Default::default(),
                 id: "same-books-native-owner".into(),
                 total: room,
                 free: room,
@@ -1640,6 +1641,7 @@ mod tests {
             arch: super::super::route::host_platform().unwrap().arch,
         };
         let prefix = Capacity {
+            own: Default::default(),
             id: "original-native-oci-pool".into(),
             total: room,
             free: CapacityResources {
@@ -2264,6 +2266,7 @@ mod tests {
                 disk_bytes: 1 << 30,
             };
             Ok(hex_api::Capacity {
+                own: Default::default(),
                 id: "cold-model".into(),
                 total: room,
                 free: room,

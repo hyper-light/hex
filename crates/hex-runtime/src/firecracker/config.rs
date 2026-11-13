@@ -833,6 +833,7 @@ mod tests {
             disk_bytes: 0,
         };
         let mut capacity = hex_api::Capacity {
+            own: Default::default(),
             id: "the guest's own node".into(),
             total,
             free: total,

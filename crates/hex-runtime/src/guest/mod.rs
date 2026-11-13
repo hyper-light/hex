@@ -526,7 +526,7 @@ pub struct GuestRuntime {
     booted: Mutex<Option<triomphe::Arc<Booted>>>,
     /// The shared backing's guest overhead as its capacity answers measured it, by its generation (joint plan step 14,
     /// C7): none before the first.
-    guest_overhead: Mutex<Option<(hex_api::BackingKey, hex_api::LearnedOverhead)>>,
+    guest_overhead: Mutex<Option<(hex_api::BackingKey, shared::Seen)>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
@@ -1574,6 +1574,23 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
+    /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
+    /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
+    /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.
+    pub fn rate_period(&self, id: &BoxId) -> Result<std::time::Duration, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.rate_period_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "rate_period",
+                why: format!(
+                    "box {id} isn't a Shards image box: only its VM's governor holds a rate over a period"
+                ),
+            }),
+        }
+    }
+
     /// Box `id` as its route says it is, its record read once by the caller.
     fn inspect_routed(&self, routed: books::Routed, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match routed {

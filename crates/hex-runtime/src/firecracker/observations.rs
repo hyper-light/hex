@@ -310,6 +310,7 @@ mod tests {
             disk_bytes: 0,
         };
         let mut capacity = Capacity {
+            own: Default::default(),
             id: "private actual guest node".into(),
             total,
             free: total,

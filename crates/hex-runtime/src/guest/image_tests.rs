@@ -305,6 +305,8 @@ struct ModelGuest {
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
     outside: Mutex<std::collections::BTreeMap<String, Outside>>,
+    /// The period its run host said its VM's governor holds a rate over as it started (D247's `rate_period`).
+    rate_period: Duration,
     /// How its microVM started (D253), as the model's run host said it at its boot.
     started_from: StartedFrom,
     /// Its run's agent-control endpoint, where its boot asked one (D252).
@@ -322,7 +324,7 @@ fn model_control() -> shards_api::image::ControlAt {
 }
 
 /// The period the model's run host says its VM's governor holds a rate over (D247's `rate_period`): the model's
-/// fixture, which its runs all say.
+/// fixture, which each run says unless the test sets another for the next boot (`ModelImages::period`).
 const MODEL_RATE_PERIOD: Duration = Duration::from_millis(100);
 
 impl ImageGuest for ModelGuest {
@@ -336,7 +338,7 @@ impl ImageGuest for ModelGuest {
         self.control.as_ref()
     }
     fn rate_period(&self) -> Duration {
-        MODEL_RATE_PERIOD
+        self.rate_period
     }
     fn started_from(&self) -> StartedFrom {
         self.started_from
@@ -507,6 +509,8 @@ struct ModelImages {
     /// `Agentfile::named`), as the test sets it: the run host holds every one to its reach of the names kept where a
     /// boot holds members apart (`Narrowing::members`, D246).
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
+    /// The period the next boot's run host says its governor holds a rate over (D247), as the test sets it.
+    period: Mutex<Duration>,
     /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
     started_from: Mutex<StartedFrom>,
     /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
@@ -533,6 +537,7 @@ impl ModelImages {
             members: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
             named: Mutex::new(Vec::new()),
+            period: Mutex::new(MODEL_RATE_PERIOD),
             started_from: Mutex::new(StartedFrom::Booted),
             abandon: AtomicBool::new(false),
             stopped: AtomicUsize::new(0),
@@ -734,6 +739,7 @@ impl Images for ModelImages {
             members: self.members.lock().unwrap().clone(),
             published,
             outside: Mutex::new(outside),
+            rate_period: *self.period.lock().unwrap(),
             started_from: *self.started_from.lock().unwrap(),
             control: match (spec.control.as_ref(), self.serve.lock().unwrap().clone()) {
                 (None, _) => None,
@@ -1765,6 +1771,37 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
     assert!(matches!(
         runtime.host_use(&id),
         Err(Refusal::Os { why, .. }) if why.contains("went unread")
+    ));
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a running image VM's rate period is its own run's, as its run host said
+/// it as the run started (D247's `ImageGuest::rate_period`), the window the node's charge learner caps it over, never a
+/// number of Hex's. Do start two image VMs whose run hosts say 70 ms and 130 ms, each on a runtime of its own (so
+/// neither boot waits at a bound the other's answer taught, decision 9), and ask each its period; then ask one made and
+/// not started, and a box the runtime doesn't hold. Expect each its own run's period; the one not started refused
+/// NotRunning, naming the call; the one not held NoSuchBox.
+#[test]
+fn w14_a_running_vms_rate_period_is_its_own_runs() {
+    let started = |name: &str, ms: u64| {
+        let images = ModelImages::new();
+        *images.period.lock().unwrap() = Duration::from_millis(ms);
+        let (runtime, owner) = model_runtime(&images, waits());
+        let id = runtime.create(spec(name, None)).unwrap().id;
+        runtime.start(&id).unwrap();
+        (runtime, owner, id)
+    };
+    let (first, _first_owner, a) = started("image-period-a", 70);
+    let (second, _second_owner, b) = started("image-period-b", 130);
+    assert_eq!(first.rate_period(&a).unwrap(), Duration::from_millis(70));
+    assert_eq!(second.rate_period(&b).unwrap(), Duration::from_millis(130));
+    let made = first.create(spec("image-period-c", None)).unwrap().id;
+    assert!(matches!(
+        first.rate_period(&made),
+        Err(Refusal::NotRunning(_, "rate_period"))
+    ));
+    assert!(matches!(
+        first.rate_period(&BoxId::new("image-period-none").unwrap()),
+        Err(Refusal::NoSuchBox(_))
     ));
 }
 
@@ -3582,6 +3619,7 @@ fn guest_pool() -> Capacity {
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned: None,
+        own: Default::default(),
         node_vms: Vec::new(),
     }
 }
@@ -3625,4 +3663,62 @@ fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record()
     );
     drop(runtime);
     assert!(relay.join().unwrap());
+}
+
+/// Joint plan step 33's sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8), red first: do create and
+/// start a harness VM whose CLI signs in, on a node whose orchestrator gave it lessors. Expect the boot asked exactly the
+/// box's sign-in, run-wide as Shards keeps it (its name, its CLI, its hosts, an earlier capture's placeholders), beside a
+/// lessor that answers it; and the record and inspect keeping the grant.
+#[test]
+fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
+    use hex_api::lease::sim::SimLessors;
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let runtime = runtime.with_lessors(Arc::new(SimLessors::new()));
+    let (mut spec, _) = credentialed(&images, "image-sign-in");
+    let captured = hex_api::Captured {
+        access: "kiln/sign-ins/claude/access".to_owned(),
+        access_placeholder: "kiln-placeholder-61636365737321".to_owned(),
+        refresh_placeholder: Some("kiln-placeholder-7265667265736821".to_owned()),
+    };
+    let sign_in = hex_api::SignInGrant {
+        member: hex_api::Member {
+            kind: hex_api::MemberKind::Harness,
+            name: "claude".to_owned(),
+        },
+        sign_in: "claude/ada".to_owned(),
+        cli: hex_api::SignInCli::ClaudeCode,
+        toward: vec!["api.anthropic.com".to_owned()],
+        captured: Some(captured),
+    };
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.credentials.clear();
+        image.sign_ins = vec![sign_in.clone()];
+    }
+    let id = runtime.create(spec).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].sign_ins,
+        vec![shards_api::image::SignInGrant {
+            sign_in: "claude/ada".to_owned(),
+            cli: shards_api::image::Cli::ClaudeCode,
+            toward: vec!["api.anthropic.com".to_owned()],
+            captured: Some(shards_api::image::Captured {
+                access: "kiln/sign-ins/claude/access".to_owned(),
+                access_placeholder: "kiln-placeholder-61636365737321".to_owned(),
+                refresh_placeholder: Some("kiln-placeholder-7265667265736821".to_owned()),
+            }),
+        }]
+    );
+    assert!(
+        asked[0].lessor.is_some(),
+        "a run with a sign-in has a lessor"
+    );
+    match &record(&owner, &id).unwrap().spec.class {
+        ClassSpec::ShardsImage(image) => assert_eq!(image.sign_ins, vec![sign_in]),
+        other => panic!("a Shards image VM recorded as {other:?}"),
+    }
+    runtime.delete(&id).unwrap();
 }

@@ -176,7 +176,7 @@ impl Transport for Socket {
                 Refusal::Broken(format!("the node agent's stream can't be read: {fault}"))
             })?;
             input = input.get(took..).unwrap_or_default();
-            let Some(message) = whole else { continue };
+            let Some(mut message) = whole else { continue };
             let these = std::mem::take(fds);
             let received = Received {
                 bytes: &message,
@@ -184,7 +184,16 @@ impl Transport for Socket {
                 descriptors: these.len(),
                 descriptors_cut: false,
             };
-            take(&received, these)?;
+            let taken = take(&received, these);
+            // A sign-in's tokens cross in the message the core reads alone (docs/design/credential-grants.md C8).
+            if wire::carries_secret(&message) {
+                hex_api::lease::wipe(&mut message);
+            }
+            taken?;
+        }
+        // Framed into the messages handed on: what was read here wiped.
+        if let Some(held) = buf.get_mut(..msg.bytes) {
+            hex_api::lease::wipe_in_place(held);
         }
         Ok(true)
     }

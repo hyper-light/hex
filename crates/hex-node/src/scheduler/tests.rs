@@ -1224,6 +1224,7 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
         }],
     };
     let report = hex_api::Capacity {
+        own: Default::default(),
         id: "same-owner".into(),
         total: fixed,
         free: fixed,

@@ -36,7 +36,10 @@ pub mod sim;
 mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
-pub use credentials::{CredentialGrant, REFERENCE_MAX, check_credentials};
+pub use credentials::{
+    Captured, CredentialGrant, REFERENCE_MAX, SignInCli, SignInGrant, check_credentials,
+    check_sign_ins,
+};
 pub use devices::{
     BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable,
     MAX_DEVICES, PhysicalDevice, PhysicalReport,
@@ -52,8 +55,8 @@ pub use runtime::{
     GpuEligibility, GuestTime, HostUse, ImageArch, ImageOs, ImagePlatform, IoKind, Learned,
     LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
     LearnedUse, LifecycleCause, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Membership, NodeRun, NodeVmPhase, NodeVmReceipt, Proc, Refusal, RouteKey, RouteOffer,
-    RouteReceipt, Runtime, RuntimeCost, Signal, StartedFrom, Upstream, Usage, VmSize,
+    MachineTime, Membership, NodeRun, NodeVmPhase, NodeVmReceipt, Proc, Refusal, RouteKey,
+    RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, StartedFrom, Upstream, Usage, VmSize,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, ImageMember,

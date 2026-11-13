@@ -1072,14 +1072,26 @@ impl GuestRuntime {
                 .read_pool(&key)?
                 .ok_or_else(|| uncertain(key, "its pool record is gone after its shared boot"))?;
             self.matches_pool(&booted, &record)?;
+            if !matches!(record.phase, BackingPhase::Granted | BackingPhase::Live) {
+                return Err(uncertain(key, "it isn't live after its shared boot"));
+            }
+            // Live only measured (joint plan step 14, C7; ROOT's pin 1): its guest's first measurement, its agent's
+            // answer now, before its record says Live; a guest that can't be measured leaves it as it was.
+            let (guest, boxes) = self
+                .reading(&booted, key, &transaction.records()?)
+                .map_err(|why| {
+                    uncertain(
+                        key,
+                        &format!("its guest couldn't be measured as it went live: {why}"),
+                    )
+                })?;
+            let seen = guest_seen(self.kept_guest(key)?, &guest, boxes);
             if record.phase == BackingPhase::Granted {
                 record.phase = BackingPhase::Live;
                 transaction.put_pool(&record)?;
             }
-            if record.phase != BackingPhase::Live {
-                return Err(uncertain(key, "it isn't live after its shared boot"));
-            }
-            let offer = record.offer()?;
+            let mut offer = record.offer()?;
+            offer.guest = self.keep_guest(key, seen)?.overhead;
             let mut state = self.lock()?;
             if state
                 .as_ref()
@@ -1321,45 +1333,78 @@ impl GuestRuntime {
     /// step 14, C7; [`guest_seen`]), kept per backing generation: a new generation starts cold. A read that fails, or a
     /// guest not running, is no sample: what was seen stays. No lock is held over the guest's answers.
     fn measured_guest(&self, key: BackingKey) -> Result<hex_api::LearnedOverhead, Refusal> {
-        let kept = match *self
-            .guest_overhead
-            .lock()
-            .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned"))?
-        {
-            Some((seen, overhead)) if seen == key => overhead,
-            _ => hex_api::LearnedOverhead::default(),
-        };
+        let kept = self.kept_guest(key)?;
         let measured = self
             .shared_running()
             .ok()
             .and_then(|booted| {
-                let guest = booted.client.capacity(Class::Oci).ok()??;
                 let records = self.authority().ok()?.records().ok()?;
-                let mut boxes = 0u64;
-                for record in records.values().flatten() {
-                    if record.spec.route.and_then(|route| route.backing) == Some(key) {
-                        boxes = boxes.saturating_add(
-                            booted.client.usage(&record.spec.id).ok()?.memory_bytes,
-                        );
-                    }
-                }
-                Some(guest_seen(kept, &guest, boxes))
+                self.reading(&booted, key, &records).ok()
             })
-            .unwrap_or(kept);
+            .map_or(kept, |(guest, boxes)| guest_seen(kept, &guest, boxes));
+        self.keep_guest(key, measured).map(|seen| seen.overhead)
+    }
+
+    /// What the shared backing `key`'s runtime has seen of its guest: none for another generation's.
+    fn kept_guest(&self, key: BackingKey) -> Result<Seen, Refusal> {
+        Ok(
+            match *self
+                .guest_overhead
+                .lock()
+                .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned"))?
+            {
+                Some((seen, kept)) if seen == key => kept,
+                _ => Seen::default(),
+            },
+        )
+    }
+
+    /// Keeps `measured` as what the shared backing `key`'s runtime has seen of its guest, merged with what another
+    /// answer kept meanwhile ([`merged`]), and answers what it keeps.
+    fn keep_guest(&self, key: BackingKey, measured: Seen) -> Result<Seen, Refusal> {
         let mut seen = self
             .guest_overhead
             .lock()
             .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned as it learns"))?;
-        // Another answer may have measured meanwhile: the most of the two.
-        let merged = match *seen {
-            Some((at, other)) if at == key => hex_api::LearnedOverhead {
-                mem_bytes: measured.mem_bytes.max(other.mem_bytes),
-                ..measured
-            },
+        let kept = match *seen {
+            Some((at, other)) if at == key => merged(measured, other),
             _ => measured,
         };
-        *seen = Some((key, merged));
-        Ok(merged)
+        *seen = Some((key, kept));
+        Ok(kept)
+    }
+
+    /// The shared backing `key`'s guest as `booted` answers it now (joint plan step 14, C7): its agent's capacity
+    /// answer, and what the boxes on the backing among `records` hold, each one's usage read. A read that fails
+    /// refuses.
+    fn reading(
+        &self,
+        booted: &Booted,
+        key: BackingKey,
+        records: &devices::Records,
+    ) -> Result<(hex_api::Capacity, Boxes), Refusal> {
+        let guest = booted
+            .client
+            .capacity(Class::Oci)?
+            .ok_or_else(|| uncertain(key, "its guest reports no capacity for its class"))?;
+        let mut boxes = Boxes::default();
+        let mut set = Sha256::new();
+        for record in records.values().flatten() {
+            if record.spec.route.and_then(|route| route.backing) == Some(key) {
+                let usage = booted.client.usage(&record.spec.id)?;
+                boxes.memory = boxes.memory.saturating_add(usage.memory_bytes);
+                boxes.cpu_ns = boxes
+                    .cpu_ns
+                    .saturating_add(usage.cpu_usec.saturating_mul(1_000));
+                set.update(record.spec.id.as_str().as_bytes());
+                set.update([0]);
+            }
+        }
+        boxes.set = set
+            .finalize()
+            .first_chunk::<8>()
+            .map_or(0, |head| u64::from_le_bytes(*head));
+        Ok((guest, boxes))
     }
 
     pub(super) fn shared_running(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
@@ -2056,22 +2101,134 @@ fn push_offer(
     Ok(())
 }
 
-/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13): what
-/// its agent says it uses (its total memory less its free) past what its boxes hold, `boxes_memory`, the most seen,
-/// only rising from `kept`. Its CPU and disk its agent's answer doesn't read, so they stay as kept: none.
-fn guest_seen(
-    kept: hex_api::LearnedOverhead,
-    guest: &hex_api::Capacity,
-    boxes_memory: u64,
-) -> hex_api::LearnedOverhead {
-    let own = guest
+/// What a shared backing's boxes held at one capacity answer, as their usage says (joint plan step 14, C7): memory and
+/// CPU time, and which boxes they were, a digest of their ids (`set`); their disk no usage reads, so none of the
+/// guest's used disk is taken as theirs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Boxes {
+    pub(super) memory: u64,
+    pub(super) cpu_ns: u64,
+    pub(super) set: u64,
+}
+
+/// A guest's machine at one capacity answer, for the next answer's interval: its CPU time and uptime, and its boxes'
+/// CPU time and set then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Reading {
+    cpu_ns: u64,
+    uptime_ns: u64,
+    boxes_cpu_ns: u64,
+    boxes: u64,
+}
+
+/// `cpu_ns` of CPU time over `span_ns`, in milli-CPU, rounded up: none over no time.
+fn share(cpu_ns: u64, span_ns: u64) -> Option<u64> {
+    let span = u128::from(span_ns);
+    if span == 0 {
+        return None;
+    }
+    u64::try_from(u128::from(cpu_ns).checked_mul(1_000)?.div_ceil(span)).ok()
+}
+
+/// The milli-CPU a guest ran of its own between two readings: its machine's CPU time past its boxes' over the uptime
+/// between. None where the interval says nothing of it: its uptime or CPU time fell (another boot of it) or its uptime
+/// didn't move on, or its boxes changed between (a box that ended took its last work's CPU time out of their sum).
+fn interval(last: Reading, now: Reading) -> Option<u64> {
+    if now.boxes != last.boxes {
+        return None;
+    }
+    let span = now.uptime_ns.checked_sub(last.uptime_ns)?;
+    let machine = now.cpu_ns.checked_sub(last.cpu_ns)?;
+    let boxes = now.boxes_cpu_ns.saturating_sub(last.boxes_cpu_ns);
+    share(machine.saturating_sub(boxes), span)
+}
+
+/// What a shared backing's runtime keeps of its guest (joint plan step 14, C7): its own overhead, its last reading, and
+/// whether its CPU is still the one reading since boot (ROOT's pin 2), which the first interval replaces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Seen {
+    pub(super) overhead: hex_api::LearnedOverhead,
+    last: Option<Reading>,
+    cpu_from_boot: bool,
+}
+
+/// The most of `a` and `b` in each dimension, none only where both are.
+fn most(a: hex_api::LearnedOverhead, b: hex_api::LearnedOverhead) -> hex_api::LearnedOverhead {
+    let max = |x: Option<u64>, y: Option<u64>| match (x, y) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    };
+    hex_api::LearnedOverhead {
+        cpu_milli: max(a.cpu_milli, b.cpu_milli),
+        mem_bytes: max(a.mem_bytes, b.mem_bytes),
+        disk_bytes: max(a.disk_bytes, b.disk_bytes),
+    }
+}
+
+/// What a shared backing keeps of its guest after an answer measured `measured` while another had kept `other`
+/// meanwhile (joint plan step 14, C7): its memory and disk, the most of the two; its CPU as pin 2 holds it whichever
+/// stored first, an interval's taking the place of a reading since boot and the intervals' most kept; and this
+/// answer's reading, the next interval's start.
+pub(super) fn merged(measured: Seen, other: Seen) -> Seen {
+    let of_intervals = |seen: &Seen| seen.overhead.cpu_milli.filter(|_| !seen.cpu_from_boot);
+    let both = most(measured.overhead, other.overhead);
+    let (cpu_milli, cpu_from_boot) = match (of_intervals(&measured), of_intervals(&other)) {
+        (Some(a), Some(b)) => (Some(a.max(b)), false),
+        (Some(a), None) | (None, Some(a)) => (Some(a), false),
+        (None, None) => (both.cpu_milli, both.cpu_milli.is_some()),
+    };
+    Seen {
+        overhead: hex_api::LearnedOverhead { cpu_milli, ..both },
+        last: measured.last.or(other.last),
+        cpu_from_boot,
+    }
+}
+
+/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13), each
+/// dimension only rising from `kept`: its memory, what its agent says it uses (its total less its free) past what its
+/// boxes hold; its disk, what it has used of its disk, its boxes' disk no usage reads; and its CPU, its machine's CPU
+/// time past its boxes' over an interval between answers ([`interval`]). Its first answer's CPU is read since its boot,
+/// its boot's work among it, so it stands only until the first interval replaces it (ROOT's pin 2); then the most of
+/// the intervals. An answer that doesn't read its machine's time (an older agent's, or another platform's) leaves its
+/// CPU as kept.
+pub(super) fn guest_seen(kept: Seen, guest: &hex_api::Capacity, boxes: Boxes) -> Seen {
+    let rise = |seen: Option<u64>, now: u64| Some(seen.map_or(now, |seen| seen.max(now)));
+    let memory = guest
         .total
         .mem_bytes
         .saturating_sub(guest.free.mem_bytes)
-        .saturating_sub(boxes_memory);
-    hex_api::LearnedOverhead {
-        mem_bytes: Some(kept.mem_bytes.map_or(own, |seen| seen.max(own))),
-        ..kept
+        .saturating_sub(boxes.memory);
+    let disk = guest.total.disk_bytes.saturating_sub(guest.free.disk_bytes);
+    let reading = match (guest.own.cpu_ns, guest.own.uptime_ns) {
+        (Some(cpu_ns), Some(uptime_ns)) => Some(Reading {
+            cpu_ns,
+            uptime_ns,
+            boxes_cpu_ns: boxes.cpu_ns,
+            boxes: boxes.set,
+        }),
+        _ => None,
+    };
+    let (cpu_milli, cpu_from_boot) = match (kept.last, reading) {
+        (Some(last), Some(now)) => match interval(last, now) {
+            Some(milli) if kept.cpu_from_boot => (Some(milli), false),
+            Some(milli) => (rise(kept.overhead.cpu_milli, milli), false),
+            None => (kept.overhead.cpu_milli, kept.cpu_from_boot),
+        },
+        (None, Some(now)) if kept.overhead.cpu_milli.is_none() => {
+            let since_boot = share(now.cpu_ns.saturating_sub(now.boxes_cpu_ns), now.uptime_ns);
+            (since_boot, since_boot.is_some())
+        }
+        _ => (kept.overhead.cpu_milli, kept.cpu_from_boot),
+    };
+    Seen {
+        overhead: hex_api::LearnedOverhead {
+            cpu_milli,
+            mem_bytes: rise(kept.overhead.mem_bytes, memory),
+            disk_bytes: rise(kept.overhead.disk_bytes, disk),
+        },
+        last: reading.or(kept.last),
+        cpu_from_boot,
     }
 }
 

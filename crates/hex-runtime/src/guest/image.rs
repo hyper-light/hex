@@ -1296,8 +1296,9 @@ impl ImageClass {
             control: None,
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
-            // No sign-in grant (Shards' D242 step 8, image channel v24): its pass-through is goal 13's.
-            sign_ins: Vec::new(),
+            // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
+            // spec grants them, run-wide as Shards keeps them; their lessor is its run's, as its credentials' is.
+            sign_ins: super::leases::sign_ins(image)?,
         })
     }
 
@@ -1766,6 +1767,12 @@ impl ImageClass {
             Err(ImageRefusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, "rate")),
             Err(why) => Err(refused(id, "holding a Shards image VM to its rate", why)),
         }
+    }
+
+    /// The period running image box `record`'s VM's governor holds its rate over (`GuestRuntime::rate_period`; D191,
+    /// D247), as its run host said it as the run started.
+    pub(super) fn rate_period_image(&self, record: BoxRecord) -> Result<Duration, Refusal> {
+        Ok(self.image_guest(&record, "rate_period")?.rate_period())
     }
 
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).

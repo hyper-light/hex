@@ -48,6 +48,7 @@ fn node() -> NodeSpec {
 
 fn capacity(learned: Option<Learned>) -> hex_api::Capacity {
     hex_api::Capacity {
+        own: Default::default(),
         id: "shards".into(),
         total: CapacityResources {
             cpu_milli: 16_000,

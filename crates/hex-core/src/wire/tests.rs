@@ -46,6 +46,7 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
 
 fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
     Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -87,11 +88,11 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         .unwrap()
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
-    // additionally ends with four empty u32 lists, no learned use (joint plan step 14) and no node
-    // VM's receipt (joint plan step 39); a spec ends with one route option and its band, 0 here
+    // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
+    // C7), and no node VM's receipt (joint plan step 39); a spec ends with one route option and its band, 0 here
     // (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1 + size_of::<u32>()
+        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>()
     } else {
         3
     };
@@ -208,11 +209,11 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 9..],
-        [0; 9],
-        "the empty list's count, then no learned use and no node VM's count, ends it"
+        cut[cut.len() - 11..],
+        [0; 11],
+        "the empty list's count, then no learned use, its machine's time unread and no node VM's count, ends it"
     );
-    cut.truncate(cut.len() - 9);
+    cut.truncate(cut.len() - 11);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -471,6 +472,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -875,6 +877,63 @@ fn requests() -> Vec<(u64, Request, usize)> {
             },
             0,
         ),
+        // docs/design/credential-grants.md C8: a connection's answers to the node's sign-in asks.
+        (
+            216,
+            Request::Captured {
+                run: 206,
+                answer: Ok(hex_api::Captured {
+                    access: "kiln/sign-ins/claude/access".to_owned(),
+                    access_placeholder: "kiln-placeholder-61".to_owned(),
+                    refresh_placeholder: Some("kiln-placeholder-62".to_owned()),
+                }),
+            },
+            0,
+        ),
+        (
+            217,
+            Request::Captured {
+                run: 206,
+                answer: Err(SignInRefused::Denied("no such sign-in".to_owned())),
+            },
+            0,
+        ),
+        (
+            218,
+            Request::Refreshed {
+                run: 206,
+                answer: Ok(Value::new(
+                    b"{\"access_token\":\"kiln-placeholder-61\"}".to_vec(),
+                )),
+            },
+            0,
+        ),
+        (
+            219,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unanswered),
+            },
+            0,
+        ),
+        (
+            220,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Unavailable(
+                    "its provider is away".to_owned(),
+                )),
+            },
+            0,
+        ),
+        (
+            221,
+            Request::Refreshed {
+                run: 206,
+                answer: Err(SignInRefused::Ended),
+            },
+            0,
+        ),
     ]
 }
 
@@ -1237,6 +1296,53 @@ fn answers() -> Vec<(u64, Answer)> {
     ));
     out.push((206, Answer::LeaseGiven("lease-1".to_owned())));
     out.push((206, Answer::LessorEnded));
+    // docs/design/credential-grants.md C8: the node's sign-in asks.
+    out.push((
+        209,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"sk-ant-oat01-access".to_vec()),
+                refresh: Some(Value::new(b"sk-ant-ort01-refresh".to_vec())),
+                expires_in: Some(28_800),
+                id_token: None,
+                scope: Some("user:inference".to_owned()),
+            },
+            key: Some([3; 32]),
+        },
+    ));
+    out.push((
+        210,
+        Answer::CaptureAsk {
+            run: 206,
+            sign_in: "openai/ada".to_owned(),
+            tokens: SignInTokens {
+                access: Value::new(b"at".to_vec()),
+                refresh: None,
+                expires_in: None,
+                id_token: Some(Value::new(b"eyJhbGciOiJub25lIn0.e30.".to_vec())),
+                scope: None,
+            },
+            key: None,
+        },
+    ));
+    out.push((
+        211,
+        Answer::RefreshAsk {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: None,
+        },
+    ));
+    out.push((
+        206,
+        Answer::SignInRevoked {
+            run: 206,
+            sign_in: "claude/ada".to_owned(),
+            key: Some([3; 32]),
+        },
+    ));
     out
 }
 
@@ -2004,7 +2110,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x001c, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x001e, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2754,9 +2860,9 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14)
-    // and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2772,6 +2878,9 @@ fn route_wire_capacity_bytes(
         put_backing_offer(&mut w, backing).unwrap();
     }
     w.u32(0);
+    w.u8(0);
+    // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39).
+    w.u8(0);
     w.u8(0);
     w.u32(0);
     w.done().unwrap()
@@ -3228,9 +3337,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14)
-    // and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -4614,8 +4723,8 @@ fn learned_capacity() -> Capacity {
 /// capacity answer, before only its node VMs (joint plan step 39). Do: encode a capacity with its priors, learned use,
 /// holdings and the VMs its last resort ended, and one with none; cut the second before its last byte; read and write
 /// both as JSON, and read the first's JSON without its ends. Expect both back exactly, the second ending with its none
-/// tag and no node VM's count and refused once cut, as every truncation is, JSON without the field reading as none, and
-/// JSON without the ends as none ended.
+/// tag, its machine's time unread and no node VM's count, and refused once cut, as every truncation is, JSON without the
+/// field reading as none, and JSON without the ends as none ended.
 #[test]
 fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     let learned = learned_capacity();
@@ -4633,9 +4742,9 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 5..],
-        [0; 5],
-        "no learned use, then no node VM's count, ends it"
+        cut[cut.len() - 7..],
+        [0; 7],
+        "no learned use, its machine's time unread, then no node VM's count, ends it"
     );
     cut.truncate(cut.len() - 1);
     assert!(matches!(
@@ -4769,9 +4878,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
         learned.ceilings = Vec::new();
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count, no
-    // ceiling's and no node VM's.
-    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
+    // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
+    // end's count and no ceiling's, its machine's time unread, and no node VM's count.
+    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 2);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -4865,9 +4974,9 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
         learned.ceilings = Vec::new();
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The ends' count, then the one end: its id's length, the id, five u64s, its band and its unmoved capability's
-    // option and tag; then no ceiling's count and no node VM's.
-    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
+    // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
+    // capability's option and tag; then no ceiling's count, its machine's time unread, and no node VM's count.
+    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 2);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5680,15 +5789,20 @@ fn s33_a_leases_value_crosses_marked_and_never_printed() {
     for (n, other, _) in requests() {
         if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
             let other = request(n, &other, MAX_MESSAGE).unwrap();
+            let kind = other.get(12..14).map(|k| u16::from_le_bytes([k[0], k[1]]));
             assert_eq!(
                 carries_secret(&other),
-                other.get(12..14) == Some(&0x001b_u16.to_le_bytes()[..]),
-                "only a leased message says it carries a value"
+                matches!(kind, Some(0x001b..=0x001d)),
+                "only a leased, captured or refreshed message says it carries a value"
             );
         }
     }
     for (n, other) in answers() {
-        assert!(!carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()));
+        assert_eq!(
+            carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()),
+            matches!(other, Answer::CaptureAsk { .. }),
+            "only a capture's ask carries tokens among the node's messages"
+        );
     }
     let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
     assert_eq!(back, leased);

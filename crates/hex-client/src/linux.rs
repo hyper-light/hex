@@ -164,7 +164,14 @@ impl Transport for Socket {
             descriptors: fds.len(),
             descriptors_cut: msg.flags.contains(ReturnFlags::CTRUNC),
         };
-        take(&received, fds)?;
+        // A sign-in's tokens cross in their message alone: its bytes here are wiped once it is read
+        // (docs/design/credential-grants.md C8).
+        let secret = wire::carries_secret(received.bytes);
+        let taken = take(&received, fds);
+        if secret && let Some(held) = reading.buf.get_mut(..msg.bytes) {
+            hex_api::lease::wipe_in_place(held);
+        }
+        taken?;
         Ok(true)
     }
 

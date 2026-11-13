@@ -232,3 +232,124 @@ fn w33_a_runs_leases_answer_shards_run_host_from_its_own_lessor() {
         vec!["lease-1".to_owned()]
     );
 }
+
+/// A run's lessor that serves its sign-ins as the test sets it, and keeps what it was asked and told.
+/// A capture as the lessor heard it: its sign-in, its tokens and its key.
+type Capture = (String, hex_api::lease::SignInTokens, Option<[u8; 32]>);
+
+#[derive(Default)]
+struct SignedIn {
+    captured: Mutex<Vec<Capture>>,
+    refreshed: Mutex<Vec<(String, Option<[u8; 32]>)>>,
+    revoked: Mutex<Vec<(String, Option<[u8; 32]>)>>,
+}
+
+impl Lessor for SignedIn {
+    fn lease(&self, _: &str, _: Option<[u8; 32]>) -> Result<Lease, LeaseRefused> {
+        Err(LeaseRefused::Denied(
+            "this lessor leases nothing".to_owned(),
+        ))
+    }
+    fn release(&self, _: &str) {}
+    fn capture(
+        &self,
+        sign_in: &str,
+        tokens: hex_api::lease::SignInTokens,
+        key: Option<[u8; 32]>,
+    ) -> Result<hex_api::Captured, hex_api::lease::SignInRefused> {
+        self.captured
+            .lock()
+            .unwrap()
+            .push((sign_in.to_owned(), tokens, key));
+        if sign_in == "refused" {
+            return Err(hex_api::lease::SignInRefused::Denied(
+                "not this one".to_owned(),
+            ));
+        }
+        Ok(hex_api::Captured {
+            access: "kiln/sign-ins/claude/access".to_owned(),
+            access_placeholder: "kiln-placeholder-61636365737321".to_owned(),
+            refresh_placeholder: Some("kiln-placeholder-7265667265736821".to_owned()),
+        })
+    }
+    fn refresh(
+        &self,
+        sign_in: &str,
+        key: Option<[u8; 32]>,
+    ) -> Result<Value, hex_api::lease::SignInRefused> {
+        self.refreshed
+            .lock()
+            .unwrap()
+            .push((sign_in.to_owned(), key));
+        Ok(Value::new(
+            b"{\"access_token\":\"kiln-placeholder-61636365737321\"}".to_vec(),
+        ))
+    }
+    fn revoked(&self, sign_in: &str, key: Option<[u8; 32]>) {
+        self.revoked.lock().unwrap().push((sign_in.to_owned(), key));
+    }
+}
+
+/// Shards' D242, step 8 (docs/design/credential-grants.md C8), red first: do capture, refresh and revoke a sign-in
+/// through Shards' interface under a key, as the run host asks. Expect each passed on to the run's lessor with its
+/// tokens whole and its key, its placeholders answered back, the refreshed response handed on whole, a refusal of
+/// Shards' kind and words, and the revocation told.
+#[test]
+fn s33_a_runs_sign_ins_answer_shards_run_host_from_its_own_lessor() {
+    use shards_api::image::{Secret, SignInRefusal, SignInTokens};
+    let signed = Arc::new(SignedIn::default());
+    let leases = RunLeases(signed.clone());
+    let tokens = || SignInTokens {
+        access: Secret(b"sk-ant-oat01-access".to_vec()),
+        refresh: Some(Secret(b"sk-ant-ort01-refresh".to_vec())),
+        expires_in: Some(28_800),
+        id_token: None,
+        scope: Some("user:inference".to_owned()),
+    };
+    let captured = leases
+        .capture("claude/ada", tokens(), Some([9; 32]))
+        .unwrap();
+    assert_eq!(captured.access, "kiln/sign-ins/claude/access");
+    assert_eq!(
+        captured.access_placeholder,
+        "kiln-placeholder-61636365737321"
+    );
+    assert_eq!(
+        captured.refresh_placeholder.as_deref(),
+        Some("kiln-placeholder-7265667265736821")
+    );
+    {
+        let asked = signed.captured.lock().unwrap();
+        let [(sign_in, given, key)] = &asked[..] else {
+            panic!("{} captures asked", asked.len());
+        };
+        assert_eq!((sign_in.as_str(), *key), ("claude/ada", Some([9; 32])));
+        assert_eq!(given.access.expose(), b"sk-ant-oat01-access");
+        assert_eq!(
+            given.refresh.as_ref().map(Value::expose),
+            Some(&b"sk-ant-ort01-refresh"[..])
+        );
+        assert_eq!(
+            (given.expires_in, given.scope.as_deref()),
+            (Some(28_800), Some("user:inference"))
+        );
+    }
+    assert_eq!(
+        leases.capture("refused", tokens(), None).unwrap_err(),
+        SignInRefusal::Denied("not this one".to_owned())
+    );
+    let refreshed = leases.refresh("claude/ada", None).unwrap();
+    assert_eq!(
+        refreshed.0,
+        b"{\"access_token\":\"kiln-placeholder-61636365737321\"}"
+    );
+    leases.revoked("claude/ada", Some([9; 32]));
+    assert_eq!(
+        signed.refreshed.lock().unwrap().clone(),
+        vec![("claude/ada".to_owned(), None)]
+    );
+    assert_eq!(
+        signed.revoked.lock().unwrap().clone(),
+        vec![("claude/ada".to_owned(), Some([9; 32]))]
+    );
+}

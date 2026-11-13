@@ -491,6 +491,7 @@ mod tests {
         backings: Vec<BackingOffer>,
     ) -> Capacity {
         Capacity {
+            own: Default::default(),
             id: "same-native-host".into(),
             total: room(),
             free: room(),
@@ -717,7 +718,12 @@ mod tests {
                             devices: vec![id],
                         },
                         BackingOffer {
-                            guest: Default::default(),
+                            // Measured as it went Live (joint plan step 14, C7, pin 1): nothing of its own.
+                            guest: hex_api::LearnedOverhead {
+                                cpu_milli: Some(0),
+                                mem_bytes: Some(0),
+                                disk_bytes: Some(0),
+                            },
                             key: warm,
                             cost: profile(),
                             phase: BackingPhase::Live,
@@ -920,7 +926,12 @@ mod tests {
                                 devices: vec![id],
                             },
                             BackingOffer {
-                                guest: Default::default(),
+                                // Measured as it went Live (joint plan step 14, C7, pin 1): nothing of its own.
+                                guest: hex_api::LearnedOverhead {
+                                    cpu_milli: Some(0),
+                                    mem_bytes: Some(0),
+                                    disk_bytes: Some(0),
+                                },
                                 key: warm,
                                 cost: profile(),
                                 phase: BackingPhase::Live,
