@@ -180,8 +180,14 @@ impl Shared {
         Ok(())
     }
 
-    /// The response a new scope's control starts from (2c): the slowest seen, the cold one before any hold.
+    /// The response a new scope's control starts from (2c): the slowest seen; before any, a cold helper's probe first
+    /// ([`probe_response`]), and the cold one where it gave none.
     pub(super) fn cpu_start(&self) -> Result<Duration, Refusal> {
+        if self.cpu_response()?.is_none()
+            && let Some(probed) = probe_response()?
+        {
+            self.observe_cpu_response(probed)?;
+        }
         Ok(self
             .cpu_response()?
             .unwrap_or(hex_core::helper::managed::COLD_RESPONSE))
@@ -2676,10 +2682,86 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
     }
 }
 
-/// A cold helper's first stop response (joint plan step 14, 2c). Original (red): none is probed, so a cold helper's
-/// scopes wait on a natural hold for one.
+/// A cold helper's first stop response (joint plan step 14, 2c; ROOT, 2026-11-13, cold start (a)), probed at the first
+/// scope it controls, a launch or a re-attach after a restart, so no scope waits on a natural hold for one. A spinner of
+/// its own (`/usr/bin/yes`, one busy thread, as `macos_cpu_response`'s member) runs under a control at Hex's least CPU
+/// bound, `hex_api::MIN_CPU_MILLI` (the kernel's least quota, 1 ms a 100 ms period: the least the learner caps any VM
+/// at, so the charge window's cycle is the one at it; this control's quantum is a milli-CPU, so it holds it), from the
+/// cold response. Once its credit runs out it is held, followed by liveness with no timer, and its response is a
+/// hold's: from its credit's running out to its read stop. None where the spinner ended first, or the stop took no
+/// time.
 fn probe_response() -> Result<Option<Duration>, Refusal> {
-    Ok(None)
+    let mut spinner = super::command::Command::new("/usr/bin/yes")
+        .stdin(super::command::Stdio::null())
+        .stdout(super::command::Stdio::null())
+        .stderr(super::command::Stdio::null())
+        .spawn()
+        .map_err(|error| Refusal::os("starting the CPU response probe", error))?;
+    let probed = probe_hold(spinner.id());
+    // The spinner is the probe's alone: ended and reaped whatever the probe found.
+    let ended = spinner
+        .kill()
+        .and_then(|()| spinner.wait())
+        .map_err(|error| Refusal::os("ending the CPU response probe", error));
+    let probed = probed?;
+    ended?;
+    Ok(probed)
+}
+
+/// One hold of the probe's spinner `pid` ([`probe_response`]).
+fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
+    let failed = |_| Refusal::os("the CPU response probe's control", "its budget refused");
+    // One busy thread is one CPU, a thousand milli-CPU.
+    let mut control = super::cpu::Control::new(
+        u64::from(hex_api::MIN_CPU_MILLI),
+        1_000,
+        hex_core::helper::managed::COLD_RESPONSE,
+        Duration::ZERO,
+    )
+    .map_err(failed)?;
+    control
+        .start(Instant::now(), Duration::ZERO)
+        .map_err(failed)?;
+    let kq = Kqueue::new().map_err(|error| Refusal::os("the CPU response probe's timer", error))?;
+    let mut events = Vec::new();
+    loop {
+        match control
+            .observe(Instant::now(), Duration::ZERO)
+            .map_err(failed)?
+        {
+            super::cpu::Decision::Hold(_) => break,
+            super::cpu::Decision::Run(Some(wait)) => {
+                // Its timer's own event ends the wait, never an interrupted kevent's empty return.
+                let mut timer = Some(wait);
+                events.clear();
+                while !events
+                    .iter()
+                    .any(|event| matches!(event, sys::Event::Timer))
+                {
+                    kq.wait(timer.take(), None, &mut events)
+                        .map_err(|error| Refusal::os("the CPU response probe's timer", error))?;
+                }
+            }
+            super::cpu::Decision::Run(None) | super::cpu::Decision::Prepared => {
+                return Err(Refusal::os(
+                    "the CPU response probe's control",
+                    "a control below its maximum never held its scope",
+                ));
+            }
+        }
+    }
+    let ran_out = control.ran_out();
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| Refusal::os("the CPU response probe's spinner", "its pid"))?;
+    rustix::process::kill_process(target, rustix::process::Signal::STOP)
+        .map_err(|error| Refusal::os("holding the CPU response probe", io::Error::from(error)))?;
+    let stopped = stopped_after(&[pid], sys::run_state)?;
+    Ok(ran_out
+        .zip(stopped)
+        .and_then(|(from, at)| at.checked_duration_since(from))
+        .filter(|response| !response.is_zero()))
 }
 
 /// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer

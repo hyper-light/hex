@@ -663,9 +663,9 @@ fn native_nproc_zero_refuses_spawn_and_hard_raise_but_preserves_threads() {
 }
 
 /// Joint plan step 14 (2c; ROOT, 2026-11-13): a learning helper's scope takes its control's response from the helper's
-/// own, never the launch's field, which is kept for older helpers; the cold nanosecond before any hold. Do make a scope
-/// whose launch names a 5 ms response on a helper that has seen a 2 us one, then one on a helper that has seen none.
-/// Expect the first's burst its maximum over 2 us and the second's over a nanosecond, neither over 5 ms.
+/// own, never the launch's field, which is kept for older helpers: before any hold, its probe's. Do make a scope whose
+/// launch names a 5 ms response on a helper that has seen a 2 us one, then one on a helper that has seen none. Expect
+/// the first's burst its maximum over 2 us and the second's over the new helper's own start, neither over 5 ms.
 #[test]
 fn w14_a_learning_helpers_scope_reads_its_own_response_never_the_launchs() {
     let record = pool();
@@ -686,14 +686,13 @@ fn w14_a_learning_helpers_scope_reads_its_own_response_never_the_launchs() {
     let one = std::num::NonZeroU64::new(1).unwrap();
     let shared = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
     assert_eq!(shared.cpu_response().unwrap(), None);
-    let cold = Scope::new(
-        native,
-        Some((control, cpu)),
-        Duration::ZERO,
-        shared.cpu_start().unwrap(),
-    )
-    .unwrap();
-    assert_eq!(cold.cpu_burst(), Some(i128::from(cpu)));
+    let start = shared.cpu_start().unwrap();
+    assert_ne!(start, Duration::from_millis(5));
+    let cold = Scope::new(native, Some((control, cpu)), Duration::ZERO, start).unwrap();
+    assert_eq!(
+        cold.cpu_burst(),
+        Some(i128::from(cpu) * i128::try_from(start.as_nanos()).unwrap())
+    );
 }
 
 /// Joint plan step 14 (2c; ROOT, 2026-11-13, cold start (a)): a cold helper probes its control's first stop response
@@ -706,7 +705,10 @@ fn w14_a_cold_helpers_first_scope_is_probed_for_its_response() {
     assert_eq!(shared.cpu_response().unwrap(), None);
     let start = shared.cpu_start().unwrap();
     assert_eq!(shared.cpu_response().unwrap(), Some(start));
-    assert!(start > hex_core::helper::managed::COLD_RESPONSE, "{start:?}");
+    assert!(
+        start > hex_core::helper::managed::COLD_RESPONSE,
+        "{start:?}"
+    );
 }
 
 /// Joint plan step 14 (2c; ROOT, 2026-11-13): a helper restarted with live scopes starts cold on purpose. Its slowest
@@ -727,7 +729,10 @@ fn w14_a_restarted_helper_starts_its_live_scopes_cold_and_raises_on_their_first_
     before.observe_cpu_response(Duration::from_secs(2)).unwrap();
     let after = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
     let start = after.cpu_start().unwrap();
-    assert!(start < Duration::from_secs(2), "the old helper's response carried: {start:?}");
+    assert!(
+        start < Duration::from_secs(2),
+        "the old helper's response carried: {start:?}"
+    );
     let scope = Scope::new(native, Some((control, cpu)), Duration::ZERO, start).unwrap();
     let nanos = |d: Duration| i128::try_from(d.as_nanos()).unwrap();
     assert_eq!(scope.cpu_burst(), Some(i128::from(cpu) * nanos(start)));
