@@ -369,7 +369,13 @@ pub(super) fn unobserved_box(controller: &Birth) -> ProcessBox {
         response: Duration::from_nanos(1),
     };
     let cpu = record.allocation.unwrap().resources.cpu_milli;
-    let scope = Scope::new(native, Some((control, cpu)), Duration::ZERO).unwrap();
+    let scope = Scope::new(
+        native,
+        Some((control, cpu)),
+        Duration::ZERO,
+        shared.cpu_start().unwrap(),
+    )
+    .unwrap();
     scope.held(native.owner()).unwrap();
     scope.running(native.owner()).unwrap();
     let bounds = Bounds::default();
@@ -654,4 +660,38 @@ fn native_nproc_zero_refuses_spawn_and_hard_raise_but_preserves_threads() {
     let cleanup = child.cleanup(true);
     assert!(cleanup.is_ok(), "NPROC actor cleanup: {cleanup:?}");
     assert_eq!(exit.unwrap(), Some(hex_api::Exit::Code(0)));
+}
+
+/// Joint plan step 14 (2c; ROOT, 2026-11-13): a learning helper's scope takes its control's response from the helper's
+/// own, never the launch's field, which is kept for older helpers; the cold nanosecond before any hold. Do make a scope
+/// whose launch names a 5 ms response on a helper that has seen a 2 us one, then one on a helper that has seen none.
+/// Expect the first's burst its maximum over 2 us and the second's over a nanosecond, neither over 5 ms.
+#[test]
+fn w14_a_learning_helpers_scope_reads_its_own_response_never_the_launchs() {
+    let record = pool();
+    let native = NativeRecord::Pool(&record);
+    let control = super::super::CpuControl {
+        cost_id: record.cost.id,
+        response: Duration::from_millis(5),
+    };
+    let cpu = record.allocation.unwrap().resources.cpu_milli;
+    let seen = Scope::new(
+        native,
+        Some((control, cpu)),
+        Duration::ZERO,
+        Duration::from_micros(2),
+    )
+    .unwrap();
+    assert_eq!(seen.cpu_burst(), Some(i128::from(cpu) * 2_000));
+    let one = std::num::NonZeroU64::new(1).unwrap();
+    let shared = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
+    assert_eq!(shared.cpu_response().unwrap(), None);
+    let cold = Scope::new(
+        native,
+        Some((control, cpu)),
+        Duration::ZERO,
+        shared.cpu_start().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cold.cpu_burst(), Some(i128::from(cpu)));
 }

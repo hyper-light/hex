@@ -88,6 +88,12 @@ impl Control {
         self.budget.held()
     }
 
+    /// Its burst, the most its scope runs past a stop, in milli-CPU nanoseconds (2c's tests).
+    #[cfg(test)]
+    pub(super) fn burst(&self) -> i128 {
+        self.budget.burst
+    }
+
     /// A hold's measured response (joint plan step 14, 2c): [`Budget::learn`].
     pub(super) fn learn(&mut self, response: Duration) -> Result<(), Failure> {
         self.budget.learn(response)

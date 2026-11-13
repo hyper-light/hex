@@ -103,11 +103,15 @@ pub(super) struct Scope {
 }
 
 impl Scope {
+    /// Original (joint plan step 14, 2c, red): `response`, the helper's own, is taken nowhere; the control starts from
+    /// the launch's field.
     pub(super) fn new(
         record: NativeRecord<'_>,
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
+        response: Duration,
     ) -> Result<Self, Refusal> {
+        let _ = response;
         let allocation = record
             .allocation()
             .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
@@ -347,6 +351,11 @@ impl Scope {
             .map_err(|_| self.refusal(id))?
             .learn(response)
             .map_err(|_| self.refusal(id))
+    }
+    /// Its control's burst, the most it runs past a stop, in milli-CPU nanoseconds (2c's tests).
+    #[cfg(test)]
+    pub(super) fn cpu_burst(&self) -> Option<i128> {
+        Some(self.cpu.as_ref()?.lock().ok()?.burst())
     }
     pub(super) fn cpu_held(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         self.cpu_decision(id)?;

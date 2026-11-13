@@ -156,6 +156,19 @@ impl Shared {
             .worst())
     }
 
+    /// The slowest stop response the helper's managed CPU control has seen in its own holds (joint plan step 14, 2c).
+    /// Original (red): none is kept.
+    pub fn cpu_response(&self) -> Result<Option<Duration>, Refusal> {
+        Ok(None)
+    }
+
+    /// The response a new scope's control starts from (2c): the slowest seen, the cold one before any hold.
+    pub(super) fn cpu_start(&self) -> Result<Duration, Refusal> {
+        Ok(self
+            .cpu_response()?
+            .unwrap_or(hex_core::helper::managed::COLD_RESPONSE))
+    }
+
     /// The rates as learned so far.
     pub fn rates(&self) -> Result<Rates, Refusal> {
         Ok(self
@@ -1010,7 +1023,7 @@ impl ProcessBox {
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
     ) -> Result<Arc<Self>, Refusal> {
-        let vm = super::managed::Scope::new(record, control, baseline)?;
+        let vm = super::managed::Scope::new(record, control, baseline, shared.cpu_start()?)?;
         let observer = super::proc::Prepared::new()?;
         let boxed = Arc::try_new(Self::prepared(
             record.owner().try_owned()?,
