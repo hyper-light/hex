@@ -1170,7 +1170,11 @@ impl GuestRuntime {
             // recovery/create installs the native route before accepting forwards.
             self.cached_selected(id)
         } else if self.managed_shared() {
-            let record = snapshot.ok_or(super::books::uncertain(id)?)?;
+            // A box its guest keeps no record of is no box of its guest's: a macOS or Windows node forwards a call
+            // on an id its host doesn't hold here, which then answers NoSuchBox (HVF image_real's HEX-IMG-1, 6 and 7).
+            let Some(record) = snapshot else {
+                return Ok(None);
+            };
             self.shared_for_record(record)
         } else {
             self.running()
