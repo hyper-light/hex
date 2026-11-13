@@ -1103,16 +1103,22 @@ impl GuestRuntime {
             Ok(client) => client,
             Err(why) => return Err(self.stopped_for(vm.run, why)),
         };
-        let b = booted_owner(Booted {
+        let b = match booted_owner(Booted {
             guest: GuestHandle::Node(vm.run),
             link,
             client,
             evented: Mutex::new(None),
             owner: None,
             backing: None,
-        })?;
-        // Its control connection joins the loop as a direct boot's does.
-        self.join(&b)?;
+        }) {
+            Ok(b) => b,
+            Err(why) => return Err(self.stopped_for(vm.run, why)),
+        };
+        // Its control connection joins the loop as a direct boot's does; a node VM whose connection can't join is
+        // stopped, so no run is left beside the next boot's.
+        if let Err(why) = self.join(&b) {
+            return Err(self.stopped_for(vm.run, why));
+        }
         Ok(b)
     }
 
