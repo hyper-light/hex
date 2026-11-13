@@ -315,6 +315,13 @@ pub struct ShardsImage {
     /// shares named here, the image's own grants widening none. After the members (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<Mount>,
+    /// Its members' credentials, granted by reference (Shards' D242; joint plan step 33; docs/design/credential-grants.md):
+    /// each a credential its orchestrator's store names, never its value, which its member's requests to the hosts its
+    /// grant names alone may have filled in at the VM's egress, leased as they first need it ([`crate::lease`]). None by
+    /// default: nothing is filled in toward any host. The orchestrator keeps or drops them, and Hex adds none. After the
+    /// shares (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<crate::CredentialGrant>,
 }
 
 /// A member of a Shards image its caller drives ([`ShardsImage::members`]): which one, by the kind and name
@@ -399,6 +406,7 @@ impl ShardsImage {
             grants: Vec::new(),
             members: Vec::new(),
             shares: Vec::new(),
+            credentials: Vec::new(),
         }
     }
 
@@ -408,7 +416,8 @@ impl ShardsImage {
     /// grants [`crate::check_grants`] takes, and members its caller drives each named once and checked as
     /// [`ImageMember`] checks one. Refused by its field's name (CLAUDE.md §3); the rest of
     /// the name's grammar is Shards' to refuse as it resolves the image, and a grant Shards can't hold
-    /// exactly is the runtime's to refuse as it programs the boot.
+    /// exactly is the runtime's to refuse as it programs the boot. Its credentials, last, as
+    /// [`crate::check_credentials`] takes them over its grants (refused naming `credentials`).
     pub fn check(&self) -> Result<(), Refusal> {
         let (name, digest) = self.image.rsplit_once('@').ok_or_else(|| {
             invalid_image(format!(
@@ -502,7 +511,9 @@ impl ShardsImage {
                 )));
             }
         }
-        Ok(())
+        // Its credentials, each one that could be filled in exactly as it says over the grants just taken (joint plan
+        // step 33, docs/design/credential-grants.md C2).
+        crate::check_credentials(&self.credentials, &self.grants)
     }
 }
 

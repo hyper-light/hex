@@ -1899,6 +1899,10 @@ pub struct BoxInfo {
     /// none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
+    /// Its credential grants as its record holds them (joint plan step 33, Shards' D242; docs/design/credential-grants.md
+    /// C4): a Shards image VM's, none for any other class. After `ended`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<crate::CredentialGrant>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -2043,6 +2047,12 @@ pub enum Refusal {
     /// (append-only).
     #[error("box {id}'s run failed: {why}")]
     Failed { id: BoxId, why: String },
+    /// What its node isn't configured to serve, `what`, and why it's needed (joint plan step 33): a Shards image VM's
+    /// credential grants on a node its orchestrator gave no lessors ([`crate::lease::Lessors`]), whose values it could
+    /// lease from no one. Its configuration's, not its platform's or its revision's: the same node given lessors serves
+    /// it. After `Failed` (append-only).
+    #[error("this node is configured with no {what}: {why}")]
+    Unconfigured { what: &'static str, why: String },
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's

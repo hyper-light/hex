@@ -22,18 +22,21 @@
 mod bounds;
 pub mod capacity;
 pub mod conformance;
+mod credentials;
 mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
 mod grants;
 mod id;
+pub mod lease;
 pub mod patience;
 mod runtime;
 pub mod sim;
 mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
+pub use credentials::{CredentialGrant, REFERENCE_MAX, check_credentials};
 pub use devices::{
     BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable,
     MAX_DEVICES, PhysicalDevice, PhysicalReport,
