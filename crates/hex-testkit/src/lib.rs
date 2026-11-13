@@ -7,6 +7,8 @@
 //!
 //! A test's wait for a fact takes its own fact's record ([`waits`]): the slowest answer the waits census
 //! recorded for it, or measuring where no row records it yet, its answers then recorded for the census.
+//!
+//! On Linux, a test that subdivides its process's own cgroup for its boxes takes it from [`cgroup::delegated`].
 
 #![cfg_attr(
     test,
@@ -20,6 +22,8 @@
     )
 )]
 
+#[cfg(target_os = "linux")]
+pub mod cgroup;
 pub mod waits;
 
 use std::fs::{self, OpenOptions};
