@@ -1167,6 +1167,20 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
     }
 }
 
+/// Flushes directory `dir` (FlushFileBuffers on its handle), so a rename or removal in it outlives a host crash.
+/// CreateFileW opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and FlushFileBuffers needs a handle with
+/// `GENERIC_WRITE` (both in their Win32 reference pages), so it is opened for writing: std's `File::open` opens it
+/// for reading alone, refused "Access is denied" (os error 5). No `unsafe`: std's open takes the flag.
+pub fn flush_directory(dir: &std::path::Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
+}
+
 /// Publish a flushed temp file beside its final name. MoveFileExW documents write-through move
 /// completion; this is not by itself a hardware power-loss proof (managed-native.md).
 pub fn replace_durable(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
