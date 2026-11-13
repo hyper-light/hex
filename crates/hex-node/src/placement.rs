@@ -1160,6 +1160,7 @@ impl Driver {
                 return Err(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Pending,
+                    why: None,
                 }
                 .into());
             }
@@ -1171,6 +1172,7 @@ impl Driver {
                 self.lock()?.admission = Some(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 });
                 return Err(refusal.into());
             }
@@ -1184,10 +1186,12 @@ impl Driver {
             state.admission = Some(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             });
             return Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             }
             .into());
         }
@@ -1208,6 +1212,7 @@ impl Driver {
         let refused = || Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         };
         if expected.phase != hex_api::BackingPhase::Draining {
             return Err(invalid_static("native cleanup requires canonical Draining intent").into());
@@ -1246,6 +1251,7 @@ impl Driver {
         let refused = || Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         };
         if expected.phase != hex_api::BackingPhase::Released
             || !self

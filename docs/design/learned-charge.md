@@ -4,8 +4,19 @@ Joint plan step 14 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "[Hex + Shards
 contention rule, and budgets per fleet"), serving AC-T7.4.1 (placement) and AC-T7.5.2 (shares under
 contention). Status: the charge by measured use is the person's decision (below); the plan has the research shape
 the rule without holding the step up, and ROOT took the rule (C1 to C7) and the interface with step 13 (C8) on
-2026-11-12, correcting C1's memory and C2's prior to the forms below. ROOT measures density, fairness and the
-violation rates once it is built.
+2026-11-12, correcting C1's memory and C2's prior to the forms below. Built, merged and live as of 2026-11-13, live
+being GitHub's main (`025aae6d`):
+- Live: the core, admission, C4's placement and the last resort (`d02a039d`, `b38ce550`, `3e30392d`, `eff0eaea`);
+  macOS and Windows managed VMs capped at their shares and ended through their receipts, why written first
+  (`b19ef663`, `6ff188e2`, `803d311f`); one derived bound (`21c779cf`); the density driver and the trace recorder
+  (`0b483d0c`, `7f1d7334`); an image VM's room, rate and host cost (`6df918db`); and a cold class and a VM's ceiling
+  (`2cd5f8f3`, `2964330d`).
+- Merged on Hex's main: a census's cost as evidence alone, with its VMs retired (`97f77b14`, `5362acb3`); hex-sim
+  replaying recorded traces (`9e0c5805`); macOS's CPU control learning its response (`a8dc671c`, `312f4e98`,
+  `c9d5cf93`); a backing's measured guest overhead (`6f40da16`); an unread VM counted whole (`0e401dbe`); and a
+  managed stop's own wait (`788dda27`).
+- Built: the learner's window from each image VM's rate period (`f95ed62b`).
+- Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
 
 Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>` with kiln's grade; raw texts in
 `~/.cache/hex-lead/research/hexres-c14`); Linux `Documentation/admin-guide/cgroup-v2.rst` at `1590cf03`; Shards

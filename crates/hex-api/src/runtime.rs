@@ -14,6 +14,7 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: *key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -23,12 +24,14 @@ pub trait Runtime: Send + Sync {
         Err(Refusal::Backing {
             key: grant.key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
     fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
         Err(Refusal::Backing {
             key,
             cause: LifecycleCause::Pending,
+            why: None,
         })
     }
 
@@ -1528,6 +1531,7 @@ impl Capacity {
                 return Err(Refusal::Backing {
                     key,
                     cause: LifecycleCause::Pending,
+                    why: None,
                 });
             }
         }
@@ -2000,13 +2004,29 @@ fn per_vcpu<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u64
     )
 }
 
+/// A refusal's reason as its message gives it: `: why` after the rest, or nothing where it gives none.
+struct Said<'a>(&'a Option<String>);
+
+impl std::fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(why) => write!(f, ": {why}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("native backing {key:?}: {cause:?}")]
+    /// Native backing `key` refused for `cause`, and `why` in the refusing site's own words where it gives them (joint
+    /// plan step 14; ROOT, 2026-11-13: an `Uncertain` with no reason is a CLAUDE.md §3 gap). Appended (the wire IDENTITY
+    /// moves); `None` where a site has no reason to give past its cause.
+    #[error("native backing {key:?}: {cause:?}{}", Said(.why))]
     Backing {
         key: BackingKey,
         cause: LifecycleCause,
+        why: Option<String>,
     },
 
     #[error("{what} isn't valid: {why}")]
@@ -2978,7 +2998,7 @@ mod route_tests {
         c.routes[0].backing = Some(backing.key);
         spec.route.as_mut().unwrap().backing = Some(backing.key);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause:LifecycleCause::Pending }) if key == backing.key)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == backing.key)
         );
         c.backings[0].phase = BackingPhase::Live;
         c.validate_route(&spec).unwrap();
@@ -3082,7 +3102,7 @@ mod route_tests {
         assert_eq!(c.validate_route(&spec).unwrap(), fresh);
         spec.route.as_mut().unwrap().backing = Some(parent);
         assert!(
-            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending }) if key == parent)
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending, .. }) if key == parent)
         );
         spec.route.as_mut().unwrap().backing = Some(BackingKey {
             generation: [9; 16],
