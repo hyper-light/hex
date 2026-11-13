@@ -27,9 +27,10 @@ pub const HELD_AT: usize = 2;
 /// A connection's end as its owner sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum There {
-    /// The peer may still send.
+    /// The peer may still send: the connection gone now cuts its bytes short, and a read says why.
     Open,
-    /// The peer's half ended: what was read is all.
+    /// The peer's half ended: all it sent has come, and is read to its end however the connection goes after
+    /// (a peer that drops a connection whose other half is open resets it after its End; HEX-QUIC-26).
     Ended,
 }
 
@@ -376,12 +377,16 @@ impl Conn {
         self.shared.peer
     }
 
-    /// Whether the peer has gone: the connection is gone, or the peer's half has ended and all of it was read. Reads
-    /// return what came before the connection went, then its end.
+    /// Whether the peer is done: its half ended and all of it was read, or the connection went while its half was
+    /// open. Reads return what came before, then the end or why the connection went (HEX-QUIC-26).
     pub fn hung_up(&self) -> bool {
-        self.shared.state.lock().is_ok_and(|state| {
-            state.gone.is_some() || (state.there == There::Ended && state.inbound.is_empty())
-        })
+        self.shared
+            .state
+            .lock()
+            .is_ok_and(|state| match state.there {
+                There::Open => state.gone.is_some(),
+                There::Ended => state.inbound.is_empty(),
+            })
     }
 
     /// Ends this side's half once what was written has gone: the peer reads to its end.

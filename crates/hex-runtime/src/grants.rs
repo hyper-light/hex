@@ -70,7 +70,7 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
             mcp: Keep::Only(Vec::new()),
             destinations: Keep::Only(kept),
             dns: false,
-            // Version 5 of D231's channel only where a destination is kept, so a stock run host of version 4 serves
+            // Version 9 of D231's channel only where a destination is kept, so a stock run host of version 6 serves
             // every boot but those.
             members: if members.is_empty() {
                 None

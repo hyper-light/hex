@@ -177,7 +177,26 @@ struct ModelRun {
     end: Mutex<Option<RunEnd>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// Each member's end, as the test sets it, by name: none until it does.
+    member_ends: Mutex<std::collections::BTreeMap<String, MemberEnd>>,
+    /// Each member a boot asked the stdin of, by name, with its own ends of its stdin, stdout and stderr: the
+    /// test holds them as the member does.
+    inside: Mutex<
+        Vec<(
+            String,
+            std::io::PipeReader,
+            std::io::PipeWriter,
+            std::io::PipeWriter,
+        )>,
+    >,
 }
+
+/// The orchestrator's ends of a member's stdin, stdout and stderr, each taken once.
+type Outside = (
+    Option<std::io::PipeWriter>,
+    Option<std::io::PipeReader>,
+    Option<std::io::PipeReader>,
+);
 
 /// A booted run in the model: its members, as the test gives the image them, and its ports, bound as its boot
 /// asked them (joint plan step 15).
@@ -185,6 +204,7 @@ struct ModelGuest {
     run: Arc<ModelRun>,
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
+    outside: Mutex<std::collections::BTreeMap<String, Outside>>,
 }
 
 impl ImageGuest for ModelGuest {
@@ -194,20 +214,44 @@ impl ImageGuest for ModelGuest {
     fn published(&self) -> &[Bound] {
         &self.published
     }
-    fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's output",
-            why: "it has none".to_owned(),
+    fn take_output(
+        &self,
+        member: &MemberName,
+        channel: Channel,
+    ) -> Result<std::io::PipeReader, ImageRefusal> {
+        let mut outside = self.outside.lock().unwrap();
+        let ends = outside.get_mut(&member.name);
+        let taken = match channel {
+            Channel::Stdout => ends.and_then(|e| e.1.take()),
+            Channel::Stderr => ends.and_then(|e| e.2.take()),
+        };
+        taken.ok_or_else(|| ImageRefusal::Spec {
+            what: "member",
+            why: format!("{}'s output was taken, or it doesn't run", member.name),
         })
     }
-    fn take_input(&self, _: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's input",
-            why: "it has none".to_owned(),
-        })
+    fn take_input(&self, member: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
+        let mut outside = self.outside.lock().unwrap();
+        outside
+            .get_mut(&member.name)
+            .and_then(|e| e.0.take())
+            .ok_or_else(|| ImageRefusal::Spec {
+                what: "member",
+                why: format!("{}'s stdin was taken, or never asked for", member.name),
+            })
     }
-    fn wait_member(&self, _: &MemberName, _: Duration) -> Result<Option<MemberEnd>, ImageRefusal> {
-        Ok(None)
+    fn wait_member(
+        &self,
+        member: &MemberName,
+        _: Duration,
+    ) -> Result<Option<MemberEnd>, ImageRefusal> {
+        Ok(self
+            .run
+            .member_ends
+            .lock()
+            .unwrap()
+            .get(&member.name)
+            .copied())
     }
     fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
         match self.run.end.lock().unwrap().clone() {
@@ -413,10 +457,29 @@ impl Images for ModelImages {
                 to,
             });
         }
+        // Each member whose stdin the boot asked for, its three pipes: the member's ends to the test, the
+        // orchestrator's to its takes.
+        let mut outside = std::collections::BTreeMap::new();
+        for m in spec.members.iter().filter(|m| m.stdin) {
+            let (stdin_r, stdin_w) = std::io::pipe().unwrap();
+            let (stdout_r, stdout_w) = std::io::pipe().unwrap();
+            let (stderr_r, stderr_w) = std::io::pipe().unwrap();
+            self.run.inside.lock().unwrap().push((
+                m.member.name.clone(),
+                stdin_r,
+                stdout_w,
+                stderr_w,
+            ));
+            outside.insert(
+                m.member.name.clone(),
+                (Some(stdin_w), Some(stdout_r), Some(stderr_r)),
+            );
+        }
         Ok(Box::new(ModelGuest {
             run: Arc::clone(&self.run),
             members: self.members.lock().unwrap().clone(),
             published,
+            outside: Mutex::new(outside),
         }))
     }
 }
@@ -498,8 +561,9 @@ fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -
 
 /// Joint plan step 12: do create, then start, an image VM of two vCPUs and 256 MiB with no command.
 /// Expect: create records it Creating and shows it Created, booting nothing; start writes Ready first
-/// and boots once, asking Shards for exactly its pinned image, its admitted size, no command, and none of
-/// its image's grants (default deny until goal 15 programs them); then it shows Running.
+/// and boots once, asking Shards for exactly its pinned image, its admitted size, no command, none of its
+/// image's grants (default deny until goal 15 programs them; no destination kept, D236) and no nesting grant
+/// (D234: no harness is a nested runtime); then it shows Running.
 #[test]
 fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
     let images = ModelImages::new();
@@ -611,6 +675,139 @@ fn member_exec_and_signals_await_the_agent_control_endpoint() {
     );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Joint plan step 17, AC-T7.4.1: do create an image VM whose spec names a harness its caller drives, with a
+/// variable and a working directory, take it before the start, start it, and take it. Expect: before the start
+/// NotRunning; the boot asks Shards for that member's stdin with its variable and directory and no terminal; the
+/// caller's ends of its three streams, given once; what the caller writes read by the member in order, and its
+/// end of input at the caller's close; what the member writes on stdout and stderr read whole by the caller; no
+/// end until the member's, then its status; its own kill awaiting the agent-control endpoint; a second take
+/// refused, as Shards refuses one; a member the spec doesn't name refused.
+#[test]
+fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
+    use std::io::{Read, Write};
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let mut boxed = spec("image-driven", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember {
+            member: claude.clone(),
+            env: vec![("TZ".to_owned(), "UTC".to_owned())],
+            workdir: Some("/work/project".to_owned()),
+        });
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    assert!(matches!(
+        runtime.member(&id, &claude),
+        Err(Refusal::NotRunning(_, "member"))
+    ));
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    let [m] = asked.members.as_slice() else {
+        panic!("one member asked: {:?}", asked.members);
+    };
+    assert_eq!(
+        (&m.member, m.stdin, m.terminal, m.workdir.as_deref()),
+        (
+            &MemberName::harness("claude"),
+            true,
+            false,
+            Some("/work/project")
+        )
+    );
+    assert_eq!(m.env, vec![("TZ".to_owned(), Secret::from("UTC"))]);
+    let mut proc = runtime.member(&id, &claude).unwrap();
+    assert!(
+        !proc.on_this_host(),
+        "a member is its guest's, no process of this host"
+    );
+    let given = proc.streams().unwrap();
+    assert!(
+        proc.streams().unwrap().stdin.is_none(),
+        "its streams are given once"
+    );
+    let mut to = hex_api::OwnedStream::from(given.stdin.unwrap());
+    let mut from = hex_api::OwnedStream::from(given.stdout.unwrap());
+    let mut errors = hex_api::OwnedStream::from(given.stderr.unwrap());
+    let (name, mut member_in, mut member_out, mut member_err) =
+        images.run.inside.lock().unwrap().pop().unwrap();
+    assert_eq!(name, "claude");
+    to.write_all(b"first\n").unwrap();
+    to.write_all(b"second\n").unwrap();
+    drop(to);
+    let mut heard = String::new();
+    member_in.read_to_string(&mut heard).unwrap();
+    assert_eq!(heard, "first\nsecond\n", "in order, then its end of input");
+    member_out.write_all(b"an answer").unwrap();
+    member_err.write_all(b"a note").unwrap();
+    drop((member_out, member_err));
+    let mut said = String::new();
+    from.read_to_string(&mut said).unwrap();
+    assert_eq!(said, "an answer");
+    let mut noted = String::new();
+    errors.read_to_string(&mut noted).unwrap();
+    assert_eq!(noted, "a note");
+    assert_eq!(proc.try_wait().unwrap(), None, "no end until the member's");
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("claude".to_owned(), MemberEnd::Exited(3));
+    assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(Exit::Code(3)));
+    assert_eq!(
+        proc.kill(),
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberSignal
+        })
+    );
+    assert!(
+        runtime.member(&id, &claude).is_err(),
+        "its streams were taken"
+    );
+    let helper = Member {
+        kind: MemberKind::Agent,
+        name: "helper".to_owned(),
+    };
+    assert!(matches!(
+        runtime.member(&id, &helper),
+        Err(Refusal::Invalid { what: "member", .. })
+    ));
+}
+
+/// Joint plan step 17, AC-T7.4.1: do take a member its caller drives whose run was stopped; expect its end the
+/// run's, KILL (signal 9), as the box's own is.
+#[test]
+fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let codex = Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    };
+    let mut boxed = spec("image-ended", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember::new(codex.clone()));
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.member(&id, &codex).unwrap();
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("codex".to_owned(), MemberEnd::WithRun);
+    *images.run.end.lock().unwrap() = Some(RunEnd::Stopped);
+    assert_eq!(
+        proc.wait_for(Duration::ZERO).unwrap(),
+        Some(Exit::Signal(Signal::KILL.number()))
+    );
 }
 
 /// Joint plan steps 12 and 14: do read a running VM's usage, then one whose stats lack a line. Expect:
@@ -752,22 +949,6 @@ fn a_boot_is_given_its_learned_patience_and_ends_the_box_past_it() {
     assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask what D231's run host awaits on each host OS. Expect: on macOS and on
-/// Windows its start holding only its stdio (RunHostStdioOnly), as Shards starts it through std's spawn, which hands
-/// it what another thread holds inheritable then: on macOS every descriptor not yet marked close-on-exec, on Windows
-/// every inheritable handle (no handle list), though Shards gives the Windows run host itself since 731b5e54; on
-/// Linux nothing.
-#[test]
-fn the_run_host_awaits_its_stdio_alone_on_macos_and_windows() {
-    for (os, awaits) in [
-        ("macos", Some(Upstream::RunHostStdioOnly)),
-        ("windows", Some(Upstream::RunHostStdioOnly)),
-        ("linux", None),
-    ] {
-        assert_eq!(run_host_awaits(os), awaits, "{os}");
-    }
-}
-
 /// Joint plan step 12, the owner's crash (ROOT, 2026-11-12): do give the runtime a Ready record with no
 /// exit and no run of this process, as a node restart leaves. Expect: every call and recovery's
 /// adoption refused Awaits(AttachAfterCrash), the record and its claim kept; then, the host's boot
@@ -858,44 +1039,165 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 12: do create where the host has no image boot, as macOS's and Windows' are until D231's run
-/// host is started holding only its stdio. Expect: refused naming that, before any record.
+/// Joint plan step 12: do create on a node configured with no image boot. Expect: refused naming that, before
+/// any record.
 #[test]
-fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
+fn a_create_is_refused_before_any_record_on_a_node_without_an_image_boot() {
     let owner = Arc::new(Owner::default());
-    let refused = Refusal::Awaits {
-        needs: Upstream::RunHostStdioOnly,
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        super::super::tests::config(),
+    );
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    assert_eq!(
+        runtime.create(spec("image-no-host", None)).map(|_| ()),
+        Err(Refusal::Platform {
+            what: "Shards image VMs",
+            platform: std::env::consts::OS,
+            why: "this node configures no Shards image boot".to_owned(),
+        })
+    );
+    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+}
+
+/// The variable naming the case the guest pair's check runs, in a test process of its own whose environment holds
+/// that case's SHARDS_KERNEL and SHARDS_INIT.
+const GUEST_PAIR_CASE: &str = "HEX_IMAGE_GUEST_PAIR_CASE";
+
+/// A path this host calls absolute (`Path::is_absolute`), as D231's run host asks of SHARDS_KERNEL and SHARDS_INIT.
+fn absolute(name: &str) -> String {
+    if cfg!(windows) {
+        format!("C:\\shards\\{name}")
+    } else {
+        format!("/shards/{name}")
+    }
+}
+
+/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too; ROOT, 2026-11-12:
+/// the guest's pair checked as the node starts): D231's run host boots the guest its environment names, which it
+/// inherits from the node: SHARDS_KERNEL and SHARDS_INIT, each taken only as an absolute path, both or neither
+/// (Shards 66113379: api_run.rs `as_run`, one alone refused "SHARDS_KERNEL and SHARDS_INIT go together"). A node
+/// whose pair is broken would have every image VM's start refused. Do start a node's image boot (`host_images`,
+/// which `hex node` calls once as it starts) and create an image VM, each case in a test process of its own whose
+/// environment holds the case's pair. Expect: with neither, or both absolute, created and recorded on every host,
+/// Linux, macOS and Windows, its run host started holding only its stdio (vendor/patches/shards 0001), so nothing
+/// awaits it; with one alone, or one the run host would drop (a relative path), refused before any record, naming
+/// both variables.
+#[test]
+fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
+    let Some(case) = std::env::var_os(GUEST_PAIR_CASE) else {
+        for (case, kernel, init) in [
+            ("neither", None, None),
+            (
+                "both",
+                Some(absolute("vmlinux")),
+                Some(absolute("shards-init")),
+            ),
+            ("kernel-alone", Some(absolute("vmlinux")), None),
+            ("init-alone", None, Some(absolute("shards-init"))),
+            (
+                "kernel-relative",
+                Some("vmlinux".to_owned()),
+                Some(absolute("shards-init")),
+            ),
+            (
+                "both-relative",
+                Some("vmlinux".to_owned()),
+                Some("shards-init".to_owned()),
+            ),
+        ] {
+            let mut alone = std::process::Command::new(std::env::current_exe().unwrap());
+            alone
+                .args([
+                    "--exact",
+                    "guest::image::tests::image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither",
+                    "--test-threads=1",
+                ])
+                .env(GUEST_PAIR_CASE, case);
+            for (name, value) in [("SHARDS_KERNEL", kernel), ("SHARDS_INIT", init)] {
+                match value {
+                    Some(value) => alone.env(name, value),
+                    None => alone.env_remove(name),
+                };
+            }
+            let ran = alone.output().unwrap();
+            assert!(
+                ran.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        return;
     };
+    let owner = Arc::new(Owner::default());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(Err(refused.clone()), waits());
+    .with_images(host_images(), waits());
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
-    assert_eq!(
-        runtime.create(spec("image-no-host", None)).map(|_| ()),
-        Err(refused)
-    );
+    let made = runtime
+        .create(spec("image-pair", None))
+        .map(|info| info.state);
+    if matches!(case.to_str(), Some("neither" | "both")) {
+        assert_eq!(made, Ok(BoxState::Created));
+        assert!(record(&owner, &BoxId::new("image-pair").unwrap()).is_some());
+        return;
+    }
+    match made {
+        Err(Refusal::Platform {
+            what: "Shards image VMs",
+            why,
+            ..
+        }) => assert!(
+            why.contains("SHARDS_KERNEL") && why.contains("SHARDS_INIT"),
+            "{case:?}: {why}"
+        ),
+        other => panic!("{case:?}: {other:?}"),
+    }
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on macOS and
-/// Windows the refusal naming a run host started holding only its stdio, since D231 starts it through std's spawn,
-/// which hands it what another thread holds inheritable then.
+/// Joint plan step 12: do read each SHARDS_KERNEL and SHARDS_INIT pair a run host might inherit, as D231's run host
+/// reads it. Expect: an empty value is none; both absolute, or neither, taken; one alone, or a value the run host
+/// would drop (relative, or on Unix not UTF-8), refused naming both variables.
 #[test]
-fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
-    let host = host_images().map(|_| ());
-    let expected = if cfg!(any(windows, target_os = "macos")) {
-        Err(Refusal::Awaits {
-            needs: Upstream::RunHostStdioOnly,
-        })
-    } else {
-        Ok(())
-    };
-    assert_eq!(host, expected);
+fn the_guest_pair_is_read_as_the_run_host_reads_it() {
+    let (kernel, init) = (absolute("vmlinux"), absolute("shards-init"));
+    let (kernel, init) = (OsStr::new(&kernel), OsStr::new(&init));
+    let (empty, relative) = (OsStr::new(""), OsStr::new("vmlinux"));
+    for (k, i) in [
+        (None, None),
+        (Some(empty), Some(empty)),
+        (Some(kernel), Some(init)),
+    ] {
+        assert_eq!(guest_pair(k, i), Ok(()), "{k:?} {i:?}");
+    }
+    #[cfg(unix)]
+    let not_utf8 = <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"/shards/\xffvmlinux");
+    #[cfg(not(unix))]
+    let not_utf8 = relative;
+    for (k, i) in [
+        (Some(kernel), None),
+        (Some(kernel), Some(empty)),
+        (None, Some(init)),
+        (Some(relative), Some(init)),
+        (Some(relative), Some(relative)),
+        (Some(not_utf8), Some(init)),
+    ] {
+        let why = guest_pair(k, i).unwrap_err().to_string();
+        assert!(
+            why.contains("SHARDS_KERNEL") && why.contains("SHARDS_INIT"),
+            "{k:?} {i:?}: {why}"
+        );
+    }
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded
