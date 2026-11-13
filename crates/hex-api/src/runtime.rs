@@ -102,6 +102,66 @@ pub trait Runtime: Send + Sync {
             ),
         })
     }
+
+    /// Tells box `id`'s guest the room its caller's budget leaves it (D188; Shards' D241; joint plan step 14, C7): the
+    /// caller's budget-left for the box, everything the VM holds coming out of it, in bytes past what the box holds now,
+    /// negative where the budget is short of that (its guest then reclaims its file pages); none lifts the hold.
+    /// Answers the bytes the guest holds itself within past what it uses, none where no budget holds it, waiting for
+    /// that answer while the box runs. A class whose boxes have no guest to tell refuses it, naming the class.
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        let _ = room;
+        Err(Refusal::Invalid {
+            what: "room",
+            why: format!(
+                "box {id} isn't a Shards image box: only its guest holds itself within a room"
+            ),
+        })
+    }
+
+    /// Holds box `id`'s vCPUs together to `rate` milli-CPU of the host's time (Shards' D247; joint plan step 14, C4),
+    /// none lifting the hold. Answers what its VM holds them to, none where nothing does, waiting for that answer while
+    /// the box runs. A class whose boxes have no vCPUs to hold refuses it, naming the class.
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(Refusal::Invalid {
+            what: "rate",
+            why: format!(
+                "box {id} isn't a Shards image box: only its VM holds its vCPUs to a rate"
+            ),
+        })
+    }
+
+    /// What box `id`'s VM costs its host beside its guest, as its run host reads its VM process (Shards' D241; joint
+    /// plan steps 12 and 14, C1): counters since the VM booted, so a reader's window is between two of its reads.
+    /// Refused, typed, for a part its run host didn't read, never read as none, for a box not running, and by a class
+    /// whose boxes run no VM process of their own, naming the class.
+    fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
+        Err(Refusal::Invalid {
+            what: "host_use",
+            why: format!(
+                "box {id} runs no VM process of its own: only a Shards image VM's run host reads its cost"
+            ),
+        })
+    }
+}
+
+/// What a box's VM costs its host beside its guest (Shards' D241, `Stats::microvm`; joint plan steps 12 and 14), each
+/// a counter since the VM booted, as its run host read its VM process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostUse {
+    /// Its VM process's CPU time, user and system together, in nanoseconds: its vCPUs' guest time among it, read just
+    /// before it, so this less their sum is its VMM's own.
+    pub cpu_ns: u64,
+    /// Its own memory, as memory per VM is counted: macOS's physical footprint, Linux's anonymous resident pages,
+    /// Windows' private working set.
+    pub footprint_bytes: u64,
+    pub resident_bytes: u64,
+    /// Nanoseconds each vCPU has run the guest, by vCPU index, one for each vCPU of the VM's size.
+    pub guest_ns: Vec<u64>,
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
@@ -1911,11 +1971,15 @@ pub enum Upstream {
     /// the workload's filter refuses vsock. Shards' agent-control endpoint (D238) has no lane that carries a connection
     /// to such a socket, and D231's run host binds no endpoint (Shards 7a4ef5c0).
     NestedChannel,
+    /// The period a Shards VM's rate holds over (D247's hold is D191's governor, its period CFS's), as Shards' API
+    /// says it: shards-api exposes neither a call nor a const for it, so a learner capping a VM through its rate can't
+    /// take its window from it (joint plan step 14, C1).
+    RatePeriod,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 16] = [
+    pub const ALL: [Upstream; 17] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1932,6 +1996,7 @@ impl Upstream {
         Upstream::LiveMove,
         Upstream::MemberDestinations,
         Upstream::NestedChannel,
+        Upstream::RatePeriod,
     ];
 }
 
@@ -1973,6 +2038,9 @@ impl std::fmt::Display for Upstream {
             }
             Self::NestedChannel => {
                 "a connection to a runtime nested under shards-init (a lane of Shards' agent-control endpoint to its socket)"
+            }
+            Self::RatePeriod => {
+                "the period a Shards VM's rate holds over (D191's governor), which shards-api doesn't expose"
             }
         })
     }

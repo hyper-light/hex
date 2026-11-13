@@ -665,7 +665,10 @@ impl Node {
         };
         let read = self.supervisor.running_vms().and_then(|running| {
             Ok((
-                running,
+                running
+                    .into_iter()
+                    .map(|(id, scope, cgroup)| (id, Scope::Native(scope), cgroup))
+                    .collect::<Vec<_>>(),
                 self.cgroups.held_slots()?,
                 self.native_capacity()?.total,
             ))

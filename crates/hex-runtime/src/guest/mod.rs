@@ -1159,6 +1159,61 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Joint plan step 14 (C7): an image VM's guest told its room (D241); a Shards guest VM's awaits its room call, its
+    /// guest's init having none from Hex; any other box's refused as the trait refuses it.
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.room_image(record, room),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(record))
+                if matches!(record.spec.class, ClassSpec::Shards(_)) =>
+            {
+                Err(Refusal::Awaits {
+                    needs: hex_api::Upstream::GuestRoom,
+                })
+            }
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "room",
+                why: format!(
+                    "box {id} isn't a Shards image box: only its guest holds itself within a room"
+                ),
+            }),
+        }
+    }
+
+    /// Joint plan step 14 (C4): an image VM's vCPUs held to `rate` (D247); any other box's refused as the trait
+    /// refuses it, a Shards guest VM's CPU being its host's cap.
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.rate_image(record, rate),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "rate",
+                why: format!(
+                    "box {id} isn't a Shards image box: only its VM holds its vCPUs to a rate"
+                ),
+            }),
+        }
+    }
+
+    /// Joint plan step 14 (C1): what an image VM costs its host (D241); any other box's refused as the trait refuses it.
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.host_use_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "host_use",
+                why: format!(
+                    "box {id} runs no VM process of its own: only a Shards image VM's run host reads its cost"
+                ),
+            }),
+        }
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Image(record) => self.signal_image(record, signal),
@@ -1604,6 +1659,22 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.member(id, member)
+    }
+
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.holder(id)?.room(id, room)
+    }
+
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.holder(id)?.rate(id, rate)
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        self.holder(id)?.host_use(id)
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
