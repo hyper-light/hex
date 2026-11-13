@@ -1194,16 +1194,21 @@ fn managed_limit(file: &'static str, text: &str) -> Result<u64, Refusal> {
         .map_err(|error| managed_read_error(file, error))
 }
 
+/// A VM scope's limits against its canonical bounds: its `cpu.max` at most its CPU bound, its swap off, and its
+/// `memory.max` at most its memory bound where it has one. A VM has none (joint plan step 14, ROOT's ruling B under
+/// decision 9: no per-VM hard memory cap, a chosen bound that would kill a VMM the first time it needs more than any
+/// window showed): its memory is held by its budget's memory.high, the last resort and its fleet's budget, so any
+/// `memory.max` it holds, "max" included, passes, and only its swap must be off, so all it holds is RAM.
 fn check_managed_limits(
     bounds: &Bounds,
     cpu: &str,
     memory: &str,
     swap: &str,
 ) -> Result<(), Refusal> {
-    let (Some(cpu_milli), Some(memory_max)) = (bounds.cpu_max_milli, bounds.memory_max) else {
+    let Some(cpu_milli) = bounds.cpu_max_milli else {
         return Err(managed_read_error(
             "native backing bounds",
-            "canonical CPU and memory limits are required",
+            "a canonical CPU limit is required",
         ));
     };
     let cpu = core::CpuMax::parse(cpu)
@@ -1224,12 +1229,16 @@ fn check_managed_limits(
             "the native CPU limit exceeds its canonical bound",
         ));
     }
-    let memory = managed_limit("memory.max", memory)?;
-    if memory == 0 || memory > memory_max {
-        return Err(managed_read_error(
-            "memory.max",
-            "the native memory limit exceeds its canonical bound",
-        ));
+    if let Some(memory_max) = bounds.memory_max {
+        let memory = managed_limit("memory.max", memory)?;
+        if memory == 0 || memory > memory_max {
+            return Err(managed_read_error(
+                "memory.max",
+                "the native memory limit exceeds its canonical bound",
+            ));
+        }
+    } else if memory.trim() != "max" {
+        managed_limit("memory.max", memory)?;
     }
     if managed_limit("memory.swap.max", swap)? != 0 {
         return Err(managed_read_error(

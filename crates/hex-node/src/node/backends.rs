@@ -115,11 +115,12 @@ impl Node {
             .ok_or_else(|| record.refusal(LifecycleCause::Pending))?;
         allocation.guest()?;
         record.commitment()?;
+        // No memory.max (joint plan step 14, ruling B): a VM's memory is held by its budget's memory.high, the last
+        // resort and its fleet's budget, and its swap stays off, which its managed create writes itself.
         Ok(hex_api::Bounds {
             cpu_max_milli: Some(
                 u32::try_from(allocation.resources.cpu_milli).map_err(|_| refused())?,
             ),
-            memory_max: Some(allocation.resources.mem_bytes),
             ..hex_api::Bounds::default()
         })
     }
@@ -226,6 +227,15 @@ impl Node {
         program.fits(&process::exec_limit())?;
         let scope = managed_native_scope_id(record)?;
         let cgroup = self.vm_root(record)?.create_managed(&scope, &bounds)?;
+        // Its swap stays off with no memory bound of its own (joint plan step 14, ruling B; HEX-RT-15), so all it
+        // holds is RAM: a scope that can't hold that is removed again, refused by name.
+        if let Err(why) = cgroup.set(&hex_core::cgroup::Write {
+            file: "memory.swap.max",
+            value: "0".to_owned(),
+        }) {
+            cgroup.remove()?;
+            return Err(why);
+        }
         let native = self
             .supervisor
             .reserve_managed(record, cgroup, plan.vsock())?;

@@ -466,7 +466,9 @@ impl Learner {
                     receipt,
                 )
                 .map_err(refused)?;
-            // Its create wrote its ceiling as its `cpu.max` and `memory.max` (`Node::managed_bounds`).
+            // Its create wrote its ceiling's CPU as its `cpu.max` (`Node::managed_bounds`); a VM made before ruling B
+            // also has a `memory.max`, taken as written so the first window lifts it. Its `memory.swap.max` stays off,
+            // never the learner's to lift (HEX-RT-15).
             let created = Bounds {
                 cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).map_err(
                     |_| Refusal::Invalid {
@@ -486,7 +488,10 @@ impl Learner {
                     receipt,
                     cgroup,
                     last: (usage.cpu_usec, now),
-                    written: hex_core::cgroup::writes(&created, &[])?,
+                    written: hex_core::cgroup::writes(&created, &[])?
+                        .into_iter()
+                        .filter(|write| write.file != "memory.swap.max")
+                        .collect(),
                     cap: created.cpu_max_milli.map(u64::from),
                 },
             );
