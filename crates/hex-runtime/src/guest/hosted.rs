@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::patience::Patience;
-use shards_api::image::{ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready};
+use shards_api::image::{
+    ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready,
+};
 
 use super::shares::Share;
 

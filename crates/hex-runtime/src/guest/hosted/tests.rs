@@ -36,8 +36,16 @@ impl Images for Shards {
         Ok(shards_api::Backend::Kvm)
     }
 
-    fn boot(&self, spec: &ImageSpec, patience: Duration) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
-        self.calls.lock().unwrap().boots.push((spec.clone(), patience));
+    fn boot(
+        &self,
+        spec: &ImageSpec,
+        patience: Duration,
+    ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+        self.calls
+            .lock()
+            .unwrap()
+            .boots
+            .push((spec.clone(), patience));
         Ok(Box::new(Run {
             says: self.says.clone(),
             calls: Arc::clone(&self.calls),
@@ -99,7 +107,11 @@ impl ImageGuest for Run {
         Err(unasked())
     }
 
-    fn wait_ready(&self, seen: Option<Ready>, timeout: Duration) -> Result<Option<Ready>, ImageRefusal> {
+    fn wait_ready(
+        &self,
+        seen: Option<Ready>,
+        timeout: Duration,
+    ) -> Result<Option<Ready>, ImageRefusal> {
         self.calls.lock().unwrap().waits.push((seen, timeout));
         match &self.says {
             Says::Ready(ready) => Ok(Some(*ready)),
@@ -107,7 +119,14 @@ impl ImageGuest for Run {
         }
     }
 
-    fn plug(&self, _: &MemberName, _: &std::path::Path, _: &str, _: bool, _: Duration) -> Result<(), ImageRefusal> {
+    fn plug(
+        &self,
+        _: &MemberName,
+        _: &std::path::Path,
+        _: &str,
+        _: bool,
+        _: Duration,
+    ) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
 
@@ -130,7 +149,8 @@ impl ImageGuest for Run {
 fn config() -> HostedConfig {
     HostedConfig {
         binary: PathBuf::from("/opt/shards"),
-        image: "hex-node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        image: "hex-node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_owned(),
         vcpus: 2,
         memory_mib: 2048,
         shares: vec![
@@ -145,7 +165,10 @@ fn config() -> HostedConfig {
                 at: "/run/hex/shares/1".to_owned(),
             },
         ],
-        env: vec![(OsString::from("SHARDS_HOME"), OsString::from("/var/hex/shards"))],
+        env: vec![(
+            OsString::from("SHARDS_HOME"),
+            OsString::from("/var/hex/shards"),
+        )],
     }
 }
 
@@ -166,6 +189,7 @@ fn hosted(says: Says) -> (Hosted, Arc<Mutex<Calls>>) {
 /// - at its cold start, no deadline, the boot following its run host (`Duration::MAX`);
 /// - the shares at the paths the direct boot's init mounts them at;
 /// - no member, no published port, none of the image's grants past the VM, and no credential.
+///
 /// Then READY waited for before the boot returns: none seen yet, following its run, its answer the guest's.
 #[test]
 fn original_the_node_vm_boots_under_shards_init_with_hexs_own_init_and_waits_for_its_ready() {
@@ -182,7 +206,10 @@ fn original_the_node_vm_boots_under_shards_init_with_hexs_own_init_and_waits_for
     assert_eq!((spec.vcpus, spec.memory_mib), (2, 2048));
     assert_eq!(spec.command, Some(vec!["/init".to_owned()]));
     assert!(spec.nesting, "Hex's init needs the nesting grant (D234)");
-    assert_eq!(spec.ready_by, None, "a cold start gives no deadline: it follows its run");
+    assert_eq!(
+        spec.ready_by, None,
+        "a cold start gives no deadline: it follows its run"
+    );
     assert_eq!(spec.binary, Some(PathBuf::from("/opt/shards")));
     assert_eq!(spec.env, config.env);
     assert_eq!(
@@ -212,7 +239,11 @@ fn original_the_node_vm_boots_under_shards_init_with_hexs_own_init_and_waits_for
         },
         "default deny: none of the image's grants past the VM"
     );
-    assert_eq!(calls.waits, [(None, Duration::MAX)], "READY is waited for, following the run");
+    assert_eq!(
+        calls.waits,
+        [(None, Duration::MAX)],
+        "READY is waited for, following the run"
+    );
     assert_eq!(calls.stops, 0);
 }
 
@@ -221,11 +252,17 @@ fn original_the_node_vm_boots_under_shards_init_with_hexs_own_init_and_waits_for
 /// typed, naming the run's end, never a guest returned; and the run stopped, so nothing of it outlives the refusal.
 #[test]
 fn original_a_node_vm_whose_run_ends_before_ready_is_refused_and_stopped() {
-    for end in [RunEnd::Exited(1), RunEnd::Failed("its VM failed".to_owned())] {
+    for end in [
+        RunEnd::Exited(1),
+        RunEnd::Failed("its VM failed".to_owned()),
+    ] {
         let (hosted, calls) = hosted(Says::Ends(end.clone()));
         match hosted.boot() {
             Err(Refusal::Os { why, .. }) => {
-                assert!(why.contains("before its init said it was ready"), "{end:?}: {why}");
+                assert!(
+                    why.contains("before its init said it was ready"),
+                    "{end:?}: {why}"
+                );
             }
             Err(other) => panic!("{end:?}: {other:?}"),
             Ok(_) => panic!("{end:?}: a guest whose run ended was returned"),
@@ -254,15 +291,30 @@ fn shards_refusals_are_typed_by_what_they_refused() {
     let op = "booting the node VM under shards-init";
     assert!(matches!(
         refused(op, ImageRefusal::Image("not in the store".to_owned())),
-        Refusal::Invalid { what: "the node image (HEX_GUEST_IMAGE)", .. }
+        Refusal::Invalid {
+            what: "the node image (HEX_GUEST_IMAGE)",
+            ..
+        }
     ));
     assert!(matches!(
         refused(op, ImageRefusal::Widening("no NESTING".to_owned())),
-        Refusal::Invalid { what: "the node image (HEX_GUEST_IMAGE)", .. }
+        Refusal::Invalid {
+            what: "the node image (HEX_GUEST_IMAGE)",
+            ..
+        }
     ));
     assert!(matches!(
-        refused(op, ImageRefusal::NoBackend { os: "macos", arch: "x86_64" }),
-        Refusal::Platform { platform: "macos", .. }
+        refused(
+            op,
+            ImageRefusal::NoBackend {
+                os: "macos",
+                arch: "x86_64"
+            }
+        ),
+        Refusal::Platform {
+            platform: "macos",
+            ..
+        }
     ));
     assert!(matches!(
         refused(op, ImageRefusal::Host("it ended".to_owned())),
