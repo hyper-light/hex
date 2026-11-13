@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `743c5b321c4592fda44fe6f6e9135c3cea7d3dfa` (main).
+Revision: `1389dc0b60c92d33b3897af6d08690d7a459bba0` (main).
 
 The API, ABI, IPC, DNS-name, AF_UNIX transport and test-directory crates, license, formatting,
 lint configuration and binding policy are copied exactly from this revision, with
