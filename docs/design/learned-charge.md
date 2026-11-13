@@ -146,14 +146,18 @@ most 10,000 and each child, box or fleet, receives at least `min(its need, its b
 weights the node writes, shared as the kernel shares them). Its owner's own `cpu_weight` is not the node's scale. The
 node writes the boxes' weights each window, so a box made between two windows keeps its owner's weight until the next.
 
-**Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
-work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's
+**Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch work
+tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's
 CPU follows its weight only as QoS tiers, and the managed control caps (f56 A, f38 A); a Windows job holds a weight of
-1 to 9 or a hard cap. Where the platform caps, each VM is capped each window at its water-filled share
-(`charge::Node::rates`): its booking, then what the fleet's CPU budget leaves past the bookings, shared by booking over
-what each asked past its booking in its last window, one that used its whole cap or ran none yet asking its ceiling.
-So each keeps at least its booking whatever it asks next, the caps fit the budget, and CPU the others leave goes to the
-VMs asking past their bookings, a window late.
+1 to 9 or a hard cap. A macOS process box can't be held at a CPU cap, so one asking it is refused, typed
+(`hex_core::watch::check`): a process box there books no CPU, and its CPU is the scheduler's to share beside the
+capped VMs. Their caps are ceilings, not shares, so under contention with such boxes a VM within its booking can be
+given less than it: on macOS C4's guarantee holds among the fleet's VMs, and against process boxes only while the
+machine's CPU covers the fleet's budget and what those boxes take. Where the platform caps, each VM is capped each
+window at its water-filled share (`charge::Node::rates`): its booking, then what the fleet's CPU budget leaves past
+the bookings, shared by booking over what each asked past its booking in its last window, one that used its whole cap
+or ran none yet asking its ceiling. So each keeps at least its booking whatever it asks next, the caps fit the budget,
+and CPU the others leave goes to the VMs asking past their bookings, a window late.
 
 **What would falsify it.** A VM within its booking receiving less than `min(demand, booking)` in a contended window
 on hardware (ROOT's fairness run).
@@ -311,7 +315,7 @@ reaches the view settled with goal 13 the same day:
 
 | Number | Value | Kind | Derivation | Pinned by |
 |---|---|---|---|---|
-| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests` |
+| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes) |
 | A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
@@ -325,7 +329,10 @@ reaches the view settled with goal 13 the same day:
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |
-| The ends a node keeps | its machine's VM population, at most a node's boxes | derived | a machine never holds more VMs at once | `node::charges::tests` |
+| A node's VMs | its machine's population: the machine over Hex's least bounds (`MIN_CPU_MILLI`, `MIN_MEMORY`) | derived | the most boxes placement places on the machine (`placement::budget`'s runner count); one past it refused, typed (`recorded::charges::bounds`) | `node::charges::tests`, `recorded::charges::tests` |
+| The classes a node remembers | as many as its VMs | derived | the least bound at which no VM's class is refused: that many classes may run at once, and while fewer run, one no VM holds is there to forget | `node::charges::tests`, `recorded::charges::tests` |
+| The ends a node keeps | its machine's VM population, at most a node's boxes | derived | a machine never holds more VMs at once | `recorded::charges::tests` |
+| The ends due and the writes kept | the ends a node keeps | derived | one end due a VM met, one write a VM lifetime; past it, the due refused, typed, the oldest write forgotten | `recorded::charges::tests` |
 
 ## Alternatives not taken
 
@@ -382,8 +389,9 @@ windows over its booking, its neighbours' and the box's misses while it rises, a
 riser's inspect (its exit and the last resort's why), and the learner's own CPU (Linux: its `hex-charges` thread;
 macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
 not a verdict. Every number it runs with is derived, none picked (ROOT, 2026-11-12): each VM's workload from the
-traces (the most busy threads and MiB any step asks), the process box's CPU cap from kiln's CI (the median CPU of the
-build legs in bench/sched/kiln-ci-20261022-20261105.trace), and the deadline guarding the node's start and each create
-from the node's own boot bound for the class (twice it). Its traces are real harness sessions, recorded by
-bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS period, the Linux
-learner's own window.
+traces (the most busy threads and MiB any step asks), the process box's caps from kiln's CI (the median CPU and the
+median peak memory of the build legs in bench/sched/kiln-ci-20261022-20261105.trace, which it books; on macOS, which
+holds a process box at no CPU cap, its memory alone, its spinners asking a CPU each), and the deadline guarding the
+node's start and each create from the node's own boot bound for the class (twice it). Its traces are real harness
+sessions, recorded by bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS
+period, the Linux learner's own window.

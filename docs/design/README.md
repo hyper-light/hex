@@ -52,8 +52,8 @@ and `Placement`.
 | The `process` box per platform | CP-T7.1 | open |
 | Linux images on macOS and Windows: one Shards guest per node running Hex's Linux node unchanged, its wire over vsock, reached through a `shards-api` seam (`shards-guest.md`) | native plan step 5 | proposed 2026-11-04; seam agreed with Shards' owner 2026-11-04 |
 | Hex's wire over hyper-transport: hex-client's transport and the node's listener carry hex-core's wire on hyper-quic lanes (control, a stream lane per stdio stream, staging and unstaging, logs); AES-256-GCM alone, each end asserting the suite it negotiated; identity by CSR enrollment with kiln's CA, so keys never move; waits learned per call kind and class (`hex-quic.md`, Q1-Q9) | joint plan step 4, CP-T7.3 | decided 2026-11-12; built on main (`cp/t7-goal4-transport`); the step's acceptance, the conformance suite over it on Linux, macOS and Windows (Windows through a kiln agent on jupiter), open on Hex ROOT's goal stack |
-| The Shards class on Agentfile images: a microVM per box that Shards' image boot (D231) boots under shards-init, pinned by digest and sized by its admitted allocation; the members its caller drives handed over with their stdin, stdout, stderr and end (`Runtime::member`, joint plan step 17), their exec and signals through Shards' agent-control endpoint once built, refused typed until then; an owner's crash holds each run's claim until a reboot proves it ended (`shards-image-class.md`) | joint plan step 12 | built 2026-11-12, to Shards `e82b9403` since, on Linux, macOS and Windows hosts (its run host started holding only its stdio, vendor/patches/shards 0001); its waits' records, its real-VM runs and a member's streams over the node's wire owed |
-| Hex's node under shards-init: the `oci` class on macOS and Windows runs its node as the workload of a Shards VM booted through shards-init, with Shards' nesting grant (D234), reaching its host over Shards' agent-control endpoint; Hex's own PID 1 kept, shards-init working with it, and the hex-guest path (`hex` as PID 1) still passing on its own (`node-under-shards-init.md`; `shards-image-class.md` §7) | joint plan step 39 | open: waits on Shards' plan steps 11 (the endpoint: its connection, its microVM's pinned key, its members' stdio lanes and the controller's side of them built at Shards `a8eee1382`, its control and terminal lanes building, which are to carry a command run in a member, built as the run protocol's exec at Shards `628de209b`, D243) and 38 (D234, built; its real-VM runs owed); where the endpoint's TLS ends is decided, at the host (plan step 10, D238 at Shards `1b6e1203d`); Hex ROOT's, with Shards ROOT measuring start latency and memory per node VM against the hex-guest path |
+| The Shards class on Agentfile images: a microVM per box that Shards' image boot (D231) boots under shards-init, pinned by digest and sized by its admitted allocation; the members its caller drives handed over with their stdin, stdout, stderr and end (`Runtime::member`, joint plan step 17), their exec and signals through Shards' agent-control endpoint once built, refused typed until then; an owner's crash holds each run's claim until a reboot proves it ended (`shards-image-class.md`) | joint plan step 12 | built 2026-11-12, to Shards `1389dc0b` since, on Linux, macOS and Windows hosts (its run host started holding only its stdio, D248; each vCPU's guest time in its usage, D241); a member's streams over the node's wire, on its socket and over QUIC; its waits' records and its real-VM runs owed |
+| Hex's node under shards-init: the `oci` class on macOS and Windows runs its node as the workload of a Shards VM booted through shards-init, with Shards' nesting grant (D234), reaching its host over Shards' agent-control endpoint; Hex's own PID 1 kept, shards-init working with it, and the hex-guest path (`hex` as PID 1) still passing on its own (`node-under-shards-init.md`; `shards-image-class.md` §7) | joint plan step 39 | decided 2026-11-13: Hex's PID 1 is the run's own command under D234's grant, PID 1 of the workload's own PID namespace, and shards-init stays the VM's. Built: init's shards-init host (hex-cli `guest.rs`: a tmpfs for state and staged, the told deadline, the relay on AF_UNIX sockets, READY=1, an exit) and the node image (`scripts/guest/node.Agentfile`, `node-image.sh`). A node configured for that form is refused `Awaits(NestedChannel)` before anything boots, until Shards' step 11 gives a lane to a nested workload's socket and an endpoint for D231's run host (Shards `7a4ef5c0` has neither). D234 is built, its `gpus=` owed. ROOT's: the conformance suite through shards-init on HVF and WHP once the lane lands, and start latency and memory per node VM both ways (`node_hosted_real`, `guest_boot_record`) |
 | Snapshot templates, pool sizing and working-set prefetch | CP-T7.2 | open |
 | The scheduler's architecture: goodput over balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial spec, laptop-to-cell-to-region on one code path, fast isolation of bad workloads and nodes, and hex-sim first (`scheduler-architecture.md`) | CP-T7.3-T7.12 | decided 2026-10-24; implementation open |
 | The control plane's state and watches in Amphora | CP-T7.3 | open (within `scheduler-architecture.md`, S6) |
@@ -69,21 +69,23 @@ and `Placement`.
 | Storage: a CSI-like interface; images from Reliquary, lazily | CP-T7.8 | open |
 | The Kubernetes API subset | CP-T7.13 | open |
 
-`vendor/shards` pins Shards main `e82b9403` (`482c5d78` before), which holds what Shards has built since, each
+`vendor/shards` pins Shards main `1389dc0b` (`e82b9403` before), which holds what Shards has built since, each
 recorded in Shards' `docs/design/architecture.md`: destinations by name and a published port's receiving member
 (D236, D231's `Bound::to`; joint plan step 9, whose use `network-grants.md` records as step 15's to program); a
 member's stdin on the orchestrator's path (`ImageGuest::take_input`, step 5, D240); a member's environment, home and
 working directory (step 7, D240); ring pins within a guest's room (D230, D188; `learned-charge.md` C7's
-`Awaits(RingPinsWithinRoom)`); each vCPU's guest time (D43), not yet in shards-api's image `Stats`; AES-256-GCM alone on
-Shards' own links (D239); and agent control over hyper-transport, where its TLS ends still open (D238). Since
-`e82b9403`, Shards main has decided that its TLS ends at the host (plan step 10; D238 and PM M540 at `1b6e1203d`) and
-built the agent-control endpoint's connection, its microVM's pinned key and its members' stdio lanes (step 11; D238
-at `60c5dfbc6`) with the controller's side Hex is to reach them through (`control::Controller`, D238 at
-`a8eee1382`); a guest's room told through shards-api with an image run's microVM cost, each vCPU's guest time
-among it, in its stats (D241 at `9bf25f367`, which `Awaits(GuestRoom)`, `Awaits(RingPinsWithinRoom)` and
-`Awaits(GuestCpuTimePerVcpu)` wait on); and a command run in a member as the run protocol's exec, with no exec of
-shards-api's own: Hex's `MemberExec` is the control lane's (D243 at `628de209b`, Shards ROOT's decision). None of
-it is in `vendor/shards` yet. The joint plan's every decision and where it is recorded:
+`Awaits(RingPinsWithinRoom)`); AES-256-GCM alone on Shards' own links (D239); agent control over hyper-transport,
+its TLS ending at the host (plan step 10; D238 and PM M540 at `1b6e1203d`), its endpoint's connection, its microVM's
+pinned key and its members' stdio lanes (step 11; D238 at `60c5dfbc6`) with the controller's side Hex is to reach
+them through (`control::Controller`, D238 at `a8eee1382`); a guest's room told through shards-api and an image run's
+microVM cost, each vCPU's guest time among it, in its stats (D241 at `9bf25f367`: the image class reads the guest
+time, `shards-image-class.md` §4, and `Awaits(GuestRoom)` and `Awaits(RingPinsWithinRoom)` wait on it, step 14's to
+lift); a command run in a member as the run protocol's exec, with no exec of shards-api's own: Hex's `MemberExec` is
+the control lane's (D243 at `628de209b`, Shards ROOT's decision); credentials granted by reference (D242), a
+member's terminal (D244), members held to their reach (D246, Hex's change upstream), the run's CPU rate (D247), the
+run host started through `shards_ipc`'s spawn (D248, Hex's change upstream), a never-started command's end in its
+VM's words (D249) and a run that keeps nothing keeping the network its image links its members to, nothing let past
+(D250): image channel version 13. The joint plan's every decision and where it is recorded:
 Shards' `docs/research/s37-decision-inventory.md` (plan step 37).
 
 ## The gate's skips
