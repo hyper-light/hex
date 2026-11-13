@@ -19,14 +19,23 @@ use super::{ARG_MAX, BoxId, FIRST, HEADER_BYTES, MAGIC, PATH_MAX, VERSION};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuControl {
     pub cost_id: [u8; 32],
+    /// Kept for helpers older than goal 14's learning helper (main a8dc671c and before), which take it as their
+    /// control's response; a learning helper reads its own, the slowest stop it has seen ([`response`]). The node sends
+    /// [`COLD_RESPONSE`] (joint plan step 14, 2c; ROOT, 2026-11-13): wire compatibility for a persistent helper holding
+    /// live VMs across a node upgrade, never a census number.
     pub response: Duration,
 }
+
+/// The cold response a node sends in [`CpuControl::response`]: the least the field holds that a helper's check takes,
+/// a nanosecond (its unit), so an older helper reading it holds a scope at its credit's end with no burst to speak of.
+pub const COLD_RESPONSE: Duration = Duration::from_nanos(1);
 impl CpuControl {
-    /// Original (joint plan step 14, 2c, red): no cold value; a control's response is the census row's.
+    /// The control a node sends for `cost_id` (joint plan step 14, 2c): the cold response, which a learning helper
+    /// ignores ([`COLD_RESPONSE`]).
     pub fn cold(cost_id: [u8; 32]) -> Self {
         Self {
             cost_id,
-            response: Duration::ZERO,
+            response: COLD_RESPONSE,
         }
     }
 
