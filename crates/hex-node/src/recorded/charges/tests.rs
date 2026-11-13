@@ -336,6 +336,63 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
     );
 }
 
+/// A running Shards VM's record (as [`vm`]: booked at 4 GiB, its lifetime `scope`), begun `started`-th on its node.
+fn begun(name: &str, scope: u8, started: u64) -> BoxRecord {
+    let mut record = vm(name, scope);
+    record.started = Some(started);
+    record
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C3's order on every OS (ROOT, 2026-11-12): of two VMs rising past their bookings
+/// into the same room, the one begun later is over and the last resort ends it, whatever their scopes. Do run a window of
+/// three Shards VMs booked at 4 GiB in a 16 GiB fleet, begun first, second and third on their node, their scopes in the
+/// opposite order (the first's the largest), then one where the first two hold 7 GiB each and the third 2 GiB. Expect the
+/// fleet's 4 GiB of room to the first (its budget 7 GiB) and the rest of it, 1 GiB, to the second (its budget 5 GiB), so
+/// the second, 2 GiB past its budget, stopped through its receipt and no other VM; and its why on the class's capacity
+/// answer naming it: 7 GiB held against its 5 GiB budget, the fleet's 16 GiB held, 16 GiB of growth, its 16 GiB budget.
+#[test]
+fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
+    let io = Record::default();
+    let vms = vec![
+        begun("vm-first", 9, 1),
+        begun("vm-second", 5, 2),
+        begun("vm-third", 1, 3),
+    ];
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, 0);
+    }
+    let budget = res(24_000, 16 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    for (name, held) in [
+        ("vm-first", 7 * GIB),
+        ("vm-second", 7 * GIB),
+        ("vm-third", 2 * GIB),
+    ] {
+        io.set(name, 0, held);
+    }
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert_eq!(*io.stops.borrow(), ["vm-second"]);
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.ended,
+        vec![LearnedEnd {
+            id: BoxId::new("vm-second").unwrap(),
+            held: 7 * GIB,
+            budget: 5 * GIB,
+            band: 0,
+            fleet_held: 16 * GIB,
+            fleet_growth: 16 * GIB,
+            fleet_budget: 16 * GIB,
+            unmoved: Some(hex_api::Upstream::LiveMove),
+        }]
+    );
+}
+
 /// The records a node keeps of its boxes, in `dir`, as `Recorded::open` makes them.
 fn books(dir: &std::path::Path) -> crate::recorded::Books {
     crate::recorded::Books {

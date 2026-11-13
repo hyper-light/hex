@@ -66,6 +66,13 @@ pub struct BoxRecord {
     /// record without it reads as `None` (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<hex_api::LearnedEnd>,
+    /// The VM lifetime's place in its node's start order (joint plan step 14, C3): the store's count of the VM lifetimes
+    /// it had begun when it began this one, so a VM begun later holds a larger one, kept across the node's restarts. The
+    /// learned charge's rule takes its VMs in this order wherever it orders them, never by their scopes. Outside the
+    /// spec, so no native commitment covers it. Added within version 1, so a record without it, begun by an earlier node
+    /// agent, reads as `None` (append-only) until its store counts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -186,6 +193,7 @@ impl BoxRecord {
             native_scope: None,
             boot: None,
             last_resort: None,
+            started: None,
         }
     }
 

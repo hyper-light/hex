@@ -1800,4 +1800,65 @@ mod tests {
         assert_eq!(fs::read_to_string(&marker).unwrap(), this_boot);
         assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
     }
+
+    /// A Shards VM's record as its create begins it: the store introduces its lifetime's scope.
+    fn vm_record(id: &str) -> BoxRecord {
+        let mut record = record(id);
+        record.spec.class = ClassSpec::Shards(Box::new(hex_api::OciSpec {
+            rootfs: hex_api::Rootfs::Dir(PathBuf::from("/images/agent")),
+            init: hex_api::Program::of(&["/bin/true"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        }));
+        record.phase = Phase::Creating;
+        record
+    }
+
+    /// Joint plan step 14 (AC-T7.4.1), C3's order (ROOT, 2026-11-12): the store gives each VM lifetime it begins its
+    /// place in the node's start order, kept in its record across the node's restarts and never its scope's; a VM of this
+    /// boot begun by an earlier node agent, its record holding no place, is given one as the store opens, in box-id order;
+    /// a process box's record holds none. Do begin vm-b then vm-a, reopen the store as a restarted node does, and begin
+    /// vm-c and a process box; then take the three VMs' places out of their records, as an earlier node agent wrote them,
+    /// reopen, and begin vm-d. Expect vm-b 1, vm-a 2 and vm-c 3, past the most on disk after the restart, and the process
+    /// box none; after the second reopening vm-a 1, vm-b 2 and vm-c 3, by box id, and vm-d 4.
+    #[test]
+    fn w14_the_store_keeps_each_vms_place_in_its_start_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = |store: &Store, id: &str| {
+            store
+                .get(&BoxId::new(id).unwrap())
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .started
+        };
+        let places = |store: &Store| ["vm-a", "vm-b", "vm-c"].map(|id| started(store, id));
+        let store = store_in(dir.path());
+        for id in ["vm-b", "vm-a"] {
+            store.begin(&vm_record(id)).unwrap();
+        }
+        drop(store);
+        let store = store_in(dir.path());
+        store.begin(&vm_record("vm-c")).unwrap();
+        let mut process = record("process");
+        process.phase = Phase::Creating;
+        store.begin(&process).unwrap();
+        assert_eq!(places(&store), [Some(2), Some(1), Some(3)]);
+        assert_eq!(started(&store, "process"), None);
+        for id in ["vm-a", "vm-b", "vm-c"] {
+            store
+                .update(&BoxId::new(id).unwrap(), |r| {
+                    r.started = None;
+                    true
+                })
+                .unwrap();
+        }
+        drop(store);
+        let store = store_in(dir.path());
+        assert_eq!(places(&store), [Some(1), Some(2), Some(3)]);
+        store.begin(&vm_record("vm-d")).unwrap();
+        assert_eq!(started(&store, "vm-d"), Some(4));
+    }
 }

@@ -10,12 +10,13 @@ use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
 const GIB: u64 = 1 << 30;
 
-/// A VM's first read: its class, its receipt and its band, no intent on its record.
+/// A VM's first read: its class, its receipt and its band, no place in a start order nor intent on its record.
 fn met(class: Class, allocation: Allocation, band: u8) -> Option<Met> {
     Some(Met {
         class,
         allocation,
         band,
+        started: None,
         intent: None,
     })
 }
@@ -690,6 +691,65 @@ fn w14_the_last_resort_ends_the_lowest_band_first() {
         .map(|end| (end.id.as_str(), end.band, end.held, end.budget))
         .collect();
     assert_eq!(ends, [("vm-3", 1, 8 * GIB, 4 * GIB)]);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C3's order in the node agent (ROOT, 2026-11-12): of two VMs rising past their
+/// bookings into the same room, the one begun later is over and the last resort ends it, whatever their scopes. Do run a
+/// window of three VMs booked at 4 GiB in a 16 GiB fleet, begun first, second and third on the node (their records' places
+/// in its start order), their scopes in the opposite order (the first's the largest), then one where the first two hold
+/// 7 GiB each and the third 2 GiB. Expect the fleet's 4 GiB of room to the first (its budget 7 GiB) and the rest, 1 GiB,
+/// to the second (its budget 5 GiB), so the second, 2 GiB past its budget, its cgroup killed and no other; and its why
+/// on the class's capacity answer naming it: 7 GiB held against its 5 GiB budget, the fleet's 16 GiB held, 16 GiB of
+/// growth, its 16 GiB budget.
+#[test]
+fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
+    let begun = |id: &BoxId| -> Result<Option<Met>, Refusal> {
+        let started = match id.as_str() {
+            "vm-first" => 1,
+            "vm-second" => 2,
+            _ => 3,
+        };
+        Ok(Some(Met {
+            started: Some(started),
+            ..booked_at_four(id)?.unwrap()
+        }))
+    };
+    let vms = || running(&[("vm-first", 9), ("vm-second", 5), ("vm-third", 1)]);
+    let io = Record::default();
+    for (_, _, cgroup) in &vms() {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, vms(), begun, &[], fleet_budget, start)
+        .unwrap();
+    for (id, held) in [
+        ("vm-first", 7 * GIB),
+        ("vm-second", 7 * GIB),
+        ("vm-third", 2 * GIB),
+    ] {
+        io.set(&fleet().join(id), 0, held);
+    }
+    learner
+        .window(&io, vms(), begun, &[], fleet_budget, start + WINDOW)
+        .unwrap();
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-second")]);
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(
+        learned.ended,
+        vec![LearnedEnd {
+            id: BoxId::new("vm-second").unwrap(),
+            held: 7 * GIB,
+            budget: 5 * GIB,
+            band: 0,
+            fleet_held: 16 * GIB,
+            fleet_growth: 16 * GIB,
+            fleet_budget: 16 * GIB,
+            unmoved: Some(Upstream::LiveMove),
+        }]
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5's last resort where the node can't act. Do run a window of three VMs booked at

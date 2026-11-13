@@ -122,12 +122,13 @@ fn refused(why: ChargeError) -> Refusal {
     }
 }
 
-/// What the learner reads of a VM's record when it first meets it (C2, C5): its class, its receipt and its band, and
-/// why the last resort is ending it, where its record says so.
+/// What the learner reads of a VM's record when it first meets it (C2, C3, C5): its class, its receipt, its band and
+/// its place in the node's start order, and why the last resort is ending it, where its record says so.
 pub(super) struct Met {
     pub(super) class: Class,
     pub(super) allocation: Allocation,
     pub(super) band: u8,
+    pub(super) started: Option<u64>,
     pub(super) intent: Option<LearnedEnd>,
 }
 
@@ -449,6 +450,7 @@ impl Learner {
                 class,
                 allocation,
                 band,
+                started: _,
                 intent,
             }) = record(&id)?
             else {
@@ -703,6 +705,7 @@ impl Node {
                 class,
                 allocation,
                 band: record.spec.band,
+                started: record.started,
                 intent: record.last_resort,
             }))
         };
