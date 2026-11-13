@@ -554,8 +554,8 @@ pub struct GuestRuntime {
     /// The Shards class on Agentfile images ([`GuestRuntime::with_images`]), its boot none until given.
     images: image::ImageClass,
     /// The lanes its guest under shards-init admits at once to its relay's sockets, as its node fitted them
-    /// ([`GuestRuntime::with_lanes`]); none until given, and that guest is refused without them.
-    lanes: Option<u32>,
+    /// ([`GuestRuntime::set_lanes`]); none until given, and that guest is refused without them.
+    lanes: OnceLock<u32>,
     /// The key it controls its guest under shards-init by (D252), made at that guest's first boot from the OS's
     /// random numbers: its run's endpoint takes it alone.
     control: Mutex<Option<Arc<shards_api::control::Identity>>>,
@@ -670,16 +670,22 @@ impl GuestRuntime {
             gpu_observer: None,
             joins: Mutex::new(None),
             images,
-            lanes: None,
+            lanes: OnceLock::new(),
             control: Mutex::new(None),
         }
     }
 
     /// The lanes its guest under shards-init admits at once to its relay's sockets: what its node fitted to its
-    /// descriptors (hex-node's `serve::fit`), each a guest frame wide each way.
-    pub fn with_lanes(mut self, lanes: u32) -> Self {
-        self.lanes = Some(lanes);
-        self
+    /// descriptors with that guest's among them (hex-node's `serve::fit`), each a guest frame wide each way. Set once,
+    /// as the node fits itself before that guest boots; set again, the same or refused.
+    pub fn set_lanes(&self, lanes: u32) -> Result<(), Refusal> {
+        match self.lanes.set(lanes) {
+            Ok(()) => Ok(()),
+            Err(again) if self.lanes.get() == Some(&again) => Ok(()),
+            Err(_) => Err(Refusal::Broken(
+                "the guest's lanes are fitted once, as its node starts".to_owned(),
+            )),
+        }
     }
 
     /// Records the guest it boots at `path` ([`held`]), and takes back the guest recorded there when the
@@ -1052,7 +1058,7 @@ impl GuestRuntime {
     ///   the lanes its node fitted at once, each a guest frame wide each way; its node's hello is its answer.
     /// - **A node that won't greet it** has its run stopped, and the boot is refused in its words.
     fn boot_image(&self, image: &str) -> Result<triomphe::Arc<Booted>, Refusal> {
-        let lanes = self.lanes.ok_or_else(|| Refusal::Invalid {
+        let lanes = self.lanes.get().copied().ok_or_else(|| Refusal::Invalid {
             what: "the oci class's guest",
             why: "its node fitted no lanes for its guest under shards-init".to_owned(),
         })?;

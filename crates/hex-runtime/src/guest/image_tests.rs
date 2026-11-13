@@ -3452,9 +3452,9 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
         waits(),
         owner.diagnostics(),
     )
-    .with_lanes(6)
     .with_runtime_cost(fixed_cost(&config))
     .unwrap();
+    runtime.set_lanes(6).unwrap();
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     runtime.boot().unwrap();

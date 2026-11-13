@@ -2268,6 +2268,18 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
             .bind_boot_session(self.books.store.boot().cloned())
     }
 
+    /// The lanes its guest under shards-init admits at once, as this node fitted them with that guest's among its
+    /// descriptors (joint plan step 39): set once, before that guest boots.
+    pub fn set_guest_lanes(&self, lanes: u32) -> Result<(), Refusal> {
+        self.runtime.guest().set_lanes(lanes)
+    }
+
+    /// Boots its guest now, so no create pays a boot: a guest under shards-init, which no shared backing's grant
+    /// boots (joint plan step 39).
+    pub fn boot_guest(&self) -> Result<(), Refusal> {
+        self.runtime.guest().boot()
+    }
+
     /// Publish only the configured shared backing after the complete retained-owner preflight.
     /// This does not boot a VM or sample GPU capacity; Index still owns its later actual grant.
     pub fn prepare_guest_backing(&self) -> Result<hex_api::BackingOffer, Refusal> {
