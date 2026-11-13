@@ -420,9 +420,10 @@ impl ReplyDeadline {
     }
 
     /// The bound that fails a call asked at `asked`, and the learned wait's end it passes on the way (decision 9,
-    /// AC-T7.4.1). With a caller's deadline only that fails it: its kind's learned wait (`patience`), where it ends
-    /// first, is a run-out to record as it passes, an answer slower than any before, not an agent taken for dead.
-    /// With none, the learned wait is the call's bound, its hang detection.
+    /// AC-T7.4.1; the person's ruling of 2026-11-13: W* is a bound only while answers come within it). Only a caller's
+    /// deadline fails a call. Its kind's learned wait (`patience`), where it ends first or the caller gave none, is a
+    /// run-out to record as it passes, an answer slower than any before, not an agent taken for dead: the call goes on
+    /// following its agent, refused at the agent's end or reset ([`Caller::wait`]).
     fn combine(
         caller: Option<Self>,
         asked: Instant,
@@ -440,7 +441,7 @@ impl ReplyDeadline {
                 (Some(caller), Some(learned))
             }
             (Some(caller), _) => (Some(caller), None),
-            (None, learned) => (learned, None),
+            (None, learned) => (None, learned),
         }
     }
 
@@ -1678,13 +1679,12 @@ impl<T: Transport> Drop for Conn<T> {
 
 impl<T: Transport> Conn<T> {
     /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
-    /// streams its transport makes), and waits for its answer: with no deadline of its caller's, at most the slowest
-    /// answer this process has had to a call of its kind ([`Transport::answers`]; decision 9), past which the call is
-    /// refused by type, the only way left to it, and, before its kind's first answer and after a run-out, as long as
-    /// the agent's connection stands (its wait following the agent); with one,
-    /// until that deadline, its kind's learned wait a run-out recorded as it passes ([`ReplyDeadline::combine`]). With
-    /// `program`, a `Proc`'s place for the end of the program an exec starts is made before the exec goes, so the end
-    /// can't come first.
+    /// streams its transport makes), and waits for its answer, following the agent: with no deadline of its caller's,
+    /// as long as the agent's connection stands, its reset or close the refusal; with one, until that deadline. Its
+    /// kind's learned wait, the slowest answer this process has had to a call of its kind ([`Transport::answers`];
+    /// decision 9), refuses nothing: past it a run-out is recorded and the wait goes on ([`ReplyDeadline::combine`]).
+    /// With `program`, a `Proc`'s place for the end of the program an exec starts is made before the exec goes, so the
+    /// end can't come first.
     fn call<'l>(
         &self,
         bound: usize,

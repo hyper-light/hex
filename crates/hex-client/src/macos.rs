@@ -27,10 +27,9 @@ use crate::calls::{
 
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a kind
 /// of call (`crate::calls::kind_of`'s order), since a list waits on its parts, so a fast hello's answer says nothing of
-/// its: the slowest answer this process has had to a call of that kind (decision 9), past which a call with no caller's
-/// deadline is refused by type, the only way left to it (under one, a run-out recorded). Before its first answer, and
-/// after a run-out, a call's wait follows the node agent: it lasts while the connection stands, its reset or close the
-/// refusal. No record is read: the `client.answer.<kind>` rows of `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json` are the
+/// its: the slowest answer this process has had to a call of that kind (decision 9), past which a call's run-out is
+/// recorded and its wait goes on, refusing nothing by itself (the person's ruling of 2026-11-13). A call's wait follows
+/// the node agent: it lasts while the connection stands, its reset or close the refusal, or to its caller's deadline. No record is read: the `client.answer.<kind>` rows of `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json` are the
 /// evidence the rule is held to. The kinds a box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.hello"),

@@ -2446,8 +2446,9 @@ fn outsiders(cg: &BoxCgroup, init: i32, start_ticks: Option<u64>) -> bool {
 
 /// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
 /// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
-/// box's. The listing ends at the wait learned from the listings before it, for as many entries as it has
-/// listed ([`LISTING`]), refused past it by type.
+/// box's. Past the wait learned from the listings before it, for as many entries as it has listed ([`LISTING`]),
+/// the listing tells the census a run-out and goes on (decision 9, the person's ruling of 2026-11-13): it is in
+/// process, its entries its progress, and only the file system refuses it.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
     ids_with(dir, prefix, &LISTING)
 }
@@ -2463,22 +2464,17 @@ fn ids_with(dir: &Path, prefix: &str, learned: &Patience) -> Result<BTreeSet<Box
     let per_entry = learned.deadline();
     let began = Instant::now();
     let mut listed = 0u32;
+    let mut ran_out = false;
     let mut ids = BTreeSet::new();
     for entry in entries {
         listed = listed.saturating_add(1);
         if let Some(per_entry) = per_entry
+            && !ran_out
             && began.elapsed() > per_entry.saturating_mul(listed)
         {
-            // No sample (Karn's point), but the census is told an entry took longer than its bound.
+            // Past W*: no sample (Karn's point), but the census is told, once, and the listing goes on.
             learned.ran_out(per_entry);
-            return Err(Refusal::Os {
-                op: "listing a directory for boxes' parts",
-                why: format!(
-                    "{} took {:?} for {listed} entries, past the slowest a listing has taken an entry",
-                    dir.display(),
-                    began.elapsed()
-                ),
-            });
+            ran_out = true;
         }
         let entry = entry.map_err(listing)?;
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
