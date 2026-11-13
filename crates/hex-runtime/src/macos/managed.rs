@@ -103,10 +103,14 @@ pub(super) struct Scope {
 }
 
 impl Scope {
+    /// A managed scope under `control`'s cost, its CPU control starting from `response`, the helper's own (joint plan
+    /// step 14, 2c; ROOT, 2026-11-13): the slowest stop it has seen, the cold one before any. The launch's response field
+    /// is kept for helpers that predate learning and read here by none.
     pub(super) fn new(
         record: NativeRecord<'_>,
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
+        response: Duration,
     ) -> Result<Self, Refusal> {
         let allocation = record
             .allocation()
@@ -124,13 +128,8 @@ impl Scope {
             .check()
             .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
         let cpu = Some(Mutex::new(
-            super::cpu::Control::new(
-                allocation.resources.cpu_milli,
-                maximum,
-                control.response,
-                baseline,
-            )
-            .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+            super::cpu::Control::new(allocation.resources.cpu_milli, maximum, response, baseline)
+                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
         ));
         Ok(Self {
             scope: record
@@ -347,6 +346,11 @@ impl Scope {
             .map_err(|_| self.refusal(id))?
             .learn(response)
             .map_err(|_| self.refusal(id))
+    }
+    /// Its control's burst, the most it runs past a stop, in milli-CPU nanoseconds (2c's tests).
+    #[cfg(test)]
+    pub(super) fn cpu_burst(&self) -> Option<i128> {
+        Some(self.cpu.as_ref()?.lock().ok()?.burst())
     }
     pub(super) fn cpu_held(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         self.cpu_decision(id)?;

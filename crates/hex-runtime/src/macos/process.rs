@@ -121,6 +121,9 @@ pub struct Shared {
     /// later act a watcher sees (watch::Lateness). What each box's hold reckons a member running across a
     /// wait can run on for.
     lateness: Arc<Mutex<watch::Lateness>>,
+    /// The slowest stop response the managed CPU control has seen in its own holds (joint plan step 14, 2c; ROOT,
+    /// 2026-11-13): none before its first, only rising, every scope's control starting from it.
+    response: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Shared {
@@ -144,6 +147,8 @@ impl Shared {
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
             lateness: Arc::try_new(Mutex::new(watch::Lateness::new(lateness)))
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            response: Arc::try_new(Mutex::new(None))
+                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
         })
     }
 
@@ -154,6 +159,32 @@ impl Shared {
             .lock()
             .map_err(|_| poisoned("the node's wake lateness"))?
             .worst())
+    }
+
+    /// The slowest stop response the helper's managed CPU control has seen in its own holds (joint plan step 14, 2c):
+    /// none before its first.
+    pub fn cpu_response(&self) -> Result<Option<Duration>, Refusal> {
+        Ok(*self
+            .response
+            .lock()
+            .map_err(|_| poisoned("the managed CPU control's response"))?)
+    }
+
+    /// A hold's measured response (2c): the slowest seen rises to it.
+    pub(super) fn observe_cpu_response(&self, response: Duration) -> Result<(), Refusal> {
+        let mut slowest = self
+            .response
+            .lock()
+            .map_err(|_| poisoned("the managed CPU control's response"))?;
+        *slowest = Some(slowest.map_or(response, |seen| seen.max(response)));
+        Ok(())
+    }
+
+    /// The response a new scope's control starts from (2c): the slowest seen, the cold one before any hold.
+    pub(super) fn cpu_start(&self) -> Result<Duration, Refusal> {
+        Ok(self
+            .cpu_response()?
+            .unwrap_or(hex_core::helper::managed::COLD_RESPONSE))
     }
 
     /// The rates as learned so far.
@@ -1010,7 +1041,7 @@ impl ProcessBox {
         control: Option<(super::CpuControl, u64)>,
         baseline: Duration,
     ) -> Result<Arc<Self>, Refusal> {
-        let vm = super::managed::Scope::new(record, control, baseline)?;
+        let vm = super::managed::Scope::new(record, control, baseline, shared.cpu_start()?)?;
         let observer = super::proc::Prepared::new()?;
         let boxed = Arc::try_new(Self::prepared(
             record.owner().try_owned()?,
@@ -2222,6 +2253,7 @@ impl Watcher {
                         .filter(|response| !response.is_zero())
                 {
                     scope.cpu_learn(owner, response)?;
+                    self.shared.observe_cpu_response(response)?;
                 }
                 match scope.cpu_decision(owner)? {
                     Some(super::cpu::Decision::Hold(wait)) => Some(wait),
