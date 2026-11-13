@@ -819,9 +819,11 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         }
     };
     let platform = hex_node::serve::windows::platform().map_err(failed)?;
-    // What the process held at its start is no term yet: Windows reads it with `GetProcessHandleCount`, a call
-    // CLAUDE.md §12's text for windows/sys.rs doesn't cover, which waits on Ada's word (ROOT, 2026-11-13).
-    let fitted = fitted(&platform, 0, hex_node::serve::fit::WINDOWS, None).map_err(failed)?;
+    // Every handle the node holds for its life beside its bounds is open now: its store's, its keeper's and its
+    // guest's.
+    let beside = hex_node::serve::windows::open_descriptors().map_err(failed)?;
+    let fitted =
+        fitted(&platform, 0, hex_node::serve::fit::WINDOWS, Some(beside)).map_err(failed)?;
     Ok(Hosted {
         host,
         limits: fitted.limits,
