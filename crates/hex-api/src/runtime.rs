@@ -1879,10 +1879,13 @@ pub enum Upstream {
     /// docs/design/network-grants.md N6). Its tag stays, the wire being append-only.
     PublishReceiver,
     /// A Shards guest's engine-ring pins (D230's long-term pinned slots) kept within the room its budget leaves it:
-    /// Shards' p/ring-pins-v1, whose room-bounded pins no Shards revision holds yet (joint plan step 14, C7).
+    /// served by Shards' ring-pins-v1, vendored at 66113379, whose pins come out of the room init is told, so no Hex
+    /// call awaits it now; kept for the node's wire, whose tags only grow (joint plan step 14, C7).
     RingPinsWithinRoom,
     /// A running Shards microVM saved whole and resumed on another machine (D176), so the last resort moves a VM
-    /// past its budget rather than ending it; D176 is in progress (joint plan step 14, C5).
+    /// past its budget rather than ending it: D176's moves are Shards' own command's, which shards-api's image run
+    /// (D231) doesn't offer at 66113379, whose D235 plugs directories into a running member, not the member
+    /// (joint plan step 14, C5).
     LiveMove,
     /// A destination (D236: a host's name, an IPv4 address or the host itself, by TCP) kept for the members an
     /// orchestrator grants it alone: per-member destinations in D231's `Narrowing`, or an image's members and the

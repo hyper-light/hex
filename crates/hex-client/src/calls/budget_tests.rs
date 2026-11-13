@@ -1576,15 +1576,80 @@ fn absolute_delete_cap_covers_queued_sender() {
     );
 }
 
-/// AC-T7.4.1: do queue an actual delete behind the held sender with an absolute deadline; expect its refusal no later
-/// than that deadline and twice the platform's slowest recorded timer overshoot (`waits::OVERSHOOT`). The deadline is
-/// the claim under test. macOS times std's condition variable waits by the waiting thread's QoS: at utility QoS a
-/// queued sender capped at 25 ms was refused at 95.1 and 98.6 ms (the waits census on 75694786, at cb166de1).
+/// The refusals each deadline test makes, every one held to the bound: three, so std's condition variable, whose
+/// refusal comes inside twice a loaded host's slowest precise wait some of the time, passes only if all three do.
+#[cfg(target_os = "macos")]
+const REFUSALS: usize = 3;
+/// The precise waits before a deadline test's first refusal and after each: six, twenty-four in all. A refusal the host's
+/// load delays past twice the slowest of them needs every one of them to have come quickly: at the load ROOT's red ran
+/// under (load 18.5 on 18 cores, where 5 of 15 refusals came more than 5.5 ms late) that is (2/3)^24, 6e-5, so a run of
+/// three refusals fails that way under one time in ten thousand.
+#[cfg(target_os = "macos")]
+const CONTROLS: usize = 6;
+
+/// How late a precise wait comes past its deadline on this thread now: poll(2) of no descriptors to a deadline `CAP`
+/// from now. XNU sleeps it with the kernel's own leeway (an eighth of the wait, at most 1 ms, twice that while the user
+/// is idle) whatever the thread's QoS, and it is none of hex-wait's (docs/design/deadline-waits.md), so what it comes
+/// late by is the host's own: its timer, and the thread's wait for a core under the load the suites run at.
+#[cfg(target_os = "macos")]
+fn precise_lateness() -> Duration {
+    let deadline = Instant::now().checked_add(CAP).unwrap();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Instant::now().saturating_duration_since(deadline);
+        }
+        // A signal ends it early: the loop waits out what is left.
+        let timeout = rustix::event::Timespec::try_from(left).unwrap();
+        let _ = rustix::event::poll(&mut [], Some(&timeout));
+    }
+}
+
+/// `refusal`, a refusal at a deadline (what it gave, and how late past its deadline it came), made [`REFUSALS`] times on
+/// this thread between precise waits: [`CONTROLS`] before the first and after each, each taught to `precise`, so every
+/// refusal has the host's own lateness measured on both sides of it, in the same run and thread.
+#[cfg(target_os = "macos")]
+fn beside_precise_waits<T>(
+    precise: &Patience,
+    mut refusal: impl FnMut() -> (T, Duration),
+) -> Vec<(T, Duration)> {
+    let teach = || {
+        for _ in 0..CONTROLS {
+            hex_testkit::waits::answered(precise, precise_lateness());
+        }
+    };
+    teach();
+    let mut refusals = Vec::new();
+    for _ in 0..REFUSALS {
+        refusals.push(refusal());
+        teach();
+    }
+    refusals
+}
+
+/// The wait the deadline tests hold each refusal to: twice the slowest precise wait recorded or seen, as every test
+/// wait's patience is (hex_core::patience), seeded from `waits::OVERSHOOT` (the NOTE_CRITICAL timer's slowest of 1,000
+/// waits on idle Macs) and taught by the run's own precise waits ([`beside_precise_waits`]), so the bound rises with the
+/// load the suites run at, never past what std's condition variable comes to at utility QoS, four times the wait and
+/// 75 ms. The census gets each precise wait, named `test.hex_client.budget.precise_late`: the record of a precise wait
+/// under the suites' load.
+#[cfg(target_os = "macos")]
+fn precise_patience() -> Patience {
+    Patience::seeded(
+        "test.hex_client.budget.precise_late",
+        hex_testkit::waits::OVERSHOOT,
+    )
+}
+
+/// AC-T7.4.1: do queue actual deletes behind the held sender, each with an absolute deadline, between precise waits on
+/// the same thread; expect each refused no later than its deadline and twice the slowest precise wait recorded or seen
+/// ([`precise_patience`]). The deadline is the claim under test. macOS times std's condition variable waits by the
+/// waiting thread's QoS: at utility QoS a queued sender capped at 25 ms was refused at 95.1 and 98.6 ms (the waits census
+/// on 75694786, at cb166de1).
 #[cfg(target_os = "macos")]
 #[test]
 fn ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline() {
-    use hex_testkit::waits::OVERSHOOT;
-    /// The queued delete's refusal at its absolute deadline, the sender held.
+    /// The queued deletes' refusals at their absolute deadlines, the sender held, and the precise waits beside them.
     static CAPPED: Patience = Patience::measuring("test.hex_client.budget.queued_delete_deadline");
     let (transport, request) = stalled(None);
     let client = Arc::new(configured(AbsoluteStalled(transport)));
@@ -1592,10 +1657,13 @@ fn ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline() {
     let control = Arc::clone(&client);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let deadline = Instant::now().checked_add(CAP).unwrap();
-        let refused = control.delete_before(&BoxId::new("deadline-control").unwrap(), deadline);
-        let late = Instant::now().saturating_duration_since(deadline);
-        let _ = finished.send((refused, late));
+        let precise = precise_patience();
+        let refusals = beside_precise_waits(&precise, || {
+            let deadline = Instant::now().checked_add(CAP).unwrap();
+            let refused = control.delete_before(&BoxId::new("deadline-control").unwrap(), deadline);
+            (refused, Instant::now().saturating_duration_since(deadline))
+        });
+        let _ = finished.send((refusals, precise.deadline()));
     });
     let result = recv_on(&CAPPED, &answer);
     drop(whole);
@@ -1606,36 +1674,45 @@ fn ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline() {
             .end(Refusal::Broken("deadline queued-send cleanup".into()));
     }
     worker.join().unwrap();
-    let (refused, late) = result.unwrap();
-    assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
-    assert!(
-        late <= OVERSHOOT * 2,
-        "refused {late:?} past its deadline, more than twice the slowest recorded overshoot, {OVERSHOOT:?}"
-    );
+    let (refusals, bound) = result.unwrap();
+    for (refused, late) in refusals {
+        assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+        // None while the waits census measures: each lateness is recorded, held to no bound.
+        if let Some(bound) = bound {
+            assert!(
+                late <= bound,
+                "refused {late:?} past its deadline, past twice the slowest precise wait recorded or seen, {bound:?}"
+            );
+        }
+    }
     assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }
 
-/// AC-T7.4.1: do send an actual delete with an absolute deadline while another call holds the reader's turn, so it
-/// waits for its answer on its mailbox; expect its refusal no later than that deadline and twice the platform's
-/// slowest recorded timer overshoot (`waits::OVERSHOOT`). The deadline is the claim under test. macOS times std's
-/// channel receive, a dispatch semaphore's wait, by the waiting thread's QoS, as it times its condition variable.
+/// AC-T7.4.1: do send actual deletes, each with an absolute deadline, while another call holds the reader's turn, so
+/// each waits for its answer on its mailbox, between precise waits on the same thread; expect each refused no later than
+/// its deadline and twice the slowest precise wait recorded or seen ([`precise_patience`]). The deadline is the claim
+/// under test. macOS times std's channel receive, a dispatch semaphore's wait, by the waiting thread's QoS, as it times
+/// its condition variable.
 #[cfg(target_os = "macos")]
 #[test]
 fn ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline() {
-    use hex_testkit::waits::OVERSHOOT;
-    /// The delete's refusal at its absolute deadline, its answer waited for on its mailbox.
+    /// The deletes' refusals at their absolute deadlines, their answers waited for on their mailboxes, and the precise
+    /// waits beside them.
     static CAPPED: Patience = Patience::measuring("test.hex_client.budget.mailbox_deadline");
     let (transport, request) = stalled(None);
     let client = Arc::new(configured(AbsoluteStalled(transport)));
-    // Held, as another call's would be: this call can't take the turn, so it waits on its mailbox.
+    // Held, as another call's would be: no call here can take the turn, so each waits on its mailbox.
     client.conn.shared.state().unwrap().reading = true;
     let control = Arc::clone(&client);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let deadline = Instant::now().checked_add(CAP).unwrap();
-        let refused = control.delete_before(&BoxId::new("mailbox-control").unwrap(), deadline);
-        let late = Instant::now().saturating_duration_since(deadline);
-        let _ = finished.send((refused, late));
+        let precise = precise_patience();
+        let refusals = beside_precise_waits(&precise, || {
+            let deadline = Instant::now().checked_add(CAP).unwrap();
+            let refused = control.delete_before(&BoxId::new("mailbox-control").unwrap(), deadline);
+            (refused, Instant::now().saturating_duration_since(deadline))
+        });
+        let _ = finished.send((refusals, precise.deadline()));
     });
     let result = recv_on(&CAPPED, &answer);
     if result.is_err() {
@@ -1645,13 +1722,18 @@ fn ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline() {
             .end(Refusal::Broken("mailbox deadline cleanup".into()));
     }
     worker.join().unwrap();
-    let (refused, late) = result.unwrap();
-    assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
-    assert!(
-        late <= OVERSHOOT * 2,
-        "refused {late:?} past its deadline, more than twice the slowest recorded overshoot, {OVERSHOOT:?}"
-    );
-    // Its request went, and only its answer was waited for.
+    let (refusals, bound) = result.unwrap();
+    for (refused, late) in refusals {
+        assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+        // None while the waits census measures: each lateness is recorded, held to no bound.
+        if let Some(bound) = bound {
+            assert!(
+                late <= bound,
+                "refused {late:?} past its deadline, past twice the slowest precise wait recorded or seen, {bound:?}"
+            );
+        }
+    }
+    // Its requests went, and only their answers were waited for.
     assert!(matches!(request.try_recv(), Ok(())));
     assert!(client.conn.shared.state().unwrap().calls.is_empty());
 }
