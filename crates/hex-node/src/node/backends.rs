@@ -43,7 +43,7 @@ fn project_initialized_routes(
             return Err(Refusal::Backing {
                 key: pool.key,
                 cause: LifecycleCause::Uncertain,
-                why: None,
+                why: Some("its node configures no backend for its execution".to_owned()),
             });
         }
     }
@@ -96,12 +96,12 @@ fn projection_refused(why: &'static str) -> Refusal {
 
 impl Node {
     fn managed_bounds(record: NativeRecord<'_>) -> Result<hex_api::Bounds, Refusal> {
-        let refused = || record.refusal(LifecycleCause::Uncertain);
         match record {
             NativeRecord::Box(record) => {
                 record.spec.check()?;
                 if record.spec.route_execution() == Some(Execution::ShardsShared) {
-                    return Err(refused());
+                    return Err(NativeRecord::Box(record)
+                        .uncertain("a box on a shared backing has no managed bounds of its own"));
                 }
             }
             NativeRecord::Pool(record) => record.check()?,
@@ -109,7 +109,9 @@ impl Node {
         if !matches!(record.class()?, Class::Shards | Class::Firecracker)
             || record.scope().is_none()
         {
-            return Err(refused());
+            return Err(record.uncertain(
+                "its record isn't a VM's with a native scope, which managed bounds are made for",
+            ));
         }
         let allocation = record
             .allocation()
@@ -120,7 +122,9 @@ impl Node {
         // resort and its fleet's budget, and its swap stays off, which its managed create writes itself.
         Ok(hex_api::Bounds {
             cpu_max_milli: Some(
-                u32::try_from(allocation.resources.cpu_milli).map_err(|_| refused())?,
+                u32::try_from(allocation.resources.cpu_milli).map_err(|_| {
+                    record.uncertain("its allocation's CPU is past a managed bound's")
+                })?,
             ),
             ..hex_api::Bounds::default()
         })
@@ -130,7 +134,7 @@ impl Node {
         self.backends
             .get()
             .and_then(|backends| backends.vm_root.as_ref())
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))
+            .ok_or_else(|| record.uncertain("its node holds no VM root to scope it under"))
     }
 
     /// Exact node-owned inputs shared with the configured Shards provider's initialization probe.
@@ -187,10 +191,11 @@ impl Node {
         let until = Instant::now()
             .checked_add(patience)
             .filter(|_| !patience.is_zero() && patience != Duration::MAX)
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+            .ok_or_else(|| record.uncertain("its managed launch's patience isn't a finite time"))?;
         let bounds = Self::managed_bounds(record)?;
-        self.backend(plan.class())?
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        self.backend(plan.class())?.ok_or_else(|| {
+            record.uncertain("its node configures no backend for its launch's class")
+        })?;
         let shards_api::LaunchIo {
             stdout,
             stderr,
@@ -213,7 +218,11 @@ impl Node {
                 writer,
             }),
             (None, None) => None,
-            _ => return Err(record.refusal(LifecycleCause::Uncertain)),
+            _ => {
+                return Err(
+                    record.uncertain("its managed launch's report descriptor and request disagree")
+                );
+            }
         };
         let owned = match plan {
             ManagedLaunch::Shards(prepared) => Some(self.shards_program(prepared)?),
@@ -222,7 +231,9 @@ impl Node {
         let program = match (plan, owned.as_ref()) {
             (ManagedLaunch::Shards(_), Some(program)) => program,
             (ManagedLaunch::Firecracker { program, .. }, None) => *program,
-            _ => return Err(record.refusal(LifecycleCause::Uncertain)),
+            _ => {
+                return Err(record.uncertain("its managed launch's program isn't its plan's"));
+            }
         };
         program.check()?;
         program.fits(&process::exec_limit())?;
@@ -248,7 +259,9 @@ impl Node {
         };
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(record.uncertain(
+                "its managed launch's deadline passed before its controller was bound",
+            ));
         }
         // A Firecracker VM given a device whole has its VMM's soft RLIMIT_MEMLOCK raised to its hard one, which its
         // create found holds the RAM its VMM pins for DMA.
@@ -626,19 +639,27 @@ impl Node {
             }
         }
         for record in &pools {
-            let refused = || Refusal::Backing {
+            let refused = |why: &str| Refusal::Backing {
                 key: record.key,
                 cause: LifecycleCause::Uncertain,
-                why: None,
+                why: Some(why.to_owned()),
             };
             match record.execution {
-                Execution::Firecracker => {
-                    firecracker.ok_or_else(refused)?.preflight_backing(record)?
+                Execution::Firecracker => firecracker
+                    .ok_or_else(|| {
+                        refused("its node configures no Firecracker backend to preflight it")
+                    })?
+                    .preflight_backing(record)?,
+                Execution::ShardsShared | Execution::ShardsDedicated => shards
+                    .ok_or_else(|| {
+                        refused("its node configures no Shards backend to preflight it")
+                    })?
+                    .preflight_backing(record)?,
+                Execution::Native => {
+                    return Err(refused(
+                        "its record's execution is native, which no backend preflights",
+                    ));
                 }
-                Execution::ShardsShared | Execution::ShardsDedicated => {
-                    shards.ok_or_else(refused)?.preflight_backing(record)?
-                }
-                Execution::Native => return Err(refused()),
             }
         }
         let bound = records
@@ -700,25 +721,31 @@ impl Node {
         pools: &[hex_core::record::PoolRecord],
     ) -> Result<(), Refusal> {
         for record in pools {
-            let refused = || Refusal::Backing {
+            let refused = |why: &str| Refusal::Backing {
                 key: record.key,
                 cause: LifecycleCause::Uncertain,
-                why: None,
+                why: Some(why.to_owned()),
             };
             match record.execution {
                 Execution::Firecracker => self
                     .backends
                     .get()
                     .and_then(|backends| backends.firecracker.as_ref())
-                    .ok_or_else(refused)?
+                    .ok_or_else(|| {
+                        refused("its node configures no Firecracker backend to recover it")
+                    })?
                     .recover_backing()?,
                 Execution::ShardsShared | Execution::ShardsDedicated => self
                     .backends
                     .get()
                     .and_then(|backends| backends.shards.as_ref())
-                    .ok_or_else(refused)?
+                    .ok_or_else(|| refused("its node configures no Shards backend to recover it"))?
                     .recover_backing()?,
-                Execution::Native => return Err(refused()),
+                Execution::Native => {
+                    return Err(refused(
+                        "its record's execution is native, which no backend recovers",
+                    ));
+                }
             }
         }
         Ok(())
@@ -965,7 +992,7 @@ fn preflight_backend(
         Some(source) => Err(Refusal::Backing {
             key: source.key,
             cause: LifecycleCause::Uncertain,
-            why: None,
+            why: Some("a box's source backing is prepared or granted, neither live, draining nor released".to_owned()),
         }),
     }
 }

@@ -170,6 +170,8 @@ fn spec(
         env,
         control: None,
         gpu_devices: Vec::new(),
+        // No sign-in grant (Shards' D242 step 8, image channel v24): its pass-through is goal 13's.
+        sign_ins: Vec::new(),
     }
 }
 
