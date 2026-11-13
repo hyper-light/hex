@@ -183,6 +183,8 @@ struct ModelRun {
     gone: Mutex<Option<String>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// The patience each stats ask was given, in order (decision 9).
+    stats_asked: Mutex<Vec<Duration>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -273,7 +275,8 @@ impl ImageGuest for ModelGuest {
             .get(&member.name)
             .copied())
     }
-    fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
+    fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+        self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
             None => Ok(self.run.stats.lock().unwrap().clone()),
@@ -1024,6 +1027,47 @@ fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
         }),
         guest,
     })
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13; ROOT's leftover of decision 9): a stats ask past its learned W* was
+/// given that W* as Shards' own patience, so D231 refused it there though its run was answering, an R03 bound of Hex's
+/// on a running VM's read. Do: read a running VM's usage once its stats wait has learned a 1 ns answer. Expect: Shards'
+/// stats asked with no bound of Hex's (`Duration::MAX`: until its run answers or ends); the usage answered; and W* risen
+/// to the answer that passed it.
+#[test]
+fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(1 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let learned = Duration::from_nanos(1);
+    let armed = ImageWaits {
+        stats: Patience::measuring("test.hex_runtime.image_stats_past"),
+        ..waits().unwrap()
+    };
+    armed.stats.answered(learned);
+    let (runtime, _owner) = model_runtime(&images, Ok(armed));
+    let id = runtime.create(spec("image-stats-past", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert!(runtime.usage(&id).is_ok());
+    assert_eq!(
+        *images.run.stats_asked.lock().unwrap(),
+        vec![Duration::MAX],
+        "Shards' stats was asked with a bound of Hex's"
+    );
+    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    assert!(
+        stats.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the answer that passed it: {:?}",
+        stats.slowest()
+    );
 }
 
 /// Joint plan steps 12 and 14, HEX-IMG-4's contract (AC-T7.4.1): do read a running VM's usage, its run's stats
