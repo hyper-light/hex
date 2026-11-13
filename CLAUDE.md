@@ -220,7 +220,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   handles (`CloseHandle`), and reads the machine's processor count
   (`GetActiveProcessorCount`), the measured worker stack extent (`GetCurrentThreadStackLimits`),
   the enclosing job's process ceiling (`IsProcessInJob` and `QueryInformationJobObject`), and, for the node's facts (`hex-node`'s `facts`), its memory
-  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
+  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). It reads the host's boot sequence where the kernel maps
+  `KUSER_SHARED_DATA` into every process (its `BootId`, read through a pointer to `MM_SHARED_USER_DATA_VA`; no call
+  binds it), so each record names the boot it was written in (T-T7.1.2). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
   Where its boxes outlive the node (the keeper, `super::keeper`; decision
