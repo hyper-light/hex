@@ -183,6 +183,8 @@ struct ModelRun {
     gone: Mutex<Option<String>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// The patience each stats ask was given, in order (decision 9).
+    stats_asked: Mutex<Vec<Duration>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -273,7 +275,8 @@ impl ImageGuest for ModelGuest {
             .get(&member.name)
             .copied())
     }
-    fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
+    fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+        self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
             None => Ok(self.run.stats.lock().unwrap().clone()),
@@ -734,6 +737,52 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan steps 12, 15 and 17 (ROOT's grants-none on KVM and HVF at c8b4ce6b, 2026-11-13: a probe of what Hex asks
+/// Shards, beside image_real's runs, which ran): do boot a VM of its members alone granted nothing, once with none of its
+/// members driven, as image_real's cases boot, and once with its harness driven by its caller (`ShardsImage::members`),
+/// as image_grants_real's check 2 boots. Expect the two boots asked alike in all but `members`: nothing kept past the
+/// microVM and every member held to reaching nothing (D246's `Some([])`), with no publish, in both; the second's
+/// `members` its harness alone, its stdin asked. So of what check 2 sends, its driven member alone is not image_real's.
+#[test]
+fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    // Each boot on a runtime of its own, so neither waits at a bound the other's answer taught (decision 9).
+    let asked_of = |members: Vec<ImageMember>| {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut spec = spec("image-probe", None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.members = members;
+        }
+        let id = runtime.create(spec).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        boot.clone()
+    };
+    let first = asked_of(Vec::new());
+    let second = asked_of(vec![ImageMember::new(Member {
+        kind: MemberKind::Harness,
+        name: "probe".to_owned(),
+    })]);
+    assert_eq!(first.egress.egress, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.mcp, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.destinations, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.members, Some(Vec::new()));
+    assert!(!first.egress.dns && first.publish.is_empty() && first.members.is_empty());
+    let [member] = second.members.as_slice() else {
+        panic!("the driven boot's members: {:?}", second.members);
+    };
+    assert_eq!(member.member, MemberName::harness("probe"));
+    assert!(member.stdin && !member.terminal);
+    let mut alike = second.clone();
+    alike.members.clone_from(&first.members);
+    alike.ready_by = first.ready_by;
+    assert_eq!(alike, first);
+}
+
 /// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
 /// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
 /// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
@@ -1033,6 +1082,47 @@ fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
         }),
         guest,
     })
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13; ROOT's leftover of decision 9): a stats ask past its learned W* was
+/// given that W* as Shards' own patience, so D231 refused it there though its run was answering, an R03 bound of Hex's
+/// on a running VM's read. Do: read a running VM's usage once its stats wait has learned a 1 ns answer. Expect: Shards'
+/// stats asked with no bound of Hex's (`Duration::MAX`: until its run answers or ends); the usage answered; and W* risen
+/// to the answer that passed it.
+#[test]
+fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(1 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let learned = Duration::from_nanos(1);
+    let armed = ImageWaits {
+        stats: Patience::measuring("test.hex_runtime.image_stats_past"),
+        ..waits().unwrap()
+    };
+    armed.stats.answered(learned);
+    let (runtime, _owner) = model_runtime(&images, Ok(armed));
+    let id = runtime.create(spec("image-stats-past", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert!(runtime.usage(&id).is_ok());
+    assert_eq!(
+        *images.run.stats_asked.lock().unwrap(),
+        vec![Duration::MAX],
+        "Shards' stats was asked with a bound of Hex's"
+    );
+    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    assert!(
+        stats.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the answer that passed it: {:?}",
+        stats.slowest()
+    );
 }
 
 /// Joint plan steps 12 and 14, HEX-IMG-4's contract (AC-T7.4.1): do read a running VM's usage, its run's stats
