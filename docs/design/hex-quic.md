@@ -80,7 +80,9 @@ outlast the program.
 (`hex_core::stream`: control, stdio, files) and a log port after them, so the guest's byte protocol runs unchanged
 on it (`hex_client::guest`: its client over a link, one code path with the guest, CLAUDE.md §8). A connection holds
 one lane of each side's while it is open: Open (port, id) binds the opener's, Accept (id) the acceptor's, data frames
-of its port's class carry its bytes, End ends a half and frees its lane from the next frame on, Reset ends both;
+of its port's class carry its bytes, End ends a half and frees its lane from the next frame on, Reset ends both
+(but takes back none of a half that had ended: its reader reads all its peer sent before that End, then its end,
+as a node's program's stdout is reset after its End when the node lets the connection go, HEX-QUIC-26);
 lane 0 carries refusals and the accepting side's Welcome (a TLS 1.3 client's handshake completes before the server
 has verified its certificate, RFC 8446 §4.4.4, so a dialer counts itself connected once it hears it). One lane per
 stdio stream, as the plan asks. Each side may send a connection's first `INITIAL_CREDIT` (two whole frames) and then
@@ -100,8 +102,8 @@ multiplexed inside: one slow program's stdout would hold every other program's. 
 never close, and QUIC's stream credit (RFC 9000 §4.6) is spent by every one ever opened.
 
 **Falsified by** a test where one connection whose reader stopped stalls another (HEX-QUIC-11), a lane reused
-before its last connection's End reached the peer (HEX-QUIC-1, -4), or bytes past a connection's credit taken
-(HEX-QUIC-18).
+before its last connection's End reached the peer (HEX-QUIC-1, -4), bytes past a connection's credit taken
+(HEX-QUIC-18), or a byte sent before a half's End not read because a reset came after it (HEX-QUIC-26).
 
 ## Q4. The node's listener
 
