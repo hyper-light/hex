@@ -1195,6 +1195,51 @@ impl GuestRuntime {
         Ok(())
     }
 
+    /// The shared backing `key`'s guest overhead, measured at this capacity answer where its guest runs (joint plan
+    /// step 14, C7; [`guest_seen`]), kept per backing generation: a new generation starts cold. A read that fails, or a
+    /// guest not running, is no sample: what was seen stays. No lock is held over the guest's answers.
+    fn measured_guest(&self, key: BackingKey) -> Result<hex_api::LearnedOverhead, Refusal> {
+        let kept = match *self
+            .guest_overhead
+            .lock()
+            .map_err(|_| refused(key, LifecycleCause::Uncertain))?
+        {
+            Some((seen, overhead)) if seen == key => overhead,
+            _ => hex_api::LearnedOverhead::default(),
+        };
+        let measured = self
+            .shared_running()
+            .ok()
+            .and_then(|booted| {
+                let guest = booted.client.capacity(Class::Oci).ok()??;
+                let records = self.authority().ok()?.records().ok()?;
+                let mut boxes = 0u64;
+                for record in records.values().flatten() {
+                    if record.spec.route.and_then(|route| route.backing) == Some(key) {
+                        boxes = boxes.saturating_add(
+                            booted.client.usage(&record.spec.id).ok()?.memory_bytes,
+                        );
+                    }
+                }
+                Some(guest_seen(kept, &guest, boxes))
+            })
+            .unwrap_or(kept);
+        let mut seen = self
+            .guest_overhead
+            .lock()
+            .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+        // Another answer may have measured meanwhile: the most of the two.
+        let merged = match *seen {
+            Some((at, other)) if at == key => hex_api::LearnedOverhead {
+                mem_bytes: measured.mem_bytes.max(other.mem_bytes),
+                ..measured
+            },
+            _ => measured,
+        };
+        *seen = Some((key, merged));
+        Ok(merged)
+    }
+
     pub(super) fn shared_running(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
         let key = self
             .shared_key()?
@@ -1357,7 +1402,9 @@ impl GuestRuntime {
                         what: "initialized native backings",
                         bound: hex_api::MAX_RUNTIME_ROUTES,
                     })?;
-                capacity.backings.push(record.offer()?);
+                let mut offer = record.offer()?;
+                offer.guest = self.measured_guest(key)?;
+                capacity.backings.push(offer);
             }
             push_offer(
                 capacity,
@@ -1815,15 +1862,23 @@ fn push_offer(
     Ok(())
 }
 
-/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7). Original (red): none is
-/// measured; it stays as `kept`.
+/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13): what
+/// its agent says it uses (its total memory less its free) past what its boxes hold, `boxes_memory`, the most seen,
+/// only rising from `kept`. Its CPU and disk its agent's answer doesn't read, so they stay as kept: none.
 fn guest_seen(
     kept: hex_api::LearnedOverhead,
     guest: &hex_api::Capacity,
     boxes_memory: u64,
 ) -> hex_api::LearnedOverhead {
-    let _ = (guest, boxes_memory);
-    kept
+    let own = guest
+        .total
+        .mem_bytes
+        .saturating_sub(guest.free.mem_bytes)
+        .saturating_sub(boxes_memory);
+    hex_api::LearnedOverhead {
+        mem_bytes: Some(kept.mem_bytes.map_or(own, |seen| seen.max(own))),
+        ..kept
+    }
 }
 
 #[cfg(test)]

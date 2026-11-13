@@ -1262,7 +1262,11 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
         capacity.free.mem_bytes = free;
         capacity
     };
-    let first = super::guest_seen(hex_api::LearnedOverhead::default(), &guest(5 * gib), 2 * gib);
+    let first = super::guest_seen(
+        hex_api::LearnedOverhead::default(),
+        &guest(5 * gib),
+        2 * gib,
+    );
     assert_eq!(
         first,
         hex_api::LearnedOverhead {
