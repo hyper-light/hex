@@ -2817,6 +2817,18 @@ mod hold_response_tests {
         assert_eq!(reads.borrow().get(&12), Some(&3));
         assert_eq!(stopped_after(&[11, 13], read).unwrap(), None);
     }
+
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13: a hold's measurement that fails is no sample, never the scope's
+    /// refusal): a member's run state that can't be read, as after a node's restart when the node is no longer its
+    /// members' parent, leaves the hold unmeasured. Do read a member whose run state read fails. Expect no sample, not
+    /// an error.
+    #[test]
+    fn w14_a_holds_stop_that_cant_be_read_is_no_sample() {
+        let read = |_: i32| -> std::io::Result<Option<sys::Run>> {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        };
+        assert_eq!(stopped_after(&[11], read).unwrap(), None);
+    }
 }
 
 #[cfg(test)]
