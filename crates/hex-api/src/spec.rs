@@ -474,6 +474,34 @@ impl ShardsImage {
                 )));
             }
         }
+        // Each share as a mount's paths are checked (its host directory absolute and UTF-8 with no NUL, where the guest
+        // sees it absolute with no `..`), never at the guest's root, which it would hide, and each path seen once.
+        for (at, share) in self.shares.iter().enumerate() {
+            let as_image = |e: Refusal| match e {
+                Refusal::Invalid { why, .. } => invalid_image(why),
+                other => other,
+            };
+            host_path(&format!("shares[{at}].source"), &share.source).map_err(as_image)?;
+            let field = format!("shares[{at}].destination");
+            container_path(&field, &share.destination).map_err(as_image)?;
+            if path_parts(&share.destination).all(|part| part.is_empty() || part == ".") {
+                return Err(invalid_image(format!(
+                    "{field} is the guest's root, which a share would hide"
+                )));
+            }
+            if self
+                .shares
+                .get(..at)
+                .unwrap_or_default()
+                .iter()
+                .any(|s| s.destination == share.destination)
+            {
+                return Err(invalid_image(format!(
+                    "{field} {:?} is another share's too",
+                    share.destination
+                )));
+            }
+        }
         Ok(())
     }
 }
