@@ -85,9 +85,18 @@ enum Run {
     Booting(Arc<Slot<Result<Box<dyn ImageGuest>, ImageRefusal>>>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
     Running(Arc<dyn ImageGuest>),
-    /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone.
-    Stopping(Arc<Slot<RunEnd>>),
+    /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
+    Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known, until its record says it.
+    Ended(End),
+}
+
+/// Why a run is stopping, so that a call that finds it so says which (goal 15's finding, 2026-11-13): its owner's stop
+/// (a signal or a delete, whose own call answers the run's end), or its run's own end, read as it came, its host reaped
+/// through the stop.
+#[derive(Clone)]
+enum Stop {
+    Asked,
     Ended(End),
 }
 
@@ -159,7 +168,7 @@ enum State {
     Created,
     Booting,
     Running(Arc<dyn ImageGuest>),
-    Stopping(Arc<Slot<RunEnd>>),
+    Stopping(Arc<Slot<RunEnd>>, Stop),
     Ended(End),
     Held,
 }
@@ -777,8 +786,8 @@ impl GuestRuntime {
                         }
                     },
                     Run::Running(guest) => Next::Running(Arc::clone(guest)),
-                    Run::Stopping(slot) => match slot.take()? {
-                        None => Next::Is(State::Stopping(Arc::clone(slot))),
+                    Run::Stopping(slot, stop) => match slot.take()? {
+                        None => Next::Is(State::Stopping(Arc::clone(slot), stop.clone())),
                         Some((end, took)) => {
                             if let Ok(waits) = image.waits() {
                                 waits.stop.answered(took);
@@ -823,14 +832,15 @@ impl GuestRuntime {
         else {
             return Ok(State::Running(guest));
         };
+        let reached = Stop::Ended(End::of(&ended));
         let slot = image.stop(guest, Some(ended))?;
         let mut runs = image.runs()?;
         // Another call may have moved it on first: then its stop is that call's, and this one's thread
         // returns with the same end.
         if let Some(run @ Run::Running(_)) = runs.get_mut(id) {
-            *run = Run::Stopping(Arc::clone(&slot));
+            *run = Run::Stopping(Arc::clone(&slot), reached.clone());
         }
-        Ok(State::Stopping(slot))
+        Ok(State::Stopping(slot, reached))
     }
 
     pub(super) fn create_image(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -865,7 +875,7 @@ impl GuestRuntime {
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}
-            State::Booting | State::Running(_) | State::Stopping(_) => {
+            State::Booting | State::Running(_) | State::Stopping(..) => {
                 return Err(Refusal::Invalid {
                     what: "start",
                     why: format!("box {id} has started already"),
@@ -961,8 +971,17 @@ impl GuestRuntime {
                             },
                         }
                     }
-                    State::Stopping(_) | State::Booting => Ok(()),
-                    State::Ended(_) => Err(Refusal::NotRunning(id, "start")),
+                    // Its owner's own stop under way (a signal or a delete), whose call answers the run's end: this
+                    // start succeeded.
+                    State::Stopping(_, Stop::Asked) | State::Booting => Ok(()),
+                    // Its run ended on its own as it started, or has been reaped since. A command that started and
+                    // exited, at once or not, is a start that succeeded, its exit the box's (`docker start`'s); a run
+                    // that failed (its command never started, or its VM, host or guest failed: D249) is a start that
+                    // failed, in its runtime's words, which the box's `ended` keeps too.
+                    State::Stopping(_, Stop::Ended(end)) | State::Ended(end) => match end.why {
+                        Some(why) => Err(Refusal::Failed { id, why }),
+                        None => Ok(()),
+                    },
                     State::Created | State::Held => Err(super::books::uncertain(&id)?),
                 }
             }
@@ -984,11 +1003,11 @@ impl GuestRuntime {
                 let slot = image.stop(guest, None)?;
                 let mut runs = image.runs()?;
                 if let Some(run) = runs.get_mut(id) {
-                    *run = Run::Stopping(Arc::clone(&slot));
+                    *run = Run::Stopping(Arc::clone(&slot), Stop::Asked);
                 }
                 slot
             }
-            State::Stopping(slot) => slot,
+            State::Stopping(slot, _) => slot,
             State::Ended(end) => return Ok(end.exit),
             State::Booting => return Err(pending(id)?),
             State::Held => return Err(held()),
@@ -1043,7 +1062,7 @@ impl GuestRuntime {
                 }
                 Ok(shown)
             }
-            State::Stopping(_) => info(&record.spec, BoxState::Running, None),
+            State::Stopping(..) => info(&record.spec, BoxState::Running, None),
             State::Ended(end) => {
                 let mut shown = info(&record.spec, BoxState::Empty, Some(end.exit))?;
                 shown.ended = end.why;
@@ -1156,7 +1175,7 @@ impl GuestRuntime {
         let guest = match self.settle(&record)? {
             State::Running(guest) => guest,
             State::Held => return Err(held()),
-            State::Booting | State::Stopping(_) => return Err(pending(&id)?),
+            State::Booting | State::Stopping(..) => return Err(pending(&id)?),
             State::Created | State::Ended(_) => return Err(Refusal::NotRunning(id, "member")),
         };
         let name = member_name(member);
@@ -1196,7 +1215,7 @@ impl GuestRuntime {
         let stopped = match state {
             State::Held => return Err(held()),
             State::Booting => return Err(pending(&id)?),
-            State::Running(_) | State::Stopping(_) => Some(self.stop_image(&id, state)?),
+            State::Running(_) | State::Stopping(..) => Some(self.stop_image(&id, state)?),
             State::Created | State::Ended(_) => None,
         };
         devices::with_transaction(self.image_books()?, &id, &[], |t| {
@@ -1219,7 +1238,7 @@ impl GuestRuntime {
         match state {
             State::Held => return Err(held()),
             State::Booting => return Err(pending(&id)?),
-            State::Running(_) | State::Stopping(_) => {
+            State::Running(_) | State::Stopping(..) => {
                 // The delete's intent, durable before its stop.
                 devices::with_transaction(self.image_books()?, &id, &[], |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
