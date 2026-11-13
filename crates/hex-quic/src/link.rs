@@ -53,6 +53,12 @@ impl guest::Link for Link {
         }
         self.dial(port)
     }
+
+    /// A connection's End ends its half alone (docs/design/hex-quic.md Q3), and the bridge carries the owner's
+    /// half-close to it.
+    fn carries_half_close(&self) -> bool {
+        true
+    }
 }
 
 /// The node agent's client over QUIC: the guest's protocol, its waits QUIC's own (`hex_client::guest::Quic`).

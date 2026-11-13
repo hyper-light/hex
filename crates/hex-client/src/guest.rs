@@ -141,6 +141,13 @@ pub trait Link: Send + Sync + 'static {
         }
         self.dial(port)
     }
+    /// Whether this link's transport carries a half-close: this side's end of sending reaches the peer as its end of
+    /// input, the other way still open, as Shards' vsock does (D12) and QUIC's lanes do. Firecracker's vsock doesn't: it
+    /// makes a host's half-close a full shutdown and drops what the guest sends after it (`vsock/csm/connection.rs`
+    /// 228-239 and 307 at upstream 500efc6; docs/design/shards-guest.md).
+    fn carries_half_close(&self) -> bool {
+        false
+    }
     /// An identity safe to lend to a caller that opens its own guest streams, without owning the VM.
     fn identity(&self) -> Result<shards_api::Identity, Refusal> {
         Err(Refusal::Invalid {
@@ -426,6 +433,16 @@ impl<W: Waits> Stream<W> {
             None => conn
                 .write_all(&stream::name(named))
                 .map_err(os("naming a stdio connection"))?,
+        }
+        // An output stream carries nothing this way once named: where the link carries a half-close, its own half
+        // ends, so its peer's End closes the connection whole, which no reader sleeps through (Shards M236), and the
+        // peer's side ends both halves with nothing left open to reset (AC-T7.4.1; joint plan step 4, ROOT's decision
+        // of 2026-11-12).
+        if self.link.carries_half_close()
+            && matches!(named.stream, stream::Stdio::Out | stream::Stdio::Err)
+        {
+            conn.shutdown(Shutdown::Write)
+                .map_err(os("ending an output stream's own half"))?;
         }
         Ok(conn)
     }

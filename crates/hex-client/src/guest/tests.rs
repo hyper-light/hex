@@ -28,6 +28,11 @@ impl Link for Loopback {
         };
         own_duplex(TcpStream::connect(addr).unwrap())
     }
+
+    /// TCP carries a half-close (RFC 9293 §3.6).
+    fn carries_half_close(&self) -> bool {
+        true
+    }
 }
 
 fn listeners() -> (TcpListener, TcpListener, LinkOwner) {
