@@ -164,6 +164,8 @@ fn spec(
         credentials: Vec::new(),
         binary: Some(shards.to_path_buf()),
         env,
+        control: None,
+        gpu_devices: Vec::new(),
     }
 }
 

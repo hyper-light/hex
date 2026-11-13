@@ -97,6 +97,17 @@ impl ImageGuest for Run {
         &[]
     }
 
+    // No agent-control endpoint: the node VM's boot asks for none yet (D252, step 39's Link).
+    fn control(&self) -> Option<&shards_api::image::ControlAt> {
+        None
+    }
+
+    // The period its run host says its governor holds a rate over (D247): the test's fixture, which the node VM's boot
+    // never reads, holding it to no rate.
+    fn rate_period(&self) -> Duration {
+        Duration::from_millis(100)
+    }
+
     fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
         Err(unasked())
     }

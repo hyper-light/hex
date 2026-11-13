@@ -861,9 +861,9 @@ fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
 /// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): through Shards' own client, a guest whose muxer answers the first
 /// CONNECT, then takes the next and never answers it: expect that dial refused by type at its deadline, the link's
 /// bound from its start, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM
-/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is Shards' own input for a
-/// withheld answer (`conformance::UNSERVED_PATIENCE`), and twice it releases the muxer only where the dial overran,
-/// as Shards' `withheld_reply_expires_before_fixture_release` does.
+/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is an input, short so the case is,
+/// and twice it releases the muxer only where the dial overran, as Shards' `withheld_reply_expires_before_fixture_release`
+/// does.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
@@ -929,7 +929,9 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
         let _ = held.recv();
         (first, second)
     });
-    let bound = shards_api::conformance::UNSERVED_PATIENCE;
+    // An input: the first dial's deadline, short so the case is. Shards' conformance asked an unserved port with this
+    // one (UNSERVED_PATIENCE) until its judged waits (Part B, ca7a04d0d) took that constant out.
+    let bound = Duration::from_millis(200);
     let link = shards::ShardsLink::new(Arc::from(guest), bound);
     let control = link.dial(stream::CONTROL_PORT).unwrap();
     let (sent, answer) = std::sync::mpsc::channel();
@@ -1378,6 +1380,42 @@ fn physical_gpu_refusals_preserve_retry_category() {
     assert!(
         matches!(shards::refusal("booting", &shards_api::Refusal::Gpu(shards_api::PhysicalGpuError::Allocation)),
         Refusal::Exhausted { what: "physical GPU selection storage", bound } if bound == shards_api::physical::MAX_PHYSICAL_GPUS)
+    );
+}
+
+/// AC-T7.4.1 (Shards 18f59d497, D232): a VM process that refuses its GPU selection says so in place of a receipt,
+/// certain, which is the selection's own refusal; a report writer closed with nothing written is the VM process ended
+/// before its renderer said anything of its selection, which leaves the selection's fate unknown. Do: map each kind of
+/// the VM process's refusal, and an unwritten report. Expect: each refusal Invalid, naming the selection, with its
+/// reason's words kept; the unwritten report an OS refusal of the call that says so, never Invalid.
+#[test]
+fn a_vm_process_refusing_its_gpu_selection_says_why() {
+    use shards_api::GpuProbeError;
+    use shards_api::physical::{GpuRefusal, JoinError};
+    for (refused, says) in [
+        (
+            GpuRefusal::Join(JoinError::Missing),
+            "no exact live Vulkan identity",
+        ),
+        (GpuRefusal::NoHostMemory, "no memory the host can map"),
+        (GpuRefusal::Acknowledgment(7), "ACK (7)"),
+    ] {
+        let mapped = shards::refusal(
+            "booting",
+            &shards_api::Refusal::GpuProbe(GpuProbeError::Refused(refused)),
+        );
+        assert!(
+            matches!(&mapped, Refusal::Invalid { what: "physical GPU selection", why } if why.contains(says)),
+            "{mapped:?}"
+        );
+    }
+    let unreported = shards::refusal(
+        "booting",
+        &shards_api::Refusal::GpuProbe(GpuProbeError::Unreported),
+    );
+    assert!(
+        matches!(&unreported, Refusal::Os { op: "booting", why } if why.contains("no report")),
+        "{unreported:?}"
     );
 }
 
