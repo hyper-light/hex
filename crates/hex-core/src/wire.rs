@@ -1877,8 +1877,8 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     Ok(())
 }
 
-/// A holder of a node's room (joint plan step 39): its tag, 0 for a box, then its id. Kept here: a node VM's isn't
-/// carried.
+/// A holder of a node's room (joint plan step 39): its tag, then its id: 0 and a box's id, or 1 and a node VM's run,
+/// its 16 bytes.
 fn put_holder(w: &mut Writer, holder: &LearnedHolder) -> Result<(), Fault> {
     match holder {
         LearnedHolder::Box(id) => {
@@ -1886,10 +1886,12 @@ fn put_holder(w: &mut Writer, holder: &LearnedHolder) -> Result<(), Fault> {
             w.u8(0);
             w.string(id.as_str())
         }
-        LearnedHolder::Node(_) => Err(Fault::value(
-            "a learned holder",
-            "a node VM's holder isn't carried",
-        )),
+        LearnedHolder::Node(run) => {
+            w.reserve_fixed(1 + 16)?;
+            w.u8(1);
+            w.raw(run.bytes());
+            Ok(())
+        }
     }
 }
 
@@ -1907,6 +1909,9 @@ fn holder_bytes(holder: &LearnedHolder) -> usize {
 fn holder(r: &mut Reader<'_>) -> Result<LearnedHolder, Fault> {
     match r.u8()? {
         0 => Ok(LearnedHolder::Box(box_id(r)?)),
+        1 => Ok(LearnedHolder::Node(hex_api::NodeRun::from_bytes(
+            r.array::<16>()?,
+        ))),
         tag => Err(Fault::value(
             "a learned holder",
             format!("tag {tag} names no holder"),
