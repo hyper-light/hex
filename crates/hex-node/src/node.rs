@@ -87,17 +87,12 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// How long [`Node::recover`] spends on each entry of a directory it lists for the parts of boxes before it
 /// refuses: the runtime directory is shared with every node of this user on the host, so its entries are
 /// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
-/// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
-/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). Seeded by
-/// build profile from the `node.listing` rows of `bench/competitive/probes/waits_census.md`: release, run 4's largest
-/// max of the release arms with a row's 1,000 samples, 7.043 us an entry (adacachy2, its disk arm, of 1,105); debug,
-/// run 5's suites', where run 3's seed ran out at 137.124 us an entry: the bound it ran out at, above every answer of
-/// the debug-build arms, so its patience doubles (decision 9).
-static LISTING: Patience = Patience::by_profile(
-    "node.listing",
-    Duration::from_nanos(7_043),
-    Some(Duration::from_nanos(137_124)),
-);
+/// entry, and the wait for a listing's first `k` entries is `k` times the slowest an entry has taken here (decision 9;
+/// Ada's rules of 2026-11-06 and 2026-11-13), refused by type past it (CLAUDE.md §2, §4). Before the first listing, and
+/// after one that ran out, the listing follows its own progress, the entries it lists, with no time bound: the
+/// `node.listing` rows of `bench/competitive/probes/waits_census.md` are the evidence the rule is held to, never a
+/// seed.
+static LISTING: Patience = Patience::measuring("node.listing");
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -214,8 +209,8 @@ pub struct Node {
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
     /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
-    /// (decision 9: twice the longest held, measuring until the first is let go, a wait before it lasting
-    /// until then); past either the call is refused by type, a create past the budget as [`Refusal::Full`]
+    /// (decision 9: the longest held; before the first is let go, and after a wait that ran out, a wait follows the
+    /// holder until it lets go); past either the call is refused by type, a create past the budget as [`Refusal::Full`]
     /// ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
@@ -424,15 +419,9 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // Seeded by build profile from the `node.turns` rows of `bench/competitive/probes/waits_census.md`:
-                // release, run 4's largest max of the release arms, 43.627 ms (adacachy2, its tmpfs arm, of 92,042);
-                // debug, run 5's largest answer of the debug-build arms, the debug arm and the suites' (adacachy2),
-                // 1,719.743 ms (the suites', of 398,973).
-                Patience::by_profile(
-                    "node.turns",
-                    Duration::from_nanos(43_627_499),
-                    Some(Duration::from_nanos(1_719_743_234)),
-                ),
+                // The longest a create or delete has held its turn here; before the first, and past it, a wait
+                // follows the holder until it lets go (decision 9: no record is read).
+                Patience::measuring("node.turns"),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,
@@ -2536,34 +2525,35 @@ fn outsiders(cg: &BoxCgroup, init: i32, start_ticks: Option<u64>) -> bool {
 
 /// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
 /// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
-/// box's. The listing ends at the wait learned from the listings before it, for as many entries as it has
-/// listed ([`LISTING`]), refused past it by type.
+/// box's. Past the wait learned from the listings before it, for as many entries as it has listed ([`LISTING`]),
+/// the listing tells the census a run-out and goes on (decision 9, the person's ruling of 2026-11-13): it is in
+/// process, its entries its progress, and only the file system refuses it.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
+    ids_with(dir, prefix, &LISTING)
+}
+
+/// [`ids_in`], the listing's wait `learned`.
+fn ids_with(dir: &Path, prefix: &str, learned: &Patience) -> Result<BTreeSet<BoxId>, Refusal> {
     let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let per_entry = LISTING.deadline();
+    let per_entry = learned.deadline();
     let began = Instant::now();
     let mut listed = 0u32;
+    let mut ran_out = false;
     let mut ids = BTreeSet::new();
     for entry in entries {
         listed = listed.saturating_add(1);
         if let Some(per_entry) = per_entry
+            && !ran_out
             && began.elapsed() > per_entry.saturating_mul(listed)
         {
-            // No sample (Karn's point), but the census is told an entry took longer than its bound.
-            LISTING.ran_out(per_entry);
-            return Err(Refusal::Os {
-                op: "listing a directory for boxes' parts",
-                why: format!(
-                    "{} took {:?} for {listed} entries, past twice the slowest a listing has taken an entry",
-                    dir.display(),
-                    began.elapsed()
-                ),
-            });
+            // Past W*: no sample (Karn's point), but the census is told, once, and the listing goes on.
+            learned.ran_out(per_entry);
+            ran_out = true;
         }
         let entry = entry.map_err(listing)?;
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -2578,7 +2568,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
-    LISTING.answered(
+    learned.answered(
         began
             .elapsed()
             .checked_div(listed.max(1))
@@ -2958,6 +2948,22 @@ mod tests {
         let ids = ids_in(dir.path(), "hex-").unwrap();
         assert_eq!(ids.len(), 2, "{ids:?}");
         assert!(LISTING.slowest().is_some());
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it;
+    /// T-T7.1.2): a recovery's listing was refused once it took longer per entry than any listing before it, failing a
+    /// node's start on a slow disk. Do: list a directory holding three boxes' parts under a wait that has learned a
+    /// per-entry W* every entry outruns (1 ns). Expect: all three ids, the listing going on past W* (the listing is
+    /// in process, and its entries are its progress), never refused.
+    #[test]
+    fn original_a_listing_slower_than_any_before_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["hex-a", "hex-b", "hex-c"] {
+            fs::create_dir(dir.path().join(id)).unwrap();
+        }
+        let learned = Patience::seeded("test.node.listing", Duration::from_nanos(1));
+        let ids = ids_with(dir.path(), "hex-", &learned).unwrap();
+        assert_eq!(ids.len(), 3, "{ids:?}");
     }
 
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,

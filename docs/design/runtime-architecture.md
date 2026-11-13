@@ -101,7 +101,7 @@ the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box tu
 id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
 as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
 the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
-The wait ends at twice the longest a turn has been held (decision 9), refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
+The wait is bounded by the longest a turn has been held, following the holder before the first and past it, a run-out told to the census (decision 9), and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
 is refused as `Full`, as step 6's claim refused it, and a delete as `Exhausted`; other boxes'
 creates and deletes never wait. A box whose owner's create takes a slot-named cgroup (goal 5 extended,
 step 6, decision 5) has no cgroup named by its id either, so its turn is all that says it's being made. Step 6 had
@@ -2433,21 +2433,50 @@ to 59, not of record):
 (some other call on its path takes it). Or a claim that costs more at p50 than the clone it saves. Or a parked init's
 memory charge pushing an owner's box past bounds the fresh path keeps.
 
-### 9. Waits learn their deadlines from the answers they wait on (Ada's rule and the lead's, 2026-11-06)
+### 9. Waits learn their deadlines from the answers they wait on (Ada's rules of 2026-11-06 and 2026-11-13)
 
 Ada's rule: "We do not support arbitrary constants. We support learned and data derived values." Every bound Hex
 states is of one of four kinds: learned at runtime; derived from a named record (a `bench/` file and its run);
-a platform or specification limit cited at its source; or picked. A picked one is converted where it can be. This
-decision covers the node's waits for an answer whose time it can observe (source notes:
-`docs/research/runtime/learned-waits.md`).
+a platform or specification limit cited at its source; or picked. A picked one is converted where it can be. Ada,
+2026-11-13: "we do not tolerate arbitrary constants. learned and data-derived values. Period. Account for cold starts
+well in any such approach." This decision covers the node's waits for an answer whose time it can observe (source
+notes: `docs/research/runtime/learned-waits.md`).
 
-**The rule** (the lead's failure-bound rule, final form of 2026-11-06), one core for every such wait,
+**The bound** (2026-11-13; it replaces the lead's failure-bound rule of 2026-11-06, twice the slowest answer, and
+every seed from a record). Ada, 2026-11-13: no value measured on our machines and baked in, per profile, OS or build,
+and "citing a number doesn't count as derived; an estimator of what's seen does". One core for every such wait,
 `hex_core::patience::Patience`:
-- **Seed**: before any sample on this node, a wait's bound is twice (`TIMES_SLOWEST`, stated at the code) the
-  slowest answer in that wait's recorded distribution for the host class, from a named record cited at the wait. No
-  calibration read, no unbounded first wait.
-- **Learn**: the bound is twice the larger of the record's slowest and this node's slowest answer, and only rises.
-  A wait that ran out is no sample, nor is a dead or hung seed (Karn's point).
+- **Learned**: once this process has an answer, a wait's bound is the slowest answer it has seen, a running maximum
+  that only rises. A bound `T` costs a call its wait for an answer that never comes, at the rate `p` of those, and a
+  run-out of an answer that would have come, at the rate an answer is slower than `T`, each costing `C > 0`:
+  `E(T) = p·T + (1 − p)·P(answer > T)·C`. The waits census measures `p` at none (an unarmed wait whose answer never
+  came would have held its arm, and every arm of runs 1 to 5 ended), so every bound at or past the slowest answer
+  costs nothing and each one under it costs something, whatever `C`, and the least of the free ones is the slowest
+  answer itself. Nothing is added past it: no bound past the slowest of `n` answers holds whatever their distribution
+  (Wilks, 1941), and the next answer outruns them with chance at most `1 / (n + 1)`.
+- **Following** (the cold start): before a wait's first answer it has no bound and follows its party: it lasts while
+  the party is alive and advancing, and is refused, typed, at the party's death, a reset of its connection, or a stall
+  of its own measured progress, no advance for longer than the longest gap between advances this wait has measured
+  (`patience::Follow`, `Party`, `Stopped`); before it has measured such a gap only the party's end refuses it. The
+  party's liveness is the shell's to read (a pidfd, a process handle, a connection's state) and its progress a count
+  that only rises while it works (its CPU time, bytes sent, entries listed). No time is picked and none is recorded.
+- **After a run-out**: a wait that ran out is no sample (Karn's point), nor is a party taken for dead or hung, and the
+  tail it ran into is unknown, the cold start's case: the next wait follows its party again (`Patience::ran_out`, which
+  tells the census, and `Patience::expired`, which doesn't), its answer comes in uncensored, and the bound rises to it.
+  No factor: RFC 6298's back-off doubles by a cited number, and the following wait measures how long to wait instead.
+  A host slower than any answer seen runs out once and is followed to its answer.
+- **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
+  `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
+  evidence the rule is held to and its falsifier's data, cited here. Two places still break it, owed: the guest's
+  first boot takes records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
+  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation and the first to close,
+  by a dial sliced against the guest's liveness (HEX-GUEST-33); and hex-api's conformance suite, compiled outside
+  `#[cfg(test)]`, seeds `conformance::PATIENCE` and `ENDS` from per-class end records. `Patience::seeded` exists for
+  tests alone (`cfg(test)`, or hex-core's `test-seeds` feature, which only hex-testkit's dependency turns on, a
+  dev-dependency everywhere, as `crates/hex-core/tests/test_seeds_dev_only.rs` holds every manifest to), for the tests'
+  own waits under the lead's rule of 2026-11-08, owed as well. Each owed piece's design, and each shell's progress
+  count for `Follow` (a following wait now waits on its party's end alone), are in
+  `docs/research/runtime/learned-waits.md` ("Owed").
 - **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
   to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
   made); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a
@@ -2456,16 +2485,12 @@ decision covers the node's waits for an answer whose time it can observe (source
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
   the node busy initializing the guest's GPU with most of the boot's 60 s left, and the guest panicked; the relay's
   hello now carries the boot's deadline, `hex guest`.)
-- **Measuring**: where no record exists yet, the wait says so (`Patience::measuring`) and names the record to come;
-  no value is picked. It is never armed: its answers are only recorded, for the census that seeds it, so no first
-  answer becomes its bound.
-- **By build profile**: a wait's record is its build's (`Patience::by_profile`): a release build is seeded from the
-  waits census's release arms, a debug build, the suites', from its debug-build arms (the debug arm and the suites,
-  whose waits run armed under the gates' load), and measures until one records it, since a debug build's answers are
-  slower and the release record isn't theirs.
+- **Measuring**: every production wait is made `Patience::measuring` and follows its party until its first answer;
+  where the census runs, every wait follows (`patience::measure_all`), so the distribution it records keeps its tail.
 
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
-RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
+RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded). Its back-off's factor
+went with the rest on 2026-11-13: a following wait replaces it.
 
 **An available answer at the deadline (AC-T7.4.1, 2026-11-10).** A caller can resume after its deadline with a
 complete reply already queued. The common client already collected decoded mailbox answers before checking
@@ -2487,13 +2512,13 @@ root reconstructed all 513,862 ledger rows and 4,000 unique phase keys/physical 
 closures and checked empty baselines. Native Linux AMD64/root-lab validation remains owed. These are
 functional checks, with no new seed, timing, leak-freedom or performance claim.
 
-| Wait | Was | Now | Seed |
+| Wait | Was | Now | Evidence (its seed until 2026-11-13) |
 | --- | --- | --- | --- |
-| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | the slowest answer seen, following the seed before the first and after a hang (it was 2 × max(record, seen) until 2026-11-13) | the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
 | a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
-| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
-| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned; past it, the holder followed to its let-go (2026-11-13: a refusal there failed HEX-SOCK-6's concurrent changes) | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take; past it, the holder followed to its let-go | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 904.705 ms<!-- /record --> |
 | a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 7,043 ns an entry, debug 137,124 ns<!-- /record --> |
 | a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: the `serve.reads` rows are short of 1,000 samples (only the parts that waited) |
@@ -2501,15 +2526,13 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 | the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 0.454 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
 
 Each row's record is `bench/competitive/probes/waits_census.md`'s rows of the same wait name, from the waits' own
-timing points (`hex_node::census`): a release build's seed the largest max of the release arms of its run 4 (adacachy2,
+timing points (`hex_node::census`): a release build's the largest max of the release arms of its run 4 (adacachy2,
 the record host in fedora's place), a debug build's run 5's largest answer of the debug-build arms, the debug arm and
-the suites (adacachy2), for every wait seeded from the same record, the tests' among them. A wait that ran out for a
-slow answer is no sample but tells the census its bound (`Patience::ran_out`, `name >nanos`), which a record is never
-under (`waits_census.py`'s `seed`), so a censored row's patience doubles each run until nothing runs out: run 5's
-suites ran `node.emptying` out at 255.505 ms under run 3's seed, and `node.listing` at its bound, which its seed now
-is. A seed past its hang bound tells the census nothing: a hung seed says nothing of an answer's time. The exec
-seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
-seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
+the suites (adacachy2). Until 2026-11-13 each seeded its wait; now they are the evidence the rule is held to: the
+census's run-outs (`name >nanos`) and answers say where a node's bound at the slowest it has seen would have run out
+and how often, which the falsifier below reads. A seed past its hang bound tells the census nothing, a hung seed
+saying nothing of an answer's time, but makes the next seed's wait follow it (`Patience::expired`). The exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is seeded from the clone record
+as the create seeds' are; and a create no seed came free for (line full, wait ended) is
 refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
 seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one implementation per job (the lead's
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
@@ -2518,11 +2541,13 @@ for its named consumer alone: a spec a seed can't serve (the classic reasons).
 A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
 the claim borrows the request, whose descriptors stay the runtime's.
 
-**What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
-answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
-node's, and the evidence is the answer times around the refusal, and the census's run-outs. The release and debug
-seeds are adacachy2's; another host class starts from them and learns its own, and a slower class's first answers
-would show the record doesn't carry.
+**What would falsify it.** A healthy node running out more often than the answers it has seen allow (each answer
+outrunning the slowest of `n` with chance at most `1 / (n + 1)`), retiring seeds as hung or refusing calls and record
+writes that would have come: then its answers aren't exchangeable with those before them, and the evidence is the
+answer times around the refusals and the census's run-outs. A following wait refused as stalled while its party went
+on to answer: then the party's progress count misses work it does, and the shell reads the wrong count. A following
+wait held by a party alive and advancing but never answering: then the census's never-answers (`p > 0`, a count it
+owes) and what a run-out costs set the bound under the slowest answer, by the cost above.
 
 ## Axes that can't reach 4x, and why
 

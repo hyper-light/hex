@@ -592,10 +592,12 @@ Hex's tests of the channel, each citing its ID:
   caller's or, with none, the learned bound on a boot to ready from the dial's start; never a relative patience, as
   Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
   (`hex_client::guest::shards::ShardsLink`).
-- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: twice the slowest boot to ready on record before
-  any boot is seen (bench/native/guest/boot-ready/RECORD.md), then twice the slowest of the record's and the
-  node's own, only rising; a guest alive and not ready within it is stopped, counted and booted once more, and
-  only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
+- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: the slowest boot to ready on record before any
+  boot is seen (bench/native/guest/boot-ready/RECORD.md), then the slowest of the record's and the node's own, only
+  rising, with no margin (decision 9 of runtime-architecture.md, 2026-11-13); a guest alive and not ready within it is
+  stopped, counted and booted once more, and only a second hang refuses its caller, by type
+  (`hex_runtime::guest::GuestRuntime`). The record is the build's one remaining read of records.tsv: a first boot that
+  follows the guest's liveness, as decision 9's cold start does, is owed.
 - HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
   learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
 - HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through

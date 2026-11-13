@@ -424,7 +424,8 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
         .into();
     let link = hex_client::guest::own_link(hex_client::guest::shards::ShardsLink::new(
         guest.clone(),
-        2 * hex_runtime::guest::recorded_boot().expect("this host class's boot-to-ready record"),
+        // The first dial's bound as the node gives it before any boot (`first_dial_bound`, decision 9).
+        hex_runtime::guest::recorded_dial_bound().expect("this host class's boot-to-ready record"),
     ))
     .unwrap();
     let client = hex_client::guest::Client::connect(link.clone()).unwrap();
