@@ -82,6 +82,7 @@ fn spec() -> ImageSpec {
             dns: false,
             members: None,
         },
+        credentials: Vec::new(),
         shares: Vec::new(),
         nesting: true,
         ready_by: None,

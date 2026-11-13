@@ -223,6 +223,12 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Plug(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a plug ({cause:?}): {why}"))
         }
+        // Only a room (D241), a rate (D247) or a terminal's resize (D244) is refused so, and this class asks none.
+        ImageRefusal::Room(why) => Refusal::Broken(format!("Shards refused {op} as a room: {why}")),
+        ImageRefusal::Rate(why) => Refusal::Broken(format!("Shards refused {op} as a rate: {why}")),
+        ImageRefusal::Terminal(why) => {
+            Refusal::Broken(format!("Shards refused {op} as a terminal's size: {why}"))
+        }
     }
 }
 
@@ -250,10 +256,10 @@ fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
     Ok(size)
 }
 
-/// What a running VM's usage is, from its run's STATS: CPU, memory, processes and I/O. Guest time per
-/// vCPU awaits Shards ([`Upstream::GuestCpuTimePerVcpu`]), and STATS has no memory peak, OOM kills or
-/// refused forks (docs/design/shards-image-class.md §4).
-fn usage_of(stats: &Stats) -> Result<Usage, Refusal> {
+/// What a running VM's usage is, from its run's STATS: CPU, memory, processes and I/O from its guest's cgroup,
+/// and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). STATS has no memory peak, OOM kills or refused
+/// forks (docs/design/shards-image-class.md §4).
+fn usage_of(stats: &Stats, vcpus: u32) -> Result<Usage, Refusal> {
     let read = |value: Option<u64>, what: &'static str| {
         value.ok_or_else(|| Refusal::Os {
             op: "reading a Shards image VM's stats",
@@ -271,8 +277,50 @@ fn usage_of(stats: &Stats) -> Result<Usage, Refusal> {
             .ok_or_else(|| Refusal::Broken("CPU nanoseconds to microseconds".to_owned()))?,
         io_read_bytes: read(stats.read_bytes, "read")?,
         io_write_bytes: read(stats.write_bytes, "write")?,
-        guest: Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)),
+        guest: Some(GuestTime::PerVcpuNs(per_vcpu(stats, vcpus)?)),
     })
+}
+
+/// What each of the VM's `vcpus` vCPUs has run of its guest, by index, as its run host read it (D241's
+/// `Stats::microvm`, from the VM's `GUEST_TIME`): each only grows. A part the run host did not read is refused naming
+/// why, never read as none (D241): no microVM part, no guest time, a vCPU this read missed (Shards keeps the most it
+/// read before, which no longer says the vCPU's time now), a count other than the VM's size, or time of vCPUs the
+/// VM no longer has, which no vCPU of its size holds.
+fn per_vcpu(stats: &Stats, vcpus: u32) -> Result<Vec<u64>, Refusal> {
+    let unread = |why: String| Refusal::Os {
+        op: "reading a Shards image VM's guest time per vCPU",
+        why,
+    };
+    let microvm = stats
+        .microvm
+        .as_ref()
+        .ok_or_else(|| unread("its run host told nothing of its microVM".to_owned()))?;
+    let times = microvm.guest.as_ref().map_err(|why| unread(why.clone()))?;
+    if times.departed_ns != 0 {
+        return Err(unread(format!(
+            "{} ns ran on vCPUs the VM no longer has",
+            times.departed_ns
+        )));
+    }
+    if u32::try_from(times.vcpus.len()).ok() != Some(vcpus) {
+        return Err(unread(format!(
+            "its run host told {} vCPUs' guest time for a VM of {vcpus} vCPUs",
+            times.vcpus.len()
+        )));
+    }
+    times
+        .vcpus
+        .iter()
+        .zip(0u32..)
+        .map(|(vcpu, index)| match &vcpu.unread {
+            _ if vcpu.index != index => Err(unread(format!(
+                "vCPU {} told where vCPU {index} is",
+                vcpu.index
+            ))),
+            Some(why) => Err(unread(format!("vCPU {index}: {why}"))),
+            None => Ok(vcpu.guest_ns),
+        })
+        .collect()
 }
 
 fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, Refusal> {
@@ -586,6 +634,8 @@ impl GuestRuntime {
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
+            // No credential granted by reference (D242): a box's spec names none.
+            credentials: Vec::new(),
             binary: Some(self.config.binary.clone()),
             env,
         })
@@ -934,7 +984,7 @@ impl GuestRuntime {
         match guest.stats(StatsScope::Run, bound.unwrap_or(Duration::MAX)) {
             Ok(stats) => {
                 waits.stats.answered(asked.elapsed());
-                usage_of(&stats)
+                usage_of(&stats, vm_size(&record.spec)?.vcpus)
             }
             Err(ImageRefusal::Ended(_)) => Err(Refusal::NotRunning(id, "usage")),
             // D231's answer to a stats ask its patience passed, as its client says it.
