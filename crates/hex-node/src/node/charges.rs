@@ -7,9 +7,9 @@
 //! process and OCI box weighs its booking and `.oci` its boxes' weights together, and the fleet's budget is what they
 //! leave, so each child under contention gets at least min(its need, its booking or budget) (`Scale`). A capacity
 //! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be held within
-//! its room: shards-api has no call that sends init's `ROOM` (D188), and no Shards revision keeps its ring pins within
-//! it, so that is refused `Awaits(GuestRoom)` and `Awaits(RingPinsWithinRoom)` while its VMM's `memory.high` holds it
-//! at its budget (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
+//! its room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
+//! VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
+//! D230) (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -17,25 +17,22 @@ use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, BoxInfo, CapacityResources, Learned, LearnedEnd,
-    MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
+    Allocation, Bounds, BoxId, CapacityResources, Learned, MAX_LEARNED_HOLDINGS, Refusal,
+    RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
-use hex_core::record::BoxRecord;
 use hex_runtime::linux::cgroup::BoxCgroup;
-use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
+use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
+use crate::recorded::charges::{LastResort, Scope, write_ends};
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
 pub(super) const WINDOW: Duration = Duration::from_micros(CPU_PERIOD_US);
 
 /// One CPU in milli-CPU, the unit a vCPU and the machine's CPU are counted in.
 const CPU_MILLI: u64 = 1_000;
-
-/// A VM by its native scope: one VM's lifetime.
-type Scope = [u8; 16];
 
 /// What the learner reads and writes of cgroups: the kernel's in the node, a record's in its tests.
 pub(super) trait Cgroups {
@@ -128,33 +125,8 @@ pub(super) struct Learner {
     rooms: BTreeMap<Scope, &'static [Upstream]>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
-    /// The last resort's state (C5).
-    resort: Resort,
-    /// The VMs the last resort ended and why, by class, oldest first: at most `ends` of them, the oldest forgotten
-    /// first, a machine never holding more VMs than its population at once.
-    ended: VecDeque<(Class, LearnedEnd)>,
-    ends: usize,
-    /// The same ends not yet in their boxes' records, oldest first, by box and VM lifetime: the node writes each into
-    /// its record after the window ([`Learner::unrecorded`]) and keeps one whose write failed for the next, at most
-    /// `ends` of them, the oldest forgotten first.
-    unrecorded: VecDeque<(BoxId, Scope, LearnedEnd)>,
-}
-
-/// The last resort's state from window to window (C5), explicit (R04).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Resort {
-    /// What the fleet's VMs hold, with the fastest growth on record in one window, is within its budget.
-    Held,
-    /// It wasn't: the VM `id` held most past its own budget, lowest band first, and its cgroup was killed for `why`.
-    /// None other is ended until its VMM is gone, so one end is never two.
-    Ending {
-        scope: Scope,
-        id: BoxId,
-        why: Excess,
-    },
-    /// It isn't, and the node can't act: every VM holds within its own budget, growth being no fact yet, or ending
-    /// the VM the rule chose was refused. Kept until a window moves it.
-    Refused(Refusal),
+    /// The last resort (C5), which ends a VM by killing its cgroup.
+    last: LastResort,
 }
 
 /// The most VMs a machine of `machine` could hold, each at least the least reservation placement takes
@@ -214,53 +186,15 @@ fn budget_of(max: Option<&str>, machine: u64) -> u64 {
 }
 
 /// What holding a VM's guest within its room awaits (C7): a Shards guest needs shards-api to send init's `ROOM`
-/// (D188), which it can't yet, and its ring pins (D230's long-term pinned slots, which its init makes on its own) kept
-/// within that room, which p/ring-pins-v1's room-bounded pins don't do yet; a Firecracker guest has no room to be told
-/// and no ring, its VMM's cgroup alone holding it.
+/// (D188), which it can't yet. Its ring pins (D230's long-term pinned slots, which its init makes on its own) come out of
+/// whatever room init is told, or of the guest's available memory where it is told none: Shards' ring-pins-v1, which
+/// Hex vendors at 66113379, so they await nothing more. A Firecracker guest has no room to be told and no ring, its
+/// VMM's cgroup alone holding it.
 fn room_awaits(class: Class) -> &'static [Upstream] {
     match class {
-        Class::Shards => &[Upstream::GuestRoom, Upstream::RingPinsWithinRoom],
+        Class::Shards => &[Upstream::GuestRoom],
         _ => &[],
     }
-}
-
-/// What moving a VM of `class` to another machine instead of ending it awaits, where that move is another product's
-/// (C5): a Shards VM saved whole and resumed elsewhere is Shards' D176, in progress. A Firecracker VM's move would be
-/// Hex's own, through Firecracker's snapshot, which Hex doesn't drive yet: none to await.
-fn move_awaits(class: Class) -> Option<Upstream> {
-    match class {
-        Class::Shards => Some(Upstream::LiveMove),
-        _ => None,
-    }
-}
-
-/// A VM box's inspect from its backend, with why the last resort ended it where its record says so (C5), across the
-/// node's restarts.
-pub(super) fn with_last_resort(info: &mut BoxInfo, record: &BoxRecord) -> Result<(), Refusal> {
-    info.last_resort = record
-        .last_resort
-        .as_ref()
-        .map(LearnedEnd::try_clone)
-        .transpose()?;
-    Ok(())
-}
-
-/// Writes why the last resort ended VM `id` into its record in `store`, where the record is still that VM's lifetime
-/// (`scope`): false where none is, the box deleted since or made again.
-pub(super) fn record_last_resort(
-    store: &crate::store::Store,
-    id: &BoxId,
-    scope: Scope,
-    end: &LearnedEnd,
-) -> Result<bool, Refusal> {
-    let end = end.try_clone()?;
-    store.update(id, move |record| {
-        if record.native_scope.as_ref().map(|s| *s.bytes()) != Some(scope) {
-            return false;
-        }
-        record.last_resort = Some(end);
-        true
-    })
 }
 
 /// One of the node's process or OCI boxes, as its cgroup books it (C4).
@@ -408,10 +342,7 @@ impl Learner {
             oci: root.join(super::OCI_BOXES),
             rooms: BTreeMap::new(),
             fault: None,
-            resort: Resort::Held,
-            ended: VecDeque::new(),
-            ends: bound.min(MAX_LEARNED_HOLDINGS),
-            unrecorded: VecDeque::new(),
+            last: LastResort::new(bound.min(MAX_LEARNED_HOLDINGS)),
         })
     }
 
@@ -545,89 +476,30 @@ impl Learner {
         Ok(())
     }
 
-    /// The last resort (C5), once the placement holds what it can: while a VM it ended still runs, nothing more, so one
-    /// end is never two; else the core's verdict, the VM it chooses ended by killing its cgroup and why recorded, or
-    /// refused, typed, where the node can't act.
+    /// The last resort (C5), once the placement holds what it can: the VM the core's verdict chooses ended by killing
+    /// its cgroup, as `LastResort` holds one end at a time.
     fn last_resort(&mut self, io: &impl Cgroups) -> Result<(), Refusal> {
-        if let Resort::Ending { scope, .. } = &self.resort
-            && self.vms.contains_key(scope)
-        {
-            return Ok(());
-        }
-        self.resort = match self.node.last_resort().map_err(refused)? {
-            charge::Resort::Held => Resort::Held,
-            charge::Resort::Within(fleet) => Resort::Refused(Refusal::Exhausted {
-                what: "a microVM fleet's memory budget, every VM within its own",
-                bound: usize::try_from(fleet.budget).unwrap_or(usize::MAX),
-            }),
-            charge::Resort::End { vm: scope, why } => {
-                let vm = self.vms.get(&scope).ok_or_else(|| {
+        let vms = &self.vms;
+        self.last.window(
+            &self.node,
+            |scope| vms.get(scope).map(|vm| (vm.class, &vm.id)),
+            |scope| {
+                let vm = vms.get(scope).ok_or_else(|| {
                     Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
                 })?;
-                let (class, id, cgroup) = (vm.class, vm.id.try_clone()?, vm.cgroup.clone());
-                match io.kill(&cgroup) {
-                    Ok(()) => {
-                        self.record_end(class, &id, scope, why)?;
-                        Resort::Ending { scope, id, why }
-                    }
-                    Err(refusal) => Resort::Refused(refusal),
-                }
-            }
-        };
-        Ok(())
-    }
-
-    /// Keeps why the last resort ended the VM `id` of lifetime `scope`, for its class's capacity answers and for its
-    /// box's record, forgetting the oldest end past the bound.
-    fn record_end(
-        &mut self,
-        class: Class,
-        id: &BoxId,
-        scope: Scope,
-        why: Excess,
-    ) -> Result<(), Refusal> {
-        let end = LearnedEnd {
-            id: id.try_clone()?,
-            held: why.held,
-            budget: why.budget,
-            band: why.band,
-            fleet_held: why.fleet.held,
-            fleet_growth: why.fleet.growth,
-            fleet_budget: why.fleet.budget,
-            unmoved: move_awaits(class),
-        };
-        let bound = self.ends;
-        let full = |what| Refusal::Exhausted { what, bound };
-        if self.ended.len() >= bound {
-            self.ended.pop_front();
-        }
-        if self.unrecorded.len() >= bound {
-            self.unrecorded.pop_front();
-        }
-        self.ended
-            .try_reserve(1)
-            .map_err(|_| full("the last resort's ends"))?;
-        self.unrecorded
-            .try_reserve(1)
-            .map_err(|_| full("the last resort's unrecorded ends"))?;
-        self.unrecorded
-            .push_back((id.try_clone()?, scope, end.try_clone()?));
-        self.ended.push_back((class, end));
-        Ok(())
+                io.kill(&vm.cgroup)
+            },
+        )
     }
 
     /// Takes the ends not yet in their boxes' records, oldest first (C5).
-    pub(super) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, LearnedEnd)> {
-        std::mem::take(&mut self.unrecorded)
+    pub(super) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, hex_api::LearnedEnd)> {
+        self.last.unrecorded()
     }
 
-    /// Keeps `left`, ends whose record writes failed, for the next window, before any made since and within the bound.
-    pub(super) fn keep_unrecorded(&mut self, mut left: VecDeque<(BoxId, Scope, LearnedEnd)>) {
-        left.append(&mut self.unrecorded);
-        while left.len() > self.ends {
-            left.pop_front();
-        }
-        self.unrecorded = left;
+    /// Keeps `left`, ends whose record writes failed, for the next window (C5).
+    pub(super) fn keep_unrecorded(&mut self, left: VecDeque<(BoxId, Scope, hex_api::LearnedEnd)>) {
+        self.last.keep_unrecorded(left);
     }
 
     /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets within the
@@ -734,23 +606,14 @@ impl Learner {
                 vms.push((*scope, &vm.id, vm.receipt));
             }
         }
-        let mut ended = Vec::new();
-        for (of, end) in self.ended.iter().rev() {
-            if *of == class {
-                ended.try_reserve(1).map_err(|_| Refusal::Exhausted {
-                    what: "a class's learned ends",
-                    bound: self.ends,
-                })?;
-                ended.push(end.try_clone()?);
-            }
-        }
-        crate::recorded::charges::learned(&self.node, class, costs, vms, ended).map(Some)
+        crate::recorded::charges::learned(&self.node, class, costs, vms, self.last.ended(class)?)
+            .map(Some)
     }
 
     /// The last resort's state (C5).
     #[cfg(test)]
-    fn resort(&self) -> &Resort {
-        &self.resort
+    fn resort(&self) -> &crate::recorded::charges::Resort {
+        self.last.resort()
     }
 
     /// The capability each guest's room awaits, by its box (C7).
@@ -802,22 +665,13 @@ impl Node {
         let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
-        let mut ends = learner.unrecorded();
+        let ends = learner.unrecorded();
         drop(learner);
-        let mut failed = None;
-        ends.retain(
-            |(id, scope, end)| match record_last_resort(&self.store, id, *scope, end) {
-                Ok(_) => false,
-                Err(why) => {
-                    failed.get_or_insert(why);
-                    true
-                }
-            },
-        );
+        let (left, failed) = write_ends(&self.store, ends);
         if let Some(why) = failed
             && let Ok(mut learner) = shared.lock()
         {
-            learner.keep_unrecorded(ends);
+            learner.keep_unrecorded(left);
             learner.failed(why);
         }
     }

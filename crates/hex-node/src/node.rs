@@ -960,7 +960,7 @@ impl Node {
                 return Err(backends::uncertain(id));
             }
             info.adopted = adopted;
-            charges::with_last_resort(&mut info, record)?;
+            crate::recorded::charges::with_last_resort(&mut info, record)?;
             return Ok(info);
         }
         let state = match record.spec.class {
