@@ -2447,6 +2447,22 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.member(id, member)
     }
 
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.runtime_at(id)?.room(id, room)
+    }
+
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.runtime_at(id)?.rate(id, rate)
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        self.runtime_at(id)?.host_use(id)
+    }
+
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         self.runtime
             .list()?
