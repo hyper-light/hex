@@ -626,6 +626,7 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
         Err(Refusal::Backing {
             key: offer.key,
             cause: LifecycleCause::Retired,
+            why: None,
         })
     );
     let kept = Transaction::read(owner.as_ref(), &id).unwrap().unwrap();
@@ -1192,7 +1193,7 @@ fn shared_index_ack_preserves_references_and_refuses_a_stale_generation() {
         )),
     );
     assert!(
-        matches!(runtime.release_backing(original.key), Err(Refusal::Backing { key, cause: LifecycleCause::Busy }) if key == original.key)
+        matches!(runtime.release_backing(original.key), Err(Refusal::Backing { key, cause: LifecycleCause::Busy, why: None }) if key == original.key)
     );
     assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
     assert_eq!(owner.row().key, original.key);

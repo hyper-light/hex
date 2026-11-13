@@ -154,6 +154,7 @@ impl Scope {
                     generation: *self.scope.bytes(),
                 },
                 cause: LifecycleCause::Uncertain,
+                why: None,
             },
         }
     }
