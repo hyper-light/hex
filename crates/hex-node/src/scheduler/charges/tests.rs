@@ -92,6 +92,10 @@ fn w14_the_scheduler_takes_the_priors_its_nodes_learner_carries() {
         Some(Prior {
             profile: [14; 32],
             booking,
+            ceiling: cost()
+                .allocate(CapacityResources::default())
+                .unwrap()
+                .resources,
         })
     );
     assert_eq!(local.capacity, node().capacity);

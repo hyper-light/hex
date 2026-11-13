@@ -280,9 +280,11 @@ reaches the view settled with goal 13 the same day:
 - `hex_api::Allocation::booked` is what a receipt booked; `Allocation::booking()` is what the ledger holds, and
   `RuntimeCost::allocate` books it whole. The node socket's wire carries it after the cost, and the peers' text
   receipt as `a2:` (an unbooked one stays `a1:`, so records written before still read).
-- `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers. The placement index books a
-  new VM's receipt at its node's prior (`model::booked_at`); a receiver admits an owner's receipt as it was booked,
-  comparing charges with the booking aside (`model::same_charge`), so a stale view is never refused for it.
+- `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers: its profile, its ceiling and
+  what a new VM of them is booked at. The placement index books a new VM's receipt at its node's prior where the
+  receipt is of the prior's class, its profile and its ceiling (`model::booked_at`), so a VM of a size none has warmed
+  for is booked whole (C2); a receiver admits an owner's receipt as it was booked, comparing charges with the booking
+  aside (`model::same_charge`), so a stale view is never refused for it.
 - The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
   cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
