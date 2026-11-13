@@ -14,6 +14,11 @@ fn box_of(holder: &hex_api::LearnedHolder) -> &str {
     }
 }
 
+/// `records` as the holders a learner reads.
+fn holders(records: &[BoxRecord]) -> Vec<Holder<'_>> {
+    boxes(records).unwrap()
+}
+
 const GIB: u64 = 1 << 30;
 
 fn res(cpu_milli: u64, mem_bytes: u64) -> CapacityResources {
@@ -104,7 +109,8 @@ struct Record {
 }
 
 impl Managed for Record {
-    fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+    fn usage(&self, holder: Holder<'_>) -> Result<Usage, Refusal> {
+        let Holder::Box(record) = holder;
         self.usage
             .borrow()
             .get(record.spec.id.as_str())
@@ -112,7 +118,8 @@ impl Managed for Record {
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
     }
 
-    fn host_use(&self, record: &BoxRecord) -> Result<HostUse, Refusal> {
+    fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal> {
+        let Holder::Box(record) = holder;
         self.host
             .borrow()
             .get(record.spec.id.as_str())
@@ -120,7 +127,8 @@ impl Managed for Record {
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
     }
 
-    fn rate_period(&self, record: &BoxRecord) -> Result<Option<Duration>, Refusal> {
+    fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal> {
+        let Holder::Box(record) = holder;
         if self
             .unread_periods
             .borrow()
@@ -141,14 +149,16 @@ impl Managed for Record {
         ))
     }
 
-    fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
+    fn set_room(&self, holder: Holder<'_>, room: i64) -> Result<(), Refusal> {
+        let Holder::Box(record) = holder;
         self.rooms
             .borrow_mut()
             .push((record.spec.id.as_str().to_owned(), room));
         Ok(())
     }
 
-    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
+    fn set_rate(&self, holder: Holder<'_>, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
+        let Holder::Box(record) = holder;
         if self.refuse_rates.get() {
             return Err(Refusal::Broken("the rate was refused".into()));
         }
@@ -163,7 +173,8 @@ impl Managed for Record {
             .unwrap_or(hex_api::RateHeld::Governor))
     }
 
-    fn stop(&self, record: &BoxRecord) -> Result<(), Refusal> {
+    fn stop(&self, holder: Holder<'_>) -> Result<(), Refusal> {
+        let Holder::Box(record) = holder;
         self.stops
             .borrow_mut()
             .push(record.spec.id.as_str().to_owned());
@@ -173,8 +184,10 @@ impl Managed for Record {
         Ok(())
     }
 
-    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
-        self.events.borrow_mut().push(format!("intend {id}"));
+    fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        self.events
+            .borrow_mut()
+            .push(format!("intend {}", box_of(id)));
         match self.records.borrow().as_ref() {
             Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
@@ -215,7 +228,7 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
         *io.rates.borrow(),
         vec![
@@ -229,7 +242,9 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
     io.set("vm-1", 2_400_000, GIB);
     io.set("vm-2", 300_000, GIB);
     io.set("vm-3", 600_000, GIB);
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(
         *io.rates.borrow(),
         vec![
@@ -248,7 +263,7 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
     io.set("vm-2", 300_000 + 300_000, GIB);
     io.set("vm-3", 600_000 + 600_000, GIB);
     learner
-        .window(&io, &vms, budget, start + WINDOW * 2)
+        .window(&io, &holders(&vms), budget, start + WINDOW * 2)
         .unwrap();
     assert!(io.rates.borrow().is_empty(), "{:?}", io.rates.borrow());
     assert!(matches!(
@@ -275,19 +290,21 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     io.refuse_rates.set(true);
     let start = Instant::now();
     assert_eq!(
-        learner.window(&io, &vms, res(24_000, 64 * GIB), start),
+        learner.window(&io, &holders(&vms), res(24_000, 64 * GIB), start),
         Err(Refusal::Broken("the rate was refused".into()))
     );
     assert_eq!(
-        learner.learned(Class::Shards, &[cost()], &vms).unwrap(),
+        learner
+            .learned(Class::Shards, &[cost()], &holders(&vms))
+            .unwrap(),
         None
     );
     io.refuse_rates.set(false);
     learner
-        .window(&io, &vms, res(24_000, 64 * GIB), start + WINDOW)
+        .window(&io, &holders(&vms), res(24_000, 64 * GIB), start + WINDOW)
         .unwrap();
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     assert_eq!(learned.used.booked, res(8_000, 8 * GIB));
@@ -362,19 +379,21 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
     let budget = res(24_000, 16 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
         io.set(name, 0, held);
     }
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
     assert!(
-        matches!(learner.last.resort(), Resort::Ending { id, .. } if id.as_str() == "vm-2"),
+        matches!(learner.last.resort(), Resort::Ending { id, .. } if box_of(id) == "vm-2"),
         "{:?}",
         learner.last.resort()
     );
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     let ends: Vec<_> = learned
@@ -401,12 +420,12 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
         )]
     );
     learner
-        .window(&io, &vms, budget, start + WINDOW * 2)
+        .window(&io, &holders(&vms), budget, start + WINDOW * 2)
         .unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
     let left = vec![vm("vm-1", 1), vm("vm-3", 3)];
     learner
-        .window(&io, &left, budget, start + WINDOW * 3)
+        .window(&io, &holders(&left), budget, start + WINDOW * 3)
         .unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "never a VM within its budget");
     assert!(
@@ -447,7 +466,7 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
     let budget = res(24_000, 16 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [
         ("vm-first", 7 * GIB),
         ("vm-second", 7 * GIB),
@@ -455,10 +474,12 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
     ] {
         io.set(name, 0, held);
     }
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-second"]);
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -574,7 +595,7 @@ fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
             .last
             .record_end(
                 class,
-                &id,
+                &LearnedHolder::Box(id),
                 Scope::Native([u8::try_from(n).unwrap(); 16]),
                 why(n * GIB),
             )
@@ -628,11 +649,13 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
     let budget = res(24_000, 16 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(name, 0, held);
     }
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
     let events = io.events.take();
     // The crash: the learner and its store go with the node, the window's writes unmade.
@@ -676,7 +699,15 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
         fleet_budget: 16 * GIB,
         unmoved: Some(hex_api::Upstream::LiveMove),
     };
-    assert!(record_last_resort(&store, &made[1].spec.id, scope, Some(&intent)).unwrap());
+    assert!(
+        record_last_resort(
+            &store,
+            &LearnedHolder::Box(made[1].spec.id.clone()),
+            scope,
+            Some(&intent)
+        )
+        .unwrap()
+    );
     let vms: Vec<BoxRecord> = made
         .iter()
         .map(|record| store.get(&record.spec.id).unwrap().unwrap().unwrap())
@@ -688,14 +719,16 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
     let budget = res(24_000, 16 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     assert_eq!(learned.ended, vec![intent]);
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
 }
 
@@ -726,13 +759,23 @@ fn w14_a_capping_learner_holds_its_machines_population_of_vms_of_as_many_classes
     let mut learner = Learner::new(Some(WINDOW), machine).unwrap();
     let start = Instant::now();
     learner
-        .window(&io, &[one, two.clone()], machine, start)
+        .window(&io, &holders(&[one, two.clone()]), machine, start)
         .unwrap();
     learner
-        .window(&io, &[two.clone(), three.clone()], machine, start + WINDOW)
+        .window(
+            &io,
+            &holders(&[two.clone(), three.clone()]),
+            machine,
+            start + WINDOW,
+        )
         .unwrap();
     assert_eq!(
-        learner.window(&io, &[two, three, four], machine, start + WINDOW * 2),
+        learner.window(
+            &io,
+            &holders(&[two, three, four]),
+            machine,
+            start + WINDOW * 2
+        ),
         Err(Refusal::Exhausted {
             what: "a node's VMs",
             bound: 2
@@ -770,17 +813,13 @@ fn w14_the_last_resorts_queues_are_kept_to_its_bound() {
         })
     );
     for n in 1..=3 {
-        last.write(
-            super::boxed(&end(n)).unwrap(),
-            Scope::Native([n; 16]),
-            Some(end(n)),
-        )
-        .unwrap();
+        last.write(end(n).id, Scope::Native([n; 16]), Some(end(n)))
+            .unwrap();
     }
     let kept: Vec<String> = last
         .unrecorded()
         .into_iter()
-        .map(|(id, _, _)| id.as_str().to_owned())
+        .map(|(id, _, _)| box_of(&id).to_owned())
         .collect();
     assert_eq!(kept, ["vm-2", "vm-3"]);
 }
@@ -832,7 +871,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
-        .window(&io, std::slice::from_ref(&vm), budget, start)
+        .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
         .unwrap();
     assert_eq!(
         *io.rates.borrow(),
@@ -844,7 +883,12 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         use_at(3_200_000_000, 150_000_000, 16, 3 * GIB),
     );
     learner
-        .window(&io, std::slice::from_ref(&vm), budget, start + WINDOW)
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&vm)),
+            budget,
+            start + WINDOW,
+        )
         .unwrap();
     assert_eq!(*io.rates.borrow(), vec![("img-1".to_owned(), 10_667)]);
     assert_eq!(
@@ -859,7 +903,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         use_at(3_500_000_000, 160_000_000, 15, 3 * GIB),
     );
     assert!(matches!(
-        learner.window(&io, &[vm], budget, start + WINDOW * 2),
+        learner.window(&io, &holders(&[vm]), budget, start + WINDOW * 2),
         Err(Refusal::Invalid { why, .. }) if why.contains("vCPU count")
     ));
 }
@@ -882,7 +926,7 @@ fn w14_a_census_free_class_starts_cold_and_learns_its_vmm_overhead() {
     let envelope = res(16_000, 8 * GIB);
     let ceilings = |learner: &Learner| {
         learner
-            .learned(Class::Shards, &[cost()], records)
+            .learned(Class::Shards, &[cost()], &holders(records))
             .unwrap()
             .unwrap()
             .ceilings
@@ -897,10 +941,12 @@ fn w14_a_census_free_class_starts_cold_and_learns_its_vmm_overhead() {
     );
     let start = Instant::now();
     let budget = res(24_000, 64 * GIB);
-    learner.window(&io, records, budget, start).unwrap();
+    learner
+        .window(&io, &holders(records), budget, start)
+        .unwrap();
     io.set("vm-1", 300_000, 8 * GIB + (300 << 20));
     learner
-        .window(&io, records, budget, start + WINDOW)
+        .window(&io, &holders(records), budget, start + WINDOW)
         .unwrap();
     let lifetime = learner.vms.get(&Scope::Native([1; 16])).unwrap().lifetime;
     assert_eq!(
@@ -941,7 +987,12 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     learner
-        .window(&io, &records, res(24_000, 64 * GIB), Instant::now())
+        .window(
+            &io,
+            &holders(&records),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
         .unwrap();
     let mut capacity = hex_api::Capacity {
         own: Default::default(),
@@ -958,7 +1009,11 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         node_vms: Vec::new(),
     };
     learner
-        .answer(Class::Shards, &mut capacity, &records)
+        .answer(
+            Class::Shards,
+            &mut capacity,
+            records.iter().map(Holder::Box),
+        )
         .unwrap();
     let mut held: Vec<String> = capacity
         .learned
@@ -1010,14 +1065,15 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
         sorted
             .learned
             .iter()
-            .map(|r| r.spec.id.as_str().to_owned())
+            .map(|holder| box_of(&holder.id().unwrap()).to_owned())
             .collect()
     };
-    let unmanaged = sort(records(), |_| false).unwrap();
+    let records = records();
+    let unmanaged = sort(&records, |_| false).unwrap();
     assert_eq!(ids(&unmanaged), ["img-1"]);
     assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
     assert_eq!(unmanaged.native, res(2_000, GIB));
-    let both = sort(records(), |_| true).unwrap();
+    let both = sort(&records, |_| true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
@@ -1060,7 +1116,7 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
-        .window(&io, &[short.clone(), long], budget, start)
+        .window(&io, &holders(&[short.clone(), long]), budget, start)
         .unwrap();
     assert_eq!(
         learner.next_window(),
@@ -1070,7 +1126,7 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
     learner
         .window(
             &io,
-            std::slice::from_ref(&short),
+            &holders(std::slice::from_ref(&short)),
             budget,
             start + Duration::from_millis(500),
         )
@@ -1086,7 +1142,7 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
     learner
         .window(
             &io,
-            std::slice::from_ref(&short),
+            &holders(std::slice::from_ref(&short)),
             budget,
             start + Duration::from_millis(800),
         )
@@ -1278,15 +1334,15 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
         *io.rates.borrow(),
         vec![("vm-1".to_owned(), 4_000), ("vm-2".to_owned(), 4_000)]
     );
-    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| id.as_str()).collect();
+    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| box_of(id)).collect();
     assert_eq!(unread, ["vm-3"]);
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     let held: Vec<&str> = learned
@@ -1300,7 +1356,9 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     assert!(!held.contains(&"vm-3"), "{held:?}");
     io.rates.borrow_mut().clear();
     io.set("vm-3", 0, GIB);
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert!(learner.unread().is_empty());
     let caps: Vec<u64> = vms
         .iter()
@@ -1331,7 +1389,7 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
         *io.rates.borrow(),
         vec![("img-1".to_owned(), 4_000), ("img-2".to_owned(), 4_000)]
@@ -1339,7 +1397,7 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
     let unread: Vec<(&str, String)> = learner
         .unread()
         .iter()
-        .map(|(id, why)| (id.as_str(), why.to_string()))
+        .map(|(id, why)| (box_of(id), why.to_string()))
         .collect();
     assert_eq!(unread.len(), 1, "{unread:?}");
     assert!(
@@ -1349,7 +1407,7 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
         "{unread:?}"
     );
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     let held: Vec<&str> = learned
@@ -1363,7 +1421,9 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
     assert!(!held.contains(&"img-3"), "{held:?}");
     io.rates.borrow_mut().clear();
     io.unread_periods.borrow_mut().clear();
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert!(learner.unread().is_empty());
     let caps: Vec<u64> = vms
         .iter()
@@ -1388,12 +1448,14 @@ fn w14_d255_a_managed_vms_governor_period_is_the_learners_window() {
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
-    learner.window(&io, &vms, budget, start).unwrap();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(learner.next_window(), Some(Duration::from_millis(500)));
     io.governed
         .borrow_mut()
         .insert("vm-1".to_owned(), Duration::from_millis(200));
-    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
     assert_eq!(learner.next_window(), Some(WINDOW));
 }
 
@@ -1419,10 +1481,12 @@ fn w14_d255_what_holds_each_managed_vms_rate_is_told_on_its_classs_capacity_answ
         .insert("vm-3".to_owned(), hex_api::RateHeld::GovernorUnderJob);
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
-    learner.window(&io, &vms, budget, Instant::now()).unwrap();
+    learner
+        .window(&io, &holders(&vms), budget, Instant::now())
+        .unwrap();
     assert_eq!(io.rates.borrow().len(), 3, "{:?}", io.rates.borrow());
     let learned = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     let told: Vec<(&str, &hex_api::RateHeld)> = learned
@@ -1467,16 +1531,16 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
         hex_api::RateHeld::Platform(unsupported.clone()),
     );
     let mut learner = Learner::new(None, res(32_000, 64 * GIB)).unwrap();
-    learner.govern(&io, &vms).unwrap();
+    learner.govern(&io, &holders(&vms)).unwrap();
     assert_eq!(
         *io.rates.borrow(),
         vec![("vm-1".to_owned(), 16_000), ("vm-2".to_owned(), 16_000)]
     );
-    let sorted = sort(vms.clone(), |record| learner.learns(record)).unwrap();
-    let learned: Vec<&str> = sorted
+    let sorted = sort(&vms, |holder| learner.learns(holder)).unwrap();
+    let learned: Vec<String> = sorted
         .learned
         .iter()
-        .map(|record| record.spec.id.as_str())
+        .map(|holder| box_of(&holder.id().unwrap()).to_owned())
         .collect();
     assert_eq!(learned, ["vm-1"]);
     assert_eq!(sorted.whole.cpu_milli, 16_000, "the second's receipt");
@@ -1491,7 +1555,7 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
     );
     assert_eq!(learner.next_window(), Some(Duration::from_millis(100)));
     let answer = learner
-        .learned(Class::Shards, &[cost()], &vms)
+        .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
     let told: Vec<(&str, &hex_api::RateHeld)> = answer
