@@ -392,6 +392,8 @@ enum Duty {
     Deadline(Deadline),
     /// Enable the controllers the node's boxes are bounded by, at the root of the hierarchy init sees.
     Controllers,
+    /// Find `/init` itself, which the node and the relay are run as, through `/proc/self/exe`.
+    FindExe,
     /// Write the GPU catalog the kernel's command line grants ([`hex_runtime::guest::gpu::initialize`]).
     GpuAuthority,
     /// Give the node its descriptor limit ([`give_descriptors`]).
@@ -404,6 +406,27 @@ enum Duty {
     Notify(PathBuf),
     /// Say the guest is ready, reap every process that ends until the node or the relay does, then end as it says.
     Serve(End),
+}
+
+impl Duty {
+    /// Whether it reads the kernel's `/proc`, mounted before it: by init's own Mount duty as the VM's init, by its
+    /// service manager under one. Leaving the initramfs reads `/proc/self/mountinfo` through a `/proc` it mounts and
+    /// unmounts itself.
+    fn reads_proc(&self) -> bool {
+        matches!(
+            self,
+            Duty::KernelShares
+                | Duty::Deadline(Deadline::Kernel)
+                | Duty::FindExe
+                | Duty::GpuAuthority
+                | Duty::Descriptors
+        )
+    }
+
+    /// Whether it mounts `/proc` for the duties after it.
+    fn mounts_proc(&self) -> bool {
+        matches!(self, Duty::Mount(mounts) if mounts.iter().any(|m| m.fs == "proc"))
+    }
 }
 
 /// Where init takes the boot's deadline from.
@@ -432,6 +455,7 @@ enum End {
 fn duties(host: &Host) -> Vec<Duty> {
     match host {
         Host::Kernel => vec![
+            Duty::FindExe,
             Duty::LeaveInitramfs,
             Duty::Mount(mounts().to_vec()),
             Duty::Dirs(&[RUN, STATE, BOX_ROOT]),
@@ -445,6 +469,7 @@ fn duties(host: &Host) -> Vec<Duty> {
             Duty::Serve(End::PowerOff),
         ],
         Host::Manager { notify, ready_by } => vec![
+            Duty::FindExe,
             Duty::Mount(node_tmpfs().to_vec()),
             Duty::Dirs(&[CHANNEL, BOX_ROOT]),
             Duty::Deadline(Deadline::Told(*ready_by)),
@@ -506,9 +531,8 @@ fn init() -> Result<(), (u8, String)> {
         .and_then(|t| t.parse::<u128>().ok())
         .unwrap_or_else(boottime_ns);
     let host = host(|name| std::env::var_os(name)).map_err(fail)?;
-    let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let mut boot = Boot {
-        exe,
+        exe: None,
         t0,
         mounted: t0,
         node_ready: t0,
@@ -524,8 +548,8 @@ fn init() -> Result<(), (u8, String)> {
 
 /// What init's duties hand on to later ones as it boots.
 struct Boot {
-    /// `/init`, which runs the node and the relay.
-    exe: PathBuf,
+    /// `/init`, which runs the node and the relay, once its FindExe duty has found it.
+    exe: Option<PathBuf>,
     /// The boot split's stamps on the guest's clock: init's first entry, its mounts done, its node ready.
     t0: u128,
     mounted: u128,
@@ -567,6 +591,11 @@ impl Boot {
                 self.mounted = boottime_ns();
                 Ok(())
             }
+            Duty::FindExe => {
+                let exe = std::env::current_exe().map_err(|e| format!("finding /init: {e}"))?;
+                self.exe = Some(exe);
+                Ok(())
+            }
             // AC-T7.4.1: only immutable host boot authority can materialize the selected renderer's
             // guest catalog; do this before the node reads its configured attachment routes.
             Duty::GpuAuthority => hex_runtime::guest::gpu::initialize(Path::new(STATE))
@@ -599,9 +628,13 @@ impl Boot {
 
     /// Starts the node, then the relay listening `on` it, each within the boot's deadline.
     fn start_node_and_relay(&mut self, on: &On) -> Result<(), String> {
+        let exe = self
+            .exe
+            .clone()
+            .ok_or_else(|| "starting the node before init found itself".to_owned())?;
         let socket = Path::new(RUN).join("node.sock");
         let node = start(
-            &self.exe,
+            &exe,
             &[
                 "node".as_ref(),
                 "--socket".as_ref(),
@@ -628,7 +661,7 @@ impl Boot {
             On::Unix(dir) => args.extend(["--unix".as_ref(), dir.as_os_str()]),
         }
         let relay = start(
-            &self.exe,
+            &exe,
             &args,
             "ready\n",
             Some(format!("{} {} {}", self.t0, self.mounted, self.node_ready)),
@@ -1627,6 +1660,7 @@ mod tests {
                 Duty::Dirs(&[CHANNEL, BOX_ROOT]),
                 Duty::Deadline(Deadline::Told(Some(4_200_000_000))),
                 Duty::Controllers,
+                Duty::FindExe,
                 Duty::Start(On::Unix(PathBuf::from(CHANNEL))),
                 Duty::Notify(PathBuf::from("/run/shards/notify")),
                 Duty::Serve(End::Exit),
@@ -1685,12 +1719,41 @@ mod tests {
                 Duty::KernelShares,
                 Duty::Deadline(Deadline::Kernel),
                 Duty::Controllers,
+                Duty::FindExe,
                 Duty::GpuAuthority,
                 Duty::Descriptors,
                 Duty::Start(On::Vsock),
                 Duty::TellFirecracker,
                 Duty::Serve(End::PowerOff),
             ]
+        );
+    }
+
+    /// AC-T7.4.1, joint plan step 39 (original): the VM's own init found itself through `/proc/self/exe` before it had
+    /// mounted `/proc`, and died: "hex guest: finding /init: no /proc/self/exe available. Is /proc mounted?", then
+    /// "Kernel panic - not syncing: Attempted to kill init!" (guest_cost on KVM, adacachy2, main 7095f460; 219a8844
+    /// resolved it ahead of every duty). Do: walk each host's duties in order. Expect: as the VM's init, no duty reads
+    /// `/proc` before the duty that mounts it; under shards-init, whose `/proc` is its manager's, no duty mounts it.
+    #[test]
+    fn original_as_the_vms_init_nothing_reads_proc_before_it_is_mounted() {
+        let mut mounted = false;
+        for duty in duties(&Host::Kernel) {
+            assert!(
+                mounted || !duty.reads_proc(),
+                "{duty:?} reads /proc before init mounts it"
+            );
+            mounted |= duty.mounts_proc();
+        }
+        assert!(mounted, "the VM's init mounts no /proc");
+        let manager = Host::Manager {
+            notify: PathBuf::from("/run/shards/notify"),
+            ready_by: None,
+        };
+        let duties = duties(&manager);
+        assert!(duties.iter().any(Duty::reads_proc));
+        assert!(
+            !duties.iter().any(Duty::mounts_proc),
+            "init mounts a /proc over its manager's"
         );
     }
 
