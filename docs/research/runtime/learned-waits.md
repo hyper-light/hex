@@ -73,6 +73,7 @@ is wired:
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
+| `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
 
