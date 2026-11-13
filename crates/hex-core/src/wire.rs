@@ -63,6 +63,12 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 /// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
 /// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
 /// Two builds talk only when theirs are the same.
+// Its evaluation visits each byte of its sources once, so their length bounds it. rustc's long_running_const_eval lint
+// takes an evaluation that long for one that may never end: on a CRLF checkout (git's core.autocrlf, on by default on
+// Windows) the loop visits every carriage return it skips too, and at main a8f6bfe4 jupiter's 673,005 bytes of
+// sources tripped it, so hex-core didn't build there; LF checkouts are close behind. The lint's own note names this
+// remedy for an evaluation long by design: allowing it here.
+#[allow(long_running_const_eval)]
 pub const IDENTITY: u64 = identity(&[
     include_bytes!("wire.rs"),
     include_bytes!("stream.rs"),
