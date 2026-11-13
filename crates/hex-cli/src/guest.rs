@@ -408,6 +408,7 @@ enum Duty {
     Serve(End),
 }
 
+#[cfg(test)]
 impl Duty {
     /// Whether it reads the kernel's `/proc`, mounted before it: by init's own Mount duty as the VM's init, by its
     /// service manager under one. Leaving the initramfs reads `/proc/self/mountinfo` through a `/proc` it mounts and
@@ -455,13 +456,14 @@ enum End {
 fn duties(host: &Host) -> Vec<Duty> {
     match host {
         Host::Kernel => vec![
-            Duty::FindExe,
             Duty::LeaveInitramfs,
             Duty::Mount(mounts().to_vec()),
             Duty::Dirs(&[RUN, STATE, BOX_ROOT]),
             Duty::KernelShares,
             Duty::Deadline(Deadline::Kernel),
             Duty::Controllers,
+            // `/proc/self/exe`: as the VM's init, only once the Mount duty above has mounted `/proc`.
+            Duty::FindExe,
             Duty::GpuAuthority,
             Duty::Descriptors,
             Duty::Start(On::Vsock),
@@ -469,11 +471,11 @@ fn duties(host: &Host) -> Vec<Duty> {
             Duty::Serve(End::PowerOff),
         ],
         Host::Manager { notify, ready_by } => vec![
-            Duty::FindExe,
             Duty::Mount(node_tmpfs().to_vec()),
             Duty::Dirs(&[CHANNEL, BOX_ROOT]),
             Duty::Deadline(Deadline::Told(*ready_by)),
             Duty::Controllers,
+            Duty::FindExe,
             Duty::Start(On::Unix(PathBuf::from(CHANNEL))),
             Duty::Notify(notify.clone()),
             Duty::Serve(End::Exit),
