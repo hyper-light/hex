@@ -329,6 +329,25 @@ impl Scope {
             .permit()
             .map_err(|_| self.refusal(id))
     }
+    /// When the scope's credit ran out, off its control's last observation (joint plan step 14, 2c): none where it has
+    /// credit left or no control.
+    pub(super) fn cpu_ran_out(&self, id: OwnerRef<'_>) -> Result<Option<Instant>, Refusal> {
+        let Some(cpu) = &self.cpu else {
+            return Ok(None);
+        };
+        Ok(cpu.lock().map_err(|_| self.refusal(id))?.ran_out())
+    }
+    /// A hold's measured response, from its credit's running out to its members' stop (joint plan step 14, 2c): its
+    /// control's slowest seen rises to it, its hold topped up (`cpu::Budget::learn`).
+    pub(super) fn cpu_learn(&self, id: OwnerRef<'_>, response: Duration) -> Result<(), Refusal> {
+        self.cpu
+            .as_ref()
+            .ok_or_else(|| self.refusal(id))?
+            .lock()
+            .map_err(|_| self.refusal(id))?
+            .learn(response)
+            .map_err(|_| self.refusal(id))
+    }
     pub(super) fn cpu_held(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         self.cpu_decision(id)?;
         self.cpu
