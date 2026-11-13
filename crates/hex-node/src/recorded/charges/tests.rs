@@ -986,9 +986,10 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
 /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13: the starving case the done-when names): a running VM whose read
 /// fails counts whole, at its receipt, against the fleet's budget until a read succeeds, its learner untouched, and
 /// the failure is told. Do run a window of three Shards VMs of 16-CPU allocations, each booked at 4 CPUs, in a 24-CPU
-/// fleet budget, the third's read failing; then one in which it reads. Expect the first two capped at their bookings,
-/// the 16 CPUs of the third's receipt taken from the budget, and the third named among the unread with its refusal;
-/// then the three capped at 8 CPUs each, as three that all read are, and none unread.
+/// fleet budget, the third's read failing, and answer the class's capacity; then one in which it reads. Expect the first
+/// two capped at their bookings, the 16 CPUs of the third's receipt taken from the budget, the third named among the
+/// unread with its refusal and carrying no holding on the answer, so the scheduler counts it at its receipt; then none
+/// unread, the third, which has run no window, capped at its 16-CPU ceiling and the two idle at their bookings.
 #[test]
 fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     let io = Record::default();
@@ -1005,6 +1006,12 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     );
     let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(unread, ["vm-3"]);
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    let held: Vec<&str> = learned.holdings.iter().map(|h| h.id.as_str()).collect();
+    assert!(!held.contains(&"vm-3"), "{held:?}");
     io.rates.borrow_mut().clear();
     io.set("vm-3", 0, GIB);
     learner.window(&io, &vms, budget, start + WINDOW).unwrap();
@@ -1013,5 +1020,5 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
         .iter()
         .map(|r| learner.rate(&Scope::of(r).unwrap()).unwrap())
         .collect();
-    assert_eq!(caps, [8_000, 8_000, 8_000]);
+    assert_eq!(caps, [4_000, 4_000, 16_000]);
 }
