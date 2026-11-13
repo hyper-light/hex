@@ -10,8 +10,8 @@ use super::*;
 use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
 use shards_api::image::{
-    Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm, Receiving,
-    VcpuTime,
+    Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
+    Receiving, VcpuTime,
 };
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
@@ -913,7 +913,10 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     departed.departed_ns = 5;
     for (microvm, says) in [
         (None, "microVM"),
-        (microvm(Err("GUEST_TIME went unanswered".to_owned())), "GUEST_TIME went unanswered"),
+        (
+            microvm(Err("GUEST_TIME went unanswered".to_owned())),
+            "GUEST_TIME went unanswered",
+        ),
         (microvm(Ok(missed)), "EBADF"),
         (microvm(Ok(guest_times(vcpus + 1))), "vCPUs"),
         (microvm(Ok(departed)), "no longer has"),
