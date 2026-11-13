@@ -72,10 +72,25 @@ pub(crate) fn follow_kill(
     })
 }
 
-/// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
-/// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
-pub(crate) fn empty_patience(killed: Instant) -> Duration {
-    EMPTYING
-        .deadline()
-        .map_or(Duration::MAX, |wait| wait.saturating_sub(killed.elapsed()))
+/// Program `proc`'s end, killed (or its box gone) at `killed`, waited for as a killed box's emptying is ([`EMPTYING`];
+/// decision 9, the person's ruling of 2026-11-13): within W*, from the kill, and past it, its run-out told once and no
+/// sample, by the program's life alone, on its own events (`Duration::MAX`: until its end), however long that takes;
+/// with no W* by its life from the start. Its end, however late, is the sample W* rises to.
+pub(crate) fn end_of_killed<P: hex_api::Proc + ?Sized>(
+    proc: &mut P,
+    killed: Instant,
+) -> Result<hex_api::Exit, hex_api::Refusal> {
+    if let Some(window) = EMPTYING.deadline() {
+        if let Some(exit) = proc.wait_for(window.saturating_sub(killed.elapsed()))? {
+            EMPTYING.answered(killed.elapsed());
+            return Ok(exit);
+        }
+        EMPTYING.ran_out(window);
+    }
+    loop {
+        if let Some(exit) = proc.wait_for(Duration::MAX)? {
+            EMPTYING.answered(killed.elapsed());
+            return Ok(exit);
+        }
+    }
 }

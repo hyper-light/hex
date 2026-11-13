@@ -154,6 +154,53 @@ Doubled bounds of the 2026-11-06 rule outside `Patience`, each a record and a fa
 `close_wait` (twice the larger of `PEER_CLOSE_RECORD` and what it has seen), and, on the lead's line,
 `precise_patience` (hex-client) and the charge driver's `guard` (hex-cli).
 
+## The audit (2026-11-13)
+
+Every wait whose learned bound still ends something, or a test's wait on a time rather than on its party, by the rule
+above: past W* a wait tells its run-out and follows its party's life alone, refused only at its end. Each is fixed red
+first where the code is wrong; the tests' own waits are fixed in place. Status as of this list:
+
+Production, a W* that still ends something:
+
+1. **`node.emptying` in the socket's core** (hex-node `serve`): a collected run's end (`Job::Collect`) and a gone
+   client's program's end (`Shared::gone`) were `Exit::Unknown` at W*, a killed program's end (`Unwatched::Killed`)
+   was given up at W*, and a stopping server's drain stopped at W*. Done: each follows its programs past W* by their
+   lives, the run-out told (`emptying::end_of_killed`; the drain's own loop).
+2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* is taken for hung, killed, and the
+   claim falls back to a seed's clone (`Patience::expired`). Owed: the claim follows the init's life (its pidfd, its
+   sync pipe and claim socket) past W*, the run-out told.
+3. **A park's wait for its init's word** (hex-node `createpool::Parker::park`, `Parked::wait_parked`): bounded by
+   `seeds.hang`'s W*, past it the park fails and its init is killed. Owed: it follows the init past W*.
+4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
+   still tentative at the settle's W*, or a dump read past the answers' W*, is thrown away, counted, and another read.
+   Owed: past W* each follows the namespace (the kernel's rtnetlink, its notices) to its settle or answer.
+5. **`hex.image.stats`** (hex-runtime `guest::image`): goal 12's.
+6. **`guest.hosted.ready`** (hex-runtime `guest::hosted::follow_ready`): past W* a node VM's boot is refused where a
+   whole W* window shows no CPU time of its VM's process: a VM's boot, the one place a stall of measured progress is
+   judged ("Life alone at the node's local sites"), to become Shards' Part B once vendored.
+7. **The guest's first boot** ("Owed", 1): records.tsv's `boot_ready`, the Link's.
+
+Production, holding the rule: `node.listing` (run-out told, the listing goes on), `node.turns` and `store.turns`
+(the holder followed to its let-go), `client.answer.*` (only a caller's deadline fails a call), `recorded.lifecycle`
+(a try), `netns.make` (no bound), and the local sites above it.
+
+Tests, waiting on a time rather than on their party:
+
+8. **hex-client's `guest::tests`** `a_relay_token_held_past_the_links_bound_refuses_the_connect` and
+   `absolute_connect_completes_and_evented_retains_the_same_link`: each failed only under load on adacachy2 (their
+   runs 12 s against 2.5 s quiet), so each waits on a time, not on its party. Owed.
+9. **A fixed duration as a test's wait** (hex-cli's tests): `FIXTURE`'s 30 s in `guest_boot_deadline.rs` went
+   (6042219c, its waits following the relay). Left: `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `DELETE_PATIENCE` 10 s
+   (`delete_flake.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`,
+   `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `HANG_GUARD` 39.507 s and
+   `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
+   (`windows_oci_box.rs`, a seeded test wait), and inline durations in `completion_backends.rs`,
+   `completion_managed_api.rs`, `oci_box.rs` and `process_box.rs`; the real-VM tests (`charge_fleet.rs`,
+   `guest_boot_record.rs`, `image_real.rs`, `image_record.rs`, `native_firecracker_smoke.rs`,
+   `native_windows_hcs_compute.rs`, `node_hosted_real.rs`) after goal 12's batch, built and linted here, run by the
+   Hex lead on KVM, HVF and WHP.
+10. **The tests' record seeds** ("Owed", 3).
+
 ## The failure-bound rule (the lead, 2026-11-06, superseded 2026-11-13)
 
 Before any sample on a node, a wait's bound is 2 × the slowest answer in that wait's recorded distribution for the
