@@ -14,6 +14,11 @@ struct Native {
     stops: AtomicUsize,
     /// A stop ends what of the scope outlived its controller, as the helper's does, so the scope is Released.
     stop_releases: AtomicBool,
+    /// The scope ends only once its wait follows it with no bound, as a scope's own observer ends such a wait at its
+    /// end (decision 9's following wait): any bounded wait for it sees no end.
+    released_when_followed: AtomicBool,
+    /// Each patience a wait for the scope was asked with.
+    asked: Mutex<Vec<Duration>>,
     /// The controller a launch published, where the model has one.
     identity: std::sync::OnceLock<shards_api::Identity>,
 }
@@ -41,7 +46,14 @@ impl shards_api::ManagedProcess for Native {
             },
         }))
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+    fn wait_for(
+        &self,
+        patience: Duration,
+    ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+        self.asked.lock().unwrap().push(patience);
+        if patience == Duration::MAX && self.released_when_followed.load(Ordering::SeqCst) {
+            self.released.store(true, Ordering::SeqCst);
+        }
         Ok(self
             .terminal()?
             .filter(|end| end.scope == shards_api::TerminalScope::Released))
@@ -1099,6 +1111,38 @@ fn shared_backing_rearms_only_after_original_scope_release_and_index_ack() {
     );
     assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
     assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 14 (ROOT, 2026-11-13, (C); decision 9): a managed scope's stop is a wait of its own, measuring,
+/// never a boot's record. Before its first stop, and past the slowest stop seen (the run-out told), it follows the
+/// scope by its own party to its end (Studio r201: a release's stop waited the guest's first boot's 5.26 s record and
+/// was refused Uncertain at it). Do grant a shared backing whose launch's scope ends only once a wait follows it with
+/// no bound; then release it. Expect it Released at once, its end recorded and its native scope
+/// finalized; its stop's wait followed with no bound; and the boot's bound never asked.
+#[test]
+fn w14_c_a_pools_stop_follows_its_scope_and_never_waits_a_boots_record() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    assert!(runtime.initialize_backing(grant(&offer)).is_err());
+    owner
+        .native
+        .released_when_followed
+        .store(true, Ordering::SeqCst);
+    let released = runtime.release_backing(offer.key);
+    let asked = owner.native.asked.lock().unwrap().clone();
+    let released = released.unwrap_or_else(|why| panic!("{why:?}; its waits asked {asked:?}"));
+    assert_eq!(released.phase, BackingPhase::Released);
+    assert_eq!(owner.row().exit, Some(hex_api::Exit::Code(7)));
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+    assert!(
+        asked.contains(&Duration::MAX),
+        "its stop never followed its scope: {asked:?}"
+    );
+    assert!(
+        !asked.contains(&runtime.first_dial_bound().unwrap()),
+        "its stop waited the first boot's bound: {asked:?}"
+    );
 }
 
 /// AC-T7.4.1: explicit Index ACK cannot erase a remaining shared workload or
