@@ -265,7 +265,7 @@ fn stale_missing_box_and_ungranted_released_owners_refuse_without_callback() {
         );
     }
     assert!(
-        matches!(transaction(&store, &sibling.spec.id, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == sibling.spec.id)
+        matches!(transaction(&store, &sibling.spec.id, &[], &native(&check), &mut |tx| tx.check_unsubmitted_pool()), Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain, .. }) if id == sibling.spec.id)
     );
     assert_eq!(pool_bytes(directory.path(), row.key), before);
     assert_eq!(store.syncs(), syncs);

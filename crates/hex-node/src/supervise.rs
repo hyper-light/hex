@@ -880,7 +880,10 @@ impl Supervisor {
     pub fn forget(&self, id: &BoxId) -> Result<Option<Forgotten>, Refusal> {
         let mut inits = self.inits()?;
         if matches!(inits.get(OwnerRef::Box(id)), Some(Init::Managed(_))) {
-            return Err(managed_uncertain(id));
+            return Err(managed_uncertain(
+                id,
+                "its init is a managed VM's, which its delete ends through its own scope",
+            ));
         }
         let Some(Init::Container(init)) = inits.remove(OwnerRef::Box(id)) else {
             return Ok(None);
@@ -1283,11 +1286,12 @@ fn managed_table_invalid() -> Refusal {
     Refusal::Broken(why)
 }
 
-fn managed_uncertain(id: &BoxId) -> Refusal {
+fn managed_uncertain(id: &BoxId, why: &str) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
             id,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: Some(why.to_owned()),
         },
         Err(error) => error,
     }
@@ -1338,11 +1342,11 @@ impl ManagedVm {
             .map(Option::flatten)
     }
 
-    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
-    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan steps 14 and 12): a pool's
+    /// backing refusal and a box's Lifecycle refusal carry them alike.
     fn uncertain(&self, why: &str) -> Refusal {
         match self.owner.as_ref() {
-            OwnerRef::Box(id) => managed_uncertain(id),
+            OwnerRef::Box(id) => managed_uncertain(id, why),
             OwnerRef::Pool(pool) => Refusal::Backing {
                 key: hex_api::BackingKey {
                     pool: *pool,

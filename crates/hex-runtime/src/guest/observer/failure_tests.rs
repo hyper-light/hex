@@ -251,6 +251,7 @@ fn failed_workload(
                     wire::Answer::Refused(Refusal::Lifecycle {
                         id: id.try_clone().map_err(|why| why.to_string())?,
                         cause: LifecycleCause::Uncertain,
+                        why: Some("the test's guest can't prove its delete".to_owned()),
                     })
                 };
                 answer(&mut control, header.id, &done, budget)?;
@@ -443,6 +444,7 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         &wire::Answer::Refused(Refusal::Lifecycle {
             id: seen.run,
             cause: LifecycleCause::Uncertain,
+            why: Some("the test's guest can't prove its delete".to_owned()),
         }),
         wire::MAX_MESSAGE,
     )

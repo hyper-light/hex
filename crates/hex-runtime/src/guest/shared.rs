@@ -321,10 +321,9 @@ impl GuestRuntime {
         route::guest_spec(spec)?;
         match spec.route_execution() {
             Some(Execution::ShardsShared) => {
-                let key = spec
-                    .route
-                    .and_then(|receipt| receipt.backing)
-                    .ok_or(super::books::uncertain(&spec.id)?)?;
+                let key = spec.route.and_then(|receipt| receipt.backing).ok_or(
+                    super::books::uncertain(&spec.id, "its shared receipt names no backing")?,
+                )?;
                 // A box on a backing its node recorded under the census cost goes with that backing's retirement.
                 if let Some(backing) = self
                     .authority()?
@@ -335,16 +334,20 @@ impl GuestRuntime {
                 {
                     return Ok(());
                 }
-                let cost = self
-                    .runtime_cost
-                    .ok_or(super::books::uncertain(&spec.id)?)?;
+                let cost = self.runtime_cost.ok_or(super::books::uncertain(
+                    &spec.id,
+                    "its shared route names no runtime cost",
+                )?)?;
                 if spec.class.class() != Class::Oci
                     || !spec.devices.is_empty()
                     || spec.allocation.is_some()
                     || key.pool != self.pool_configuration(cost)?
                     || self.shared_key()?.is_some_and(|bound| bound != key)
                 {
-                    return Err(super::books::uncertain(&spec.id)?);
+                    return Err(super::books::uncertain(
+                        &spec.id,
+                        "its shared route names no shared backing this guest holds, or holds an allocation of its own",
+                    )?);
                 }
                 Ok(())
             }
@@ -368,7 +371,10 @@ impl GuestRuntime {
                 }
                 self.preflight_selected_receipt(record)
             }
-            Some(_) | None => Err(super::books::uncertain(&spec.id)?),
+            Some(_) | None => Err(super::books::uncertain(
+                &spec.id,
+                "its record names neither a shared nor a selected receipt this guest holds",
+            )?),
         }
     }
 
@@ -382,13 +388,21 @@ impl GuestRuntime {
             None if record.phase == hex_core::record::Phase::Creating && record.init.is_none() => {
                 return Ok(());
             }
-            None => return Err(super::books::uncertain(id)?),
+            None => {
+                return Err(super::books::uncertain(
+                    id,
+                    "its selected receipt is gone, though its record has left Creating",
+                )?);
+            }
         };
         receipt.matches_record(record)?;
         if !receipt.devices.is_empty()
             && self.catalog_physical(&receipt.devices)? != receipt.physical
         {
-            return Err(super::books::uncertain(id)?);
+            return Err(super::books::uncertain(
+                id,
+                "its selected guest's devices aren't the ones it holds now",
+            )?);
         }
         match &receipt.phase {
             Phase::Running(identity)
@@ -398,7 +412,10 @@ impl GuestRuntime {
                 ..
             } => managed::same_init(record, identity)?,
             Phase::Released { identity: None, .. } if record.init.is_some() => {
-                return Err(super::books::uncertain(id)?);
+                return Err(super::books::uncertain(
+                    id,
+                    "its selected receipt was released with no identity, though its record names an init",
+                )?);
             }
             Phase::Intent | Phase::Released { identity: None, .. } => {}
         }
@@ -696,7 +713,7 @@ impl GuestRuntime {
             for (id, boxed) in records {
                 let boxed = match boxed {
                     Ok(boxed) => boxed,
-                    Err(_) => return Err(super::books::uncertain(id)?),
+                    Err(_) => return Err(super::books::uncertain(id, "its record can't be read")?),
                 };
                 // A retired box's backing went with its retirement: it names no backing to agree with.
                 if !boxed.retired
@@ -704,7 +721,10 @@ impl GuestRuntime {
                     && boxed.spec.route.and_then(|route| route.backing)
                         != current.map(|row| row.key)
                 {
-                    return Err(super::books::uncertain(id)?);
+                    return Err(super::books::uncertain(
+                        id,
+                        "its shared route names another backing than this guest's current one",
+                    )?);
                 }
             }
             Ok(())
@@ -1434,12 +1454,18 @@ impl GuestRuntime {
             .route
             .filter(|route| route.key.execution == Execution::ShardsShared)
             .and_then(|route| route.backing)
-            .ok_or(super::books::uncertain(&boxed.spec.id)?)?;
+            .ok_or(super::books::uncertain(
+                &boxed.spec.id,
+                "its record routes it on no backing",
+            )?)?;
         if boxed.retired {
             return Err(boxed.retired_refusal()?);
         }
         if self.shared_key()? != Some(key) {
-            return Err(super::books::uncertain(&boxed.spec.id)?);
+            return Err(super::books::uncertain(
+                &boxed.spec.id,
+                "its backing isn't the shared one this guest holds",
+            )?);
         }
         let record = self.pool_record(key)?;
         record.check()?;

@@ -1107,16 +1107,19 @@ impl Catalog {
             Ok(())
         };
         for (id, record) in records {
-            let bad = || match id.try_clone() {
+            let bad = |why: &str| match id.try_clone() {
                 Ok(id) => Refusal::Lifecycle {
                     id,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: Some(why.to_owned()),
                 },
                 Err(refusal) => refusal,
             };
-            let record = record.as_ref().map_err(|_| bad())?;
+            let record = record
+                .as_ref()
+                .map_err(|_| bad("its record can't be read"))?;
             if record.spec.id != *id {
-                return Err(bad());
+                return Err(bad("its record names another box"));
             }
             record.spec.check()?;
             if let Some(key) = current

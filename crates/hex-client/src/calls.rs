@@ -2731,9 +2731,13 @@ impl<T: Transport> Core<T> {
                         };
                         Err(match killed {
                             Ok(()) => why,
-                            Err(_) => Refusal::Lifecycle {
+                            Err(kill) => Refusal::Lifecycle {
                                 id,
                                 cause: hex_api::LifecycleCause::Uncertain,
+                                why: Some(format!(
+                                    "its exec's streams couldn't be set up ({why}), and its kill couldn't confirm its \
+                                     end ({kill}), so the program may still run"
+                                )),
                             },
                         })
                     }

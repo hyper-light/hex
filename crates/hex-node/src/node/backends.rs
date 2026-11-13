@@ -392,13 +392,19 @@ impl Node {
         let client = match class {
             Class::Firecracker => match &backends.firecracker {
                 Some(backend) => backend.evented_for(id),
-                None => Err(uncertain(id)),
+                None => Err(uncertain(
+                    id,
+                    "this node has no Firecracker backend for a box its record says is one",
+                )),
             },
             Class::Shards => match &backends.shards {
-                Some(guest) => guest
-                    .evented_for(id)
-                    .and_then(|client| client.ok_or_else(|| uncertain(id))),
-                None => Err(uncertain(id)),
+                Some(guest) => guest.evented_for(id).and_then(|client| {
+                    client.ok_or_else(|| uncertain(id, "its Shards backend holds no guest for it"))
+                }),
+                None => Err(uncertain(
+                    id,
+                    "this node has no Shards backend for a box its record says is one",
+                )),
             },
             Class::Process | Class::Oci => return Forward::Back(Box::new((call, stdio))),
         };
@@ -594,7 +600,9 @@ impl Node {
         let pools = self.store.all_pools()?;
         crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
         for (id, record) in &records {
-            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let record = record
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             let handoff = crate::recorded::preflight_handoff_turns(
                 &self.turns,
                 &self.store,
@@ -606,19 +614,29 @@ impl Node {
                     .spec
                     .route
                     .and_then(|route| route.backing)
-                    .ok_or_else(|| uncertain(id))?;
+                    .ok_or_else(|| uncertain(id, "its record routes it on no backing"))?;
                 Some(
                     self.store
                         .read_pool(&key.pool)?
                         .filter(|source| source.key == key)
-                        .ok_or_else(|| uncertain(id))?,
+                        .ok_or_else(|| {
+                            uncertain(
+                                id,
+                                "its record's backing has no record of its own, or another key",
+                            )
+                        })?,
                 )
             } else {
                 None
             };
             match record.spec.backend_class()? {
                 Class::Firecracker => {
-                    let backend = firecracker.ok_or_else(|| uncertain(id))?;
+                    let backend = firecracker.ok_or_else(|| {
+                        uncertain(
+                            id,
+                            "this node has no Firecracker backend for a box its record says is one",
+                        )
+                    })?;
                     preflight_backend(
                         record,
                         source.as_ref(),
@@ -627,7 +645,12 @@ impl Node {
                     )?;
                 }
                 Class::Shards => {
-                    let backend = shards.ok_or_else(|| uncertain(id))?;
+                    let backend = shards.ok_or_else(|| {
+                        uncertain(
+                            id,
+                            "this node has no Shards backend for a box its record says is one",
+                        )
+                    })?;
                     preflight_backend(
                         record,
                         source.as_ref(),
@@ -674,7 +697,9 @@ impl Node {
             .try_reserve_exact(bound)
             .map_err(|_| Refusal::Full(MAX_BOXES))?;
         for (id, record) in &records {
-            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let record = record
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             // A retired box's VM is gone with its retirement (joint plan step 14): no native scope to adopt.
             if record.retired {
                 continue;
@@ -853,7 +878,7 @@ impl Node {
             return Ok(None);
         };
         self.backend(record.spec.backend_class()?)
-            .map_err(|_| uncertain(id))
+            .map_err(|_| uncertain(id, "this node has no backend for its record's class"))
     }
 
     pub(super) fn initialized_classes(&self) -> Vec<Class> {
@@ -873,9 +898,11 @@ impl Node {
     /// records cannot be treated as native Process/OCI cleanup authority.
     pub(super) fn recover_backends(&self, records: &Records) -> Result<RecoverySummary, Refusal> {
         for (id, record) in records {
-            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let record = record
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             if record.spec.id != *id {
-                return Err(uncertain(id));
+                return Err(uncertain(id, "its record names another box"));
             }
             record.spec.check()?;
             if matches!(
@@ -884,10 +911,10 @@ impl Node {
             ) && record.spec.route_execution() != Some(hex_api::Execution::ShardsShared)
                 && record.spec.allocation.is_none()
             {
-                return Err(uncertain(id));
+                return Err(uncertain(id, "its record holds no allocation for its VM"));
             }
             self.backend(record.spec.backend_class()?)
-                .map_err(|_| uncertain(id))?;
+                .map_err(|_| uncertain(id, "this node has no backend for its record's class"))?;
         }
         let mut summary = RecoverySummary::default();
         summary
@@ -903,14 +930,16 @@ impl Node {
             .try_reserve_exact(records.len())
             .map_err(|_| Refusal::Full(MAX_BOXES))?;
         for (id, record) in records {
-            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let record = record
+                .as_ref()
+                .map_err(|_| uncertain(id, "its record can't be read"))?;
             // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14).
             if record.retired {
                 continue;
             }
             let Some(backend) = self
                 .backend(record.spec.backend_class()?)
-                .map_err(|_| uncertain(id))?
+                .map_err(|_| uncertain(id, "this node has no backend for its record's class"))?
             else {
                 continue;
             };
@@ -933,15 +962,15 @@ impl Node {
                             .backends
                             .get()
                             .and_then(|backends| backends.firecracker.as_ref())
-                            .ok_or_else(|| uncertain(id))?
+                            .ok_or_else(|| uncertain(id, "this node has no Firecracker backend for a box its record says is one"))?
                             .validate_binding(&record.spec),
                         Class::Shards => self
                             .backends
                             .get()
                             .and_then(|backends| backends.shards.as_ref())
-                            .ok_or_else(|| uncertain(id))?
+                            .ok_or_else(|| uncertain(id, "this node has no Shards backend for a box its record says is one"))?
                             .recover_managed(&record.spec),
-                        Class::Process | Class::Oci => return Err(uncertain(id)),
+                        Class::Process | Class::Oci => return Err(uncertain(id, "its record names a class no recovered VM is")),
                     };
                     match recovered {
                         Ok(()) => {}
@@ -960,7 +989,10 @@ impl Node {
                         || actual.allocation != record.spec.allocation
                         || actual.route != record.spec.route
                     {
-                        return Err(uncertain(id));
+                        return Err(uncertain(
+                            id,
+                            "its recovered VM's class, allocation or route isn't its record's",
+                        ));
                     }
                     summary.adopted.push(id.try_clone()?);
                 }
@@ -1182,11 +1214,13 @@ impl Books for Node {
     }
 }
 
-pub(super) fn uncertain(id: &BoxId) -> Refusal {
+/// Box `id`'s lifecycle uncertain, in the refusing site's own words (joint plan step 12).
+pub(super) fn uncertain(id: &BoxId, why: &str) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
             id,
             cause: LifecycleCause::Uncertain,
+            why: Some(why.to_owned()),
         },
         Err(refusal) => refusal,
     }
@@ -1416,7 +1450,10 @@ mod preflight_dispatch_tests {
                     Some(&source),
                     |_| {
                         ordinary += 1;
-                        Err(uncertain(&record.spec.id))
+                        Err(uncertain(
+                            &record.spec.id,
+                            "the test's ordinary preflight refuses it",
+                        ))
                     },
                     |record, source| {
                         proof += 1;
@@ -1445,7 +1482,10 @@ mod preflight_dispatch_tests {
                 None,
                 |_| {
                     ordinary += 1;
-                    Err(uncertain(&record.spec.id))
+                    Err(uncertain(
+                        &record.spec.id,
+                        "the test's ordinary preflight refuses it",
+                    ))
                 },
                 |_, _| {
                     proof += 1;

@@ -689,6 +689,10 @@ impl Driver {
                         return Err(Refusal::Lifecycle {
                             id: physical.try_clone()?,
                             cause: hex_api::LifecycleCause::Uncertain,
+                            why: Some(
+                                "its surviving physical box's allocation or route isn't its placement's"
+                                    .to_owned(),
+                            ),
                         }
                         .into());
                     }
@@ -1459,6 +1463,10 @@ impl Driver {
                         refusal: Refusal::Lifecycle {
                             id: id.try_clone()?,
                             cause: hex_api::LifecycleCause::Uncertain,
+                            why: Some(
+                                "the box its placement found has another allocation or route than its launch's"
+                                    .to_owned(),
+                            ),
                         },
                         cleanup: None,
                     });
@@ -1498,6 +1506,10 @@ impl Driver {
                     return Err(Refusal::Lifecycle {
                         id: id.try_clone()?,
                         cause: hex_api::LifecycleCause::Uncertain,
+                        why: Some(
+                            "the box its launch made has another allocation or route than its launch asked"
+                                .to_owned(),
+                        ),
                     });
                 }
                 if info.class != payload.spec.class.class() {

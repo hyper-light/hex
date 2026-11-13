@@ -579,7 +579,7 @@ mod tests {
             .reserve(OwnerRef::Box(&record.spec.id), &[], None, None)
             .unwrap();
         assert!(
-            matches!(native.preflight_unsubmitted(&record), Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }) if id == record.spec.id)
+            matches!(native.preflight_unsubmitted(&record), Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain, .. }) if id == record.spec.id)
         );
         assert_eq!(native.boxes().unwrap().len(), 1);
 
