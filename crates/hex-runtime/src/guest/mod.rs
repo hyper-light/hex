@@ -1330,6 +1330,10 @@ impl GuestRuntime {
         snapshot: Option<&hex_core::record::BoxRecord>,
         id: &BoxId,
     ) -> Result<(), Refusal> {
+        // A box whose backing was retired is gone with it: its delete is its owner's, the record's alone to remove.
+        if snapshot.is_some_and(|record| record.retired) {
+            return Ok(());
+        }
         let Some(b) = self.booted_for_record(snapshot, id)? else {
             return if self.managed_shared() {
                 Ok(())

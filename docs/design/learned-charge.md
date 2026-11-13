@@ -61,6 +61,13 @@ contention rule and the predictors; they do not hold the step up.
   memory and the read disk past it. A window that reached its CPU cap is no CPU sample (Karn's point): the cap cut
   its use. Before its class's first window a VM's ceiling is the envelope alone, and its class's capacity answer says
   so, typed (`hex_api::LearnedCeiling`, each dimension of its `LearnedOverhead` none while cold, never a zero).
+- **The census is evidence**: a node takes a cost's VMM overhead and guest allowance as none where it loads them (the
+  guest cost loader and the Firecracker config, `RuntimeCost::census_free`; guest_cost writes none, its measurements
+  kept in its evidence, which the cost's id still names), so its receipts are the envelope alone and fit is decided on
+  it. A shared backing recorded under a census cost, its identity no longer its node's profile's, is retired as its
+  node prepares its backing: its scope stopped and released, its record removed, and each box on it kept, ready, its
+  end unknown, every call but its owner's delete refused `LifecycleCause::Retired` ("its backing's identity changed
+  with decision 9's census-free cost").
 - **Cold**: until it has SEEDABLE windows its charge is no less than its booking (C2), as its p99.9 is not yet an
   observed sample.
 - Use that grows past the charge is the contention rule's (C4, C5), not a margin's.
