@@ -5222,12 +5222,17 @@ proptest! {
     }
 }
 
+/// A placeholder as kiln's broker mints one (Shards' D242): a visible marker, then 256 random bits in hex.
+const OPENAI_PLACEHOLDER: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// Joint plan step 33's credential grants: one toward the provider `each_way` grants its harness by name, by TCP.
 fn openai_credential(toward: &str) -> Vec<CredentialGrant> {
     vec![CredentialGrant {
         member: harness(),
         reference: "openai/ada".to_owned(),
         toward: vec![toward.to_owned()],
+        placeholder: OPENAI_PLACEHOLDER.to_owned(),
     }]
 }
 
@@ -5237,7 +5242,8 @@ fn unchecked_credentials(list: &[CredentialGrant]) -> Vec<u8> {
     w.list(list, |w, grant| {
         put_member(w, &grant.member)?;
         w.string(&grant.reference)?;
-        w.list(&grant.toward, |w, host| w.string(host))
+        w.list(&grant.toward, |w, host| w.string(host))?;
+        w.string(&grant.placeholder)
     })
     .unwrap();
     w.done().unwrap()

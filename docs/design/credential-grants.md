@@ -5,7 +5,8 @@ toward the hosts its grants name and no other, with no credential value anywhere
 the launch spec's credential grants, keep every one in its record of the VM, add none an image's box didn't carry, and
 answer the run's lease asks from its orchestrator's broker, giving each lease back as the run lets go of it. Decided
 for kiln plan `01a1d2b88be57304b972761e2a5c6781` (step 33's plan), step 6, built on Shards at `740fa372` (vendored by
-goal 12's re-vendor; at or after `b60dab848`), whose D242 is the contract. Requirements served: `AC-T7.7.2` (flows
+goal 12's re-vendor; at or after `b60dab848`) and carried to `db4168345` (D242's step 3: each grant's placeholder), whose
+D242 is the contract. Requirements served: `AC-T7.7.2` (flows
 allowed that no grant names: 0, here credentials filled in that no grant names: 0), and step 6's acceptance: "a
 Hex-launched harness VM reaches exactly its granted providers with its credentials filled in at egress and nothing
 else; every credential grant is in Hex's record of the VM; Hex adds no grant the image did not carry; Hex answers lease
@@ -19,6 +20,11 @@ Sources, read at the revisions named:
   `LeaseRefusal`, `Secret`), `image/session.rs` (`lease_asked`, `settle`, `release`: every lease given is given back
   once, as the host says `RELEASED` or as its answers end, and one given after the release or with none of its life left
   at once), `crates/shards/src/api_run.rs` (`credentials`: each grant's hosts held to the run's egress grants).
+- Shards `db4168345`: D242's "Built: step 3's first slice, each grant's placeholder" (`crates/dns/src/credential.rs`:
+  `CredentialGrant::placeholder`, never printed, its `Debug` showing its length alone; `placeholder`, `check`,
+  `Refused::NotAToken`, `Refused::Shared`; `decide` taking the request's token), `crates/api/src/image.rs` (`request`
+  checking them, `ImageRefusal::Spec`).
+- RFC 6750 §2.1 (a bearer credential's `b64token`: `1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`).
 - kiln `978e8a1a0`: `crates/kiln/src/secrets/broker.rs` (the run-lease broker: `lease(key, reference)`, `release(key)`,
   `moved`), `crates/kiln-seams/src/secrets.rs` (`check_name`, `NAME_MAX`), `crates/kiln-seams/src/sandbox.rs`.
 - AWS Secrets Manager API Reference, `CreateSecret`, `Name` (1 to 512 characters of ASCII letters, digits and
@@ -36,10 +42,13 @@ A box's credential grants are a list of `hex_api::CredentialGrant` in its image 
 | `member` | who: a member of the box's image, as a network grant names one (N1) |
 | `reference` | which credential: a secret's name in its orchestrator's store, never its value |
 | `toward` | the hosts the value may be filled in toward, each a DNS name its member's egress reaches |
+| `placeholder` | what stands for the credential in its member's requests: minted by the orchestrator where it gives the credential to the member (kiln's broker: `kiln-placeholder-` and 256 random bits in hex), a token the member sends where the value would go; never printed |
 
-Its way is out, as an egress grant's: a value is filled into what the member sends to those hosts, never into what
-comes back (Shards' injector is a gateway that fills a request header, D242). None by default: nothing is filled in
-toward any host, the run asks no lease, and its boot names no lessor.
+Its way is out, as an egress grant's: a value is filled into what the member sends to those hosts where its placeholder
+stands, never into what comes back (Shards' injector is a gateway that fills a request header, D242), and never into a
+request that carries no placeholder of a grant toward its host. Holding the placeholder is the capability, so it never
+prints: `CredentialGrant`'s `Debug` shows its length alone, as Shards' grant's does, and no refusal names it. None by
+default: nothing is filled in toward any host, the run asks no lease, and its boot names no lessor.
 
 ## C2. One check, wherever a credential grant enters
 
@@ -118,11 +127,16 @@ Alternatives considered:
 ## C4. Hex's record of the VM
 
 The credential grants live in the image class's spec, `ShardsImage::credentials`, in the box's durable record
-(`hex_core::record::BoxRecord`, JSON, its fields by name), and `inspect` reports them as `BoxInfo::credentials` (after
-`ended`), every one as the record holds it. The node's wire carries both (a create's spec after its shares, an inspect's
-answer after its run's words), each checked written and read (C2); the wire's `IDENTITY` takes `credentials.rs` and
-moves. Shards' boot is given the box's grants lowered to its run-wide form (`leases::lowered`): one `CredentialGrant`
-of each credential toward every host its members' grants of it name, each once and sorted, Hex adding none.
+(`hex_core::record::BoxRecord`, JSON, its fields by name; a grant a record kept before placeholders reads with none,
+refused as the box boots), and `inspect` reports them as `BoxInfo::credentials` (after `ended`), every one as
+the record holds it, its placeholder among it: the record keeps it because each boot of the box gives it to Shards, and
+inspect answers the node's callers, who gave it. The node's wire carries both (a create's spec after its shares, an
+inspect's answer after its run's words), each grant its member, reference, hosts and placeholder, each checked written
+and read (C2); the wire's `IDENTITY` takes `credentials.rs` and moves. Shards' boot is given the box's grants lowered to
+its run-wide form (`leases::lowered`): one `CredentialGrant` of each credential and placeholder toward every host its
+members' grants of it with that placeholder name, each once and sorted, Hex adding none. Members given one credential
+under placeholders of their own lower to a grant of it for each, so a member's placeholder is filled in toward its own
+hosts alone (D242's `decide`).
 
 ## C5. Bounds and literals
 

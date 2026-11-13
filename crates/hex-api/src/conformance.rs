@@ -1437,10 +1437,19 @@ fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             last: 443,
         },
     };
+    // Placeholders as kiln's broker mints them (Shards' D242): a visible marker, then 256 random bits in hex; one for
+    // each credential here.
+    let placeholder = |reference: &str| match reference {
+        "anthropic/team" => {
+            "kiln-placeholder-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+        _ => "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
     let credential = |member: &Member, reference: &str, toward: &[&str]| CredentialGrant {
         member: member.clone(),
         reference: reference.to_owned(),
         toward: toward.iter().map(|h| (*h).to_owned()).collect(),
+        placeholder: placeholder(reference).to_owned(),
     };
     let granted =
         |grants: Vec<Grant>, credentials: Vec<CredentialGrant>| -> Result<BoxSpec, String> {

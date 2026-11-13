@@ -394,6 +394,12 @@ impl ImageGuest for ModelGuest {
             why: "it has none".to_owned(),
         })
     }
+    fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's saves",
+            why: "it makes none".to_owned(),
+        })
+    }
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
@@ -2453,6 +2459,11 @@ fn a_guest_path_call_scans_the_records_once() {
     );
 }
 
+/// The placeholder kiln's broker gives Claude Code's harness for its account's credential (Shards' D242): a visible
+/// marker, then 256 random bits in hex.
+const CLAUDE_PLACEHOLDER: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// Claude Code's harness as kiln boots it (joint plan step 33's example): its providers by name, by TCP, and its
 /// account's credential toward both; and the model's image naming what the harness reaches.
 fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::CredentialGrant>) {
@@ -2482,6 +2493,7 @@ fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::Cred
             "api.anthropic.com".to_owned(),
             "platform.claude.com".to_owned(),
         ],
+        placeholder: CLAUDE_PLACEHOLDER.to_owned(),
     }];
     let mut spec = spec(name, None);
     if let ClassSpec::ShardsImage(image) = &mut spec.class {
@@ -2494,9 +2506,10 @@ fn credentialed(images: &ModelImages, name: &str) -> (BoxSpec, Vec<hex_api::Cred
 /// AC-T7.7.2, joint plan step 33 (its step 6; Shards' D242; docs/design/credential-grants.md C3, C4): do create and
 /// start a harness VM granting its credential toward its two providers, on a node whose orchestrator gave it lessors
 /// over a simulated broker; then ask the credential as Shards' run host relays its egress's first use, and stop the VM.
-/// Expect: the boot asked exactly the box's credential, one grant toward both hosts and a lessor; inspect showing every
-/// credential grant as the record holds it; the ask answered with the broker's value, held there; a host the grant
-/// doesn't name carrying no credential (Shards' decision passes it bare); and the lease given back as the run ends.
+/// Expect: the boot asked exactly the box's credential, one grant toward both hosts with its placeholder and a lessor;
+/// inspect showing every credential grant as the record holds it; the ask answered with the broker's value, held
+/// there; a host the grant doesn't name, or a request without its placeholder, carrying no credential (Shards' decision
+/// passes it bare); and the lease given back as the run ends.
 #[test]
 fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_lessors() {
     use hex_api::lease::sim::SimLessors;
@@ -2518,6 +2531,7 @@ fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_le
                 "api.anthropic.com".to_owned(),
                 "platform.claude.com".to_owned()
             ],
+            placeholder: CLAUDE_PLACEHOLDER.to_owned(),
         }]
     );
     assert!(asked[0].lessor.is_some());
@@ -2530,12 +2544,27 @@ fn w33_a_harness_vms_credentials_reach_its_boot_and_record_and_lease_from_its_le
         shards_api::image::decide(
             &asked[0].credentials,
             "api.anthropic.com",
-            "api.anthropic.com"
+            "api.anthropic.com",
+            Some(CLAUDE_PLACEHOLDER)
         ),
         shards_api::image::Fill::With("anthropic/ada".to_owned())
     );
     assert_eq!(
-        shards_api::image::decide(&asked[0].credentials, "evil.example", "evil.example"),
+        shards_api::image::decide(
+            &asked[0].credentials,
+            "evil.example",
+            "evil.example",
+            Some(CLAUDE_PLACEHOLDER)
+        ),
+        shards_api::image::Fill::Pass
+    );
+    assert_eq!(
+        shards_api::image::decide(
+            &asked[0].credentials,
+            "api.anthropic.com",
+            "api.anthropic.com",
+            None
+        ),
         shards_api::image::Fill::Pass
     );
     let leased = images.run.ask("anthropic/ada").unwrap();

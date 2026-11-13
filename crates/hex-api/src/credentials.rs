@@ -14,15 +14,36 @@ use crate::{Destination, Grant, Member, Proto, Refusal};
 pub const REFERENCE_MAX: usize = 512;
 
 /// A credential granted by reference: `member`'s requests to each of `toward`'s hosts may have the credential
-/// `reference` names filled in at its VM's egress, and no other request may (Shards' D242). Its way is out, as an
-/// egress grant's: a value is filled into what the member sends, never into what comes back. It grants no egress:
-/// each host is one the member's own egress grant reaches by name, by TCP, as TLS names a server by its DNS name alone
-/// (RFC 6066 §3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `reference` names filled in at its VM's egress where its `placeholder` stands, and no other request may (Shards'
+/// D242). Its way is out, as an egress grant's: a value is filled into what the member sends, never into what comes
+/// back. It grants no egress: each host is one the member's own egress grant reaches by name, by TCP, as TLS names a
+/// server by its DNS name alone (RFC 6066 §3).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialGrant {
     pub member: Member,
     pub reference: String,
     pub toward: Vec<String>,
+    /// What stands for the credential in its member's requests (Shards' D242): minted by the orchestrator where it
+    /// gives the credential to the member (kiln's broker: `kiln-placeholder-` and 256 random bits in hex), a token the
+    /// member sends where the value would go, which the run's injector fills the value in for. Holding it is the
+    /// capability, so it never prints. After `toward`, so a record written before it reads as none (append-only).
+    #[serde(default)]
+    pub placeholder: String,
+}
+
+/// Shows a grant's member, reference and hosts, and of its placeholder its length alone, as Shards' grant does.
+impl std::fmt::Debug for CredentialGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialGrant")
+            .field("member", &self.member)
+            .field("reference", &self.reference)
+            .field("toward", &self.toward)
+            .field(
+                "placeholder",
+                &format_args!("{} bytes", self.placeholder.len()),
+            )
+            .finish()
+    }
 }
 
 /// Whether every credential grant could be filled in exactly as it says, against the box's network `grants` (which

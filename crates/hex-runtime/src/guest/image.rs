@@ -334,6 +334,10 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Terminal(why) => {
             Refusal::Broken(format!("Shards refused {op} as a terminal's size: {why}"))
         }
+        // Only a save (D259) is refused so, and this class asks none.
+        ImageRefusal::Save(cause, why) => {
+            Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
+        }
     }
 }
 

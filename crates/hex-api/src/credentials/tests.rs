@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::*;
 use crate::{MemberKind, Ports};
 
@@ -24,11 +26,23 @@ fn egress(member: Member, name: &str, proto: Proto) -> Grant {
     }
 }
 
+/// The placeholder kiln's broker would give here for the credential `reference` names (Shards' D242): its visible
+/// marker, then hex, one for each reference, so that grants of one credential share it and two credentials never do.
+fn placeholder(reference: &str) -> String {
+    reference
+        .bytes()
+        .fold("kiln-placeholder-".to_owned(), |mut placeholder, b| {
+            write!(placeholder, "{b:02x}").unwrap();
+            placeholder
+        })
+}
+
 fn credential(member: Member, reference: &str, toward: &[&str]) -> CredentialGrant {
     CredentialGrant {
         member,
         reference: reference.to_owned(),
         toward: toward.iter().map(|h| (*h).to_owned()).collect(),
+        placeholder: placeholder(reference),
     }
 }
 
@@ -216,15 +230,35 @@ fn w33_every_member_reaching_a_credentials_host_holds_it() {
 }
 
 /// Joint plan step 33 (every credential grant in Hex's record of the VM): do write a credential grant as the record's
-/// JSON and read it back. Expect it whole, each field by its name.
+/// JSON and read it back, and read one a record written before placeholders holds. Expect it whole, each field by its
+/// name, its placeholder last; the older one read with none.
 #[test]
 fn w33_a_credential_grant_round_trips_through_the_records_json() {
     let (_, credentials) = harness();
     let json = serde_json::to_string(&credentials).unwrap();
     assert_eq!(
         json,
-        r#"[{"member":{"kind":"harness","name":"claude"},"reference":"anthropic/ada","toward":["api.anthropic.com","platform.claude.com"]}]"#
+        r#"[{"member":{"kind":"harness","name":"claude"},"reference":"anthropic/ada","toward":["api.anthropic.com","platform.claude.com"],"placeholder":"kiln-placeholder-616e7468726f7069632f616461"}]"#
     );
     let back: Vec<CredentialGrant> = serde_json::from_str(&json).unwrap();
     assert_eq!(back, credentials);
+    let older: CredentialGrant = serde_json::from_str(
+        r#"{"member":{"kind":"harness","name":"claude"},"reference":"anthropic/ada","toward":["api.anthropic.com"]}"#,
+    )
+    .unwrap();
+    assert_eq!(older.placeholder, "");
+}
+
+/// Shards' D242 (holding a placeholder is the capability): do format a credential grant with `{:?}`. Expect its
+/// member, reference and hosts, and of its placeholder its length alone.
+#[test]
+fn w33_a_credential_grants_debug_shows_its_placeholders_length_alone() {
+    let (_, credentials) = harness();
+    let shown = format!("{credentials:?}");
+    assert!(!shown.contains(&credentials[0].placeholder), "{shown}");
+    assert!(shown.contains("placeholder: 43 bytes"), "{shown}");
+    assert!(
+        shown.contains("reference: \"anthropic/ada\"") && shown.contains("platform.claude.com"),
+        "{shown}"
+    );
 }

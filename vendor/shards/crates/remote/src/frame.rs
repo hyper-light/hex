@@ -37,6 +37,13 @@ pub enum Tag {
     /// harness makes to its MCP bridge, as an exec lane takes its exec
     /// (`control::exec::Kind::Mcp`).
     Mcp = 7,
+    /// Controller, on an agent-control endpoint (D238): control a member itself, its state,
+    /// its end and its steering, on a lane as an exec's (`control::exec::Kind::Member`).
+    Member = 8,
+    /// Controller, on an agent-control endpoint (D238's log lane): read the log the run keeps
+    /// of its command's output or of a member's, on a lane as an exec's
+    /// (`control::exec::Kind::Log`).
+    Log = 9,
     /// Client: bytes of the command's stdin.
     Stdin = 16,
     /// Client: the end of the command's stdin.
@@ -75,6 +82,16 @@ pub enum Tag {
     /// why (UTF-8): it may have run, all or some of it, as [`Refused`](Tag::Refused)'s never
     /// did (D176 part 6).
     Cut = 42,
+    /// Agent-control endpoint, on a member's lane (D238): the member runs, its index (four
+    /// bytes, big endian).
+    Running = 43,
+    /// Agent-control endpoint, on a member's lane (D238): its last steer taken (0), or
+    /// refused, typed (`control::exec::Unsteered`, four bytes, big endian).
+    Steered = 44,
+    /// Agent-control endpoint, on a log lane (D238): the place it was asked from is older than
+    /// the oldest its log keeps, which this names (`control::exec::LogPos`, 24 bytes); the
+    /// lane's end follows.
+    Rotated = 45,
 }
 
 impl Tag {
@@ -87,6 +104,8 @@ impl Tag {
             5 => Tag::UnixConnect,
             6 => Tag::Control,
             7 => Tag::Mcp,
+            8 => Tag::Member,
+            9 => Tag::Log,
             16 => Tag::Stdin,
             17 => Tag::StdinEnd,
             18 => Tag::Resize,
@@ -102,6 +121,9 @@ impl Tag {
             40 => Tag::Connected,
             41 => Tag::Unreached,
             42 => Tag::Cut,
+            43 => Tag::Running,
+            44 => Tag::Steered,
+            45 => Tag::Rotated,
             _ => return None,
         })
     }

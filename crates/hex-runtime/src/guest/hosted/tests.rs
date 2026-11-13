@@ -200,6 +200,10 @@ impl ImageGuest for Run {
         Err(unasked())
     }
 
+    fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
+
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.calls.lock().unwrap().stops += 1;
         Ok(())

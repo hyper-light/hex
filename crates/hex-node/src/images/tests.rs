@@ -98,6 +98,9 @@ impl ImageGuest for Held {
     fn unplug(&self, _: &str, _: Duration) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
+    fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         Ok(())
