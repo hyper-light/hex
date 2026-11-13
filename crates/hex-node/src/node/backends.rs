@@ -483,6 +483,14 @@ impl Node {
             .backends
             .get()
             .ok_or_else(|| projection_refused("initialized node backends were not published"))?;
+        // Joint plan step 14 (ROOT, 2026-11-13): what this node recorded under a profile's census cost is retired, its
+        // natives up, before any preparation or recovery uses it; the preflight above passed it for this alone.
+        if let Some(backend) = &backends.firecracker {
+            backend.retire_census()?;
+        }
+        if let Some(backend) = &backends.shards {
+            backend.retire_census()?;
+        }
         if let Some(backend) = &backends.firecracker {
             backend.prepare_backing()?;
         }
@@ -634,6 +642,10 @@ impl Node {
             .map_err(|_| Refusal::Full(MAX_BOXES))?;
         for (id, record) in &records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
+            // A retired box's VM is gone with its retirement (joint plan step 14): no native scope to adopt.
+            if record.retired {
+                continue;
+            }
             if matches!(
                 record.spec.backend_class()?,
                 Class::Firecracker | Class::Shards
@@ -848,6 +860,10 @@ impl Node {
             .map_err(|_| Refusal::Full(MAX_BOXES))?;
         for (id, record) in records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
+            // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14).
+            if record.retired {
+                continue;
+            }
             let Some(backend) = self
                 .backend(record.spec.backend_class()?)
                 .map_err(|_| uncertain(id))?
