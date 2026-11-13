@@ -28,6 +28,7 @@ pub mod differential;
 mod end;
 mod grants;
 mod id;
+pub mod patience;
 mod runtime;
 pub mod sim;
 mod spec;

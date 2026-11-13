@@ -1191,3 +1191,26 @@ fn w14_the_window_is_the_period_of_the_cpu_max_the_node_writes() {
         .unwrap();
     assert_eq!(Duration::from_micros(period), WINDOW);
 }
+
+/// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13: the starving case the done-when names): a running VM whose cgroup
+/// can't be read counts whole, at its receipt, against the fleet's budget until a read succeeds, its learner untouched,
+/// and the failure is told. Do run a window of two Shards VMs of 16-CPU, 8 GiB receipts in a 16-CPU, 64 GiB fleet
+/// budget, the second's cgroup unread. Expect the first's memory budget the fleet's 64 GiB less the second's 8 GiB
+/// receipt, and the second named among the unread.
+#[test]
+fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
+    io.set(&fleet().join("vm-1"), 0, GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner
+        .window(&io, vms, shards, &[], res(16_000, 64 * GIB), Instant::now())
+        .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-1"), "memory.high"),
+        Some((56 * GIB).to_string())
+    );
+    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(unread, ["vm-2"]);
+}

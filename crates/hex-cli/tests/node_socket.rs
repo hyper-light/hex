@@ -249,10 +249,7 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
         .unwrap();
     let mut said = String::new();
     out.read_to_string(&mut said).unwrap();
-    assert_eq!(
-        proc.wait_for(conformance::PATIENCE).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(conformance::end_of(&mut proc).unwrap(), Exit::Code(0));
     client.delete(&id).unwrap();
     said.trim().to_owned()
 }
@@ -1101,10 +1098,7 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     let mut said = String::new();
     out.read_to_string(&mut said).unwrap();
     assert_eq!(said, "", "true says nothing");
-    assert_eq!(
-        proc.wait_for(conformance::PATIENCE).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(conformance::end_of(&mut proc).unwrap(), Exit::Code(0));
     let (mut out, w) = std::io::pipe().unwrap();
     let mut proc = client
         .exec(
@@ -1119,10 +1113,7 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     let mut said = String::new();
     out.read_to_string(&mut said).unwrap();
     assert_eq!(said, "from the socket\n");
-    assert_eq!(
-        proc.wait_for(conformance::PATIENCE).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(conformance::end_of(&mut proc).unwrap(), Exit::Code(0));
     client.delete(&id).unwrap();
     Ok(())
 }

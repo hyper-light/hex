@@ -175,6 +175,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         }],
         device_routes: Vec::new(),
         backings: vec![BackingOffer {
+            guest: Default::default(),
             key,
             cost,
             phase: BackingPhase::Prepared,
@@ -416,6 +417,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         }],
         device_routes: Vec::new(),
         backings: vec![BackingOffer {
+            guest: Default::default(),
             key,
             cost,
             phase: BackingPhase::Draining,

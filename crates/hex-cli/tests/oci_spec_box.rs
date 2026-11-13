@@ -837,10 +837,7 @@ fn exec(node: &Node, id: &BoxId, script: &str) -> (Exit, String) {
         .expect("exec");
     let mut out = String::new();
     r.read_to_string(&mut out).unwrap();
-    let exit = proc
-        .wait_for(conformance::PATIENCE)
-        .unwrap()
-        .expect("the program ends");
+    let exit = conformance::end_of(&mut proc).unwrap();
     (exit, out)
 }
 
