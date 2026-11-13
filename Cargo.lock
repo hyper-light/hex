@@ -576,6 +576,7 @@ dependencies = [
  "sha2 0.10.9",
  "shards-afunix",
  "shards-api",
+ "shards-remote",
  "shards-testdir",
  "tar",
  "tempfile",
