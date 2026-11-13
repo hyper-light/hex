@@ -19,14 +19,17 @@ pub use shards_abi::run::nesting::Ready;
 /// ([`Narrowing::destinations`], D236), and to each published port in [`Started`], the
 /// members it reaches; 4, a host directory plugged into a running member and let go of
 /// (`PLUG`, `UNPLUG`, answered `PLUGGED`; D235), so that a side that has no plugs refuses
-/// the run as it is asked, before any plug is; 5, each member's reach of the destinations
-/// kept ([`Narrowing::members`], D236), which its run host holds every member to. A request
-/// that names none is written as version 4, which a side of version 4 reads alike, so such a
-/// side refuses only the requests that hold members to their reach.
-pub const VERSION: u8 = 5;
+/// the run as it is asked, before any plug is; 5, each member's working directory
+/// ([`MemberStage::workdir`]); 6, whether each member's stdin is the orchestrator's
+/// ([`MemberStage::input`], plan step 5); 9, each member's reach of the destinations kept
+/// ([`Narrowing::members`], D236), which its run host holds every member to (7 and 8 are
+/// Shards main's room and credential grants, D241 and D242, which this revision lacks). A
+/// request that names none is written as version 6, which a side of version 6 reads alike, so
+/// such a side refuses only the requests that hold members to their reach.
+pub const VERSION: u8 = 9;
 
 /// The version a request naming no member's reach is written as (see [`VERSION`]).
-const WITHOUT_REACH: u8 = 4;
+const WITHOUT_REACH: u8 = 6;
 
 /// What the orchestrator's side sends.
 pub mod to_host {
@@ -43,6 +46,11 @@ pub mod to_host {
     pub const PLUG: u8 = 6;
     /// An [`UnplugAsk`](super::UnplugAsk).
     pub const UNPLUG: u8 = 7;
+    /// [`Input`](super::Input): bytes for a member's stdin, within the room its host gave.
+    pub const INPUT: u8 = 8;
+    /// [`InputEnd`](super::InputEnd): the orchestrator's end of a member's stdin, or its
+    /// abort.
+    pub const INPUT_END: u8 = 9;
 }
 
 /// What the run host sends.
@@ -66,6 +74,10 @@ pub mod to_client {
     pub const READY: u8 = 23;
     /// [`PlugAnswer`](super::PlugAnswer): a plug's or an unplug's outcome, by its ask's id.
     pub const PLUGGED: u8 = 24;
+    /// [`InputRoom`](super::InputRoom): room for more of a member's stdin.
+    pub const INPUT_ROOM: u8 = 25;
+    /// [`InputEnded`](super::InputEnded): a member's stdin has ended, and how.
+    pub const INPUT_ENDED: u8 = 26;
 }
 
 /// Why a payload could not be read or written.
@@ -156,6 +168,10 @@ pub struct MemberStage {
     /// `KEY=VALUE` each, over its image's.
     pub env: Vec<Secret>,
     pub files: Vec<StagedFile>,
+    /// Its working directory, absolute and plain; none for its image's.
+    pub workdir: Option<String>,
+    /// Its stdin is the orchestrator's to write ([`Input`]); else it is `/dev/null`.
+    pub input: bool,
 }
 
 /// A guest port published on the host.
@@ -191,7 +207,7 @@ pub struct Narrowing {
     /// Names past the microVM, where the image grants them.
     pub dns: bool,
     /// What each member may reach of the destinations kept, where the orchestrator holds
-    /// members apart (version 5): every member the image declares is held to it, one named
+    /// members apart (version 9): every member the image declares is held to it, one named
     /// nowhere here to none of them, or the run is refused before it starts. A member reaches
     /// each destination kept that it reaches by name (its networks' destinations and its
     /// remote MCP servers'), the network process keeping the whole microVM to those kept and
@@ -349,6 +365,38 @@ pub struct Output {
     pub member: u32,
     pub channel: Channel,
     pub bytes: Vec<u8>,
+}
+
+/// Bytes for a member's stdin, at most the room its host has given and the orchestrator has
+/// not used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Input {
+    pub member: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// The orchestrator's end of a member's stdin ([`StreamEnd::Closed`]), every byte before it
+/// to go to the member, or its abort, with its errno.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnd {
+    pub member: u32,
+    pub end: StreamEnd,
+}
+
+/// Room for `bytes` more of member `member`'s stdin: given once its stdin is ready, then as
+/// each part the orchestrator sent is in the member's input connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputRoom {
+    pub member: u32,
+    pub bytes: u64,
+}
+
+/// A member's stdin has ended: the bytes it took, and how, as its init told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnded {
+    pub member: u32,
+    pub written: u64,
+    pub end: StreamEnd,
 }
 
 /// How a member's channel ended.
@@ -610,6 +658,15 @@ impl Writer {
         }
         Ok(())
     }
+    fn stream_end(&mut self, end: StreamEnd) {
+        match end {
+            StreamEnd::Closed => self.u8(0),
+            StreamEnd::Aborted(errno) => {
+                self.u8(1);
+                self.i32(errno);
+            }
+        }
+    }
     fn done(self) -> Result<Vec<u8>, WireError> {
         if self.0.len() > run::MAX_PAYLOAD as usize {
             return Err(WireError::TooLong);
@@ -694,6 +751,13 @@ impl<'a> Reader<'a> {
                 what: "a grant list",
                 tag,
             }),
+        }
+    }
+    fn stream_end(&mut self, what: &'static str) -> Result<StreamEnd, WireError> {
+        match self.u8()? {
+            0 => Ok(StreamEnd::Closed),
+            1 => Ok(StreamEnd::Aborted(self.i32()?)),
+            tag => Err(WireError::Tag { what, tag }),
         }
     }
     fn end(self) -> Result<(), WireError> {
@@ -799,7 +863,21 @@ impl Request {
             }
         }
         w.keep(&self.egress.destinations)?;
-        // Each member's reach, appended in version 5: written only where it is named.
+        // Each member's working directory, in the members' order, appended in version 5.
+        for m in &self.members {
+            match &m.workdir {
+                None => w.u8(0),
+                Some(path) => {
+                    w.u8(1);
+                    w.text(path)?;
+                }
+            }
+        }
+        // Each member's input, in the members' order, appended in version 6.
+        for m in &self.members {
+            w.u8(u8::from(m.input));
+        }
+        // Each member's reach, appended in version 9: written only where it is named.
         if let Some(members) = &self.egress.members {
             w.count(members.len())?;
             for m in members {
@@ -833,7 +911,9 @@ impl Request {
         } else {
             None
         };
-        let n = r.count(1 + 4 + 4 + 4)?;
+        // Each member's kind, name, env and files, and, appended last, its working
+        // directory's flag and its input's.
+        let n = r.count(1 + 4 + 4 + 4 + 1 + 1)?;
         let mut members = Vec::with_capacity(n);
         for _ in 0..n {
             let kind = member_kind(r.u8()?)?;
@@ -856,6 +936,9 @@ impl Request {
                 name,
                 env,
                 files,
+                // Read with the members' working directories and inputs, appended last.
+                workdir: None,
+                input: false,
             });
         }
         let n = r.count(2 + 1 + 1 + 2)?;
@@ -885,6 +968,13 @@ impl Request {
         let nesting = r.flag()?;
         let ready_by = if r.flag()? { Some(r.u64()?) } else { None };
         let destinations = r.keep()?;
+        for m in &mut members {
+            m.workdir = if r.flag()? { Some(r.text()?) } else { None };
+        }
+        for m in &mut members {
+            m.input = r.flag()?;
+        }
+        // Each member's reach, appended in version 9.
         let reach = if version == VERSION {
             let n = r.count(1 + 4 + 4)?;
             let mut reach = Vec::with_capacity(n);
@@ -1177,6 +1267,76 @@ impl Output {
     }
 }
 
+impl Input {
+    /// Its head, before its bytes, as [`Output::head`] is an output's.
+    pub fn head(member: u32) -> [u8; 4] {
+        member.to_be_bytes()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Input, WireError> {
+        let (head, bytes) = payload.split_first_chunk::<4>().ok_or(WireError::Short)?;
+        Ok(Input {
+            member: u32::from_be_bytes(*head),
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+impl InputEnd {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.u32(self.member);
+        w.stream_end(self.end);
+        w.0
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<InputEnd, WireError> {
+        let mut r = Reader(payload);
+        let member = r.u32()?;
+        let end = r.stream_end("an input's end")?;
+        r.end()?;
+        Ok(InputEnd { member, end })
+    }
+}
+
+impl InputRoom {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.u32(self.member);
+        w.u64(self.bytes);
+        w.0
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<InputRoom, WireError> {
+        let mut r = Reader(payload);
+        let room = InputRoom {
+            member: r.u32()?,
+            bytes: r.u64()?,
+        };
+        r.end()?;
+        Ok(room)
+    }
+}
+
+impl InputEnded {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.u32(self.member);
+        w.u64(self.written);
+        w.stream_end(self.end);
+        w.0
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<InputEnded, WireError> {
+        let mut r = Reader(payload);
+        let member = r.u32()?;
+        let written = r.u64()?;
+        let end = r.stream_end("an input's end")?;
+        r.end()?;
+        Ok(InputEnded { member, written, end })
+    }
+}
+
 impl OutputEnd {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer(Vec::new());
@@ -1384,6 +1544,8 @@ mod tests {
                     mode: 0o600,
                     bytes: Secret(b"{\"token\":\"t0p\"}\0".to_vec()),
                 }],
+                workdir: None,
+                input: true,
             }],
             publish: vec![
                 Publish {
@@ -1416,14 +1578,14 @@ mod tests {
         }
     }
 
-    /// Each member's reach of the destinations kept (D236) rides version 5 alone: a request
-    /// naming it, none, one member or several, a member reaching nothing among them, reads
-    /// back as written, its first byte 5 and the reach last; one naming none is written as
-    /// version 4, byte for byte the request a side of version 4 writes, and read back with no
-    /// reach. A reach cut short, a member of no kind, or a version 4 request carrying one is
+    /// Each member's reach of the destinations kept (D236) rides version 9 alone: a request
+    /// naming it, for no member, one or several, a member reaching nothing among them, reads
+    /// back as written, its first byte 9 and the reach last; one naming none is written as
+    /// version 6, byte for byte the request a side of version 6 writes, and read back with no
+    /// reach. A reach cut short, a member of no kind, or a version 6 request carrying one is
     /// refused, never read as another.
     #[test]
-    fn a_members_reach_rides_version_5_alone() {
+    fn a_members_reach_rides_version_9_alone() {
         let reach = |kind, name: &str, destinations: &[&str]| MemberReach {
             kind,
             name: name.into(),
@@ -1467,7 +1629,7 @@ mod tests {
         let mut kindless = held(vec![reach(MemberKind::Agent, "helper", &[])])
             .encode()
             .unwrap();
-        // The reach's count, then its one member's kind.
+        // The one member's kind, before its name and its destinations' count.
         let at = kindless.len() - (1 + 4 + "helper".len() + 4);
         kindless[at] = 2;
         assert!(matches!(Request::decode(&kindless), Err(WireError::Tag { .. })));
@@ -1483,6 +1645,24 @@ mod tests {
     fn messages_round_trip() {
         let r = request();
         assert_eq!(Request::decode(&r.encode().unwrap()).unwrap(), r);
+        // Each member's working directory, or none, in the members' order (version 5), and
+        // whether its input is the orchestrator's (version 6).
+        let mut worked = request();
+        worked.members[0].workdir = Some("/Users/ada/proj".into());
+        worked.members.push(MemberStage {
+            kind: MemberKind::Agent,
+            name: "helper".into(),
+            env: Vec::new(),
+            files: Vec::new(),
+            workdir: None,
+            input: false,
+        });
+        worked.members.push(MemberStage {
+            workdir: Some("/".into()),
+            input: true,
+            ..worked.members[1].clone()
+        });
+        assert_eq!(Request::decode(&worked.encode().unwrap()).unwrap(), worked);
         let with_command = Request {
             command: Some(vec!["sh".into(), "-c".into(), String::new()]),
             ..request()
@@ -1514,9 +1694,10 @@ mod tests {
         .encode()
         .unwrap();
         assert_eq!(
-            asked.get(asked.len() - 11..).unwrap(),
-            [1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 0],
-            "appended: the grant's flag, the deadline's, then the destinations kept (all)"
+            asked.get(asked.len() - 13..).unwrap(),
+            [1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 1],
+            "appended: the grant's flag, the deadline's, the destinations kept (all), then the one \
+             member's working directory (none) and its input"
         );
         // Destinations kept by name, the host itself among them (D236), and none.
         for destinations in [
@@ -1643,6 +1824,56 @@ mod tests {
         5
     }
 
+    /// A member's input both ways round-trips: its bytes as they are, its ends typed, a flag
+    /// or tag no version has refused.
+    #[test]
+    fn a_members_input_round_trips_and_its_malformed_frames_are_refused() {
+        let mut bytes = Input::head(7).to_vec();
+        bytes.extend_from_slice(b"\0\xff\x80{\"id\":1}\nno-newline");
+        assert_eq!(
+            Input::decode(&bytes).unwrap(),
+            Input {
+                member: 7,
+                bytes: b"\0\xff\x80{\"id\":1}\nno-newline".to_vec()
+            }
+        );
+        assert_eq!(Input::decode(&[0, 0, 1]), Err(WireError::Short));
+        for end in [StreamEnd::Closed, StreamEnd::Aborted(libc_eio())] {
+            let e = InputEnd { member: 2, end };
+            assert_eq!(InputEnd::decode(&e.encode()).unwrap(), e);
+            let ended = InputEnded {
+                member: 2,
+                written: u64::MAX,
+                end,
+            };
+            assert_eq!(InputEnded::decode(&ended.encode()).unwrap(), ended);
+        }
+        let room = InputRoom {
+            member: 4,
+            bytes: 65536,
+        };
+        assert_eq!(InputRoom::decode(&room.encode()).unwrap(), room);
+        let mut long = room.encode();
+        long.push(0);
+        assert_eq!(InputRoom::decode(&long), Err(WireError::Trailing));
+        assert!(matches!(
+            InputEnd::decode(&[0, 0, 0, 1, 2]),
+            Err(WireError::Tag { tag: 2, .. })
+        ));
+        // A member's input flag, appended last in version 5, that is no flag.
+        let mut bad = request().encode().unwrap();
+        let last = bad.len() - 1;
+        assert_eq!(bad[last], 1, "the member's input flag comes last");
+        bad[last] = 2;
+        assert!(matches!(
+            Request::decode(&bad),
+            Err(WireError::Tag {
+                what: "a flag",
+                tag: 2
+            })
+        ));
+    }
+
     /// A request cut anywhere short, or with a byte past its end, is refused by type; no
     /// prefix is ever read as a request.
     #[test]
@@ -1665,15 +1896,25 @@ mod tests {
         let mut bytes = request().encode().unwrap();
         bytes[0] = VERSION + 1;
         assert_eq!(Request::decode(&bytes), Err(WireError::Version(VERSION + 1)));
-        // A request of version 1, without the nesting grant's fields, is no request of
-        // this one's: refused by its version, never read with the grant defaulted.
+        // A request of version 1, without the nesting grant's fields, of version 4, without
+        // its members' working directories, or of version 5, without their inputs, is no
+        // request of this one's: refused by its version, never read with them defaulted.
         let mut v1 = request().encode().unwrap();
-        v1.truncate(v1.len() - 2);
+        v1.truncate(v1.len() - 3);
         v1[0] = 1;
         assert_eq!(Request::decode(&v1), Err(WireError::Version(1)));
-        // The nesting flag, before the deadline's tag and the destinations': no flag.
+        let mut v4 = request().encode().unwrap();
+        v4.truncate(v4.len() - 2);
+        v4[0] = 4;
+        assert_eq!(Request::decode(&v4), Err(WireError::Version(4)));
+        let mut v5 = request().encode().unwrap();
+        v5.truncate(v5.len() - 1);
+        v5[0] = 5;
+        assert_eq!(Request::decode(&v5), Err(WireError::Version(5)));
+        // The nesting flag, before the deadline's tag, the destinations' and the one member's
+        // working directory's and input's: no flag.
         let mut flag = request().encode().unwrap();
-        let at = flag.len() - 3;
+        let at = flag.len() - 5;
         flag[at] = 2;
         assert_eq!(
             Request::decode(&flag),
@@ -1682,11 +1923,11 @@ mod tests {
                 tag: 2
             })
         );
-        // The destinations' list, last: no list of version 3's.
+        // The destinations' list, before the member's working directory and input: no list
+        // of version 3's and on.
         let mut list = request().encode().unwrap();
-        if let Some(last) = list.last_mut() {
-            *last = 2;
-        }
+        let at = list.len() - 3;
+        list[at] = 2;
         assert_eq!(
             Request::decode(&list),
             Err(WireError::Tag {

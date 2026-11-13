@@ -89,11 +89,16 @@ fn a_stranger_is_turned_away(dir: &Path, address: SocketAddr) {
     );
 }
 
-/// The boxes of Hex's own HEX-CV-L1 places, each a quarter of the machine's CPUs, where Hex places a `process` box (its
-/// `oci` placement class): Linux and Windows. A Mac places Shards microVMs alone (`hex_sim::facts::classes`), which this
-/// test boots none of: there the stand-in meets the machine's room alone.
-pub fn hex_boxes() -> u64 {
-    if cfg!(target_os = "macos") { 0 } else { 2 }
+/// The boxes of Hex's own HEX-CV-L1 places on the machine in `dir`, each a quarter of its CPUs: two where its scheduler
+/// places a `process` box under its `oci` placement class ([`machine::places_process_boxes`]), as on Linux; none where
+/// it doesn't, as on a Mac, which places Shards microVMs alone, or on a Windows node that runs containers, whose `oci`
+/// class places those alone. This test boots neither: there the stand-in meets the machine's room alone.
+pub fn hex_boxes(dir: &Path) -> u64 {
+    if machine::places_process_boxes(dir) {
+        2
+    } else {
+        0
+    }
 }
 
 /// What a kiln-shaped workload's run of HEX-CV-L1 takes: steps enough to fill the room and empty it again several times
@@ -132,8 +137,10 @@ fn light(dir: &Path, box_root: Option<&Path>) {
     let mut kiln = StandIn::start(&holder_dir, HOLDER, KEEPER, address);
     assert!(kiln.join().unwrap(), "the first sync's counts disagree");
     let room = kiln.view().unwrap().room;
-    // Hex's own: two boxes of a quarter of the machine's CPUs each, placed through the scheduler.
-    for n in 0..hex_boxes() {
+    // Hex's own: two boxes of a quarter of the machine's CPUs each, placed through the scheduler, where it places them.
+    let boxes = hex_boxes(&machine_dir);
+    eprintln!("HEX-CV-L1: Hex's boxes {boxes}");
+    for n in 0..boxes {
         let placed = machine::place(&machine_dir, &format!("cv-box-{n}"), room.cpu_milli / 4);
         assert!(
             placed.created && placed.refusals.is_empty(),
@@ -142,7 +149,7 @@ fn light(dir: &Path, box_root: Option<&Path>) {
         );
     }
     // Runs of an eighth of the machine until the room refuses one: what Hex's boxes leave, and no more.
-    let left = 8 - 2 * hex_boxes();
+    let left = 8 - 2 * boxes;
     let mut granted = 0u64;
     loop {
         match kiln.reserve(run_of(room, 8)).unwrap() {
@@ -203,7 +210,7 @@ fn light(dir: &Path, box_root: Option<&Path>) {
             && tally.unanswered > 0
             && tally.synced == 3
             && tally.links_lost == 2
-            && (hex_boxes() == 0 || tally.hints > 0)
+            && (boxes == 0 || tally.hints > 0)
             && tally.views > tally.granted,
         "{tally:?}"
     );
@@ -218,12 +225,12 @@ fn light(dir: &Path, box_root: Option<&Path>) {
 
 /// HEX-CV-L1 (joint plan step 13; AC-T7.4.1; CV1-CV11 over CV9's lane): do run `hex node` and `hex schedule serve` with
 /// a capacity lane on loopback, its enrollment begun by `hex node enroll` and answered by the simulator CA; have a peer
-/// the lane doesn't name dial it; have the stand-in join, Hex place two boxes of a quarter of the CPUs (none on a Mac:
-/// `hex_boxes`), and the stand-in reserve eighths until refused; kill the scheduler and start it again; drop the
-/// stand-in's link; then run 64 steps of kiln-shaped work. Expect the stranger refused at its handshake (Identity);
-/// every view's CPU held within the machine's and every grant within its room; the runs refused for room past what the
-/// boxes leave, the boxes and the runs within the machine's CPUs; the sync agreeing after the restart and after the
-/// dropped link; and the keeper's books, read from its records once it has ended, the stand-in's own.
+/// the lane doesn't name dial it; have the stand-in join, Hex place two boxes of a quarter of the CPUs (where it places
+/// a `process` box: `hex_boxes`), and the stand-in reserve eighths until refused; kill the scheduler and start it
+/// again; drop the stand-in's link; then run 64 steps of kiln-shaped work. Expect the stranger refused at its handshake
+/// (Identity); every view's CPU held within the machine's and every grant within its room; the runs refused for room
+/// past what the boxes leave, the boxes and the runs within the machine's CPUs; the sync agreeing after the restart and
+/// after the dropped link; and the keeper's books, read from its records once it has ended, the stand-in's own.
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn hex_cv_l1() {
@@ -247,8 +254,9 @@ fn hex_cv_l1() {
 /// 2. `b1`, on B, with `HEX_CV_REQUEST`: says `HEX_CV_CHAIN` and `HEX_CV_ROOTS`.
 /// 3. `a2`, on A, with `HEX_CV_CHAIN` and `HEX_CV_ROOTS`.
 /// 4. `a3`, on A, in the background, with `HEX_CV_BIND` (`<A's address>:<port>`): says `HEX_CV_SCHEDULER_PID` and
-///    `HEX_CV_CAPACITY` at each start of the scheduler, and starts it again each time it ends, until it ends with
-///    `$HEX_CV_DIR/stop` there: then says `HEX_CV_BOOKS` and `HEX_CV_LEFT=none`.
+///    `HEX_CV_CAPACITY` at each start of the scheduler (after the first, `HEX_CV_HEX_BOXES`: how many boxes of Hex's
+///    own it placed), and starts it again each time it ends, until it ends with `$HEX_CV_DIR/stop` there: then says
+///    `HEX_CV_BOOKS` and `HEX_CV_LEFT=none`.
 /// 5. `b2`, on B, with `HEX_CV_ADDR` (A's `HEX_CV_BIND`): says `HEX_CV_TALLY` and `HEX_CV_HELD`.
 /// 6. `b3`, on B, in the background, with `HEX_CV_ADDR` and `HEX_CV_LOSS=kill`: once it says `HEX_CV_READY`, kill the
 ///    scheduler on A by its last `HEX_CV_SCHEDULER_PID` (`kill -9 <pid>`; Windows: `taskkill /F /PID <pid>`); A3 starts
@@ -430,10 +438,12 @@ mod two_hosts {
         say("HEX_CV_SCHEDULER_PID", scheduler.child.id());
         say("HEX_CV_CAPACITY", address);
         // Hex's own: two boxes of a quarter of the machine's CPUs each (the node's CPUs are its hardware threads, as
-        // the standard library counts them within the cgroup's quota), kept through every restart; none on a Mac
-        // (`hex_boxes`).
+        // the standard library counts them within the cgroup's quota), kept through every restart; none where its
+        // scheduler places no `process` box (`hex_boxes`).
         let threads = u64::try_from(std::thread::available_parallelism().unwrap().get()).unwrap();
-        for n in 0..super::hex_boxes() {
+        let boxes = super::hex_boxes(&dir);
+        say("HEX_CV_HEX_BOXES", boxes);
+        for n in 0..boxes {
             let placed = machine::place(&dir, &format!("cv-2h-box-{n}"), threads * 1000 / 4);
             assert!(
                 placed.created && placed.refusals.is_empty(),
@@ -464,10 +474,11 @@ mod two_hosts {
 
     /// HEX-CV-2H A3, on the keeper's host, in the background. Do: run `hex node` and `hex schedule serve` with its lane
     /// at `HEX_CV_BIND` serving `HEX_CV_HOLDER` alone, and place two boxes of Hex's own of a quarter of the machine's
-    /// CPUs each; each time the scheduler ends, start it again over the same state and address, until it ends with
-    /// `$HEX_CV_DIR/stop` there. Expect: each start said (`HEX_CV_SCHEDULER_PID`, `HEX_CV_CAPACITY`), Hex's boxes
-    /// placed, and once stopped the keeper's books of the holder said from its records (`HEX_CV_BOOKS`) and the boxes
-    /// deleted (`HEX_CV_LEFT=none`). A Linux host that can't delegate a cgroup records the skip and serves nothing.
+    /// CPUs each where its scheduler places a `process` box (`HEX_CV_HEX_BOXES` says how many); each time the
+    /// scheduler ends, start it again over the same state and address, until it ends with `$HEX_CV_DIR/stop` there.
+    /// Expect: each start said (`HEX_CV_SCHEDULER_PID`, `HEX_CV_CAPACITY`), Hex's boxes placed, and once stopped the
+    /// keeper's books of the holder said from its records (`HEX_CV_BOOKS`) and the boxes deleted (`HEX_CV_LEFT=none`).
+    /// A Linux host that can't delegate a cgroup records the skip and serves nothing.
     #[test]
     #[ignore = "HEX-CV-2H's phase A3, on the keeper's host: the lead's two-host run"]
     fn hex_cv_2h_a3_the_machine_keeps_its_view_through_its_schedulers_end() {

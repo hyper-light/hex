@@ -15,7 +15,7 @@ index 9cfbc0e3027e4791e0f0ee93f75e5c0f4f4c380f..9486d6b3367ef094615287b0237fa142
  [dev-dependencies]
  shards-testdir = { path = "../testdir" }
 diff --git a/crates/api/src/image.rs b/crates/api/src/image.rs
-index 5afc9736b1189315097caa59ba2565cf96e497b1..0367f20aa8afc4c7c7b75b1eaa9f93248d800679 100644
+index eea13892ce711f24d48caf7605b2e3ce872fbf29..4819b61224e2de577c0b969a6903761611039b09 100644
 --- a/crates/api/src/image.rs
 +++ b/crates/api/src/image.rs
 @@ -22,6 +22,7 @@ use std::path::PathBuf;
@@ -27,7 +27,7 @@ index 5afc9736b1189315097caa59ba2565cf96e497b1..0367f20aa8afc4c7c7b75b1eaa9f9324
  
  pub use wire::{
 diff --git a/crates/api/src/image/session.rs b/crates/api/src/image/session.rs
-index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf7874c384d6 100644
+index a9588d955ad8ee7e5754e123a4b033bc04755515..b10631a84947a1c45280b566cd4ac5b4a6232526 100644
 --- a/crates/api/src/image/session.rs
 +++ b/crates/api/src/image/session.rs
 @@ -11,10 +11,10 @@
@@ -42,7 +42,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
  use super::wire::{self, Channel, MemberInfo, Ready, RunEnd, Stats, StatsScope};
  use super::{ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberName};
  
-@@ -89,7 +89,7 @@ struct Shared {
+@@ -100,7 +100,7 @@ struct Shared {
      changed: Condvar,
      /// The host's stdin: closed once the run's end has come, which the host takes as the
      /// last of its owner, and by `stop`.
@@ -51,7 +51,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
  }
  
  impl Shared {
-@@ -138,86 +138,10 @@ impl Shared {
+@@ -149,86 +149,10 @@ impl Shared {
      }
  }
  
@@ -142,7 +142,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
      }
  }
  
-@@ -225,7 +149,7 @@ impl Host {
+@@ -236,7 +160,7 @@ impl Host {
  #[derive(Debug)]
  pub(super) struct Session {
      shared: Arc<Shared>,
@@ -151,7 +151,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
      members: Vec<MemberInfo>,
      published: Vec<wire::Bound>,
      outputs: Mutex<HashMap<(u32, Channel), io::PipeReader>>,
-@@ -246,24 +170,13 @@ impl Session {
+@@ -257,24 +181,13 @@ impl Session {
              .or_else(|| std::env::var_os("SHARDS_BIN").map(PathBuf::from))
              .unwrap_or_else(|| PathBuf::from("shards"));
          let os = |what: &'static str| move |e: io::Error| ImageRefusal::Os { what, kind: e.kind() };
@@ -182,7 +182,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
          let shared = Arc::new(Shared {
              state: Mutex::new(State::default()),
              changed: Condvar::new(),
-@@ -296,7 +209,7 @@ impl Session {
+@@ -307,7 +220,7 @@ impl Session {
                  .map_err(os("the run host's request"))
          })();
          let end_it = |shared: &Shared| {
@@ -191,7 +191,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
              lock(&shared.to_host).take();
          };
          if let Err(e) = threads {
-@@ -471,7 +384,7 @@ fn pump(shared: &Shared, member: u32, channel: Channel, mut writer: io::PipeWrit
+@@ -539,7 +452,7 @@ fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
  /// Reads the host's answers until it closes its stdout, each into the state; one that
  /// breaks the channel's contract ends the session as a failed run. The run's end closes
  /// the host's stdin: the host then ends.
@@ -200,7 +200,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
      let failed = loop {
          let (kind, payload) = match wire::read_frame(&mut from_host) {
              Ok(Some(frame)) => frame,
-@@ -567,7 +480,7 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
+@@ -656,7 +569,7 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
  }
  
  /// Keeps the host's last diagnostics until they end.
@@ -209,7 +209,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
      let keep = said_kept();
      let mut buf = [0u8; 4096];
      while let Ok(n) = said.read(&mut buf) {
-@@ -584,10 +497,10 @@ fn keep_said(shared: &Shared, mut said: std::process::ChildStderr) {
+@@ -673,10 +586,10 @@ fn keep_said(shared: &Shared, mut said: std::process::ChildStderr) {
  }
  
  /// Waits for the host to exit, then reaps it under the state's lock as `exited` is set.
@@ -222,7 +222,7 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
      if let Err(e) = awaited {
          state
              .end
-@@ -757,7 +670,7 @@ impl ImageGuest for Session {
+@@ -870,7 +783,7 @@ impl ImageGuest for Session {
          // (`STOP_ORDER`). A run that has ended is not asked: its host is cleaning up.
          let ended = lock(&self.shared.state).end.is_some();
          if !ended && self.shared.send(wire::to_host::STOP, &[]).is_err() {
@@ -231,6 +231,29 @@ index b314c2f6a5ba85fac1c18d79482e1ad01a76c66f..ccf493e2d354bf6a1b487a55f2a0cf78
          }
          // The run's end comes as its VM goes, which the host kills at once; or the host is
          // gone. The host's own exit after (its cleanup) is the watcher's to reap.
+@@ -962,15 +875,21 @@ mod tests {
+     #[cfg(unix)]
+     #[test]
+     fn a_feed_sends_its_callers_bytes_within_its_room_then_its_end() {
++        use std::process::{Command, Stdio};
+         let mut host = Command::new("cat")
+             .stdin(Stdio::piped())
+             .stdout(Stdio::piped())
+             .spawn()
+             .unwrap();
++        // The host's stdin as a session holds its run host's: a pipe's write end (spawn.rs).
++        let to_host = host
++            .stdin
++            .take()
++            .map(|stdin| io::PipeWriter::from(std::os::fd::OwnedFd::from(stdin)));
+         let s = Arc::new(Shared {
+             state: Mutex::new(State::default()),
+             changed: Condvar::new(),
+-            to_host: Mutex::new(host.stdin.take()),
++            to_host: Mutex::new(to_host),
+         });
+         lock(&s.state).inputs.insert(1, InputFlow::default());
+         let (reader, mut writer) = io::pipe().unwrap();
 diff --git a/crates/api/src/image/spawn.rs b/crates/api/src/image/spawn.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..4abf855f94d0d70665ccfa239fa759be4f4585c3
