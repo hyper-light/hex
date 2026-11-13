@@ -387,6 +387,44 @@ fn a_nodes_image_class_takes_this_boot_from_its_stores_own_stamp() {
     ));
 }
 
+/// This OS's socket bounds for a node, as `hex node` takes them.
+fn socket_limits() -> crate::serve::Limits {
+    #[cfg(target_os = "linux")]
+    let platform = crate::sizes::Sizes::now().unwrap().platform();
+    #[cfg(target_os = "macos")]
+    let platform = crate::serve::macos::platform().unwrap();
+    #[cfg(windows)]
+    let platform = crate::serve::windows::platform().unwrap();
+    crate::serve::limits(&platform)
+}
+
+// The simulator served bare, its image VMs' records its own, as a node's guest runtime keeps an image VM's
+// (`owns_records`): a refused create leaves nothing behind. It ends no exec for a closed connection, and keeps no
+// network namespaces.
+impl crate::serve::Host for SimRuntime {
+    fn abandoned(&self, _: &BoxId) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn netns(&self) -> Result<hex_core::netns::Counts, Refusal> {
+        Ok(hex_core::netns::Counts::default())
+    }
+}
+
+/// Joint plan step 12, AC-T7.4.1 (ROOT's r558, HEX-IMG-7): a real node's image cases run through its socket, as
+/// `image_real` runs them, where a create the client can't send (a grant the wire's check refuses) is refused before
+/// any node sees it. Do run every image case through a socket the simulator serves. Expect: none fails, as none fails
+/// in process (`hex_api::sim`'s `the_simulator_passes_the_shards_image_cases`).
+#[test]
+fn the_image_cases_hold_through_a_nodes_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("node.sock");
+    let node = Arc::new(SimRuntime::new());
+    let _server = crate::serve::Server::bind(&socket, node, socket_limits(), 2).unwrap();
+    let client = hex_client::Client::connect(&socket).unwrap();
+    let failures = hex_api::conformance::run_image(&client, &hex_api::sim::SimFixture::ShardsImage);
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// Joint plan step 12, AC-T7.4.1 (docs/design/shards-image-class.md §8): a macOS or Windows node holds a Shards image
 /// VM in its guest runtime, beside its host runtime, and the VM's guest runs no node of Hex's. Do forward a start, an
 /// inspect, a usage and a signal of an image VM's spec through the node's runtime. Expect: each back to run here,
