@@ -1059,11 +1059,14 @@ impl Driver {
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,
     /// is given the room those holdings leave, its room the machine's physical room still. Replaces what
     /// was said before; returns how many boxes it holds so.
-    pub fn rebook(&self, holds: &[(Key, hex_api::CapacityResources)]) -> Result<usize, Error> {
+    pub fn rebook(
+        &self,
+        holds: &[(peer::Holder, hex_api::CapacityResources)],
+    ) -> Result<usize, Error> {
         let mut state = self.lock()?;
-        let kept = state.node.rebook(holds.iter().map(|(key, holding)| {
+        let kept = state.node.rebook(holds.iter().map(|(holder, holding)| {
             (
-                *key,
+                *holder,
                 Resources {
                     cpu_milli: holding.cpu_milli,
                     mem_bytes: holding.mem_bytes,
@@ -1160,6 +1163,7 @@ impl Driver {
                 return Err(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Pending,
+                    why: None,
                 }
                 .into());
             }
@@ -1171,6 +1175,7 @@ impl Driver {
                 self.lock()?.admission = Some(Refusal::Backing {
                     key,
                     cause: hex_api::LifecycleCause::Uncertain,
+                    why: None,
                 });
                 return Err(refusal.into());
             }
@@ -1184,10 +1189,12 @@ impl Driver {
             state.admission = Some(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             });
             return Err(Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Uncertain,
+                why: None,
             }
             .into());
         }
@@ -1208,6 +1215,7 @@ impl Driver {
         let refused = || Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         };
         if expected.phase != hex_api::BackingPhase::Draining {
             return Err(invalid_static("native cleanup requires canonical Draining intent").into());
@@ -1246,6 +1254,7 @@ impl Driver {
         let refused = || Refusal::Backing {
             key,
             cause: hex_api::LifecycleCause::Uncertain,
+            why: None,
         };
         if expected.phase != hex_api::BackingPhase::Released
             || !self

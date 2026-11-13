@@ -9,6 +9,15 @@ apart, D246; a run's network kept, D250) and what still waits on Shards. Decided
 VMs" (joint plan kiln `01a1cd8e862e7169a074db3d5fa33f3d`, "Decided by the person" 2); its ruling on step 9's
 destinations (N4) and receivers (N6) followed the same day.
 
+Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`). Live: the grants, their one check
+and the image class's boot programmed from them (`944ab292`, `9bdcc666`, `7767d4db`), each destination by TCP kept and
+every member held to its own reach (`25237f5e`, `6027470c`), on Shards `1389dc0b`. Merged on Hex's main, on Shards
+`740fa372`: check 2 waiting for its probe while its box settles, a run's own end recorded, and the VM granted nothing
+booted both undriven and driven (`4b1b31c2`, `c56fcfbb`, `8b65e191`). `image_grants_real` passed on Linux KVM at
+`8aa7c028` and on macOS HVF at `cf535152`, where its host readings say `GRANTS-OWED`, as macOS keeps no /proc. Built:
+readers for those on macOS and Windows (`66cb1b1a`). Owed: those readings on HVF, every case on Windows WHP, and N2's
+enforcer cases (Tests).
+
 Requirements served: `AC-T7.7.2` (flows allowed that no grant names: 0), `T-T7.7.1` (no DNS answer and no packet
 for a workload without a DNS grant), and the joint plan's step 15 acceptance: "a Hex-launched harness reaches
 exactly its granted providers and kiln's endpoint, publishes nothing ungranted, and every grant is visible in

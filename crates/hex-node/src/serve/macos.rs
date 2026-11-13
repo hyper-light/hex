@@ -72,6 +72,19 @@ pub fn platform() -> Result<Platform, Refusal> {
     })
 }
 
+/// How many descriptors this process holds now: the entries of `/dev/fd` (fdesc, the process's own descriptor
+/// table), less the one the listing itself opens. What a node holds beside its bounds as its start fits them
+/// ([`crate::serve::fit::fit`]), as Linux's node reads `/proc/self/fd` (`crate::netns::open_descriptors`).
+pub fn open_descriptors() -> Result<u64, Refusal> {
+    let listing = |e| Refusal::os("counting the node's open descriptors in /dev/fd", e);
+    let mut count = 0u64;
+    for entry in std::fs::read_dir("/dev/fd").map_err(listing)? {
+        entry.map_err(listing)?;
+        count = count.saturating_add(1);
+    }
+    Ok(count.saturating_sub(1))
+}
+
 /// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
 /// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
 /// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.
@@ -377,10 +390,14 @@ impl Os for MacOs {
             return Recv::Gone;
         };
         loop {
-            if let Some(m) = f.ready.pop_front() {
+            if let Some(mut m) = f.ready.pop_front() {
                 let n = m.bytes.len().min(buf.len());
                 if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.get(..n)) {
                     into.copy_from_slice(from);
+                }
+                // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
+                if wire::carries_secret(&m.bytes) {
+                    hex_api::lease::wipe(&mut m.bytes);
                 }
                 return Recv::Message {
                     size: m.size,
@@ -649,7 +666,8 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
     if msg.flags.contains(ReturnFlags::CTRUNC) {
         f.cut = true;
     }
-    let mut input = bytes.get(..msg.bytes).unwrap_or_default();
+    let read = msg.bytes.min(bytes.len());
+    let mut input = bytes.get(..read).unwrap_or_default();
     while !input.is_empty() {
         let at_start = !f.deframer.in_frame();
         match f.deframer.take(input) {
@@ -694,6 +712,11 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
                 return Ok(true);
             }
         }
+    }
+    // What it read is framed into the messages it holds now: its bytes here, which may carry a lease's value, wiped
+    // (docs/design/credential-grants.md C7).
+    if let Some(held) = bytes.get_mut(..read) {
+        hex_api::lease::wipe_in_place(held);
     }
     Ok(true)
 }

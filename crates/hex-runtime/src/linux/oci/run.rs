@@ -654,26 +654,31 @@ impl Parked {
         self.held.as_ref().map(|h| h.0)
     }
 
-    /// Waits up to `patience` for the init to say on its socket that it is parked: its effective capabilities
-    /// emptied, waiting for its claim (`seed::parked`).
-    pub fn wait_parked(&self, patience: std::time::Duration) -> Result<(), OciError> {
-        let Some((_, _, socket)) = &self.held else {
+    /// Waits for the init to say on its socket that it is parked (its effective capabilities emptied, waiting for its
+    /// claim: `seed::parked`), as decision 9 waits (the person's ruling of 2026-11-13: W* is a bound only while answers
+    /// come within it): within `patience`, and past it, `past` told (the run-out, once), by the init's life alone, on
+    /// its socket and its pidfd, until its word or its end, refused then. With no `patience` it follows the init from
+    /// the start.
+    pub fn wait_parked(
+        &self,
+        patience: Option<std::time::Duration>,
+        past: impl FnOnce(),
+    ) -> Result<(), OciError> {
+        let Some((_, pidfd, socket)) = &self.held else {
             return Err(OciError::Broken("a parked init no longer held".to_owned()));
         };
-        let mut fds = [rustix::event::PollFd::new(
-            socket,
-            rustix::event::PollFlags::IN,
-        )];
-        let timeout = rustix::event::Timespec {
-            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: patience.subsec_nanos().into(),
-        };
-        let ready = rustix::event::poll(&mut fds, Some(&timeout))
-            .map_err(|e| OciError::os("waiting for an init to park", e))?;
-        if ready == 0 {
-            return Err(OciError::Broken(format!(
-                "an init didn't say it was parked within {patience:?}"
-            )));
+        const OP: &str = "waiting for an init to park";
+        let watched = [socket.as_fd(), pidfd.as_fd()];
+        let mut first = first_readable(&watched, patience, OP)?;
+        if first.is_none() {
+            // Past its bound: no sample (Karn's point), the run-out told once, and the init followed by its life.
+            past();
+            first = first_readable(&watched, None, OP)?;
+        }
+        if first != Some(0) {
+            return Err(OciError::Broken(
+                "an init ended before it said it was parked".to_owned(),
+            ));
         }
         match super::seed::recv_answer(socket.as_fd())? {
             (hex_core::seed::Answer::Started { .. }, Some(_)) => Ok(()),
@@ -686,6 +691,34 @@ impl Parked {
     /// The init's pid, pidfd and claim socket, the caller's from here.
     pub fn take(mut self) -> Option<(i32, OwnedFd, OwnedFd)> {
         self.held.take()
+    }
+}
+
+/// Which of `fds` turns readable first within `patience`, the earliest in the list where several have: `None` past it,
+/// and with none (a wait following its party) it waits until one does. A peer's end (`POLLHUP`) counts, for the read
+/// that says so, as does a process's end on its pidfd. `op` names the poll in its error.
+pub fn first_readable(
+    fds: &[BorrowedFd<'_>],
+    patience: Option<std::time::Duration>,
+    op: &'static str,
+) -> Result<Option<usize>, OciError> {
+    let deadline = patience.and_then(|p| std::time::Instant::now().checked_add(p));
+    loop {
+        let left = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        let ts = left.map(|left| rustix::event::Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        });
+        let mut polled: Vec<rustix::event::PollFd<'_>> = fds
+            .iter()
+            .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+            .collect();
+        match rustix::event::poll(&mut polled, ts.as_ref()) {
+            Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
+            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os(op, e)),
+        }
     }
 }
 
@@ -2743,6 +2776,49 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a
+    /// park's wait for its init's word that it is parked ended at the seeds' hang W*, and the park failed, its init
+    /// killed, though the init went on to say it. Do: a parked stand-in, a sleeping child of the test's, whose word
+    /// comes on its socket only once the wait has passed its bound, a nanosecond, and told its run-out. Expect: the
+    /// wait answered.
+    #[test]
+    fn original_a_parks_wait_past_its_bound_follows_its_init_to_its_word() {
+        use std::sync::mpsc::channel;
+        #[expect(
+            clippy::zombie_processes,
+            reason = "reaped by its pidfd through the Parked made of it, dropped at the test's end"
+        )]
+        let sleeper = std::process::Command::new("sleep")
+            .arg("infinity")
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(sleeper.id()).unwrap();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_child(&sleeper),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let (ours, theirs) = super::super::seed::socketpair().unwrap();
+        let parked = Parked::new(pid, pidfd, ours, 0);
+        let (told, heard) = channel::<()>();
+        // It says it is parked once told, a descriptor riding with its word as an init's does; a wait that never tells
+        // drops `told`, and the stand-in says nothing.
+        let init = std::thread::spawn(move || {
+            if heard.recv().is_ok() {
+                let (rides, _kept) = super::super::seed::socketpair().unwrap();
+                let parked = hex_core::seed::Answer::Started { pid: 1 };
+                super::super::seed::send_answer(theirs.as_fd(), &parked, Some(rides.as_fd()))
+                    .unwrap();
+            }
+            theirs
+        });
+        let got = parked.wait_parked(Some(std::time::Duration::from_nanos(1)), move || {
+            let _ = told.send(());
+        });
+        let _theirs = init.join().unwrap();
+        assert!(got.is_ok(), "the park refused at its bound: {got:?}");
+    }
 
     // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
     // that could name another place is refused before anything is touched; `delete ../../x` would

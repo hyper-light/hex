@@ -545,6 +545,7 @@ impl OfferedGuest {
                 token: u64::from(pid),
                 exec: u64::from(pid),
                 streams: Streams::default(),
+                setup: None,
             },
             ready: Box::new(move || {
                 let _cancelled = cancelled;
@@ -1376,6 +1377,35 @@ fn a_runs_end_told_late_is_waited_for_on_a_worker() {
     assert_eq!(lab.watched(), 0);
 }
 
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a run's
+/// end waited for on a worker (its watch reported before its runtime could tell it) was `Exit::Unknown` at
+/// node.emptying's W*, the slowest emptying this process had seen, though its runtime went on to tell it. Do: once an
+/// emptying of a microsecond has been seen, run a program, end it with its end untold, and tell the end only once W*,
+/// the slowest emptying seen (other tests share it, and may raise it meanwhile), has passed since, or an answer came.
+/// Expect: the run's end, Code(0), never Unknown, and nothing left watched.
+#[test]
+fn original_a_runs_end_told_past_the_emptyings_w_star_is_its_own_never_unknown() {
+    crate::emptying::EMPTYING.answered(Duration::from_micros(1));
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, run(7, "r"));
+    let pid = match answer_of(&sock) {
+        (Header { id: 7, .. }, Answer::Started { pid }) => pid,
+        other => panic!("{other:?}"),
+    };
+    lab.os.lock().untold.insert(pid);
+    lab.os.end(pid);
+    let ended = Instant::now();
+    wait_until("W* to pass since the end, or an answer", || {
+        let window = crate::emptying::EMPTYING.slowest().unwrap_or_default();
+        ended.elapsed() > window || !sock.to_client.lock().unwrap().is_empty()
+    });
+    lab.os.tell(pid);
+    let (h, end) = answer_of(&sock);
+    assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(0))));
+    assert_eq!(lab.watched(), 0);
+}
+
 /// HEX-SOCK-7 (the core), runtime goal 7 (decision 7): a run's program its node reaped before the core could watch it
 /// (to remove its box) is answered as any run is, its start and then its end, which its `Proc` tells, and its place
 /// among the programs is given back. Do: run a program the OS finds reaped when the core watches it, then exec two
@@ -1507,8 +1537,7 @@ fn list_parts(sock: &Sock) -> usize {
 /// though it was there to read. Do: a server whose reads have learned a W* of 1 s; a client with no room asks for a
 /// list of three parts or more, and makes room only once the next part's wait has run out (told, the wait following)
 /// or its connection has closed. Expect: the connection standing past W*; once the client reads, every part, and W*
-/// risen to the read that passed it. The client is to read within a window of W* of the run-out, so W* is long
-/// against a loaded host's late wake-ups (a 200 ms timed wait woke 130 ms late on adacachy2 under load, run r362).
+/// risen to the read that passed it.
 #[test]
 fn original_a_client_reading_a_list_slower_than_any_before_is_followed_past_w_star() {
     static READS: Patience = Patience::measuring("test.serve.reads.followed");
@@ -1534,36 +1563,34 @@ fn original_a_client_reading_a_list_slower_than_any_before_is_followed_past_w_st
     );
 }
 
-/// Decision 9 (the person's ruling of 2026-11-13): past W* a list's client is followed by what it takes, and one that
-/// takes nothing over a whole W* window has stopped reading. Do: a server whose reads have learned a W* of 20 ms; a
-/// client with no room asks for a list of three parts or more, and never makes room. Expect: the run-out told, then
-/// the connection closed, never before a whole window past W* (40 ms after the list was asked), and no sample taken.
+/// Decision 9 (the person's ruling of 2026-11-13: W* is a bound only while answers come within it; past it the wait
+/// follows its party, the client, by its life alone, as at every local site): a list's client that took nothing over a
+/// whole W* window past W* had its connection closed, though it was there to read. Do: a server whose reads have
+/// learned a W* of 1 ms; a client with no room asks for a list of three parts or more; once the next part's wait has
+/// run out (told), the client makes no room for a hundred windows of W*, or until its connection closes; then it makes
+/// room. Expect: the connection standing; once the client reads, every part.
 #[test]
-fn a_client_that_takes_nothing_over_a_whole_window_past_w_star_is_closed() {
-    static READS: Patience = Patience::measuring("test.serve.reads.stalled");
-    let learned = Duration::from_millis(20);
+fn a_client_past_w_star_is_followed_by_its_life_however_long_it_takes_nothing() {
+    static READS: Patience = Patience::measuring("test.serve.reads.life");
+    let learned = Duration::from_millis(1);
     READS.answered(learned);
-    let (lab, _) = listing(&READS);
+    let (lab, parts) = listing(&READS);
     let sock = lab.os.connect(true, 0);
-    let asked = Instant::now();
     lab.os.put(&sock, request(1, Call::List));
-    wait_until("the client's connection to close", || {
-        sock.shut.load(Ordering::SeqCst)
-    });
-    let closed = asked.elapsed();
+    wait_until(
+        "the next part's wait to run out, or the client's connection to close",
+        || READS.deadline().is_none() || sock.shut.load(Ordering::SeqCst),
+    );
+    let told = Instant::now();
+    while !sock.shut.load(Ordering::SeqCst) && told.elapsed() < learned.saturating_mul(100) {
+        std::thread::park_timeout(learned);
+    }
     assert!(
-        READS.deadline().is_none(),
-        "the run-out wasn't told before the close"
+        !sock.shut.load(Ordering::SeqCst),
+        "the connection was closed past W*, its client there to read"
     );
-    assert!(
-        closed >= learned.saturating_mul(2),
-        "closed {closed:?} after the list was asked, before a whole window past W* ({learned:?})"
-    );
-    assert_eq!(
-        READS.slowest(),
-        Some(learned),
-        "a client taken for stopped is no sample"
-    );
+    lab.os.give_room(&sock, 64);
+    assert_eq!(list_parts(&sock), parts);
 }
 
 /// The core when the OS runs out of descriptors: accepting pauses, and a connection that closes resumes it,

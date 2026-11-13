@@ -42,6 +42,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.forget"),
     // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
     Patience::measuring("client.answer.links"),
+    // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
+    Patience::measuring("client.answer.lessors"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`,
@@ -150,11 +152,16 @@ impl Transport for Socket {
         Ok(true)
     }
 
-    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-        stream::frame(&message, wire::MAX_MESSAGE).map_err(|fault| Refusal::Invalid {
+    fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let framed = stream::frame(&message, wire::MAX_MESSAGE).map_err(|fault| Refusal::Invalid {
             what: "message",
             why: fault.to_string(),
-        })
+        });
+        // A lease's value crosses in its framed copy alone (docs/design/credential-grants.md C7).
+        if wire::carries_secret(&message) {
+            hex_api::lease::wipe(&mut message);
+        }
+        framed
     }
 
     fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {

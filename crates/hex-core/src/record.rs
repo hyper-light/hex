@@ -84,11 +84,23 @@ pub struct BoxRecord {
     /// reads as not retired (append-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
+    /// How its Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started
+    /// ([`hex_api::Usage::started_from`]), kept across the node's restarts so Hex can say how the box came up. Outside the
+    /// spec, so no native commitment covers it. Added within version 1, so a record without it reads as `None`
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<hex_api::StartedFrom>,
+    /// The file its Shards image VM's run host's diagnostics are kept in, whole (D258's `keep_diagnostics`; joint plan
+    /// step 12), named as its start's intent is written, before its boot: a failed run's `ended` quotes its last bytes,
+    /// and it goes with the box's delete. Outside the spec, so no native commitment covers it. Added within version 1,
+    /// so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<PathBuf>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
-/// `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`. The core takes the kernel's text;
-/// the shell reads it.
+/// `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`, Windows' boot sequence (`KUSER_SHARED_DATA`'s
+/// `BootId`, in decimal). The core takes the kernel's text; the shell reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BootSession(String);
@@ -196,6 +208,7 @@ impl BoxRecord {
             Some(key) => Refusal::Backing {
                 key,
                 cause: hex_api::LifecycleCause::Retired,
+                why: None,
             },
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,
@@ -223,6 +236,7 @@ impl BoxRecord {
             published: Vec::new(),
             last_resort: None,
             ended: self.ended.clone(),
+            credentials: Vec::new(),
         })
     }
 
@@ -252,6 +266,8 @@ impl BoxRecord {
             started: None,
             ended: None,
             retired: false,
+            started_from: None,
+            diagnostics: None,
         }
     }
 
@@ -597,6 +613,27 @@ mod tests {
             start_ticks: 99,
         });
         assert_eq!(BoxRecord::decode(&ran.encode().unwrap()).unwrap(), ran);
+    }
+
+    /// Joint plan step 39 (AC-T7.4.1), append-only: a record's last resort names its box by its id alone, as records
+    /// written before a learned end's holder could be a node VM name it. Do write a record whose last resort ended its
+    /// box; expect its text to name the box by its bare id, and to read back the same.
+    #[test]
+    fn a_records_last_resort_names_its_box_as_before_node_vms_held_room() {
+        let mut r = record();
+        r.last_resort = Some(hex_api::LearnedEnd {
+            id: hex_api::LearnedHolder::Box(BoxId::new("r1").unwrap()),
+            held: 12 << 30,
+            budget: 8 << 30,
+            band: 1,
+            fleet_held: 16 << 30,
+            fleet_growth: 4 << 30,
+            fleet_budget: 16 << 30,
+            unmoved: None,
+        });
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(text.contains(r#""last_resort":{"id":"r1","#), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap(), r);
     }
 
     /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record

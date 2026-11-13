@@ -14,6 +14,7 @@ mod gpu_pool;
 pub mod held;
 pub mod hosted;
 mod image;
+mod leases;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
@@ -26,7 +27,7 @@ pub mod selected;
 mod shared;
 pub mod shares;
 
-pub use image::{ImageWaits, host_images};
+pub use image::{ImageClass, ImageWaits, host_images};
 pub use observer::config::{
     ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
     GpuObserverInput,
@@ -73,8 +74,8 @@ pub use cost::{
 pub struct GuestConfig {
     /// The `shards` binary that boots it (on macOS the signed build, run where it is installed).
     pub binary: PathBuf,
-    pub kernel: PathBuf,
-    pub initrd: PathBuf,
+    /// Which form of the guest it boots: the one, never both.
+    pub boot: Boot,
     pub vcpus: u32,
     pub memory_mib: u64,
     /// Enable Shards' existing shared Venus GPU; physical reservations still require mapping.
@@ -82,6 +83,18 @@ pub struct GuestConfig {
     pub shares: Vec<Share>,
     /// Where the guest's relay stages each box's root: [`stage::STAGED`], the guest's tmpfs.
     pub staged: String,
+}
+
+/// How a node boots its guest, one form or the other (docs/design/node-under-shards-init.md §4), so that both can't
+/// be configured at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Boot {
+    /// Shards' direct boot of Hex's own kernel and initramfs, whose `/init` is `hex`, the guest's PID 1
+    /// (`HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`).
+    Kernel { kernel: PathBuf, initrd: PathBuf },
+    /// Hex's node image, pinned by digest, booted through Shards' image boot under shards-init with its nesting grant
+    /// (`HEX_GUEST_IMAGE`).
+    Image(String),
 }
 
 /// The environment variables a node reads its guest from.
@@ -157,8 +170,10 @@ impl GuestConfig {
         let path = |name: &str| PathBuf::from(var(name).unwrap_or_default());
         Ok(Self {
             binary: path(ENV_SHARDS_BIN),
-            kernel: path(ENV_KERNEL),
-            initrd: path(ENV_INITRD),
+            boot: Boot::Kernel {
+                kernel: path(ENV_KERNEL),
+                initrd: path(ENV_INITRD),
+            },
             vcpus: number(&var, ENV_CPUS)?,
             memory_mib: number(&var, ENV_MEMORY_MIB)?,
             gpu: match var(ENV_GPU) {
@@ -181,11 +196,12 @@ impl GuestConfig {
     /// whatever words the kernel passes it (HEX-GUEST-12); its command line the serial console, a panic
     /// resetting the guest so the host sees it end, and `hex.shares=` naming each share's mode in tag
     /// order, none when there are none (HEX-GUEST-11). The guest is reached on the channel's three
-    /// ports alone.
-    pub fn spec(&self) -> shards_api::GuestSpec {
-        shards_api::GuestSpec {
-            kernel: self.kernel.clone(),
-            init: shards_api::Init::Initrd(self.initrd.clone()),
+    /// ports alone. An image's boot has none: it boots through Shards' image boot ([`hosted`]).
+    pub fn spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let (kernel, initrd) = self.direct()?;
+        Ok(shards_api::GuestSpec {
+            kernel: kernel.to_path_buf(),
+            init: shards_api::Init::Initrd(initrd.to_path_buf()),
             cmdline: self.cmdline(),
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -202,6 +218,19 @@ impl GuestConfig {
                     read_only: s.read_only,
                 })
                 .collect(),
+        })
+    }
+
+    /// The direct boot's kernel and initramfs; refused for an image, which has neither.
+    pub fn direct(&self) -> Result<(&std::path::Path, &std::path::Path), Refusal> {
+        match &self.boot {
+            Boot::Kernel { kernel, initrd } => Ok((kernel, initrd)),
+            Boot::Image(_) => Err(Refusal::Invalid {
+                what: "the oci class's guest",
+                why: "an image under shards-init boots through Shards' image boot, not its direct boot of a kernel and \
+                      initramfs"
+                    .to_owned(),
+            }),
         }
     }
 }
@@ -277,9 +306,10 @@ impl GuestConfig {
             .try_reserve_exact(allowed.len())
             .map_err(|_| exhausted(allowed.len()))?;
         ports.extend_from_slice(&allowed);
+        let (kernel, initrd) = self.direct()?;
         Ok(shards_api::GuestSpec {
-            kernel: path(&self.kernel)?,
-            init: shards_api::Init::Initrd(path(&self.initrd)?),
+            kernel: path(kernel)?,
+            init: shards_api::Init::Initrd(path(initrd)?),
             cmdline,
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -463,6 +493,9 @@ pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
     booted: Mutex<Option<triomphe::Arc<Booted>>>,
+    /// The shared backing's guest overhead as its capacity answers measured it, by its generation (joint plan step 14,
+    /// C7): none before the first.
+    guest_overhead: Mutex<Option<(hex_api::BackingKey, hex_api::LearnedOverhead)>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
@@ -482,13 +515,13 @@ pub struct GuestRuntime {
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
     native_images: Option<shards_api::NativeImages>,
-    native_paths: Option<shards_api::RuntimePaths>,
+    native_paths: Option<Arc<shards_api::RuntimePaths>>,
     shared_pool: Mutex<Option<hex_api::BackingKey>>,
     gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
-    /// Shards' image boot, for the Shards class on Agentfile images ([`GuestRuntime::with_images`]).
-    image: Option<image::ImageBoot>,
+    /// The Shards class on Agentfile images ([`GuestRuntime::with_images`]), its boot none until given.
+    images: image::ImageClass,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -570,18 +603,20 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
-    fn cpu_spec(&self) -> shards_api::GuestSpec {
-        let mut spec = self.config.spec();
+    fn cpu_spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let mut spec = self.config.spec()?;
         spec.gpu = false;
-        spec
+        Ok(spec)
     }
     /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
     /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
+        let images = image::ImageClass::new(config.binary.clone());
         Self {
             guests,
             config,
             booted: Mutex::new(None),
+            guest_overhead: Mutex::new(None),
             slowest: Mutex::new(Duration::ZERO),
             retired: AtomicU64::new(0),
             digests: Mutex::new(Digests::default()),
@@ -597,7 +632,7 @@ impl GuestRuntime {
             shared_pool: Mutex::new(None),
             gpu_observer: None,
             joins: Mutex::new(None),
-            image: None,
+            images,
         }
     }
 
@@ -638,7 +673,7 @@ impl GuestRuntime {
             return Ok(());
         };
         let guest: Arc<dyn shards_api::Guest> =
-            match self.guests.attach(&identity, &self.cpu_spec()) {
+            match self.guests.attach(&identity, &self.cpu_spec()?) {
                 Ok(guest) => guest.into(),
                 Err(
                     shards_api::Refusal::Gone { .. }
@@ -812,7 +847,7 @@ impl GuestRuntime {
         least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
         least.shares.clear();
         least.gpu = false;
-        let mut spec = least.spec();
+        let mut spec = least.spec()?;
         let guests = Arc::clone(&self.guests);
         let bound = self.first_dial_bound()?;
         tell_ready(&mut spec.cmdline, bound)?;
@@ -890,7 +925,7 @@ impl GuestRuntime {
                 why: format!("{bound:?} from now is past a monotonic deadline"),
             })?;
             // AC-T7.4.1: the guest is told what is left of it, which its relay's hello to its node takes.
-            let mut spec = self.cpu_spec();
+            let mut spec = self.cpu_spec()?;
             tell_ready(
                 &mut spec.cmdline,
                 ready_by.saturating_duration_since(Instant::now()),
@@ -1091,7 +1126,7 @@ impl Runtime for GuestRuntime {
             });
         }
         if let ClassSpec::ShardsImage(_) = &spec.class {
-            return self.create_image(spec);
+            return self.images.create_image(spec);
         }
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
         if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
@@ -1111,7 +1146,7 @@ impl Runtime for GuestRuntime {
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.start_image(record),
+            books::Routed::Image(record) => self.images.start_image(record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, true, || {
@@ -1155,7 +1190,7 @@ impl Runtime for GuestRuntime {
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.member_image(record, member),
+            books::Routed::Image(record) => self.images.member_image(record, member),
             books::Routed::Other(_) => Err(Refusal::Invalid {
                 what: "member",
                 why: format!(
@@ -1170,7 +1205,7 @@ impl Runtime for GuestRuntime {
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.room_image(record, room),
+            books::Routed::Image(record) => self.images.room_image(record, room),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(record))
                 if matches!(record.spec.class, ClassSpec::Shards(_)) =>
@@ -1197,7 +1232,7 @@ impl Runtime for GuestRuntime {
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.rate_image(record, rate),
+            books::Routed::Image(record) => self.images.rate_image(record, rate),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
                 what: "rate",
@@ -1212,7 +1247,7 @@ impl Runtime for GuestRuntime {
     fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.host_use_image(record),
+            books::Routed::Image(record) => self.images.host_use_image(record),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
                 what: "host_use",
@@ -1226,7 +1261,7 @@ impl Runtime for GuestRuntime {
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.signal_image(record, signal),
+            books::Routed::Image(record) => self.images.signal_image(record, signal),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, true, || {
@@ -1237,25 +1272,23 @@ impl Runtime for GuestRuntime {
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let routed = self.routed(id)?;
+        self.inspect_routed(routed, id)
+    }
+
+    /// An image box followed to its start's end as its class follows it (kiln's HexVms adapter); every other box as its
+    /// inspect answers it, its one read of the node's records carried on.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match self.routed(id)? {
-            // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
-            books::Routed::Retired(record) => record.retired_info(),
-            books::Routed::Image(record) => self.inspect_image(record),
-            books::Routed::Other(snapshot) => {
-                let snapshot = snapshot.as_ref();
-                self.call_recorded(snapshot, id, false, || {
-                    self.with(snapshot, id, |b| {
-                        self.project_info(b, b.client.inspect(id)?)
-                    })
-                })
-            }
+            books::Routed::Image(record) => self.images.started_image(record),
+            routed => self.inspect_routed(routed, id),
         }
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         let snapshot = match self.routed(id)? {
             books::Routed::Retired(record) => return Err(record.retired_refusal()?),
-            books::Routed::Image(record) => return self.usage_image(record),
+            books::Routed::Image(record) => return self.images.usage_image(record),
             books::Routed::Other(snapshot) => snapshot,
         };
         let snapshot = snapshot.as_ref();
@@ -1299,7 +1332,7 @@ impl Runtime for GuestRuntime {
                 }
             }
         }
-        let images = self.image_infos()?;
+        let images = self.images.image_infos()?;
         boxes
             .try_reserve_exact(images.len())
             .map_err(|_| Refusal::Exhausted {
@@ -1313,11 +1346,18 @@ impl Runtime for GuestRuntime {
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => self.delete_retired(&record),
-            books::Routed::Image(record) => self.delete_image(record),
+            books::Routed::Image(record) => self.images.delete_image(record),
             books::Routed::Other(Some(record)) if self.owns_record(&record.spec) => {
                 self.delete_recorded(&record, id)
             }
             books::Routed::Other(snapshot) => self.delete_payload(snapshot.as_ref(), id),
+        }
+    }
+
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.images.delete_image_used(record),
+            books::Routed::Retired(_) | books::Routed::Other(_) => self.delete(id).map(|()| None),
         }
     }
 }
@@ -1337,6 +1377,23 @@ impl GuestRuntime {
                     "box {id} isn't a Shards image box: only its VM's governor holds a rate over a period"
                 ),
             }),
+        }
+    }
+
+    /// Box `id` as its route says it is, its record read once by the caller.
+    fn inspect_routed(&self, routed: books::Routed, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        match routed {
+            // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
+            books::Routed::Retired(record) => record.retired_info(),
+            books::Routed::Image(record) => self.images.inspect_image(record),
+            books::Routed::Other(snapshot) => {
+                let snapshot = snapshot.as_ref();
+                self.call_recorded(snapshot, id, false, || {
+                    self.with(snapshot, id, |b| {
+                        self.project_info(b, b.client.inspect(id)?)
+                    })
+                })
+            }
         }
     }
 

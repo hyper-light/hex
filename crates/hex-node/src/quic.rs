@@ -309,11 +309,15 @@ impl<N: Os> Quic<N> {
     /// what the connection's seats hold a call.
     fn recv_quic(&self, control: &Control, buf: &mut [u8]) -> Recv<Passed<N::Passed>> {
         for _ in 0..=hex_quic::HELD_AT {
-            if let Some(ready) = control.ready.lock().ok().and_then(|mut r| r.pop_front()) {
+            if let Some(mut ready) = control.ready.lock().ok().and_then(|mut r| r.pop_front()) {
                 let size = ready.message.len();
                 let got = size.min(buf.len());
                 if let (Some(to), Some(from)) = (buf.get_mut(..got), ready.message.get(..got)) {
                     to.copy_from_slice(from);
+                }
+                // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
+                if wire::carries_secret(&ready.message) {
+                    hex_api::lease::wipe(&mut ready.message);
                 }
                 return Recv::Message {
                     size,
@@ -344,6 +348,11 @@ impl<N: Os> Quic<N> {
                 if let Some(message) = whole {
                     self.route(control, message);
                 }
+            }
+            // Framed into the messages it holds now: what was read here, which may carry a lease's value, wiped
+            // (docs/design/credential-grants.md C7).
+            if let Some(held) = chunk.get_mut(..n) {
+                hex_api::lease::wipe_in_place(held);
             }
         }
         Recv::WouldBlock

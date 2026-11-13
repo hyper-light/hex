@@ -7,7 +7,7 @@ use hex_api::{BackingGrant, BackingKey, BackingOffer, BackingPhase, Execution, L
 use hex_core::record::{NativeRecord, PoolRecord};
 use sha2::{Digest, Sha256};
 
-use super::pool::{self, Receipt, refused};
+use super::pool::{self, Receipt, refused, uncertain};
 use super::selected::Phase;
 use super::*;
 use crate::devices::{self, Transaction};
@@ -417,7 +417,10 @@ impl GuestRuntime {
         record.check()?;
         let key = record.key;
         if self.runtime_cost != Some(record.cost) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its record's cost isn't its node's profile's",
+            ));
         }
         let gpu = match record.execution {
             Execution::ShardsShared
@@ -428,7 +431,12 @@ impl GuestRuntime {
                 None
             }
             Execution::ShardsDedicated => Some(self.gpu_definition_for_record(record)?),
-            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+            _ => {
+                return Err(uncertain(
+                    key,
+                    "its record's execution isn't a Shards backing's",
+                ));
+            }
         };
         let allocation = record
             .cost
@@ -441,7 +449,10 @@ impl GuestRuntime {
             || guest.cpu_milli != configured.cpu_milli
             || guest.mem_bytes != configured.mem_bytes
         {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its allocation, or its guest's size, isn't its node's configured one",
+            ));
         }
         Ok(gpu)
     }
@@ -499,28 +510,43 @@ impl GuestRuntime {
             {
                 return Ok(());
             }
-            None => return Err(refused(record.key, LifecycleCause::Uncertain)),
+            None => {
+                return Err(uncertain(
+                    record.key,
+                    "its shared receipt is gone though it is past its grant",
+                ));
+            }
         };
         receipt.matches(record)?;
         if receipt.physical != physical {
-            return Err(refused(record.key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                record.key,
+                "its receipt's physical selection isn't its devices' now",
+            ));
         }
         if let Some(readiness) = &receipt.readiness {
-            let observer = self
-                .gpu_observer
-                .as_ref()
-                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+            let observer = self.gpu_observer.as_ref().ok_or_else(|| {
+                uncertain(
+                    record.key,
+                    "its receipt holds readiness though its node configures no GPU observer",
+                )
+            })?;
             if readiness.configuration != observer.identity()
                 || readiness.max_queues != observer.queues()
             {
-                return Err(refused(record.key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    record.key,
+                    "its receipt's readiness came from another GPU observer configuration",
+                ));
             }
         }
         if let Some(attempt) = &receipt.attempt {
-            let observer = self
-                .gpu_observer
-                .as_ref()
-                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+            let observer = self.gpu_observer.as_ref().ok_or_else(|| {
+                uncertain(
+                    record.key,
+                    "its receipt holds a boot attempt though its node configures no GPU observer",
+                )
+            })?;
             attempt.check_config(observer, physical.len())?;
         }
         match &receipt.phase {
@@ -562,21 +588,29 @@ impl GuestRuntime {
         let mut bound = self
             .shared_pool
             .lock()
-            .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+            .map_err(|_| uncertain(key, "its guest's shared pool slot is poisoned"))?;
         if bound.is_some_and(|known| known != key) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its guest is bound to another shared backing",
+            ));
         }
         *bound = Some(key);
         Ok(())
     }
 
     fn clear_shared_key(&self, key: BackingKey) -> Result<(), Refusal> {
-        let mut bound = self
-            .shared_pool
-            .lock()
-            .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+        let mut bound = self.shared_pool.lock().map_err(|_| {
+            uncertain(
+                key,
+                "its guest's shared pool slot is poisoned as it is let go",
+            )
+        })?;
         if *bound != Some(key) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its guest isn't bound to it as it is let go",
+            ));
         }
         *bound = None;
         Ok(())
@@ -597,25 +631,36 @@ impl GuestRuntime {
             self.preflight_backing(&record)?;
             if record.phase == BackingPhase::Released {
                 if !matches!(receipt.phase, Phase::Released { .. }) {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "it is released, yet its shared receipt isn't",
+                    ));
                 }
-                let books = self
-                    .books
-                    .get()
-                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                let books = self.books.get().ok_or_else(|| {
+                    uncertain(
+                        key,
+                        "its guest has no record authority to clear its released shared receipt",
+                    )
+                })?;
                 devices::with_pool_transaction(books, &key, &[], |transaction| {
                     let current = transaction
                         .read_pool(&key)?
-                        .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                        .ok_or_else(|| uncertain(key, "its pool record is gone before its released shared receipt was cleared"))?;
                     receipt.matches(&current)?;
                     if current.phase != BackingPhase::Released {
-                        return Err(refused(key, LifecycleCause::Uncertain));
+                        return Err(uncertain(
+                            key,
+                            "it isn't released as its shared receipt is cleared",
+                        ));
                     }
                     remove_receipt(path)
                 })?;
             } else {
                 if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "its record isn't a shared backing's as it is prepared",
+                    ));
                 }
                 self.bind_pool(key)?;
                 return record.offer();
@@ -633,7 +678,10 @@ impl GuestRuntime {
                 }
                 self.backing_configuration(row)?;
                 if current.replace(row).is_some() {
-                    return Err(refused(row.key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        row.key,
+                        "its guest holds a second current shared backing",
+                    ));
                 }
             }
             if current != expected {
@@ -666,7 +714,10 @@ impl GuestRuntime {
             &mut validate,
         )?;
         if row.key.pool != pool || row.cost != allocation.cost || !row.devices.is_empty() {
-            return Err(refused(row.key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                row.key,
+                "the prepared shared backing names another pool, cost or devices",
+            ));
         }
         self.preflight_backing(&row)?;
         self.bind_pool(row.key)?;
@@ -710,11 +761,8 @@ impl GuestRuntime {
                 part(&value.to_be_bytes())?;
             }
         }
-        for path in [
-            &self.config.binary,
-            &self.config.kernel,
-            &self.config.initrd,
-        ] {
+        let (kernel, initrd) = self.config.direct()?;
+        for path in [self.config.binary.as_path(), kernel, initrd] {
             part(path.as_os_str().as_encoded_bytes())?;
         }
         part(paths.cache().as_os_str().as_encoded_bytes())?;
@@ -777,7 +825,7 @@ impl GuestRuntime {
                 continue;
             }
             if matches!(record.spec.class, hex_api::ClassSpec::ShardsImage(_)) {
-                self.retire_image(record)?;
+                self.images.retire_image(record)?;
                 continue;
             }
             let keys = self.turn_keys(&record.spec.devices)?;
@@ -815,13 +863,18 @@ impl GuestRuntime {
             let books = self
                 .books
                 .get()
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                .ok_or_else(|| uncertain(key, "its guest has no record authority to retire it"))?;
             devices::with_pool_transaction(books, &key, &[], |transaction| {
-                let mut record = transaction
-                    .read_pool(&key)?
-                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                let mut record = transaction.read_pool(&key)?.ok_or_else(|| {
+                    uncertain(
+                        key,
+                        "its shared pool record is gone before its census retirement",
+                    )
+                })?;
                 for boxed in transaction.records()?.into_values() {
-                    let mut boxed = boxed.map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                    let mut boxed = boxed.map_err(|_| {
+                        uncertain(key, "a box record couldn't be read as it was retired")
+                    })?;
                     if boxed.retired
                         || boxed.spec.route.and_then(|route| route.backing) != Some(key)
                     {
@@ -844,7 +897,7 @@ impl GuestRuntime {
             .pool_records()?
             .into_iter()
             .find(|record| record.key == key)
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))
+            .ok_or_else(|| uncertain(key, "its guest holds no record of it"))
     }
 
     /// Recovery consumes the original already-admitted grant. It never invents
@@ -881,7 +934,10 @@ impl GuestRuntime {
             (BackingPhase::Prepared | BackingPhase::Released, _) => Ok(()),
             (BackingPhase::Granted | BackingPhase::Live, Some(allocation)) => {
                 if !record.devices.is_empty() {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "a shared backing's record names physical devices at its recovery",
+                    ));
                 }
                 self.initialize_pool(BackingGrant {
                     key,
@@ -890,22 +946,33 @@ impl GuestRuntime {
                 })?;
                 Ok(())
             }
-            _ => Err(refused(key, LifecycleCause::Uncertain)),
+            _ => Err(uncertain(
+                key,
+                "it is draining, or granted with no allocation, at its recovery",
+            )),
         }
     }
 
     fn observe_ended_pool(&self, record: &mut PoolRecord) -> Result<bool, Refusal> {
         let key = record.key;
-        let books = self
-            .books
-            .get()
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let books = self.books.get().ok_or_else(|| {
+            uncertain(
+                key,
+                "its guest has no record authority to record its shared end",
+            )
+        })?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
-            let mut current = transaction
-                .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let mut current = transaction.read_pool(&key)?.ok_or_else(|| {
+                uncertain(
+                    key,
+                    "its pool record is gone before its shared end was recorded",
+                )
+            })?;
             if current.native_commitment()? != record.native_commitment()? {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "its record's commitment changed before its shared end was recorded",
+                ));
             }
             let path = self.pool_path()?;
             let Some(mut receipt) = pool::read(path)? else {
@@ -927,7 +994,12 @@ impl GuestRuntime {
                 {
                     None
                 }
-                _ => return Err(refused(key, LifecycleCause::Uncertain)),
+                _ => {
+                    return Err(uncertain(
+                        key,
+                        "its shared receipt names no controller its record can attach as its end is recorded",
+                    ));
+                }
             };
             let native = transaction.attach_managed(identity)?;
             let terminal = native
@@ -949,8 +1021,10 @@ impl GuestRuntime {
                     managed::stop_scope(
                         transaction,
                         identity.as_ref(),
-                        self.first_dial_bound()?,
-                        refused(key, LifecycleCause::Uncertain),
+                        uncertain(
+                            key,
+                            "its ended shared backing's scope wasn't seen released after its stop",
+                        ),
                     )?
                 }
             };
@@ -977,7 +1051,10 @@ impl GuestRuntime {
             let record = transaction.grant_pool(&grant)?;
             self.preflight_backing(&record)?;
             if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "the granted record isn't a shared backing's",
+                ));
             }
             let booted = match self.running()? {
                 Some(booted) => {
@@ -989,14 +1066,14 @@ impl GuestRuntime {
             };
             let mut record = transaction
                 .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                .ok_or_else(|| uncertain(key, "its pool record is gone after its shared boot"))?;
             self.matches_pool(&booted, &record)?;
             if record.phase == BackingPhase::Granted {
                 record.phase = BackingPhase::Live;
                 transaction.put_pool(&record)?;
             }
             if record.phase != BackingPhase::Live {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(key, "it isn't live after its shared boot"));
             }
             let offer = record.offer()?;
             let mut state = self.lock()?;
@@ -1004,7 +1081,7 @@ impl GuestRuntime {
                 .as_ref()
                 .is_some_and(|known| known.backing != booted.backing)
             {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(key, "its guest booted another backing"));
             }
             *state = Some(booted);
             Ok(offer)
@@ -1026,11 +1103,19 @@ impl GuestRuntime {
             }
             None if record.phase == BackingPhase::Granted && record.init.is_none() => {
                 if record.allocation != Some(self.configured_allocation()?) {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "its allocation isn't its node's configured one at its shared boot",
+                    ));
                 }
                 Receipt::intent(record, Vec::new(), &self.config)?
             }
-            None => return Err(refused(key, LifecycleCause::Uncertain)),
+            None => {
+                return Err(uncertain(
+                    key,
+                    "its shared receipt is gone though it is past its grant, at its boot",
+                ));
+            }
         };
         let binding = Binding {
             key,
@@ -1042,12 +1127,18 @@ impl GuestRuntime {
         let guest = match &receipt.phase {
             Phase::Running(identity) => {
                 receipt.checked_report()?;
-                let canonical = transaction
-                    .read_pool(&key)?
-                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                let canonical = transaction.read_pool(&key)?.ok_or_else(|| {
+                    uncertain(
+                        key,
+                        "its pool record is gone as its running shared controller was re-attached",
+                    )
+                })?;
                 managed::same_native(NativeRecord::Pool(&canonical), identity)?;
                 if identity.vsock != socket {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "its running shared controller's vsock isn't its socket",
+                    ));
                 }
                 managed::attach(transaction, plan, identity, budget)?
             }
@@ -1055,25 +1146,37 @@ impl GuestRuntime {
                 // An existing Intent is an interrupted attempt, not permission
                 // to spawn another controller or discard uncertain helpers.
                 if pool::read(path)?.is_some() {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "an interrupted shared boot of it left its intent",
+                    ));
                 }
                 budget.remaining()?;
                 pool::write(path, &receipt)?;
                 managed::boot(transaction, plan, budget)?
             }
             Phase::Stopping(_) | Phase::Released { .. } => {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "its shared receipt is stopping or released at its boot",
+                ));
             }
         };
         let identity = shards_api::Guest::identity(&guest)
             .map_err(|why| refusal("reading managed shared guest identity", &why))?;
-        let canonical = transaction
-            .read_pool(&key)?
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let canonical = transaction.read_pool(&key)?.ok_or_else(|| {
+            uncertain(
+                key,
+                "its pool record is gone after its shared controller started",
+            )
+        })?;
         receipt.matches(&canonical)?;
         managed::same_native(NativeRecord::Pool(&canonical), &identity)?;
         if identity.vsock != socket {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its started shared controller's vsock isn't its socket",
+            ));
         }
         receipt.checked_report()?;
         receipt.phase = Phase::Running(identity);
@@ -1082,18 +1185,20 @@ impl GuestRuntime {
         let guest_capacity = booted
             .client
             .capacity(Class::Oci)?
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            .ok_or_else(|| uncertain(key, "its guest reports no capacity for its class"))?;
         guest_capacity.check()?;
-        let allocation = receipt
-            .original
-            .allocation
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let allocation = receipt.original.allocation.ok_or_else(|| {
+            uncertain(
+                key,
+                "its shared receipt's record holds no allocation for its guest's room",
+            )
+        })?;
         let room = allocation
             .guest()?
             .checked_sub(allocation.cost.guest_overhead)
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            .ok_or_else(|| uncertain(key, "its guest's overhead is past its allocation"))?;
         if !guest_capacity.total.holds(room) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(key, "its guest's capacity doesn't hold its room"));
         }
         budget.remaining()?;
         Ok(booted)
@@ -1104,25 +1209,33 @@ impl GuestRuntime {
         let guest = receipt
             .original
             .allocation
-            .ok_or_else(|| refused(receipt.original.key, LifecycleCause::Uncertain))?
+            .ok_or_else(|| {
+                uncertain(
+                    receipt.original.key,
+                    "its shared receipt's record holds no allocation to size its VM",
+                )
+            })?
             .guest()?;
         if guest.cpu_milli.checked_rem(1000) != Some(0)
             || guest.mem_bytes.checked_rem(1 << 20) != Some(0)
         {
-            return Err(refused(receipt.original.key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                receipt.original.key,
+                "its guest's allocation isn't in whole CPUs and MiB",
+            ));
         }
-        let mut spec = self.cpu_spec();
-        spec.vcpus = u32::try_from(
-            guest
-                .cpu_milli
-                .checked_div(1000)
-                .ok_or_else(|| refused(receipt.original.key, LifecycleCause::Uncertain))?,
-        )
-        .map_err(|_| refused(receipt.original.key, LifecycleCause::Uncertain))?;
-        spec.memory_mib = guest
-            .mem_bytes
-            .checked_div(1 << 20)
-            .ok_or_else(|| refused(receipt.original.key, LifecycleCause::Uncertain))?;
+        let mut spec = self.cpu_spec()?;
+        spec.vcpus =
+            u32::try_from(guest.cpu_milli.checked_div(1000).ok_or_else(|| {
+                uncertain(receipt.original.key, "its guest's CPU count overflowed")
+            })?)
+            .map_err(|_| uncertain(receipt.original.key, "its guest's CPU count is past a VM's"))?;
+        spec.memory_mib = guest.mem_bytes.checked_div(1 << 20).ok_or_else(|| {
+            uncertain(
+                receipt.original.key,
+                "its guest's memory couldn't be counted in MiB",
+            )
+        })?;
         Ok(spec)
     }
 
@@ -1175,7 +1288,10 @@ impl GuestRuntime {
                 commitment: record.native_commitment()?,
             })
         {
-            return Err(refused(record.key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                record.key,
+                "its guest's booted backing isn't its record's",
+            ));
         }
         Ok(())
     }
@@ -1190,9 +1306,54 @@ impl GuestRuntime {
             .terminal_scope()
             .map_err(|why| refusal("observing shared native scope", &why))?;
         if exited || scope.is_some() {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(key, "its guest's VM ended"));
         }
         Ok(())
+    }
+
+    /// The shared backing `key`'s guest overhead, measured at this capacity answer where its guest runs (joint plan
+    /// step 14, C7; [`guest_seen`]), kept per backing generation: a new generation starts cold. A read that fails, or a
+    /// guest not running, is no sample: what was seen stays. No lock is held over the guest's answers.
+    fn measured_guest(&self, key: BackingKey) -> Result<hex_api::LearnedOverhead, Refusal> {
+        let kept = match *self
+            .guest_overhead
+            .lock()
+            .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned"))?
+        {
+            Some((seen, overhead)) if seen == key => overhead,
+            _ => hex_api::LearnedOverhead::default(),
+        };
+        let measured = self
+            .shared_running()
+            .ok()
+            .and_then(|booted| {
+                let guest = booted.client.capacity(Class::Oci).ok()??;
+                let records = self.authority().ok()?.records().ok()?;
+                let mut boxes = 0u64;
+                for record in records.values().flatten() {
+                    if record.spec.route.and_then(|route| route.backing) == Some(key) {
+                        boxes = boxes.saturating_add(
+                            booted.client.usage(&record.spec.id).ok()?.memory_bytes,
+                        );
+                    }
+                }
+                Some(guest_seen(kept, &guest, boxes))
+            })
+            .unwrap_or(kept);
+        let mut seen = self
+            .guest_overhead
+            .lock()
+            .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned as it learns"))?;
+        // Another answer may have measured meanwhile: the most of the two.
+        let merged = match *seen {
+            Some((at, other)) if at == key => hex_api::LearnedOverhead {
+                mem_bytes: measured.mem_bytes.max(other.mem_bytes),
+                ..measured
+            },
+            _ => measured,
+        };
+        *seen = Some((key, merged));
+        Ok(merged)
     }
 
     pub(super) fn shared_running(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
@@ -1205,7 +1366,7 @@ impl GuestRuntime {
         }
         let booted = self
             .running()?
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            .ok_or_else(|| uncertain(key, "its guest isn't running"))?;
         self.matches_pool(&booted, &record)?;
         self.pool_alive(&booted, key)?;
         Ok(booted)
@@ -1232,7 +1393,10 @@ impl GuestRuntime {
         let record = self.pool_record(key)?;
         record.check()?;
         if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its record isn't a shared backing's as its guest is reached",
+            ));
         }
         if record.phase == BackingPhase::Released {
             return Ok(None);
@@ -1255,16 +1419,20 @@ impl GuestRuntime {
         let books = self
             .books
             .get()
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            .ok_or_else(|| uncertain(key, "its guest has no record authority to reach its VM"))?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
             let current = transaction
                 .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                .ok_or_else(|| uncertain(key, "its pool record is gone as its guest is reached"))?;
             if current.native_commitment()? != record.native_commitment()? {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "its record's commitment changed as its guest is reached",
+                ));
             }
-            let receipt = pool::read(self.pool_path()?)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let receipt = pool::read(self.pool_path()?)?.ok_or_else(|| {
+                uncertain(key, "its shared receipt is gone as its guest is reached")
+            })?;
             receipt.matches(&current)?;
             let identity = match &receipt.phase {
                 Phase::Running(identity)
@@ -1281,7 +1449,12 @@ impl GuestRuntime {
                 {
                     None
                 }
-                _ => return Err(refused(key, LifecycleCause::Uncertain)),
+                _ => {
+                    return Err(uncertain(
+                        key,
+                        "its shared receipt names no controller its record can attach as its guest is reached",
+                    ));
+                }
             };
             let native = transaction.attach_managed(identity)?;
             let terminal = native
@@ -1290,7 +1463,10 @@ impl GuestRuntime {
             if terminal.is_some_and(|end| end.scope == shards_api::TerminalScope::Released) {
                 return Ok(None);
             }
-            Err(refused(key, LifecycleCause::Uncertain))
+            Err(uncertain(
+                key,
+                "its cold shared parent scope isn't released",
+            ))
         })
     }
 
@@ -1301,14 +1477,19 @@ impl GuestRuntime {
         if self.shared_key()? != Some(key) {
             return self.gpu_backing_usage(key);
         }
-        let books = self
-            .books
-            .get()
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let books = self.books.get().ok_or_else(|| {
+            uncertain(
+                key,
+                "its guest has no record authority to read its shared usage",
+            )
+        })?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
-            let record = transaction
-                .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let record = transaction.read_pool(&key)?.ok_or_else(|| {
+                uncertain(
+                    key,
+                    "its pool record is gone before its shared usage was read",
+                )
+            })?;
             record.check()?;
             if !matches!(
                 record.phase,
@@ -1347,7 +1528,10 @@ impl GuestRuntime {
             })?;
             let record = self.pool_record(key)?;
             if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "its record isn't a shared backing's as its offers are made",
+                ));
             }
             if !capacity.backings.iter().any(|backing| backing.key == key) {
                 capacity
@@ -1357,7 +1541,9 @@ impl GuestRuntime {
                         what: "initialized native backings",
                         bound: hex_api::MAX_RUNTIME_ROUTES,
                     })?;
-                capacity.backings.push(record.offer()?);
+                let mut offer = record.offer()?;
+                offer.guest = self.measured_guest(key)?;
+                capacity.backings.push(offer);
             }
             push_offer(
                 capacity,
@@ -1461,16 +1647,19 @@ impl GuestRuntime {
             || !spec.devices.is_empty()
             || spec.allocation.is_some()
         {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "a box asked of the shared backing names devices or an allocation",
+            ));
         }
         let books = self
             .books
             .get()
             .ok_or_else(|| refused(key, LifecycleCause::Pending))?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
-            let record = transaction
-                .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let record = transaction.read_pool(&key)?.ok_or_else(|| {
+                uncertain(key, "its pool record is gone as a box is created on it")
+            })?;
             if record.phase != BackingPhase::Live {
                 return Err(refused(key, LifecycleCause::Pending));
             }
@@ -1488,27 +1677,41 @@ impl GuestRuntime {
         key: BackingKey,
     ) -> Result<BackingOffer, Refusal> {
         if self.shared_key()? != Some(key) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its guest isn't bound to it as its shared release is acknowledged",
+            ));
         }
-        let books = self
-            .books
-            .get()
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let books = self.books.get().ok_or_else(|| {
+            uncertain(
+                key,
+                "its guest has no record authority to acknowledge its shared release",
+            )
+        })?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
-            let record = transaction
-                .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let record = transaction.read_pool(&key)?.ok_or_else(|| {
+                uncertain(
+                    key,
+                    "its pool record is gone before its shared release was acknowledged",
+                )
+            })?;
             self.preflight_backing(&record)?;
             if record.execution != Execution::ShardsShared
                 || !record.devices.is_empty()
                 || record.phase != BackingPhase::Released
             {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "it isn't a released shared backing as its release is acknowledged",
+                ));
             }
             for boxed in transaction.records()?.values() {
-                let boxed = boxed
-                    .as_ref()
-                    .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                let boxed = boxed.as_ref().map_err(|_| {
+                    uncertain(
+                        key,
+                        "a box record couldn't be read as its shared release was acknowledged",
+                    )
+                })?;
                 if boxed.spec.route.and_then(|route| route.backing) == Some(key) {
                     return Err(refused(key, LifecycleCause::Busy));
                 }
@@ -1517,7 +1720,10 @@ impl GuestRuntime {
             if let Some(receipt) = pool::read(path)? {
                 receipt.matches(&record)?;
                 if !matches!(receipt.phase, Phase::Released { .. }) {
-                    return Err(refused(key, LifecycleCause::Uncertain));
+                    return Err(uncertain(
+                        key,
+                        "its shared receipt isn't released as its release is acknowledged",
+                    ));
                 }
                 transaction.finalize_managed(receipt.released_identity()?)?;
                 remove_receipt(path)?;
@@ -1531,26 +1737,37 @@ impl GuestRuntime {
 
     pub(super) fn release_pool(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
         if self.shared_key()? != Some(key) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return Err(uncertain(
+                key,
+                "its guest isn't bound to it as it is released",
+            ));
         }
-        let books = self
-            .books
-            .get()
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let books = self.books.get().ok_or_else(|| {
+            uncertain(
+                key,
+                "its guest has no record authority to release the shared backing",
+            )
+        })?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
-            let mut record = transaction
-                .read_pool(&key)?
-                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            let mut record = transaction.read_pool(&key)?.ok_or_else(|| {
+                uncertain(key, "its pool record is gone before its shared release")
+            })?;
             if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "its record isn't a shared backing's as it is released",
+                ));
             }
             if record.phase == BackingPhase::Released {
                 return record.offer();
             }
             for boxed in transaction.records()?.values() {
-                let boxed = boxed
-                    .as_ref()
-                    .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                let boxed = boxed.as_ref().map_err(|_| {
+                    uncertain(
+                        key,
+                        "a box record couldn't be read as the shared backing was released",
+                    )
+                })?;
                 if boxed
                     .spec
                     .route
@@ -1580,7 +1797,10 @@ impl GuestRuntime {
         let path = self.pool_path()?;
         if record.phase == BackingPhase::Prepared {
             if pool::read(path)?.is_some() {
-                return Err(refused(key, LifecycleCause::Uncertain));
+                return Err(uncertain(
+                    key,
+                    "it is prepared, yet its shared receipt is on disk",
+                ));
             }
             prepared(record)?;
             transaction.check_unsubmitted_pool()?;
@@ -1595,7 +1815,12 @@ impl GuestRuntime {
                 original.exit = None;
                 Receipt::retained(original, Vec::new())?
             }
-            None => return Err(refused(key, LifecycleCause::Uncertain)),
+            None => {
+                return Err(uncertain(
+                    key,
+                    "its shared receipt is gone though its record names a controller",
+                ));
+            }
         };
         receipt.matches(record)?;
         record.phase = BackingPhase::Draining;
@@ -1611,7 +1836,12 @@ impl GuestRuntime {
                 Some(identity)
             }
             Phase::Intent | Phase::Released { identity: None, .. } if record.init.is_none() => None,
-            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+            _ => {
+                return Err(uncertain(
+                    key,
+                    "its shared receipt's phase names no controller its record can stop",
+                ));
+            }
         };
         let terminal = match &receipt.phase {
             Phase::Released { status, .. } => *status,
@@ -1624,8 +1854,7 @@ impl GuestRuntime {
                 let terminal = managed::stop_scope(
                     transaction,
                     identity.as_ref(),
-                    self.first_dial_bound()?,
-                    refused(key, LifecycleCause::Uncertain),
+                    uncertain(key, "its shared backing's end wasn't seen after its stop"),
                 )?;
                 receipt.phase = Phase::Released {
                     identity,
@@ -1637,7 +1866,12 @@ impl GuestRuntime {
         };
         let identity = match &receipt.phase {
             Phase::Released { identity, .. } => identity.as_ref(),
-            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+            _ => {
+                return Err(uncertain(
+                    key,
+                    "its shared receipt isn't released after its stop",
+                ));
+            }
         };
         transaction.finalize_managed(identity)?;
         record.exit = Some(exit_of(terminal));
@@ -1813,6 +2047,25 @@ fn push_offer(
         }
     }
     Ok(())
+}
+
+/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13): what
+/// its agent says it uses (its total memory less its free) past what its boxes hold, `boxes_memory`, the most seen,
+/// only rising from `kept`. Its CPU and disk its agent's answer doesn't read, so they stay as kept: none.
+fn guest_seen(
+    kept: hex_api::LearnedOverhead,
+    guest: &hex_api::Capacity,
+    boxes_memory: u64,
+) -> hex_api::LearnedOverhead {
+    let own = guest
+        .total
+        .mem_bytes
+        .saturating_sub(guest.free.mem_bytes)
+        .saturating_sub(boxes_memory);
+    hex_api::LearnedOverhead {
+        mem_bytes: Some(kept.mem_bytes.map_or(own, |seen| seen.max(own))),
+        ..kept
+    }
 }
 
 #[cfg(test)]

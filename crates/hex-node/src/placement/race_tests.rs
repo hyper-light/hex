@@ -14,7 +14,7 @@ use hex_api::{BoxId, BoxInfo, BoxSpec, Proc, Program, Refusal, Runtime, Signal, 
 use hex_core::patience::Patience;
 use hex_sim::index::Pick;
 use hex_sim::model::{Class, NodeId, NodeSpec};
-use hex_sim::peer::{Budget, Msg};
+use hex_sim::peer::{self, Budget, Msg};
 use hex_testkit::waits::follow::{self, Party};
 
 use super::tests::{cpu, demand_of, four_cpus, holding, quiesce, started, talk};
@@ -245,7 +245,12 @@ fn a_rebook_past_the_room_inside_an_admission_leaves_it_refused() {
     let (d, p) = demand_of(1500);
     let (_, step) = driver.submit(d, p).unwrap();
     let notices = raced(&driver, &gate, start_of(step), || {
-        assert_eq!(driver.rebook(&[(vm, holding(5000))]).unwrap(), 1);
+        assert_eq!(
+            driver
+                .rebook(&[(peer::Holder::Box(vm), holding(5000))])
+                .unwrap(),
+            1
+        );
     });
     assert!(
         !started(&notices),
