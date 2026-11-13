@@ -982,3 +982,36 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
 }
+
+/// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13: the starving case the done-when names): a running VM whose read
+/// fails counts whole, at its receipt, against the fleet's budget until a read succeeds, its learner untouched, and
+/// the failure is told. Do run a window of three Shards VMs of 16-CPU allocations, each booked at 4 CPUs, in a 24-CPU
+/// fleet budget, the third's read failing; then one in which it reads. Expect the first two capped at their bookings,
+/// the 16 CPUs of the third's receipt taken from the budget, and the third named among the unread with its refusal;
+/// then the three capped at 8 CPUs each, as three that all read are, and none unread.
+#[test]
+fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
+    let io = Record::default();
+    let vms = vec![vm("vm-1", 1), vm("vm-2", 2), vm("vm-3", 3)];
+    io.set("vm-1", 0, GIB);
+    io.set("vm-2", 0, GIB);
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    assert_eq!(
+        *io.rates.borrow(),
+        vec![("vm-1".to_owned(), 4_000), ("vm-2".to_owned(), 4_000)]
+    );
+    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(unread, ["vm-3"]);
+    io.rates.borrow_mut().clear();
+    io.set("vm-3", 0, GIB);
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert!(learner.unread().is_empty());
+    let caps: Vec<u64> = vms
+        .iter()
+        .map(|r| learner.rate(&Scope::of(r).unwrap()).unwrap())
+        .collect();
+    assert_eq!(caps, [8_000, 8_000, 8_000]);
+}

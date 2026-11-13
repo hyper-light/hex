@@ -871,6 +871,11 @@ impl Learner {
         &self.unheld
     }
 
+    /// The VMs its last window couldn't read, and why. Original (red): none is told.
+    pub(crate) fn unread(&self) -> &[(BoxId, Refusal)] {
+        &[]
+    }
+
     /// The cap each VM runs under now, by its lifetime.
     #[cfg(test)]
     fn rate(&self, scope: &Scope) -> Option<u64> {
