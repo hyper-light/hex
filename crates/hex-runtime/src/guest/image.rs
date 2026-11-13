@@ -233,8 +233,9 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
     }
 }
 
-/// The box's VM size, held to what Shards boots: memory even and at least its least on this host
-/// (`shards_api::min_memory_mib`, shards-vmm's own floor), refused naming the allocation.
+/// The box's VM size, held to what Shards boots on this host: a size it boots as asked, which
+/// `shards_api::envelope` (Shards' least memory and unit, its `check`'s rule from one source) gives back unchanged;
+/// any other refused naming the allocation and what Shards would boot for it. Hex states none of Shards' numbers.
 fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
     let size = spec
         .allocation
@@ -244,17 +245,19 @@ fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
                 .to_owned(),
         })?
         .vm_size()?;
-    let least = shards_api::min_memory_mib(std::env::consts::ARCH);
-    if size.memory_mib < least || !size.memory_mib.is_multiple_of(2) {
-        return Err(Refusal::Invalid {
-            what: "shards image",
-            why: format!(
-                "allocation: {} MiB of guest memory; Shards boots an even number of MiB, at least {least}",
-                size.memory_mib
-            ),
-        });
+    let invalid = |why: String| Refusal::Invalid {
+        what: "shards image",
+        why,
+    };
+    match shards_api::envelope(std::env::consts::ARCH, size.vcpus, size.memory_mib) {
+        Ok((vcpus, memory_mib)) if (vcpus, memory_mib) == (size.vcpus, size.memory_mib) => Ok(size),
+        Ok((vcpus, memory_mib)) => Err(invalid(format!(
+            "allocation: {} vCPUs and {} MiB of guest memory, which Shards boots as {vcpus} and {memory_mib} MiB \
+             (shards_api::envelope)",
+            size.vcpus, size.memory_mib
+        ))),
+        Err(why) => Err(invalid(format!("allocation: {why}"))),
     }
-    Ok(size)
 }
 
 /// What a running VM's usage is, from its run's STATS: CPU, memory, processes and I/O from its guest's cgroup,
