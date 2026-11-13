@@ -237,6 +237,68 @@ fn ac_t7_4_1_what_a_peer_wrote_before_its_end_outlasts_its_reset() {
     }
 }
 
+/// How a bridged stream's owner read its end: the peer's End, or the connection cut short, as the read's error says.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    Ended,
+    Cut(std::io::ErrorKind),
+}
+
+/// What `owner` holds now, read without waiting and kept in `got`: its end, once it has come.
+fn ending(owner: &mut hex_client::guest::DuplexOwner, got: &mut Vec<u8>) -> Option<Ending> {
+    let mut buf = [0u8; 64];
+    loop {
+        match std::io::Read::read(&mut **owner, &mut buf) {
+            Ok(0) => return Some(Ending::Ended),
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Some(Ending::Cut(e.kind())),
+        }
+    }
+}
+
+/// AC-T7.4.1 (joint plan step 4, Q3; hex-quic.md Q11, route (b)): a stream cut short reads as cut, never as ended. Do:
+/// the client's link bridges a stdio connection (`link::Link`'s dial); the node writes a line on it and, once the line
+/// has gone, resets the connection with no End; then again with the node ending its half instead. Expect the cut
+/// stream to read the line, then a reset (`ConnectionReset`), and the ended one the line, then its end.
+#[test]
+fn ac_t7_4_1_a_stream_cut_short_reads_as_cut() {
+    use hex_client::guest::Link as _;
+    let ca = SimCa::new().unwrap();
+    let node = node(&ca, "node-cut.test");
+    let client = std::sync::Arc::new(client(enrolled(&ca, "client-cut.test")));
+    let peer = within(&DIAL, |by| {
+        client.dial("node-cut.test", node.local_addr(), by)
+    })
+    .unwrap();
+    let link = link::Link::new(std::sync::Arc::clone(&client), peer);
+    for (cut, expected) in [
+        (true, Ending::Cut(std::io::ErrorKind::ConnectionReset)),
+        (false, Ending::Ended),
+    ] {
+        let mut owner = link.dial(STDIO_PORT).unwrap();
+        owner.set_nonblocking(true).unwrap();
+        let (_, there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+        within(&ROOM, |by| there.write_all(b"line\n", by)).unwrap();
+        if cut {
+            // Its frame gone to the driver, ahead of the Reset on the connection's lane.
+            until(&ROOM, "the line gone to the driver", || there.writable()).unwrap();
+            there.reset(Why::Gone);
+        } else {
+            within(&ROOM, |by| there.end(by)).unwrap();
+        }
+        let (mut got, mut end) = (Vec::new(), None);
+        until(&READ, "the bridged line and its end", || {
+            end = ending(&mut owner, &mut got);
+            end.is_some()
+        })
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&got), "line\n", "cut: {cut}");
+        assert_eq!(end, Some(expected), "cut: {cut}");
+    }
+}
+
 /// A provider that shares everything with Hex's links but its suites.
 fn offering(suites: &[rustls::SupportedCipherSuite]) -> rustls::crypto::CryptoProvider {
     rustls::crypto::CryptoProvider {
@@ -435,7 +497,7 @@ mod silent {
     }
 
     /// What `owner` holds now, read without waiting (its socket non-blocking) and kept in `got`: whether its end has
-    /// come (an end of input, or a reset).
+    /// come (an end of input, a reset, or the cut of its connection's close, Q11).
     fn drain(owner: &mut DuplexOwner, got: &mut Vec<u8>) -> bool {
         let mut buf = [0u8; 64];
         loop {
@@ -444,7 +506,14 @@ mod silent {
                 Ok(n) => got.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return false,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == ErrorKind::ConnectionReset => return true,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return true;
+                }
                 Err(e) => panic!("reading a bridged socket: {e}"),
             }
         }

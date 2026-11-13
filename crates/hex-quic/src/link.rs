@@ -38,7 +38,7 @@ impl guest::Link for Link {
             .endpoint
             .open(self.peer, port)
             .map_err(refusal("opening a connection to the node over QUIC"))?;
-        let socket = bridge::socket(conn)
+        let socket = bridge::bridged(conn)
             .map_err(|e| Refusal::os("bridging a QUIC connection to a local socket", e))?;
         guest::own_duplex(socket)
     }
