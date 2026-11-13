@@ -676,6 +676,17 @@ struct Vm {
     held: Option<hex_api::RateHeld>,
 }
 
+/// A managed VM its learner asked its governor at first sight, on a platform with no window (D255).
+struct Governed {
+    class: Class,
+    /// What holds its rate: its governor (under its job on Windows), or its platform's cap and why.
+    held: hex_api::RateHeld,
+    /// Whether its governor answered a period, so its learner learns it over that.
+    period: bool,
+    /// Whether its ask failed, so it is asked again next window.
+    again: bool,
+}
+
 /// The node's learner (module docs).
 pub(crate) struct Learner {
     node: charge::Node<Lifetime>,
@@ -689,6 +700,8 @@ pub(crate) struct Learner {
     unheld: Refusal,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
     unread: Vec<(BoxId, Refusal)>,
+    /// The managed VMs it asked their governors at first sight, on a platform with no window (D255), by their scopes.
+    governors: BTreeMap<Scope, Governed>,
     /// The last resort (C5).
     last: LastResort,
 }
@@ -750,6 +763,7 @@ impl Learner {
             fault: None,
             last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unread: Vec::new(),
+            governors: BTreeMap::new(),
             unheld: Refusal::Platform {
                 what: "memory_high",
                 platform: std::env::consts::OS,
@@ -765,20 +779,76 @@ impl Learner {
         self.managed.is_some()
     }
 
-    /// Whether it learns managed VM `record` (C1, D255). Original (red): only where its platform has a window.
+    /// Whether it learns managed VM `record` (C1, D255): where its platform has a window, or its governor has answered a
+    /// period ([`Learner::govern`]).
     pub(crate) fn learns(&self, record: &BoxRecord) -> bool {
-        let _ = record;
         self.manages()
+            || Scope::of(record)
+                .and_then(|scope| self.governors.get(&scope))
+                .is_some_and(|governed| governed.period)
     }
 
-    /// Asks the governor of each managed VM among `running` it hasn't seen, on a platform with no window (D255).
-    /// Original (red): none is asked.
+    /// Asks the governor of each managed VM among `records` it hasn't asked, on a platform with no window (D255; ROOT,
+    /// 2026-11-13), at the VM's ceiling, its allocation's CPU, which holds nothing below its vCPUs: a cold start that
+    /// can't starve it. One whose governor answers a period is learned over it from then on ([`Learner::learns`]); one
+    /// whose process takes no rate stays booked whole, told; one whose ask or period read fails stays booked whole,
+    /// told, and is asked again next window. Those no longer running are forgotten.
     pub(crate) fn govern(
         &mut self,
         io: &impl Managed,
-        running: &[BoxRecord],
+        records: &[BoxRecord],
     ) -> Result<(), Refusal> {
-        let _ = (io, running);
+        self.governors.retain(|scope, _| {
+            records
+                .iter()
+                .any(|record| Scope::of(record) == Some(*scope))
+        });
+        if self.manages() {
+            return Ok(());
+        }
+        for record in records {
+            if !running(record) {
+                continue;
+            }
+            let (Some(scope), Some(allocation)) = (Scope::of(record), record.spec.allocation)
+            else {
+                continue;
+            };
+            if self.vms.contains_key(&scope)
+                || self
+                    .governors
+                    .get(&scope)
+                    .is_some_and(|governed| !governed.again)
+            {
+                continue;
+            }
+            let class = match record.spec.class.class() {
+                hex_api::Class::Shards => Class::Shards,
+                hex_api::Class::Firecracker => Class::Firecracker,
+                hex_api::Class::Process | hex_api::Class::Oci => continue,
+            };
+            let asked = io
+                .set_rate(record, allocation.resources.cpu_milli)
+                .and_then(|held| match held {
+                    hex_api::RateHeld::Platform(_) => Ok((held, false)),
+                    held => io
+                        .rate_period(record)
+                        .map(|period| (held, period.is_some())),
+                });
+            let (held, period, again) = match asked {
+                Ok((held, period)) => (held, period, false),
+                Err(why) => (hex_api::RateHeld::Platform(why.to_string()), false, true),
+            };
+            self.governors.insert(
+                scope,
+                Governed {
+                    class,
+                    held,
+                    period,
+                    again,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -1081,9 +1151,18 @@ impl Learner {
             let Some(scope) = Scope::of(record) else {
                 continue;
             };
-            if let Some(vm) = self.vms.get(&scope)
-                && vm.class == class
-                && let Some(how) = &vm.held
+            // What its last cap's answer said; else what its governor's ask at first sight did (D255).
+            let governed = self
+                .governors
+                .get(&scope)
+                .filter(|governed| governed.class == class)
+                .map(|governed| &governed.held);
+            let how = match self.vms.get(&scope) {
+                Some(vm) if vm.class == class => vm.held.as_ref().or(governed),
+                Some(_) => None,
+                None => governed,
+            };
+            if let Some(how) = how
                 && held.len() < MAX_LEARNED_HOLDINGS
             {
                 held.push((rank(how), &record.spec.id, how));
