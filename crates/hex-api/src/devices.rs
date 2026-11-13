@@ -148,16 +148,28 @@ pub struct BackendUnavailable {
     pub cause: Refusal,
 }
 
-/// This diagnostic has only fixed-size backing identity and the existing three typed causes.
+/// This diagnostic has the backing's fixed-size identity, the existing three typed causes, and the refusing site's
+/// reason where it gave one (joint plan step 14: appended, absent where none).
 /// General Refusal contains static names/text and deliberately has no serde implementation.
 mod unavailable_cause {
     use super::*;
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Cause {
         key: crate::BackingKey,
         cause: crate::LifecycleCause,
+        #[serde(default)]
+        why: Option<String>,
+    }
+
+    /// [`Cause`] as it is written, its reason borrowed from the refusal.
+    #[derive(Serialize)]
+    struct Written<'a> {
+        key: crate::BackingKey,
+        cause: crate::LifecycleCause,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        why: Option<&'a str>,
     }
 
     pub(super) fn serialize<S: serde::Serializer>(
@@ -169,14 +181,15 @@ mod unavailable_cause {
                 "only qualified backing observation causes may be encoded",
             ));
         }
-        let Refusal::Backing { key, cause, .. } = value else {
+        let Refusal::Backing { key, cause, why } = value else {
             return Err(serde::ser::Error::custom(
                 "unavailable observation has no backing identity",
             ));
         };
-        Cause {
+        Written {
             key: *key,
             cause: *cause,
+            why: why.as_deref(),
         }
         .serialize(serializer)
     }
@@ -188,7 +201,7 @@ mod unavailable_cause {
         let cause = Refusal::Backing {
             key: value.key,
             cause: value.cause,
-            why: None,
+            why: value.why,
         };
         if !BackendUnavailable::qualified(crate::Class::Firecracker, &cause) {
             return Err(de::Error::custom(

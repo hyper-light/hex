@@ -1986,13 +1986,25 @@ fn per_vcpu<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u64
     )
 }
 
+/// A refusal's reason as its message gives it: `: why` after the rest, or nothing where it gives none.
+struct Said<'a>(&'a Option<String>);
+
+impl std::fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(why) => write!(f, ": {why}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     /// Native backing `key` refused for `cause`, and `why` in the refusing site's own words where it gives them (joint
     /// plan step 14; ROOT, 2026-11-13: an `Uncertain` with no reason is a CLAUDE.md §3 gap). Appended (the wire IDENTITY
     /// moves); `None` where a site has no reason to give past its cause.
-    #[error("native backing {key:?}: {cause:?}")]
+    #[error("native backing {key:?}: {cause:?}{}", Said(.why))]
     Backing {
         key: BackingKey,
         cause: LifecycleCause,

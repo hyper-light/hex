@@ -3968,10 +3968,11 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
         ));
     }
     assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
-    // 3 is Retired (joint plan step 14); the next cause is unknown.
+    // 3 is Retired (joint plan step 14); the next cause is unknown. The cause is the byte before its reason's option
+    // tag, an entry's last (joint plan step 14, (B)).
     for cause in [4, u8::MAX] {
         let mut raw = bytes.clone();
-        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = cause;
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 2] = cause;
         assert!(matches!(
             refused(&raw),
             Fault::Value {
@@ -3979,6 +3980,12 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
                 ..
             }
         ));
+    }
+    // A reason's option tag that is neither 0 nor 1.
+    for tag in [2, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = tag;
+        assert!(matches!(refused(&raw), Fault::Value { what: "option", .. }));
     }
     let mut duplicate = bytes.clone();
     duplicate[entry + PHYSICAL_UNAVAILABLE_BYTES] = duplicate[entry];
