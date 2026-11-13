@@ -664,6 +664,7 @@ fn waits() -> Result<ImageWaits, Refusal> {
         boot: Patience::measuring("test.hex_runtime.image_boot"),
         stats: Patience::measuring("test.hex_runtime.image_stats"),
         stop: Patience::measuring("test.hex_runtime.image_stop"),
+        delete_boot: Patience::measuring("test.hex_runtime.image_delete_boot"),
     })
 }
 
@@ -2624,13 +2625,24 @@ fn the_image_waits_follow_their_parties_until_their_first_answers() {
         (
             waits.boot.deadline(),
             waits.stats.deadline(),
-            waits.stop.deadline()
+            waits.stop.deadline(),
+            waits.delete_boot.deadline()
         ),
-        (None, None, None)
+        (None, None, None, None)
     );
     assert_eq!(
-        (waits.boot.name(), waits.stats.name(), waits.stop.name()),
-        ("hex.image.boot", "hex.image.stats", "hex.image.stop")
+        (
+            waits.boot.name(),
+            waits.stats.name(),
+            waits.stop.name(),
+            waits.delete_boot.name()
+        ),
+        (
+            "hex.image.boot",
+            "hex.image.stats",
+            "hex.image.stop",
+            "hex.image.delete_boot"
+        )
     );
     waits.boot.answered(Duration::from_millis(3));
     assert_eq!(waits.boot.deadline(), Some(Duration::from_millis(3)));
