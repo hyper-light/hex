@@ -631,6 +631,30 @@ mod tests {
     }
 
     /// AC-T7.4.1: prepared scope is durable before grant and retry cannot generate a new lifetime.
+    /// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): the node's
+    /// store refuses a backing Uncertain in its site's own words. Do prepare a shared pool, then remove it before it was
+    /// released. Expect it refused Uncertain with its key and its reason, and its pool file kept.
+    #[test]
+    fn w14_b_a_pool_removed_before_its_release_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("disk"), &dir.path().join("run")).unwrap();
+        let record = prepared(&store, [2; 16]);
+        let refused = store.remove_pool(&record.key).unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                Refusal::Backing {
+                    key,
+                    cause: LifecycleCause::Uncertain,
+                    why: Some(why),
+                } if *key == record.key
+                    && why == "it isn't released, or is another generation, as its pool file is removed"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(store.read_pool(&[1; 32]).unwrap(), Some(record));
+    }
+
     #[test]
     fn preparation_retry_keeps_the_original_durable_scope() {
         let dir = tempfile::tempdir().unwrap();
