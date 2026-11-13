@@ -2467,14 +2467,16 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
-  evidence the rule is held to and its falsifier's data, cited here. Two places still break it, owed: the guest's
+  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the guest's
   first boot takes records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
-  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation and the first to close,
-  by a dial sliced against the guest's liveness (HEX-GUEST-33); and hex-api's conformance suite, compiled outside
-  `#[cfg(test)]`, seeds `conformance::PATIENCE` and `ENDS` from per-class end records. `Patience::seeded` exists for
-  tests alone (`cfg(test)`, or hex-core's `test-seeds` feature, which only hex-testkit's dependency turns on, a
-  dev-dependency everywhere, as `crates/hex-core/tests/test_seeds_dev_only.rs` holds every manifest to), for the tests'
-  own waits under the lead's rule of 2026-11-08, owed as well. Each owed piece's design is in
+  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation, by a dial sliced against
+  the guest's liveness (HEX-GUEST-33). hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
+  `conformance::PATIENCE` and `ENDS` from per-class end records until 2026-11-13; it now follows each program to its
+  end (`conformance::end_of`, `ENDS` measuring), and each differential reading the runtime's party. `Patience::seeded`,
+  now `hex_api::patience`'s, exists for tests alone (`cfg(test)`, or hex-api's `test-seeds` feature, which only
+  dev-dependencies turn on, hex-core's own and hex-testkit's through hex-core's, as
+  `crates/hex-core/tests/test_seeds_dev_only.rs` holds every manifest to), for the tests' own waits under the lead's
+  rule of 2026-11-08, owed as well. Each owed piece's design is in
   `docs/research/runtime/learned-waits.md` ("Owed").
 - **No caller failure where an alternative exists**: a seed past its bound is followed by its life, never retired
   (2026-11-13); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a

@@ -16,16 +16,8 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+pub use hex_core::patience::Party;
 use hex_core::patience::Patience;
-
-/// What makes a wait's fact true, as its test looks at it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Party {
-    /// Alive: the fact may yet come.
-    Live,
-    /// Ended (it finished or died, or its connection was reset or closed): nothing can make the fact true now.
-    Ended,
-}
 
 /// A wait's fact that didn't come: its party ended without it.
 #[derive(Debug, Clone, PartialEq, Eq)]

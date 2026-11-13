@@ -5,9 +5,9 @@
 
 use std::io::{Read, Write};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::patience::{Party, Patience};
 use crate::{
     Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Destination, DeviceId,
     DeviceKind, Exit, Grant, GuestTime, Member, MemberKind, Mount, Network, OciSpec, Ports,
@@ -64,6 +64,17 @@ pub trait Fixture {
     fn term_ends_init(&self) -> bool {
         false
     }
+    /// The life that can still change the runtime's answers, as the test sees it (decision 9): the runtime under test,
+    /// its node. A case's or a scenario's wait follows it past W*, and fails at its end. Alive by default: an
+    /// in-process runtime, and a node its test keeps, live as long as the test.
+    fn party(&self) -> Party {
+        Party::Live
+    }
+    /// A wait past W* tells this once: what it waits on, what it wants and what the runtime last showed, for the test's
+    /// output. Where a runtime that differs stays alive, the wait goes on, and this is what the person sees of it.
+    fn told(&self, note: &str) {
+        let _ = note;
+    }
 }
 
 /// One part of the contract.
@@ -80,143 +91,40 @@ pub struct Failure {
     pub why: String,
 }
 
-/// The class of host a suite runs on, by its OS: each keeps its own record of how slow a program's end has
-/// been, from its start to its reported end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostClass {
-    Linux,
-    Macos,
-    Windows,
-}
+/// The suite's waits for a program's end or a box's answer (decision 9, and the rule at a local site of
+/// docs/research/runtime/learned-waits.md): W*, the slowest end this process has seen, a bound only while ends come
+/// within it. Past it the run-out is told, and the wait follows its party, the program or the box, by its life alone,
+/// until the end comes. Before the first end, and from a run-out to the next, it follows its party from the start. No
+/// record seeds it: the per-class end records it was seeded from until 2026-11-13 are evidence alone.
+pub static ENDS: Patience = Patience::measuring("conformance.ends");
 
-impl HostClass {
-    /// Every class.
-    pub const ALL: [HostClass; 3] = [HostClass::Linux, HostClass::Macos, HostClass::Windows];
-
-    /// The class of the host this is built for, if it is one of them.
-    pub const THIS: Option<HostClass> = if cfg!(target_os = "linux") {
-        Some(HostClass::Linux)
-    } else if cfg!(target_os = "macos") {
-        Some(HostClass::Macos)
-    } else if cfg!(target_os = "windows") {
-        Some(HostClass::Windows)
-    } else {
-        None
-    };
-
-    /// The slowest end on this class's record, across every driver of the native bench and the suites,
-    /// counting a first run after a rebuild (every upgrade's first run is one, and a fresh binary is
-    /// scanned before it runs), or `None` where no record holds one yet.
-    /// - Windows: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1). It is
-    ///   above every end in four first runs of windows_process_box after a rebuild on a clean jupiter, the
-    ///   slowest 726 ms (bench/install/records/windows-jupiter-20261105.txt entry 23, retaken 2026-11-09).
-    /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
-    ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
-    ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt). It is above the waits census's
-    ///   record of a program's end, its `lifecycle.exec` row (`bench/competitive/probes/waits_census.md` run 3's
-    ///   debug arm, 39.131 ms of 10,000, a lighter load's), so the slower of the two records seeds the wait
-    ///   (decision 9's seed: the slowest answer on the class's record).
-    /// - macOS: 939 ms, a hog's end on adas-mac-studio.local-2 at load 15-20, the first program a rebuilt
-    ///   macos_process_box ran (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt,
-    ///   2026-11-08), above the 839 ms seen there before it, the 770 ms seen on adalundhe-macbook-pro at load
-    ///   21 (2026-11-06, [`still_running`]) and adas-mac-studio-2's 534 ms.
-    pub const fn slowest_recorded_end(self) -> Option<Duration> {
-        match self {
-            HostClass::Windows => Some(Duration::from_millis(6_239)),
-            HostClass::Linux => Some(Duration::from_millis(957)),
-            HostClass::Macos => Some(Duration::from_millis(939)),
+/// Program `p`'s end, waited for as [`ENDS`] waits: within W*, and past it, its run-out told, by the program's life
+/// alone, on its own events (`Proc::wait_for` until its end), however long that takes. The end, however long it took,
+/// is the sample W* rises to. Refused only as the runtime refuses the wait.
+pub fn end_of<P: crate::Proc + ?Sized>(p: &mut P) -> Result<Exit, Refusal> {
+    let asked = std::time::Instant::now();
+    if let Some(within) = ENDS.deadline() {
+        if let Some(exit) = p.wait_for(within)? {
+            ENDS.answered(asked.elapsed());
+            return Ok(exit);
+        }
+        // Past W*: no sample (Karn's point), but the census is told, once, and the wait goes on.
+        ENDS.ran_out(within);
+    }
+    loop {
+        // `Duration::MAX`: until its end, each runtime's wait taking it as "no deadline".
+        if let Some(exit) = p.wait_for(Duration::MAX)? {
+            ENDS.answered(asked.elapsed());
+            return Ok(exit);
         }
     }
 }
 
-/// The slowest end on any class's record ([`HostClass::slowest_recorded_end`]).
-pub const SLOWEST_RECORDED_END: Duration = slower(
-    slower(
-        slower(Duration::ZERO, HostClass::Linux.slowest_recorded_end()),
-        HostClass::Macos.slowest_recorded_end(),
-    ),
-    HostClass::Windows.slowest_recorded_end(),
-);
-
-/// The slower of `a` and the record `b`, where there is one.
-const fn slower(a: Duration, b: Option<Duration>) -> Duration {
-    match b {
-        Some(record) if record.as_nanos() > a.as_nanos() => record,
-        _ => a,
-    }
-}
-
-/// What a learned wait on a host of `class` seeds from (Hex's rule for learned waits): its class's slowest
-/// end on record ([`seed_from`]).
-pub const fn seed(class: Option<HostClass>) -> Duration {
-    match class {
-        Some(c) => seed_from(c.slowest_recorded_end()),
-        None => seed_from(None),
-    }
-}
-
-/// What a learned wait seeds from given its class's `record`: that record, or for a class with none (or a
-/// host of no class), the slowest on any class's record, rather than refusing to wait.
-pub const fn seed_from(record: Option<Duration>) -> Duration {
-    match record {
-        Some(r) => r,
-        None => SLOWEST_RECORDED_END,
-    }
-}
-
-/// The learned wait's bound before any sample on this host, its [`seed`], the slowest end on record, with no margin: a
-/// fixed wait for a program's end, for the tests that wait outside the suite's learned waits (hex-cli's oci_box,
-/// oci_spec_box and node_socket on every native line). The suite itself waits on [`patience`], which learns. A record
-/// seed outside `#[cfg(test)]`, which decision 9 of docs/design/runtime-architecture.md no longer allows: owed, to a
-/// wait that follows its program (docs/research/runtime/learned-waits.md, "Owed").
-pub const PATIENCE: Duration = seed(HostClass::THIS);
-
-/// A wait whose bound is learned: before any sample, the slowest answer on its record; then the slowest of the record
-/// and what it has seen; and it only rises, so a node slower than the record is waited for once it has been seen. A
-/// case's wait that runs out fails its case. Its record seed is owed to decision 9's following cold start, as
-/// [`PATIENCE`]'s is.
-pub struct LearnedWait {
-    record: Duration,
-    seen_nanos: AtomicU64,
-}
-
-impl LearnedWait {
-    /// A wait seeded from `record`, the slowest answer on its record.
-    pub const fn new(record: Duration) -> Self {
-        Self {
-            record,
-            seen_nanos: AtomicU64::new(0),
-        }
-    }
-
-    /// Learns from an answer that came after `answered`.
-    pub fn saw(&self, answered: Duration) {
-        let nanos = u64::try_from(answered.as_nanos()).unwrap_or(u64::MAX);
-        self.seen_nanos.fetch_max(nanos, Ordering::Relaxed);
-    }
-
-    /// Its bound now: the slowest of its record and what it has seen.
-    pub fn bound(&self) -> Duration {
-        let seen = Duration::from_nanos(self.seen_nanos.load(Ordering::Relaxed));
-        self.record.max(seen)
-    }
-}
-
-/// The suite's waits for a program's end or a box's answer, seeded from this host's [`seed`]; each wait
-/// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
-pub static ENDS: LearnedWait = LearnedWait::new(seed(HostClass::THIS));
-
-/// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
-pub fn patience() -> Duration {
-    ENDS.bound()
-}
-
-/// How long a case watches now a program it expects to keep running (the negative watch, "this does not
-/// end"): [`ENDS`]' bound, since an end may come as late as the slowest seen, and one host's end maximum
-/// doesn't carry (59.6 ms on adas-mac-studio-2 was 550-770 ms on adalundhe-macbook-pro at load 21,
-/// 2026-11-06).
-pub fn still_running() -> Duration {
-    ENDS.bound()
+/// How long a case watches a program it expects to keep running (the negative watch, "this does not end"): the
+/// slowest end this process has seen, since an end may come as late as that; `None` before any end, when there is
+/// nothing to watch against (the suite runs its ending cases first).
+pub fn still_running() -> Option<Duration> {
+    ENDS.slowest()
 }
 
 /// Every case, in order.
@@ -396,14 +304,7 @@ fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Resul
 }
 
 fn ended(p: &mut Box<dyn crate::Proc>) -> Result<Exit, String> {
-    let patience = patience();
-    let asked = std::time::Instant::now();
-    let exit = p
-        .wait_for(patience)
-        .map_err(|e| format!("wait: {e}"))?
-        .ok_or_else(|| format!("still running after {patience:?}"))?;
-    ENDS.saw(asked.elapsed());
-    Ok(exit)
+    end_of(p).map_err(|e| format!("wait: {e}"))
 }
 
 fn piped() -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
@@ -532,16 +433,16 @@ fn kill(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut other = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = killed
-        .wait_for(still_running())
-        .map_err(|e| e.to_string())?;
+    let watch =
+        still_running().ok_or("no program's end seen yet to watch a waiting one against")?;
+    let early = killed.wait_for(watch).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
     killed.kill().map_err(|e| format!("kill: {e}"))?;
     let exit = ended(&mut killed)?;
     let again = killed.kill();
-    let on = other.wait_for(still_running()).map_err(|e| e.to_string())?;
+    let on = other.wait_for(watch).map_err(|e| e.to_string())?;
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Signal(9), || format!("exit {exit:?}"))?;
     ensure(again.is_ok(), || {
@@ -798,53 +699,81 @@ pub(crate) fn rest(d: Duration) -> Result<(), String> {
     hex_wait::rest_until(end).map_err(|why| format!("a rest of {d:?}: {why}"))
 }
 
-/// Polls `inspect` until the box reports an exit, for at most `patience` (the cases': [`patience`]): the fact the
-/// exit cases wait on, never a guessed delay. A box's state has no event to wait on, so it is read again after
-/// waiting as long as the last read took: at most half the time reading, at this platform's cost.
-fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::BoxInfo, String> {
+/// Reads with `look` until it gives its fact, as [`ENDS`] waits (decision 9): within W*, and past it, its run-out told
+/// once, to the census and to the test ([`Fixture::told`], naming `what`), for as long as the runtime under test lives
+/// ([`Fixture::party`]); at its end, once a last reading hasn't given the fact, refused with `last`'s words for the
+/// reading that stood. A box's state has no event to wait on, so it is read again after waiting as long as the last
+/// read took: at most half the time reading, at this platform's cost.
+fn read_until<T, R: std::fmt::Debug>(
+    fx: &dyn Fixture,
+    what: &str,
+    mut look: impl FnMut() -> Result<Result<T, R>, String>,
+    last: impl Fn(&R) -> String,
+) -> Result<T, String> {
     let asked = std::time::Instant::now();
-    let deadline = asked.checked_add(patience);
+    let bound = ENDS.deadline();
+    let mut past = false;
     loop {
+        let ended = fx.party() == Party::Ended;
         let read = std::time::Instant::now();
-        let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+        let reading = look()?;
         let took = read.elapsed();
-        if info.exit.is_some() {
-            ENDS.saw(asked.elapsed());
-            return Ok(info);
+        let stood = match reading {
+            Ok(fact) => {
+                ENDS.answered(asked.elapsed());
+                return Ok(fact);
+            }
+            Err(stood) => stood,
+        };
+        if ended {
+            return Err(last(&stood));
         }
-        // No deadline is a measuring patience's: the wait is the fact's alone.
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Err(format!("no exit reported after {patience:?}: {info:?}"));
+        if !past
+            && let Some(within) = bound
+            && asked.elapsed() >= within
+        {
+            // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on while the runtime lives.
+            ENDS.ran_out(within);
+            fx.told(&format!(
+                "{what}: past {within:?}, the runtime showing {stood:?}; following it"
+            ));
+            past = true;
         }
         rest(took)?;
     }
 }
 
-/// Polls `inspect` until box `id` is gone, for at most `patience` (the cases': [`patience`]): the fact a run's
-/// removal is waited on, read again after waiting as long as the last read took, as [`exit_of`] reads an exit.
-fn gone_within(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<(), String> {
-    let asked = std::time::Instant::now();
-    let deadline = asked.checked_add(patience);
-    loop {
-        let read = std::time::Instant::now();
-        let left = rt.inspect(id);
-        let took = read.elapsed();
-        match left {
-            Err(Refusal::NoSuchBox(_)) => {
-                ENDS.saw(asked.elapsed());
-                return Ok(());
-            }
-            Ok(_) => {}
-            Err(e) => return Err(format!("inspect of a run's box being removed: {e}")),
-        }
-        // No deadline is a measuring patience's: the wait is the fact's alone.
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return Err(format!(
-                "a let-go run's box still there {patience:?} after its program ended: {left:?}"
-            ));
-        }
-        rest(took)?;
-    }
+/// Reads `inspect` until the box reports an exit ([`read_until`]): the fact the exit cases wait on, never a guessed
+/// delay.
+fn exit_of(rt: &dyn Runtime, fx: &dyn Fixture, id: &BoxId) -> Result<crate::BoxInfo, String> {
+    read_until(
+        fx,
+        &format!("an exit of {id}"),
+        || {
+            let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+            Ok(if info.exit.is_some() {
+                Ok(info)
+            } else {
+                Err(info)
+            })
+        },
+        |info| format!("no exit reported, its runtime ended: {info:?}"),
+    )
+}
+
+/// Reads `inspect` until box `id` is gone ([`read_until`]): the fact a run's removal is waited on, as [`exit_of`]
+/// reads an exit.
+fn gone_within(rt: &dyn Runtime, fx: &dyn Fixture, id: &BoxId) -> Result<(), String> {
+    read_until(
+        fx,
+        &format!("{id} gone"),
+        || match rt.inspect(id) {
+            Err(Refusal::NoSuchBox(_)) => Ok(Ok(())),
+            Ok(info) => Ok(Err(info)),
+            Err(e) => Err(format!("inspect of a run's box being removed: {e}")),
+        },
+        |info| format!("a let-go run's box still there after its program ended: {info:?}"),
+    )
 }
 
 /// A box whose init does `act`, made and started; `None` for a `process` box, after checking it
@@ -878,7 +807,7 @@ fn init_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let Some(id) = made_init(rt, fx, "init-exit", &Act::Fail(3))? else {
         return Ok(());
     };
-    let info = exit_of(rt, &id, patience());
+    let info = exit_of(rt, fx, &id);
     rt.delete(&id).map_err(|e| e.to_string())?;
     let info = info?;
     ensure(info.exit == Some(Exit::Code(3)), || {
@@ -901,7 +830,7 @@ fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         )?;
         rt.signal(&id, Signal::KILL)
             .map_err(|e| format!("signal: {e}"))?;
-        let info = exit_of(rt, &id, patience())?;
+        let info = exit_of(rt, fx, &id)?;
         ensure(info.exit == Some(Exit::Signal(9)), || {
             format!("exit {:?}", info.exit)
         })
@@ -1114,7 +1043,7 @@ fn run_removes(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ensure(matches!(ended_by, Exit::Signal(_)), || {
         format!("what a let-go run left in its box ended {ended_by:?}")
     })?;
-    gone_within(rt, &id, patience())
+    gone_within(rt, fx, &id)
 }
 
 /// A Shards image VM `name`, made and not started.
@@ -1185,7 +1114,7 @@ fn image_stop(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         rt.start(&id).map_err(|e| format!("start: {e}"))?;
         rt.signal(&id, Signal::KILL)
             .map_err(|e| format!("stop: {e}"))?;
-        let info = exit_of(rt, &id, patience())?;
+        let info = exit_of(rt, fx, &id)?;
         ensure(
             (info.state, info.exit) == (BoxState::Empty, Some(Exit::Signal(9))),
             || format!("a stopped VM: {info:?}"),
@@ -1208,7 +1137,7 @@ fn image_command_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> 
         .map_err(|e| format!("create: {e}"))?;
     deleting(rt, &id, || {
         rt.start(&id).map_err(|e| format!("start: {e}"))?;
-        let info = exit_of(rt, &id, patience())?;
+        let info = exit_of(rt, fx, &id)?;
         ensure(
             (info.state, info.exit) == (BoxState::Empty, Some(Exit::Code(3))),
             // Where its run failed, its runtime's words first (joint plan step 12).
@@ -1267,7 +1196,7 @@ fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         })?;
         rt.signal(&id, Signal::KILL)
             .map_err(|e| format!("stop: {e}"))?;
-        exit_of(rt, &id, patience())?;
+        exit_of(rt, fx, &id)?;
         let late = rt.usage(&id);
         ensure(matches!(late, Err(Refusal::NotRunning(..))), || {
             format!("usage after its end: {late:?}")
@@ -1686,32 +1615,48 @@ mod tests {
         assert!(began.elapsed() >= SLOWER, "its program ended before SLOWER");
     }
 
-    /// Decision 9 (the lead's rule of 2026-11-06 for test patiences): an exit case waits on its fact, a box's
-    /// reported exit, for at most its patience, and with a measuring one (no record yet: the longest a `Duration`
-    /// holds, so no deadline) for the fact alone. Do: an `oci` box whose init exits with 3, its exit reported from
-    /// the third look; wait for it with a measuring patience. Expect: Code(3) at the third look, never "no exit
-    /// reported" at the first.
+    /// The simulator's fixture, its runtime's life ended as the wait looks at it: a double whose answers can't change.
+    struct EndedFixture(SimFixture);
+
+    impl Fixture for EndedFixture {
+        fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
+            self.0.spec(id, bounds)
+        }
+        fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
+            self.0.init(id, act)
+        }
+        fn program(&self, act: &Act) -> Program {
+            self.0.program(act)
+        }
+        fn party(&self) -> Party {
+            Party::Ended
+        }
+    }
+
+    /// Decision 9 (the person's ruling of 2026-11-13): an exit case waits on its fact, a box's reported exit, while its
+    /// runtime lives, however many looks it takes. Do: an `oci` box whose init exits with 3, its exit reported from the
+    /// third look; wait for it, the runtime alive. Expect: Code(3) at the third look, never "no exit reported" at the
+    /// first.
     #[test]
-    fn a_measuring_patience_waits_for_the_exit_past_the_first_look() {
+    fn an_exit_case_waits_for_the_exit_past_the_first_look() {
         let id = BoxId::new("late").unwrap();
         let late = Late::with_exiting_box(&id, 3);
         assert_eq!(
-            exit_of(&late, &id, Duration::MAX).map(|info| info.exit),
+            exit_of(&late, &SimFixture::Process, &id).map(|info| info.exit),
             Ok(Some(Exit::Code(3)))
         );
         assert_eq!(late.looks.load(Ordering::Relaxed), 3);
     }
 
-    /// The wait still ends at its patience. Do: the same box, its exit never reported, waited for with a patience
-    /// of a nanosecond, less than a look takes. Expect: refused at its first look, naming that patience.
+    /// A wait whose runtime has ended fails at once, once a last look hasn't found the fact. Do: the same box, its exit
+    /// never reported, waited for with the runtime's life ended. Expect: refused at its first look, saying so.
     #[test]
-    fn a_patience_ends_the_wait_for_an_exit_never_reported() {
+    fn an_exit_never_reported_fails_the_wait_at_its_runtimes_end() {
         let id = BoxId::new("never").unwrap();
         let late = Late::with_exiting_box(&id, usize::MAX);
-        let patience = Duration::from_nanos(1);
-        let refused = exit_of(&late, &id, patience).unwrap_err();
+        let refused = exit_of(&late, &EndedFixture(SimFixture::Process), &id).unwrap_err();
         assert!(
-            refused.starts_with(&format!("no exit reported after {patience:?}")),
+            refused.starts_with("no exit reported, its runtime ended"),
             "{refused}"
         );
         assert_eq!(late.looks.load(Ordering::Relaxed), 1);
@@ -1719,14 +1664,18 @@ mod tests {
 
     /// HEX-RT-4 checks that a waiting program runs at the moment it signals the box: its Signal(15) end
     /// then proves it hadn't ended on its own (that would be Code(0)), so the case waits out no watch (the
-    /// lead, 2026-11-07). Do: run HEX-RT-4 against the simulator, timed. Expect: it passes in less than one
-    /// [`still_running`] watch.
+    /// lead, 2026-11-07). Do: once an end of a second has been seen, so a watch lasts that long at least, run HEX-RT-4
+    /// against the simulator, timed. Expect: it passes in less than one [`still_running`] watch.
     #[test]
     fn the_signal_case_waits_out_no_watch() {
+        ENDS.answered(Duration::from_secs(1));
         let case = CASES.iter().find(|c| c.id == "HEX-RT-4").unwrap();
         let t = std::time::Instant::now();
         (case.run)(&SimRuntime::new(), &SimFixture::Process).unwrap();
         let took = t.elapsed();
-        assert!(took < still_running(), "HEX-RT-4 took {took:?}");
+        assert!(
+            still_running().is_some_and(|watch| took < watch),
+            "HEX-RT-4 took {took:?}"
+        );
     }
 }
