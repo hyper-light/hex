@@ -9,9 +9,10 @@
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
+use hex_client::Cut;
 use hex_client::guest::{Duplex, DuplexOwner, Handle, own_duplex};
 use hex_core::lanes::{DATA_BOUND, Why};
 
@@ -58,21 +59,9 @@ pub fn socket(conn: Conn) -> io::Result<Local> {
     bridged(conn).map(|bridged| bridged.sock)
 }
 
-/// What cut a bridged connection short: the error its connection's read ended with before the peer's End (a reset,
-/// the link's end), recorded once, as the bridge ends the owner's socket.
-#[derive(Clone, Default)]
-struct Cut(Arc<OnceLock<(io::ErrorKind, String)>>);
-
-impl Cut {
-    fn error(&self) -> Option<io::Error> {
-        self.0
-            .get()
-            .map(|(kind, why)| io::Error::new(*kind, why.clone()))
-    }
-}
-
 /// The owner's end of a bridged connection, read as the connection is: the bytes that came, then its End, or the
-/// error that cut it short, which the socket pair alone would read as an End.
+/// error that cut it short (a reset, the link's end: what its connection's read ended with before the peer's End,
+/// recorded as the bridge ends the owner's socket), which the socket pair alone would read as an End.
 pub(crate) struct Bridged {
     sock: Local,
     cut: Cut,
@@ -145,6 +134,11 @@ impl Duplex for Bridged {
     fn set_nonblocking(&self, on: bool) -> io::Result<()> {
         Local::set_nonblocking(&self.sock, on)
     }
+
+    /// The cut the bridge records: its owner's caller reads the socket itself, whose pair can't report it.
+    fn cut(&self) -> Option<Cut> {
+        Some(self.cut.clone())
+    }
 }
 
 /// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
@@ -202,7 +196,7 @@ fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
                 }
             }
             Err(e) => {
-                let _ = cut.0.set((e.kind(), e.to_string()));
+                cut.record(&e);
                 end(&to);
                 return;
             }
