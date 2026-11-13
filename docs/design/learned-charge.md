@@ -146,14 +146,18 @@ most 10,000 and each child, box or fleet, receives at least `min(its need, its b
 weights the node writes, shared as the kernel shares them). Its owner's own `cpu_weight` is not the node's scale. The
 node writes the boxes' weights each window, so a box made between two windows keeps its owner's weight until the next.
 
-**Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
-work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's
+**Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch work
+tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's
 CPU follows its weight only as QoS tiers, and the managed control caps (f56 A, f38 A); a Windows job holds a weight of
-1 to 9 or a hard cap. Where the platform caps, each VM is capped each window at its water-filled share
-(`charge::Node::rates`): its booking, then what the fleet's CPU budget leaves past the bookings, shared by booking over
-what each asked past its booking in its last window, one that used its whole cap or ran none yet asking its ceiling.
-So each keeps at least its booking whatever it asks next, the caps fit the budget, and CPU the others leave goes to the
-VMs asking past their bookings, a window late.
+1 to 9 or a hard cap. A macOS process box can't be held at a CPU cap, so one asking it is refused, typed
+(`hex_core::watch::check`): a process box there books no CPU, and its CPU is the scheduler's to share beside the
+capped VMs. Their caps are ceilings, not shares, so under contention with such boxes a VM within its booking can be
+given less than it: on macOS C4's guarantee holds among the fleet's VMs, and against process boxes only while the
+machine's CPU covers the fleet's budget and what those boxes take. Where the platform caps, each VM is capped each
+window at its water-filled share (`charge::Node::rates`): its booking, then what the fleet's CPU budget leaves past
+the bookings, shared by booking over what each asked past its booking in its last window, one that used its whole cap
+or ran none yet asking its ceiling. So each keeps at least its booking whatever it asks next, the caps fit the budget,
+and CPU the others leave goes to the VMs asking past their bookings, a window late.
 
 **What would falsify it.** A VM within its booking receiving less than `min(demand, booking)` in a contended window
 on hardware (ROOT's fairness run).
@@ -386,7 +390,8 @@ riser's inspect (its exit and the last resort's why), and the learner's own CPU 
 macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
 not a verdict. Every number it runs with is derived, none picked (ROOT, 2026-11-12): each VM's workload from the
 traces (the most busy threads and MiB any step asks), the process box's caps from kiln's CI (the median CPU and the
-median peak memory of the build legs in bench/sched/kiln-ci-20261022-20261105.trace, which it books), and the deadline
-guarding the node's start and each create from the node's own boot bound for the class (twice it). Its traces are real
-harness sessions, recorded by bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's
-CFS period, the Linux learner's own window.
+median peak memory of the build legs in bench/sched/kiln-ci-20261022-20261105.trace, which it books; on macOS, which
+holds a process box at no CPU cap, its memory alone, its spinners asking a CPU each), and the deadline guarding the
+node's start and each create from the node's own boot bound for the class (twice it). Its traces are real harness
+sessions, recorded by bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS
+period, the Linux learner's own window.
