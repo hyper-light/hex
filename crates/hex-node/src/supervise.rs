@@ -28,6 +28,8 @@ use crate::store::Store;
 
 mod managed_preflight;
 mod run;
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+pub use run::RemovalHold;
 pub use run::{Run, RunProc};
 
 /// What [`Refusal::Exhausted`] names the supervisor's budget: its pidfds, one for each live `oci` box's init and
@@ -274,6 +276,9 @@ pub struct Supervisor {
     /// reaped (decision 3); the caller's [`Proc`] usually reaps its program, but a delete beats it, so
     /// the agent reaps what is left and records each exit for the caller to read.
     programs: Mutex<BTreeMap<BoxId, Vec<Program>>>,
+    /// A debug build's hold on the runs' removals, armed by the node's caller alone ([`run::Removals`]).
+    #[cfg(all(debug_assertions, feature = "test-controls"))]
+    removals: run::Removals,
 }
 
 /// An exec'd program the agent may reap on its box's delete: the agent's own duplicate of its pidfd,
@@ -711,6 +716,8 @@ impl Supervisor {
             store,
             fault: Mutex::new(None),
             programs: Mutex::new(BTreeMap::new()),
+            #[cfg(all(debug_assertions, feature = "test-controls"))]
+            removals: run::Removals::default(),
         });
         let weak = Arc::downgrade(&supervisor);
         std::thread::Builder::new()

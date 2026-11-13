@@ -513,6 +513,16 @@ impl Node {
         Ok(self)
     }
 
+    /// Holds each run's removal at its start until the returned guard goes (runtime goal 7): a claimer that has taken
+    /// a run stops before it reaps the program or touches the box, as one descheduled there would, so a test meets a
+    /// delete beside a removal under way; the guard counts the claimers stopped and the deletes that waited on one. A
+    /// test control of debug builds alone, armed by the node's caller alone.
+    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-controls")]
+    pub fn hold_run_removals(&self) -> Result<crate::supervise::RemovalHold<'_>, Refusal> {
+        self.supervisor.hold_removals()
+    }
+
     /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
     /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
     /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the

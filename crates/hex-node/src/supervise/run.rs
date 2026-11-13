@@ -208,11 +208,19 @@ impl Supervisor {
     /// the box ended (as `hex box run` ends it), the cgroup and the record removed; then publishes
     /// the program's end, or why the box couldn't be removed, which it also returns.
     fn finish_run(&self, run: &Run) -> Result<(), Refusal> {
+        #[cfg(all(debug_assertions, feature = "test-controls"))]
+        self.removals.stop_here()?;
         let removed = reap(run, WaitIdOptions::EXITED | WaitIdOptions::NOHANG)
             .and_then(|exit| remove(&run.id, &run.cgroup, &run.names, &self.store).map(|()| exit));
         let failed = removed.as_ref().err().cloned();
         run.publish(removed)?;
         failed.map_or(Ok(()), Err)
+    }
+
+    /// Holds the runs' removals at their start until the guard goes ([`Removals`]).
+    #[cfg(all(debug_assertions, feature = "test-controls"))]
+    pub fn hold_removals(&self) -> Result<RemovalHold<'_>, Refusal> {
+        self.removals.hold()
     }
 
     /// The supervising thread's pass over the runs whose programs ended.
@@ -270,6 +278,93 @@ fn remove(id: &BoxId, cgroup: &BoxCgroup, names: &Names, store: &Store) -> Resul
     cgroup.remove()?;
     names.forget(id.as_str());
     store.remove(id)
+}
+
+/// A debug build's hold on the runs' removals (runtime goal 7), armed by the node's caller alone
+/// ([`crate::Node::hold_run_removals`]): while it stands, a claimer that has taken a run stops before it reaps the
+/// program or touches the box, as one descheduled there would, so a test meets a delete beside a removal under way.
+/// Absent from release builds, and from any build without the test controls.
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+#[derive(Debug, Default)]
+pub(super) struct Removals {
+    state: Mutex<Holding>,
+    changed: Condvar,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+#[derive(Debug, Default)]
+struct Holding {
+    held: bool,
+    /// Claimers stopped at the hold now.
+    stopped: u64,
+    /// Deletes that waited on a removal another claimer had under way.
+    waiting: u64,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+impl Removals {
+    fn state(&self) -> Result<MutexGuard<'_, Holding>, Refusal> {
+        self.state.lock().map_err(poisoned)
+    }
+
+    /// The hold, standing until the guard goes.
+    pub(super) fn hold(&self) -> Result<RemovalHold<'_>, Refusal> {
+        self.state()?.held = true;
+        Ok(RemovalHold { removals: self })
+    }
+
+    /// A claimer at the start of its removal: stopped there while the hold stands.
+    fn stop_here(&self) -> Result<(), Refusal> {
+        let mut state = self.state()?;
+        if !state.held {
+            return Ok(());
+        }
+        state.stopped = state.stopped.saturating_add(1);
+        self.changed.notify_all();
+        let mut state = self
+            .changed
+            .wait_while(state, |state| state.held)
+            .map_err(poisoned)?;
+        state.stopped = state.stopped.saturating_sub(1);
+        Ok(())
+    }
+
+    /// A delete waits on a removal another claimer has under way.
+    pub(super) fn waiting(&self) -> Result<(), Refusal> {
+        let mut state = self.state()?;
+        state.waiting = state.waiting.saturating_add(1);
+        self.changed.notify_all();
+        Ok(())
+    }
+}
+
+/// The hold on the runs' removals ([`Removals`]): it stands until this goes.
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+pub struct RemovalHold<'a> {
+    removals: &'a Removals,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+impl RemovalHold<'_> {
+    /// The claimers stopped at the hold now.
+    pub fn stopped(&self) -> Result<u64, Refusal> {
+        Ok(self.removals.state()?.stopped)
+    }
+
+    /// The deletes that waited on a removal another claimer had under way.
+    pub fn waiting(&self) -> Result<u64, Refusal> {
+        Ok(self.removals.state()?.waiting)
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls"))]
+impl Drop for RemovalHold<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.removals.state() {
+            state.held = false;
+        }
+        self.removals.changed.notify_all();
+    }
 }
 
 /// The caller's [`Proc`] for a run: its end is reported once the box is gone. Its own wait removes the
