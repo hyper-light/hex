@@ -188,5 +188,7 @@ fn record(name: &'static str, sample: hex_core::patience::Sample) {
     }
 }
 
+pub mod follow;
+
 #[cfg(test)]
 mod tests;
