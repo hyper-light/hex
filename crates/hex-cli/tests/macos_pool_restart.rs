@@ -7,8 +7,8 @@
 //! node started on the same state takes the pool back: with its controller still running, the same
 //! process, re-attached and Live; with its controller ended while no node ran (its vsock gone with it)
 //! and a descendant outliving it, Draining with its end recorded and the descendant ended. Either is then
-//! released through the restarted node and nothing of it is left. Each test waits on the fact it needs, within PATIENCE, and checks what is left by pid and
-//! birth.
+//! released through the restarted node and nothing of it is left. Each test waits on the fact it needs,
+//! within PATIENCE, and checks what is left by pid and birth.
 #![cfg(target_os = "macos")]
 #![allow(
     clippy::unwrap_used,
