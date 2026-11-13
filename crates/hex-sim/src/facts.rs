@@ -175,10 +175,64 @@ pub fn meminfo(text: &str) -> Option<(u64, u64)> {
 }
 
 /// A Linux machine's CPU time since its boot and its uptime, in nanoseconds (joint plan step 14, C7), from `/proc/stat`'s
-/// text `stat`, `/proc/uptime`'s `uptime`, and the kernel's clock ticks a second, `hz`. Original (red): neither read.
+/// text `stat`, `/proc/uptime`'s `uptime`, and the kernel's clock ticks a second, `hz`. Its CPU time is every CPU's
+/// user, nice, system, irq and softirq ticks, the aggregate `cpu` line's first, second, third, sixth and seventh fields
+/// (proc(5): guest time is within user and nice; idle, iowait and steal are no work of its own); its uptime the first
+/// field of `uptime`, seconds to at most nanoseconds. Each is none where its text doesn't read.
 pub fn machine_time(stat: &str, uptime: &str, hz: u64) -> hex_api::MachineTime {
-    let _ = (stat, uptime, hz);
-    hex_api::MachineTime::default()
+    hex_api::MachineTime {
+        cpu_ns: cpu_time(stat, hz),
+        uptime_ns: uptime.split_whitespace().next().and_then(seconds_ns),
+    }
+}
+
+fn cpu_time(stat: &str, hz: u64) -> Option<u64> {
+    let line = stat.lines().find_map(|line| line.strip_prefix("cpu "))?;
+    let mut fields = line.split_whitespace().map(str::parse::<u64>);
+    let mut ticks = [0u64; 7];
+    for slot in &mut ticks {
+        *slot = fields.next()?.ok()?;
+    }
+    let [user, nice, system, _idle, _iowait, irq, softirq] = ticks;
+    let work = [user, nice, system, irq, softirq]
+        .into_iter()
+        .try_fold(0u64, u64::checked_add)?;
+    if hz == 0 {
+        return None;
+    }
+    u64::try_from(
+        u128::from(work)
+            .checked_mul(1_000_000_000)?
+            .checked_div(u128::from(hz))?,
+    )
+    .ok()
+}
+
+/// Seconds written as `/proc/uptime` writes them, `12345.67`, in nanoseconds: none past nanoseconds or a u64.
+fn seconds_ns(text: &str) -> Option<u64> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let places = u32::try_from(fraction.len())
+        .ok()
+        .filter(|places| *places <= 9)?;
+    let fraction_ns = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(10u64.checked_pow(9u32.checked_sub(places)?)?)?
+    };
+    whole
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(fraction_ns)
 }
 
 /// A cgroup v2 `memory.max`: a limit in bytes, or none for `max`.

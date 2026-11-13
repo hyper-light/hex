@@ -392,10 +392,11 @@ pub struct BackingOffer {
     #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
     /// Its guest's own overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13): what its guest
-    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until the
-    /// backing's first capacity answer measures it (its cold start: its boxes' sum alone). Never the census's
-    /// `guest_overhead`, which a census-free cost carries as none. A shared backing's payload fits its envelope with it
-    /// ([`BackingOffer::check_inner`]). Absent from an older JSON report, read as cold.
+    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until it is
+    /// measured. A shared backing is measured before it is Live, so a placement never meets a cold one; a dimension
+    /// not yet measured counts at the whole envelope. Never the census's `guest_overhead`, which a census-free cost
+    /// carries as none. A shared backing's payload fits its envelope with it ([`BackingOffer::check_inner`]). Absent
+    /// from an older JSON report, read as cold.
     #[serde(default, skip_serializing_if = "LearnedOverhead::cold")]
     pub guest: LearnedOverhead,
 }
@@ -431,20 +432,29 @@ impl BackingOffer {
         })
     }
 
-    /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
-    /// and host allowances and quantization. A residual host debit alone is not guest admission.
-    /// With them, the guest's own overhead as its runtime measured it, in each dimension it has
-    /// measured (joint plan step 14, C7): cold, the boxes' sum alone.
+    /// Whether aggregate inner reservations `used`, a new one among them, fit: with the guest's own
+    /// overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13), a dimension
+    /// not yet measured counted at the whole envelope, so no box is placed on a guest not heard
+    /// from, within the profile ([`BackingOffer::check_retained`]).
     pub fn check_inner(&self, used: CapacityResources) -> Result<(), Refusal> {
-        let granted = self.allocation()?;
+        let ceiling = self.cost.ceiling;
         let guest = CapacityResources {
-            cpu_milli: self.guest.cpu_milli.unwrap_or(0),
-            mem_bytes: self.guest.mem_bytes.unwrap_or(0),
-            disk_bytes: self.guest.disk_bytes.unwrap_or(0),
+            cpu_milli: self.guest.cpu_milli.unwrap_or(ceiling.cpu_milli),
+            mem_bytes: self.guest.mem_bytes.unwrap_or(ceiling.mem_bytes),
+            disk_bytes: self.guest.disk_bytes.unwrap_or(ceiling.disk_bytes),
         };
         let used = used.checked_add(guest).ok_or_else(|| {
             invalid_route("aggregate payload and the guest's own overhead overflow")
         })?;
+        self.check_retained(used)
+    }
+
+    /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
+    /// and host allowances and quantization. A residual host debit alone is not guest admission.
+    /// Those a backing holds are held to this alone: its guest's own overhead, measured after they
+    /// were placed, stops further boxes ([`BackingOffer::check_inner`]), never refuses those it holds.
+    pub fn check_retained(&self, used: CapacityResources) -> Result<(), Refusal> {
+        let granted = self.allocation()?;
         if self.cost.allocate(used)? != granted {
             return Err(invalid_route(
                 "aggregate payload differs from its fixed backing grant",
@@ -1316,9 +1326,7 @@ impl Learned {
     }
 }
 
-/// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
-/// scheduler's authority; these facts do not grant resources or guess unread measurements.
-/// A node's machine's CPU time since its boot, every CPU's non-idle time together, and its uptime, each none where its
+/// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
 /// platform's answer doesn't read it (joint plan step 14, C7).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1334,6 +1342,8 @@ impl MachineTime {
     }
 }
 
+/// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
+/// scheduler's authority; these facts do not grant resources or guess unread measurements.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capacity {

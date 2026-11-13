@@ -1339,7 +1339,10 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
         capacity.free.mem_bytes = free;
         capacity
     };
-    let boxes = |memory: u64| super::Boxes { memory, cpu_ns: 0 };
+    let boxes = |memory: u64| super::Boxes {
+        memory,
+        ..super::Boxes::default()
+    };
     let first = super::guest_seen(super::Seen::default(), &guest(5 * gib), boxes(2 * gib));
     assert_eq!(first.overhead.mem_bytes, Some(gib));
     let second = super::guest_seen(first, &guest(6 * gib), boxes(3 * gib / 2));
@@ -1382,7 +1385,10 @@ fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_
             uptime_ns: Some(uptime_ns),
         },
     };
-    let boxes = |cpu_ns: u64| super::Boxes { memory: 0, cpu_ns };
+    let boxes = |cpu_ns: u64| super::Boxes {
+        cpu_ns,
+        ..super::Boxes::default()
+    };
     let first = super::guest_seen(
         super::Seen::default(),
         &guest(4 * second, 10 * second),

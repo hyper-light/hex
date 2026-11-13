@@ -31,9 +31,10 @@ fn profile() -> hex_api::RuntimeCost {
         },
     }
 }
+/// A Live shared backing, its guest measured as it went Live at nothing of its own (joint plan step 14, C7, pin 1).
 fn backing() -> BackingOffer {
     BackingOffer {
-        guest: Default::default(),
+        guest: measured(0, 0),
         key: BackingKey {
             pool: [1; 32],
             generation: [2; 16],
