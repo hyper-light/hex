@@ -42,7 +42,7 @@ use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW,
     CreateProcessW, CreateWaitableTimerExW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
-    GetExitCodeProcess, GetProcessTimes, InitializeProcThreadAttributeList,
+    GetExitCodeProcess, GetProcessTimes, GetSystemTimes, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent, ResumeThread,
@@ -1098,6 +1098,19 @@ pub fn below_normal() -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
+}
+
+/// Joint plan step 14 (AC-T7.4.1): the machine's idle, kernel and user time so far, in 100 ns, summed over its
+/// processors (`GetSystemTimes`; kernel time holds idle time), so the charge-window probe can say what else ran.
+pub fn system_times() -> io::Result<[u64; 3]> {
+    let (mut idle, mut kernel, mut user): (FILETIME, FILETIME, FILETIME) =
+        (zeroed_struct(), zeroed_struct(), zeroed_struct());
+    // SAFETY: three FILETIMEs this frame owns, each written by the call.
+    if unsafe { GetSystemTimes(&raw mut idle, &raw mut kernel, &raw mut user) } == 0 {
+        return Err(last_error());
+    }
+    let time = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Ok([time(idle), time(kernel), time(user)])
 }
 
 /// A high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`): a wait on it ends near its due time, not
