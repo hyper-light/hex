@@ -1311,7 +1311,7 @@ pub(crate) fn learned(
         holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
         ended,
         ceilings,
-        // Original (red, D255): what holds each managed VM's rate is told nowhere.
+        // What holds each VM's rate its learner tells (`Learner::learned`, D255); Linux's holds each by its cpu.max.
         rates: Vec::new(),
     })
 }
