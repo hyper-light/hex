@@ -252,8 +252,8 @@ impl Waits for Guest {
 }
 
 /// A node over QUIC (`hex-quic`'s link; docs/design/hex-quic.md Q7): the guest's protocol on hyper-transport's lanes,
-/// its waits its own, `client.quic.answer.<kind>` and `client.quic.answer.<kind>.<class>`, each MEASURING until a
-/// census over QUIC records it, never the guest's record.
+/// its waits its own, `client.quic.answer.<kind>` and `client.quic.answer.<kind>.<class>`, each learned from this
+/// process's own answers over QUIC (decision 9), never the guest's.
 pub struct Quic;
 
 static QUIC_ANSWERS: [Patience; KINDS] = [

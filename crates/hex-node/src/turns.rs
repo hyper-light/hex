@@ -5,11 +5,10 @@
 //! takes one for each create and delete of a box, which has no record while it's being made (goal 5
 //! extended, step 5).
 //!
-//! The patience is the longest a turn has been held, recorded or seen, or the back-off of a wait that ran out
-//! (decision 9; Ada's rules of 2026-11-06 and 2026-11-13; [`hex_core::patience`]): each turn let go is a sample of
-//! what a wait for one waits on.
-//! Each owner seeds its turns from the record of its holds, or, with none yet, measures ([`Patience::measuring`]):
-//! until the first sample a measuring wait is unarmed and lasts until the turn is let go.
+//! The patience is the longest a turn has been held in this process (decision 9; Ada's rules of 2026-11-06 and
+//! 2026-11-13; [`hex_core::patience`]): each turn let go is a sample of what a wait for one waits on. Before the first
+//! is let go, and after a wait that ran out, a wait follows the holder: it lasts until the turn is let go. No record
+//! is read.
 
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -472,11 +471,11 @@ mod tests {
         assert!(turns.take(&id("c")).is_ok());
     }
 
-    /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at the slowest hold recorded, with no
-    /// margin, refused by type, never longer, and the refusal is no sample, but the hold outlasted the 25 ms it waited,
-    /// so the next wait is twice that (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5). Do: seed the
-    /// turns from a hold of 25 ms, hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after
-    /// at least 25 ms, the wait counted once, and the wait 50 ms after.
+    /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at the slowest hold seen, with no
+    /// margin, refused by type, never longer; the refusal is no sample (Karn's point), and the next wait follows the
+    /// holder until it lets go, with no factor. Do: start the turns as they are once a hold of 25 ms has been seen
+    /// (test-only `Patience::seeded`), hold box a's turn and take it again. Expect: refused as `Os` for the turns' op
+    /// after at least 25 ms, the wait counted once, and no bound after: the next wait follows the holder.
     #[test]
     fn a_wait_for_the_same_box_ends_at_the_slowest_hold() {
         let turns = Turns::new(
@@ -497,7 +496,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(turns.waited(), 1);
-        assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
+        assert_eq!(turns.patience(), None, "the next wait follows the holder");
     }
 
     /// AC-T7.4.1/T-T7.1.2: overlap refuses without waiting or taking another box's ownership.
@@ -562,12 +561,12 @@ mod tests {
         assert_eq!(turns.waited(), 0);
     }
 
-    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): measuring, a wait for a turn lasts until it is let go, and the
-    /// hold is recorded, never arming it. Do: on new turns, hold box a's turn while another thread takes it, until that
-    /// take waits; hold on for at least 30 ms and let go. Expect: the waiting take given the turn; the wait still
-    /// unarmed.
+    /// Decision 9's cold start (T-T7.1.2): before any turn has been let go, a wait for a turn has no bound and follows
+    /// its holder until it lets go, and the hold it waited on then bounds the next. Do: on new turns, hold box a's turn
+    /// while another thread takes it, until that take waits; hold on for at least 30 ms and let go. Expect: no bound
+    /// before; the waiting take given the turn; then a bound of at least the 30 ms hold, the slowest seen.
     #[test]
-    fn a_measuring_wait_lasts_until_the_turn_is_let_go_and_stays_unarmed() {
+    fn a_cold_wait_follows_the_holder_until_it_lets_go_and_learns_the_hold() {
         let turns = Turns::new(
             "op",
             "turns under way",
@@ -589,7 +588,11 @@ mod tests {
             drop(held);
             waiter.join().unwrap().unwrap();
         });
-        assert_eq!(turns.patience(), None, "a measuring wait is never armed");
+        let bound = turns.patience();
+        assert!(
+            bound.is_some_and(|b| b >= Duration::from_millis(30)),
+            "the hold waited on bounds the next wait: {bound:?}"
+        );
     }
 }
 

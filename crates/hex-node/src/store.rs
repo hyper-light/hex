@@ -1485,7 +1485,7 @@ mod tests {
     /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
     /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
     /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
-    /// (decision 9: a hold past the slowest recorded or seen is a fault the store refuses).
+    /// (decision 9: a hold past the slowest seen is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
         let write = STORE_TURN;

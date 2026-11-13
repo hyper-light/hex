@@ -2,8 +2,8 @@
 //! socket, as macOS has no `SOCK_SEQPACKET` local socket, each message framed ([`hex_core::stream`]), an exec's stdio
 //! as `SCM_RIGHTS` descriptors at its message's first byte, on the core every transport shares (`crate::calls`): no
 //! thread of its own reads it, each message is written whole under the connection's send lock, and a call waits for
-//! its answer until its caller's deadline, or with none at most the slowest answer to a call of its kind, recorded or
-//! seen, or the back-off of one that ran out ([`ANSWERS`]; decision 9).
+//! its answer until its caller's deadline, or with none at most the slowest answer this process has had to a call of
+//! its kind, following the node agent before its first answer and after a run-out ([`ANSWERS`]; decision 9).
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;

@@ -209,8 +209,8 @@ pub struct Node {
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
     /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
-    /// (decision 9: the longest held, or the back-off of a wait that ran out, measuring until the first is let go, a
-    /// wait before it lasting until then); past either the call is refused by type, a create past the budget as [`Refusal::Full`]
+    /// (decision 9: the longest held; before the first is let go, and after a wait that ran out, a wait follows the
+    /// holder until it lets go); past either the call is refused by type, a create past the budget as [`Refusal::Full`]
     /// ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
@@ -2469,8 +2469,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
-                    "{} took {:?} for {listed} entries, past the slowest a listing has taken an entry, or the \
-                     back-off of one that ran out",
+                    "{} took {:?} for {listed} entries, past the slowest a listing has taken an entry",
                     dir.display(),
                     began.elapsed()
                 ),

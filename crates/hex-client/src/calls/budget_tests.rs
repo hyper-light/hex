@@ -20,7 +20,7 @@ const CAP: Duration = Duration::from_millis(25);
 /// setup under it has room for its steps before CAP is left, and it is a later bound than CAP's.
 const LONG_CAP: Duration = Duration::from_millis(100);
 /// What a learned wait's refusal says, which a caller's own refusal never does: the slowest answer to a call of its
-/// kind, recorded or seen, or the back-off of one that ran out, is its bound (decision 9).
+/// kind this process has seen is its bound (decision 9).
 const LEARNED: &str = "the slowest answer to a call of its kind";
 
 /// The next message from `from` by `by`, or with no deadline whenever it comes; a sender gone is `Disconnected`.

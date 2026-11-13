@@ -1,13 +1,14 @@
 //! What the tests' waits take (decision 9 of docs/design/runtime-architecture.md; the lead's rules for test patiences
 //! of 2026-11-06 and 2026-11-08: every wait in the tests uses its own record's patience). A test waits for a fact for
-//! at most the slowest answer recorded or seen for that fact (decision 9: no margin past it), so a fact as slow as any
-//! on record passes and one slower runs out, the run-out told to the census, whose next record covers it:
+//! at most its record, then the slowest answer seen for that fact, with no margin, so a fact as slow as any on record
+//! passes and one slower runs out, the run-out told to the census; the next wait for that fact then follows it, for the
+//! fact alone (decision 9's rule after a run-out):
 //! - a fact a census row records takes that row's record, here; a program's end through a `Proc` takes the suites'
 //!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end);
 //! - a fact one node operation makes within itself takes that operation's record, the relation stated where it is
 //!   waited for and tested there (a hook holding a create is bounded by the create's answer);
-//! - a fact no recorded operation makes is waited for measuring, for the fact alone, its answers recorded for the
-//!   census that will seed it ([`hex_core::patience::Patience::measuring`], named `test.<crate>.<fact>`).
+//! - a fact no recorded operation makes is waited for measuring, named `test.<crate>.<fact>`: for the fact alone until
+//!   its first answer, then at the slowest seen ([`hex_core::patience::Patience::measuring`]).
 //!
 //! The tests run debug builds, so each record here is a debug build's (`bench/competitive/probes/waits_census.md`,
 //! run 5, waits-census-20261109T184054Z on adacachy2, at ef259dbe): the largest answer of the debug-build arms, the
@@ -88,7 +89,7 @@ impl std::fmt::Display for Waited {
 }
 
 /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most `wait`'s
-/// deadline (none while it measures: the fact alone); says how many looks it took, and tells `wait`, and the census
+/// deadline (none before its first answer and after a run-out: the fact alone); says how many looks it took, and tells `wait`, and the census
 /// where the probe runs the suites, how long. Refused, naming `what` and the patience, once the deadline has passed
 /// without the fact; a wait that ran out is no sample (Karn's point), but the census is told it ran out at its bound.
 pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
@@ -125,7 +126,7 @@ pub fn answered(wait: &Patience, took: Duration) {
 }
 
 /// Waits for a fact through `call`, a wait that takes its own deadline (a read's, an accept's, a dial's): `wait`'s
-/// deadline from now, none while it measures (the fact alone). Tells `wait`, and the census where the probe runs the
+/// deadline from now, none before its first answer and after a run-out (the fact alone). Tells `wait`, and the census where the probe runs the
 /// suites, how long its answer took; one that came only once the deadline had passed is no sample (Karn's point), and
 /// the census is told it ran out at its bound, as [`until`] tells it.
 pub fn within<T>(wait: &Patience, call: impl FnOnce(Option<Instant>) -> T) -> T {

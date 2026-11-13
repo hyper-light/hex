@@ -1,7 +1,7 @@
-//! Test waits take their own record (CLAUDE.md §4 and §6; decision 9; the lead's rule of 2026-11-06 for test
-//! patiences, and of 2026-11-08: every wait in the tests uses its own record's patience). A test's wait for a fact is
-//! bounded by the slowest answer recorded or seen for that fact (decision 9, no margin past it), so a fact as slow as
-//! any on record passes and one slower runs out. The suites' program-end record, `hex_api::conformance::PATIENCE`, is
+//! Test waits take their own record (CLAUDE.md §4 and §6; the lead's rule of 2026-11-06 for test patiences, and of
+//! 2026-11-08: every wait in the tests uses its own record's patience; no production wait reads a record, decision 9).
+//! A test's wait for a fact is bounded by its record, then by the slowest answer seen for that fact, with no margin, so
+//! a fact as slow as any on record passes and one slower runs out. The suites' program-end record, `hex_api::conformance::PATIENCE`, is
 //! the slowest end of a program on its host class's record, from its start to its reported end (`HostClass::slowest_recorded_end`: on Linux the
 //! first-run record, above the waits census's `lifecycle.exec` row). Bounding any other fact with it, a box's
 //! emptying, a pool's refill, a turn's hold, a node's start, takes another fact's record, which under load fails a

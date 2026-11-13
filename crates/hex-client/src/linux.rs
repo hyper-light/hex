@@ -1,8 +1,8 @@
 //! The client on Linux: one `SOCK_SEQPACKET` connection to the node agent's socket, which keeps each message whole
 //! (unix(7)), an exec's stdio passed as `SCM_RIGHTS` descriptors, on the core every transport shares
 //! (`crate::calls`): no thread of its own reads it, and a call waits for its answer until its caller's deadline,
-//! or with none at most the slowest answer this process has had or recorded to a call of its kind, or the back-off of
-//! one that ran out ([`ANSWERS`]; decision 9).
+//! or with none at most the slowest answer this process has had to a call of its kind, following the node agent before
+//! its first answer and after a run-out ([`ANSWERS`]; decision 9).
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;

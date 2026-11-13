@@ -446,7 +446,7 @@ impl ReplyDeadline {
             }
             ReplyBound::Learned(wait) => {
                 format!(
-                    "none came in {wait:?}, the slowest answer to a call of its kind, or the back-off of one that ran out"
+                    "none came in {wait:?}, the slowest answer to a call of its kind this process has seen"
                 )
             }
             ReplyBound::Link(bound) => {
@@ -1428,8 +1428,8 @@ impl<'a, T: Transport> Caller<'a, T> {
         let no_room = || Refusal::Os {
             op: "sending to the node agent",
             why: format!(
-                "no room in its socket for {:?}, the slowest answer to a call of its kind, or the back-off of one that \
-                 ran out: it isn't reading",
+                "no room in its socket for {:?}, the slowest answer to a call of its kind this process has seen: it \
+                 isn't reading",
                 patience.unwrap_or_default()
             ),
         };
@@ -1671,9 +1671,9 @@ impl<T: Transport> Drop for Conn<T> {
 impl<T: Transport> Conn<T> {
     /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
     /// streams its transport makes), and waits for its answer: with no deadline of its caller's, at most the slowest
-    /// answer this process has had or recorded to a call of its kind, or the back-off of one that ran out
-    /// ([`Transport::answers`]; decision 9), past which the call is
-    /// refused by type, the only way left to it, and as long as it takes while its kind's wait measures; with one,
+    /// answer this process has had to a call of its kind ([`Transport::answers`]; decision 9), past which the call is
+    /// refused by type, the only way left to it, and, before its kind's first answer and after a run-out, as long as
+    /// the agent's connection stands (its wait following the agent); with one,
     /// until that deadline, its kind's learned wait a run-out recorded as it passes ([`ReplyDeadline::combine`]). With
     /// `program`, a `Proc`'s place for the end of the program an exec starts is made before the exec goes, so the end
     /// can't come first.

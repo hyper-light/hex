@@ -2462,14 +2462,18 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   tells the census, and `Patience::expired`, which doesn't), its answer comes in uncensored, and the bound rises to it.
   No factor: RFC 6298's back-off doubles by a cited number, and the following wait measures how long to wait instead.
   A host slower than any answer seen runs out once and is followed to its answer.
-- **The boundary: no per-host-class seed anywhere.** No production wait reads a record: not the waits census, not
-  `bench/native/guest/records.tsv`, not a constant measured on a bench host. `Patience::seeded` exists for tests alone
-  (`cfg(test)`, or hex-core's `test-seeds` feature, which only hex-testkit's dependency turns on, a dev-dependency
-  everywhere). The census and records.tsv are the evidence the rule is held to and its falsifier's data, cited here,
-  read by no build. Owed: the guest's first boot still takes records.tsv's `boot_ready` (`dial_bound`): Shards' dial
-  takes a finite instant (HEX-GUEST-33), so its following wait needs a dial sliced against the guest's liveness; and
-  each shell's progress count for `Follow`, where a following wait now waits on its party's end alone (the inventory
-  in `docs/research/runtime/learned-waits.md`).
+- **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
+  `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
+  evidence the rule is held to and its falsifier's data, cited here. Two places still break it, owed: the guest's
+  first boot takes records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
+  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation and the first to close,
+  by a dial sliced against the guest's liveness (HEX-GUEST-33); and hex-api's conformance suite, compiled outside
+  `#[cfg(test)]`, seeds `conformance::PATIENCE` and `ENDS` from per-class end records. `Patience::seeded` exists for
+  tests alone (`cfg(test)`, or hex-core's `test-seeds` feature, which only hex-testkit's dependency turns on, a
+  dev-dependency everywhere, as `crates/hex-core/tests/test_seeds_dev_only.rs` holds every manifest to), for the tests'
+  own waits under the lead's rule of 2026-11-08, owed as well. Each owed piece's design, and each shell's progress
+  count for `Follow` (a following wait now waits on its party's end alone), are in
+  `docs/research/runtime/learned-waits.md` ("Owed").
 - **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
   to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
   made); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a

@@ -631,7 +631,7 @@ impl Seeds {
     }
 
     /// A create in line since `since` whose wait ran out at its bound, `until`, with no seed: refused, and no sample
-    /// (Karn's point), but the line's wait backs off past that bound and the census is told (busy seeds, not hung or
+    /// (Karn's point), but the line's next wait follows its seeds until one answers, and the census is told (busy seeds, not hung or
     /// failed ones: a seed past its hang bound is [`Seeds::hung`]'s and one that failed to start
     /// [`Seeds::start_failed`]'s, neither of which says anything of an answer's time).
     fn waited_out(&mut self, since: Duration, until: Duration) -> Refused {

@@ -1243,7 +1243,7 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
+    /// seed under the node's own bounds and waits (following its seeds: no record is read, decision 9). Expect: the create is refused by
     /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming the
     /// failed start's cause, not the seeds' bound (no bound was reached); never left waiting, never sent
     /// another way.

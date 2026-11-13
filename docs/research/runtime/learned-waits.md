@@ -50,11 +50,68 @@ is wired:
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*`, `guest.stage` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
-| the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | Shards' guest handle | none | not yet following: records.tsv's `boot_ready`, owed |
+| the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
 
-Test waits still take the census's records through the test-only `Patience::seeded` (hex-testkit), and hex-api's
-`conformance::LearnedWait` its per-class end records; the Hex lead's line has two more doubled bounds to fold in
-(hex-client's `precise_patience`, hex-cli's charge driver `guard`).
+## Owed (2026-11-13)
+
+Three places still seed a wait from a record, the first in production. Each needs code that this change's one-host
+checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
+
+1. **The guest's first boot reads records.tsv: a production R03 violation, the first to close.**
+   `hex_client::guest::shards::RECORDS` takes `bench/native/guest/records.tsv` by `include_str!`; `recorded_boot`
+   reads this host class's `boot_ready` row (with none, the slowest of any class's; where no class has one, refused
+   "record one first"); and `hex_runtime::guest::first_dial_bound`, the larger of it and the slowest boot seen, makes
+   the one finite deadline `managed::Budget::new` spends across a create's native launch and first relay dial (fifteen
+   calls in books.rs, dedicated.rs, gpu_pool.rs, shared.rs and mod.rs), as `ShardsGuest::dial_before(port, None)`
+   dials until it. The design, HEX-GUEST-33's liveness-sliced dial: before the first boot, and after one that ran out,
+   the budget follows the guest's VM (`Budget::following(party)` beside `Budget::new(bound)`, its deadline an
+   `Option<Instant>`). The VM's liveness is its process's end, an event on every OS (a pidfd on Linux,
+   `EVFILT_PROC`/`NOTE_EXIT` on macOS, a process handle on Windows); its progress is its CPU time
+   (`/proc/<pid>/stat`, `proc_pid_rusage`, `GetProcessTimes`), given to `Follow::look`. Shards'
+   `connect_once_before(port, at)` takes a finite instant, so the dial is cut into slices at the follower's own
+   instants: `Follow::stalls_after()` once the VM has shown a gap between advances, before that the next look its own
+   events give (its exit, its console's bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
+   or its VM's end (`Option<Instant>`, `None` for "until either"), with no slices; Shards is ROOT's to change. Then
+   `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
+   alone.
+2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`): `conformance::PATIENCE`, the program-end record
+   of this host's class (`HostClass::slowest_recorded_end`: Linux 957 ms, macOS 939 ms, Windows 6,239 ms), and `ENDS`,
+   a `LearnedWait` seeded from it. hex-api can't name `hex_core::patience` (hex-core depends on hex-api), so the design
+   moves the pure core down: `crates/hex-core/src/patience.rs` and its tests to `hex_api::patience`, with
+   `pub use hex_api::patience;` in hex-core, so every `hex_core::patience` path stands, and `test-seeds` with it.
+   `ENDS` becomes `Patience::measuring("conformance.ends")`: a case's wait for a program it expects to end follows the
+   program until the first end (`Proc::try_wait` looked at on its own events, the end the answer), then is bounded at
+   the slowest end seen; `still_running()`, the negative watch, is the slowest end seen, or a typed refusal where none
+   has been (the suite runs its ending cases before it). `PATIENCE`, `seed`, `seed_from`, `SLOWEST_RECORDED_END`,
+   `slowest_recorded_end` and `LearnedWait` go, and their users outside the suite (about 45 calls, in hex-cli's Linux
+   and Windows tests and in hex-node, hex-client and hex-bench) take a helper, `conformance::end_of(&mut proc)`,
+   that waits as the suite does.
+3. **The tests' own waits**: `Patience::seeded` seeds them from `hex_testkit::waits`' census constants (`PROGRAM` to
+   `SEEDS`, adacachy2's debug run 5) under the lead's rule of 2026-11-08, and a dozen tests double a record
+   (`node_socket.rs`'s `ANSWERED` and emptying, `oci_box.rs`'s namespaces, program end and creates, `oci_reuse.rs`'s
+   kill, `native_firecracker_smoke.rs`'s emptying, `netns/tests.rs`, `serve/linux_tests.rs`, `macos/tests.rs`,
+   `macos_process_box.rs`, `helper_daemon/tests.rs`). Made plainly `measuring`, the first answer in a test binary
+   would bound every later wait for that fact in it, and a test fails at a run-out where production follows. The
+   design: `hex_testkit::waits::until` and `within` take the fact's party (`impl FnMut() -> Party`: a `Proc`'s
+   `try_wait`, a cgroup's populated count, a pid's CPU time) and follow it with `Follow` before the first answer and
+   after a run-out; a run-out is told to the census and never fails a test, which fails at its party's end or stall.
+   Then the constants, the doubles, `seeded` and `test-seeds` go: eighteen seeded statics in six Linux-only files
+   (`oci_box.rs`, `oci_reuse.rs`, `node_socket.rs`, `oci_spec_box.rs`, `serve/linux_tests.rs`, `netcheck/tests.rs`)
+   and the rest in hex-client, hex-node, hex-runtime and hex-testkit.
+
+A finding beside them, the lead's to weigh: where a learned bound ends a call (a client's call with no caller's
+deadline, `ReplyDeadline::combine`: "the learned wait is the call's bound"; a turn, a store turn, a listing, a seed's
+line, `serve.reads`), the call is refused at the slowest answer seen. With no seed and no margin, the `n`-th answer is
+the slowest yet with chance `1 / n` where answers are exchangeable, so a fresh process's second call of a kind is
+refused whenever its answer is slower than the first's: half the time. The cost above, with `p = 0` measured, is least
+with no bound at all: at the learned bound the wait would record its run-out and go on following its party, as
+`wait_past` already does under a caller's deadline, refused only at the party's end, reset or stall.
+
+Doubled bounds of the 2026-11-06 rule outside `Patience`, each a record and a factor in production code:
+`hex_core::setup::FEATURE_QUERY_PATIENCE` (jupiter's 2,421 ms twice, `hex_runtime::windows::features`' bound),
+`hex_core::watch`'s lateness seeds (an unrecorded model at twice the highest record), `hex_node::serve::windows`'
+`close_wait` (twice the larger of `PEER_CLOSE_RECORD` and what it has seen), and, on the lead's line,
+`precise_patience` (hex-client) and the charge driver's `guard` (hex-cli).
 
 ## The failure-bound rule (the lead, 2026-11-06, superseded 2026-11-13)
 

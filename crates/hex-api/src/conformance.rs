@@ -164,16 +164,17 @@ pub const fn seed_from(record: Option<Duration>) -> Duration {
     }
 }
 
-/// The learned wait's bound before any sample on this host, its [`seed`], the slowest end on record (Hex's rule for
-/// learned waits, decision 9 of docs/design/runtime-architecture.md: no margin past the slowest answer): a fixed wait
-/// for a program's end, for the tests that wait outside the suite's learned waits (hex-cli's oci_box, oci_spec_box and
-/// node_socket on every native line). The suite itself waits on [`patience`], which learns.
+/// The learned wait's bound before any sample on this host, its [`seed`], the slowest end on record, with no margin: a
+/// fixed wait for a program's end, for the tests that wait outside the suite's learned waits (hex-cli's oci_box,
+/// oci_spec_box and node_socket on every native line). The suite itself waits on [`patience`], which learns. A record
+/// seed outside `#[cfg(test)]`, which decision 9 of docs/design/runtime-architecture.md no longer allows: owed, to a
+/// wait that follows its program (docs/research/runtime/learned-waits.md, "Owed").
 pub const PATIENCE: Duration = seed(HostClass::THIS);
 
-/// A wait whose bound is learned (Hex's rule for learned waits, decision 9): before any sample, the slowest answer on
-/// its record; then the slowest of the record and what it has seen; and it only rises, so a node slower than the
-/// record is waited for once it has been seen, and no first wait is unbounded. A case's wait that runs out fails its
-/// case, so it has no back-off of its own (`hex_core::patience` backs a node's off in process).
+/// A wait whose bound is learned: before any sample, the slowest answer on its record; then the slowest of the record
+/// and what it has seen; and it only rises, so a node slower than the record is waited for once it has been seen. A
+/// case's wait that runs out fails its case. Its record seed is owed to decision 9's following cold start, as
+/// [`PATIENCE`]'s is.
 pub struct LearnedWait {
     record: Duration,
     seen_nanos: AtomicU64,
