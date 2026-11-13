@@ -225,13 +225,12 @@ impl Routes {
                     })?;
                 shared
                     .then(|| {
-                        // Its guest's own CPU as its runtime measured it (joint plan step 14, C7), none while cold: a
-                        // census-free cost carries no guest_overhead.
-                        backing
-                            .cost
-                            .floor
-                            .cpu_milli
-                            .checked_sub(backing.guest.cpu_milli.unwrap_or(0))?
+                        // Its guest's own CPU as its runtime measured it (joint plan step 14, C7), the whole envelope's
+                        // while cold, as no box fits a guest not heard from: a census-free cost carries no
+                        // guest_overhead.
+                        let floor = backing.cost.floor.cpu_milli;
+                        floor
+                            .checked_sub(backing.guest.cpu_milli.unwrap_or(floor))?
                             .checked_sub(used)
                     })
                     .flatten()
@@ -317,8 +316,9 @@ impl Routes {
                     sum.checked_add(capacity_resources(*used))
                 })
                 .ok_or(SimError::Resources(node))?;
+            // What it holds stays held whatever its guest's own overhead has grown to (joint plan step 14, C7).
             backing
-                .check_inner(used)
+                .check_retained(used)
                 .map_err(|_| SimError::Resources(node))?;
         }
         Ok(next)

@@ -392,10 +392,11 @@ pub struct BackingOffer {
     #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
     /// Its guest's own overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13): what its guest
-    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until the
-    /// backing's first capacity answer measures it (its cold start: its boxes' sum alone). Never the census's
-    /// `guest_overhead`, which a census-free cost carries as none. A shared backing's payload fits its envelope with it
-    /// ([`BackingOffer::check_inner`]). Absent from an older JSON report, read as cold.
+    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until it is
+    /// measured. A shared backing is measured before it is Live, so a placement never meets a cold one; a dimension
+    /// not yet measured counts at the whole envelope. Never the census's `guest_overhead`, which a census-free cost
+    /// carries as none. A shared backing's payload fits its envelope with it ([`BackingOffer::check_inner`]). Absent
+    /// from an older JSON report, read as cold.
     #[serde(default, skip_serializing_if = "LearnedOverhead::cold")]
     pub guest: LearnedOverhead,
 }
@@ -431,20 +432,29 @@ impl BackingOffer {
         })
     }
 
-    /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
-    /// and host allowances and quantization. A residual host debit alone is not guest admission.
-    /// With them, the guest's own overhead as its runtime measured it, in each dimension it has
-    /// measured (joint plan step 14, C7): cold, the boxes' sum alone.
+    /// Whether aggregate inner reservations `used`, a new one among them, fit: with the guest's own
+    /// overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13), a dimension
+    /// not yet measured counted at the whole envelope, so no box is placed on a guest not heard
+    /// from, within the profile ([`BackingOffer::check_retained`]).
     pub fn check_inner(&self, used: CapacityResources) -> Result<(), Refusal> {
-        let granted = self.allocation()?;
+        let ceiling = self.cost.ceiling;
         let guest = CapacityResources {
-            cpu_milli: self.guest.cpu_milli.unwrap_or(0),
-            mem_bytes: self.guest.mem_bytes.unwrap_or(0),
-            disk_bytes: self.guest.disk_bytes.unwrap_or(0),
+            cpu_milli: self.guest.cpu_milli.unwrap_or(ceiling.cpu_milli),
+            mem_bytes: self.guest.mem_bytes.unwrap_or(ceiling.mem_bytes),
+            disk_bytes: self.guest.disk_bytes.unwrap_or(ceiling.disk_bytes),
         };
         let used = used.checked_add(guest).ok_or_else(|| {
             invalid_route("aggregate payload and the guest's own overhead overflow")
         })?;
+        self.check_retained(used)
+    }
+
+    /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
+    /// and host allowances and quantization. A residual host debit alone is not guest admission.
+    /// Those a backing holds are held to this alone: its guest's own overhead, measured after they
+    /// were placed, stops further boxes ([`BackingOffer::check_inner`]), never refuses those it holds.
+    pub fn check_retained(&self, used: CapacityResources) -> Result<(), Refusal> {
+        let granted = self.allocation()?;
         if self.cost.allocate(used)? != granted {
             return Err(invalid_route(
                 "aggregate payload differs from its fixed backing grant",
@@ -1316,6 +1326,22 @@ impl Learned {
     }
 }
 
+/// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
+/// platform's answer doesn't read it (joint plan step 14, C7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineTime {
+    pub cpu_ns: Option<u64>,
+    pub uptime_ns: Option<u64>,
+}
+
+impl MachineTime {
+    /// Whether neither is read.
+    pub fn unread(&self) -> bool {
+        self.cpu_ns.is_none() && self.uptime_ns.is_none()
+    }
+}
+
 /// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
 /// scheduler's authority; these facts do not grant resources or guess unread measurements.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1363,6 +1389,10 @@ pub struct Capacity {
     /// None from a node that learns none: no window on its platform, or an older build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<Learned>,
+    /// What the answering node's machine has run and how long it has been up (joint plan step 14, C7): a shared
+    /// backing's runtime learns its guest's own CPU from its agent's answer. Absent from an older answer, read as unread.
+    #[serde(default, skip_serializing_if = "MachineTime::unread")]
+    pub own: MachineTime,
 }
 
 impl Capacity {
@@ -1464,6 +1494,7 @@ impl Capacity {
             backings,
             unavailable,
             learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
+            own: self.own,
         })
     }
 
@@ -2196,8 +2227,9 @@ pub enum Upstream {
     /// to such a socket, and D231's run host binds no endpoint (Shards 7a4ef5c0).
     NestedChannel,
     /// The period a Shards VM's rate holds over (D247's hold is D191's governor, its period CFS's), as Shards' API
-    /// says it: shards-api exposes neither a call nor a const for it, so a learner capping a VM through its rate can't
-    /// take its window from it (joint plan step 14, C1).
+    /// says it. Given since Shards 1acbf2cb9 (`ImageGuest::rate_period`, image channel version 17): each run's own, as
+    /// its run host said it as the run started, which the charge learner reads each window (joint plan step 14, C1), so
+    /// no call awaits it now. Its tag stays, the wire being append-only.
     RatePeriod,
 }
 
@@ -2264,7 +2296,7 @@ impl std::fmt::Display for Upstream {
                 "a connection to a runtime nested under shards-init (a lane of Shards' agent-control endpoint to its socket)"
             }
             Self::RatePeriod => {
-                "the period a Shards VM's rate holds over (D191's governor), which shards-api doesn't expose"
+                "the period a Shards VM's rate holds over (D191's governor; given by D247's ImageGuest::rate_period)"
             }
         })
     }
@@ -2770,6 +2802,7 @@ mod route_tests {
     }
     fn capacity() -> Capacity {
         Capacity {
+            own: Default::default(),
             id: "native-owner".into(),
             total: CapacityResources {
                 cpu_milli: 4000,
@@ -2787,10 +2820,11 @@ mod route_tests {
         }
     }
     /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own
-    /// overhead its runtime measured, never the census's (a census-free cost carries none); cold, its boxes' sum alone.
-    /// Do check boxes summing 0.5 CPU and 512 MiB against a backing of a 1 CPU, 1 MiB-quantum envelope of 1 GiB, cold;
-    /// with a guest measured at 0.25 CPU and 256 MiB; then at 0.25 CPU and 600 MiB. Expect the first two to fit and the
-    /// third, its memory past the envelope with the boxes', refused.
+    /// overhead its runtime measured, never the census's (a census-free cost carries none); a dimension not yet measured
+    /// counts at the whole envelope, its ceiling, as no box is placed on a guest not heard from. Do check boxes summing
+    /// 0.5 CPU and 512 MiB against a backing of a 1 CPU, 1 MiB-quantum envelope of 1 GiB, cold; with a guest measured at
+    /// 0.25 CPU and 256 MiB; then at 0.25 CPU and 600 MiB; then at 0.6 CPU and 256 MiB. Expect the cold one refused, the
+    /// second to fit, and the third and fourth, past the envelope with the boxes', refused.
     #[test]
     fn w14_a_shared_backings_payload_fits_with_its_guests_measured_overhead() {
         let envelope = CapacityResources {
@@ -2817,14 +2851,20 @@ mod route_tests {
             mem_bytes: 512 << 20,
             disk_bytes: 0,
         };
-        backing.check_inner(boxes).unwrap();
+        assert!(
+            backing.check_inner(boxes).is_err(),
+            "no box fits a guest not heard from"
+        );
         backing.guest = LearnedOverhead {
             cpu_milli: Some(250),
             mem_bytes: Some(256 << 20),
-            disk_bytes: None,
+            disk_bytes: Some(0),
         };
         backing.check_inner(boxes).unwrap();
         backing.guest.mem_bytes = Some(600 << 20);
+        assert!(backing.check_inner(boxes).is_err());
+        backing.guest.mem_bytes = Some(256 << 20);
+        backing.guest.cpu_milli = Some(600);
         assert!(backing.check_inner(boxes).is_err());
     }
 

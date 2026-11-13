@@ -100,6 +100,7 @@ impl Runtime for NativeReporting {
 #[test]
 fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
     let native = hex_api::Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),

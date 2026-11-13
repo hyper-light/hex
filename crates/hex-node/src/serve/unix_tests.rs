@@ -205,6 +205,9 @@ struct LeasingRuntime {
     sim: SimRuntime,
     lessors: Arc<WireLessors>,
     runs: Mutex<BTreeMap<String, Leasing>>,
+    /// Each box's sign-ins as its spec granted them, and what each run's capture of them gave (C8).
+    sign_ins: Mutex<BTreeMap<String, Vec<hex_api::SignInGrant>>>,
+    captured: Mutex<BTreeMap<String, Vec<hex_api::Captured>>>,
 }
 
 /// A run's lessor and the leases it holds.
@@ -216,7 +219,15 @@ impl LeasingRuntime {
             sim: SimRuntime::default(),
             lessors,
             runs: Mutex::new(BTreeMap::new()),
+            sign_ins: Mutex::new(BTreeMap::new()),
+            captured: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The run of box `id`'s lessor, while it runs.
+    fn lessor_of(&self, id: &BoxId) -> Option<Arc<dyn hex_api::lease::Lessor>> {
+        let runs = self.runs.lock().unwrap();
+        runs.get(id.as_str()).map(|(lessor, _)| Arc::clone(lessor))
     }
 
     /// The run of box `id` has ended: each of its leases given back, and its lessor let go.
@@ -242,12 +253,26 @@ impl Runtime for LeasingRuntime {
         self.sim.classes()
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        self.sim.create(spec)
+        let sign_ins = match &spec.class {
+            ClassSpec::ShardsImage(image) => image.sign_ins.clone(),
+            _ => Vec::new(),
+        };
+        let id = spec.id.to_string();
+        let made = self.sim.create(spec)?;
+        self.sign_ins.lock().unwrap().insert(id, sign_ins);
+        Ok(made)
     }
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         let credentials = self.sim.inspect(id)?.credentials;
+        let sign_ins = self
+            .sign_ins
+            .lock()
+            .unwrap()
+            .get(id.as_str())
+            .cloned()
+            .unwrap_or_default();
         self.sim.start(id)?;
-        if credentials.is_empty() {
+        if credentials.is_empty() && sign_ins.is_empty() {
             return Ok(());
         }
         let lessor = hex_api::lease::Lessors::lessor(&*self.lessors, id)?;
@@ -258,6 +283,25 @@ impl Runtime for LeasingRuntime {
                 .map_err(|why| Refusal::Broken(format!("its run's lease was refused: {why}")))?;
             leases.push(lease);
         }
+        // Each sign-in captured as its CLI's first token response would be, its tokens the run's to hand on (C8).
+        let mut captured = Vec::new();
+        for grant in &sign_ins {
+            let tokens = hex_api::lease::SignInTokens {
+                access: hex_api::lease::Value::new(TOKEN.to_vec()),
+                refresh: Some(hex_api::lease::Value::new(b"refresh-token".to_vec())),
+                expires_in: Some(28_800),
+                id_token: None,
+                scope: Some("user:inference".to_owned()),
+            };
+            let got = lessor
+                .capture(&grant.sign_in, tokens, None)
+                .map_err(|why| Refusal::Broken(format!("its run's capture was refused: {why}")))?;
+            captured.push(got);
+        }
+        self.captured
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), captured);
         self.runs
             .lock()
             .unwrap()
@@ -336,6 +380,154 @@ impl crate::recorded::Recover for LeasingRuntime {
 /// What a waiting broker follows: the client's connection, its lessors' thread giving each lease back as it hears.
 static GIVEN_BACK: hex_core::patience::Patience =
     hex_core::patience::Patience::measuring("test.hex_node.serve.s33.given_back");
+
+/// A sign-in's access token, as its CLI's token response gave it.
+const TOKEN: &[u8] = b"hex-s33-token-5b0e8c2d71f4a693";
+
+/// A broker that serves its runs' sign-ins (C8): each capture kept with its access token, its placeholders answered,
+/// each refresh answered with a token response, each revocation kept.
+#[derive(Default, Clone)]
+struct SignInBroker {
+    state: Arc<BrokerState>,
+}
+
+#[derive(Default)]
+struct BrokerState {
+    captures: Mutex<Vec<(String, Vec<u8>)>>,
+    revoked: Mutex<Vec<String>>,
+}
+
+impl hex_api::lease::Lessors for SignInBroker {
+    fn lessor(&self, _id: &BoxId) -> Result<Arc<dyn hex_api::lease::Lessor>, Refusal> {
+        Ok(Arc::new(SignInRun(Arc::clone(&self.state))))
+    }
+}
+
+/// The broker's lessor for one run.
+struct SignInRun(Arc<BrokerState>);
+
+impl hex_api::lease::Lessor for SignInRun {
+    fn lease(
+        &self,
+        _: &str,
+        _: Option<[u8; 32]>,
+    ) -> Result<hex_api::lease::Lease, hex_api::lease::LeaseRefused> {
+        Err(hex_api::lease::LeaseRefused::Denied(
+            "this broker leases no credential".to_owned(),
+        ))
+    }
+    fn release(&self, _: &str) {}
+    fn capture(
+        &self,
+        sign_in: &str,
+        tokens: hex_api::lease::SignInTokens,
+        _key: Option<[u8; 32]>,
+    ) -> Result<hex_api::Captured, hex_api::lease::SignInRefused> {
+        self.0
+            .captures
+            .lock()
+            .unwrap()
+            .push((sign_in.to_owned(), tokens.access.expose().to_vec()));
+        Ok(hex_api::Captured {
+            access: format!("{sign_in}/access"),
+            access_placeholder: "kiln-placeholder-6163".to_owned(),
+            refresh_placeholder: Some("kiln-placeholder-7266".to_owned()),
+        })
+    }
+    fn refresh(
+        &self,
+        _sign_in: &str,
+        _key: Option<[u8; 32]>,
+    ) -> Result<hex_api::lease::Value, hex_api::lease::SignInRefused> {
+        Ok(hex_api::lease::Value::new(
+            b"{\"access_token\":\"kiln-placeholder-6163\"}".to_vec(),
+        ))
+    }
+    fn revoked(&self, sign_in: &str, _key: Option<[u8; 32]>) {
+        self.0.revoked.lock().unwrap().push(sign_in.to_owned());
+    }
+}
+
+/// A Shards image VM whose harness's CLI, Claude Code, signs in as `claude/ada` toward its provider.
+fn signing_in(name: &str) -> BoxSpec {
+    let mut spec = granting(name);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.credentials.clear();
+        image.sign_ins = vec![hex_api::SignInGrant {
+            member: hex_api::Member {
+                kind: hex_api::MemberKind::Agent,
+                name: "claude".to_owned(),
+            },
+            sign_in: "claude/ada".to_owned(),
+            cli: hex_api::SignInCli::ClaudeCode,
+            toward: vec!["api.anthropic.com".to_owned()],
+            captured: None,
+        }];
+    }
+    spec
+}
+
+/// Joint plan step 33's sign-ins (docs/design/credential-grants.md C8): a harness VM created over the node's wire by a
+/// client that leases has its CLI's sign-in captured through that wire, its tokens handed whole to the client's broker
+/// and the broker's placeholders answered back; its refresh answered the same way; its revocation told to the broker.
+#[test]
+fn s33_a_remote_harnesss_sign_in_is_captured_refreshed_and_revoked_through_the_wire() {
+    let dir = scratch("s33-sign-in-");
+    let host = Arc::new(LeasingRuntime::new(WireLessors::new()));
+    let server = Server::bind(
+        &dir.path().join("node.sock"),
+        Arc::clone(&host) as Arc<dyn Host>,
+        limits(),
+        8,
+    )
+    .unwrap();
+    let broker = SignInBroker::default();
+    let client = Client::connect(server.path())
+        .unwrap()
+        .with_lessors(Arc::new(broker.clone()))
+        .unwrap();
+    let spec = signing_in("harness-5");
+    let id = spec.id.clone();
+    client.create(spec).unwrap();
+    client.start(&id).unwrap();
+    let captured = host
+        .captured
+        .lock()
+        .unwrap()
+        .get(id.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        captured,
+        vec![hex_api::Captured {
+            access: "claude/ada/access".to_owned(),
+            access_placeholder: "kiln-placeholder-6163".to_owned(),
+            refresh_placeholder: Some("kiln-placeholder-7266".to_owned()),
+        }]
+    );
+    assert_eq!(
+        broker.state.captures.lock().unwrap().clone(),
+        vec![("claude/ada".to_owned(), TOKEN.to_vec())],
+        "the broker holds the access token, whole"
+    );
+    let lessor = host.lessor_of(&id).unwrap();
+    assert_eq!(
+        lessor.refresh("claude/ada", None).unwrap().expose(),
+        b"{\"access_token\":\"kiln-placeholder-6163\"}"
+    );
+    lessor.revoked("claude/ada", None);
+    follow::until(
+        &GIVEN_BACK,
+        "the revocation told to the broker",
+        || Party::Live,
+        || broker.state.revoked.lock().unwrap().len() == 1,
+    )
+    .unwrap();
+    drop(lessor);
+    client.signal(&id, HexSignal::KILL).unwrap();
+    client.delete(&id).unwrap();
+    drop((client, server));
+}
 
 /// A credential's value no file or answer of the node's may hold.
 const VALUE: &[u8] = b"hex-s33-value-1d9e4f7a2c58b6e0";
@@ -490,6 +682,12 @@ fn s33_a_credential_granting_create_without_lessors_is_refused_before_any_record
             assert!(what.contains("lessors"), "{what}: {why}");
         }
         other => panic!("a credential granted by a client with no lessors: {other:?}"),
+    }
+    match client.create(signing_in("harness-6")) {
+        Err(Refusal::Unconfigured { what, why }) => {
+            assert!(what.contains("lessors"), "{what}: {why}");
+        }
+        other => panic!("a sign-in granted by a client with no lessors: {other:?}"),
     }
     assert!(host.sim.list().unwrap().is_empty(), "no record was made");
     assert_eq!(broker.held().unwrap(), 0);
