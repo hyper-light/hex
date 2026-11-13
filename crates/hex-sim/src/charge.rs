@@ -266,15 +266,32 @@ pub struct ClassKey {
     class: Class,
     profile: [u8; 32],
     ceiling: [u64; 3],
+    /// What its VMs' workload is admitted at, their guest envelope: a cold class's prior. Its ceiling less the VMM's
+    /// census allowance, which is evidence for the ceiling alone (ROOT, 2026-11-13).
+    admission: [u64; 3],
 }
 
 impl ClassKey {
-    pub fn new(class: Class, profile: [u8; 32], ceiling: Amounts) -> Self {
+    /// The class of VMs of `class` and cost `profile`, their receipt `ceiling`, each admitted at `admission`, at most
+    /// the ceiling in each dimension, as a prior is.
+    pub fn new(class: Class, profile: [u8; 32], ceiling: Amounts, admission: Amounts) -> Self {
         Self {
             class,
             profile,
             ceiling: dims(ceiling),
+            admission: each(dims(admission), dims(ceiling), u64::min),
         }
+    }
+
+    /// The class of the VMs `allocation` admits for `class`: its cost profile, its whole receipt the ceiling, and its
+    /// guest envelope ([`hex_api::Allocation::guest`]) the admission. Refused where the receipt holds no envelope.
+    pub fn of(class: Class, allocation: hex_api::Allocation) -> Result<Self, hex_api::Refusal> {
+        Ok(Self::new(
+            class,
+            allocation.cost.id,
+            allocation.resources,
+            allocation.guest()?,
+        ))
     }
 
     pub fn ceiling(&self) -> Amounts {
@@ -466,14 +483,15 @@ impl<K: Ord + Copy> Node<K> {
         amounts(self.budget)
     }
 
-    /// What a new VM of `class` would be booked at (C2): its class's prior, else its allocation.
+    /// What a new VM of `class` would be booked at (C2): its class's prior; with no VM of it warmed, what its workload
+    /// is admitted at, its VMM's own learned from its windows.
     pub fn prior(&self, class: &ClassKey) -> Amounts {
         let prior = self
             .classes
             .get(class)
             .filter(|record| record.tail.full())
             .and_then(|record| record.tail.p999())
-            .map_or(class.ceiling, |p| each(p, class.ceiling, u64::min));
+            .map_or(class.admission, |p| each(p, class.ceiling, u64::min));
         amounts(prior)
     }
 

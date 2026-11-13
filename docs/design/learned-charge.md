@@ -54,7 +54,8 @@ contention rule and the predictors; they do not hold the step up.
   RAM included; disk is its folders' bytes.
 - **The charge**, each of CPU, memory and disk: the nearest-rank p99.9 of its last SEEDABLE windows (of CPU, and of
   memory's and disk's high-water marks), the second largest of 1,000.
-- **Ceiling**: each at most its allocation (envelope and VMM overhead). Learning never raises authority (R03).
+- **Ceiling**: each at most its allocation (envelope and VMM overhead). Learning never raises authority (R03). The
+  census's VMM overhead is the ceiling's alone, evidence, never booked (ROOT, 2026-11-13; C2).
 - **Cold**: until it has SEEDABLE windows its charge is no less than its booking (C2), as its p99.9 is not yet an
   observed sample.
 - Use that grows past the charge is the contention rule's (C4, C5), not a margin's.
@@ -78,7 +79,14 @@ there, the history becomes the VM's life.
 image and size. A new VM is booked at its class's prior: by the same sample rule, the nearest-rank p99.9 of the
 class's last SEEDABLE windows of its warmed VMs (each warmed VM's window a sample, as its own charge's is), each
 dimension at most the allocation. It falls when the evidence does: an outlier's windows leave the sample as newer
-ones come. With no warmed VM of the class on record, its allocation.
+ones come. With no warmed VM of the class on record, a node that learns its VMs books a new one at what its workload
+is admitted at, its receipt's guest envelope (`Allocation::guest`; `charge::ClassKey`'s admission), as ROOT took it
+on 2026-11-13: its VMM's own is learned from its windows (D241's `Stats::microvm` for an image VM, its cgroup or
+native owner for a managed one) and an image VM's guest is told its room (C7), so the census's overhead stays
+evidence, the ceiling's alone. A node that learns none of its VMs carries no prior, and its VMs are booked whole, as
+nothing reads what their VMMs take (f60 A). Priors are a class's, not a kind's: a Shards image VM and a managed Shards
+VM of one profile and size share one, and a node learning one kind but not the other books the other whole off its
+fleet's budget (C4, `recorded::charges::sort`) while the scheduler books it at the prior.
 
 **Sources.** Resource Central predicts a new VM from its class, as a subscription's VMs behave alike, 81% accurate
 for average CPU (f62 A), and counts a VM it can't predict as using all it was allocated (f29 A); an empirical-Bayes
@@ -338,7 +346,7 @@ reaches the view settled with goal 13 the same day:
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
 | The ceiling | the allocation | (b) | guest_cost's census of the class | `charge::tests` |
-| The cold booking | the class's prior, else the allocation | (a) | p99.9 of the class's last SEEDABLE warmed windows | `charge::tests` |
+| The cold booking | the class's prior; with none warmed, the workload's admission where a node learns, else the allocation | (a) | p99.9 of the class's last SEEDABLE warmed windows; the receipt's guest envelope | `charge::tests`, `recorded::charges::tests` |
 | `cpu.weight`'s range | 1 to 10,000 | (c) | cgroup-v2.rst | `charge::tests` |
 | The fleet's weight | `ceil(10,000 × budget / machine CPU)`, at least 1 | derived | its budget's share of the machine on the kernel's range | `charge::tests` (exact and property) |
 | The fleet's CPU cap | its CPU budget, at least 10 milli-CPU | (c) | the kernel's least quota, 1 ms a 100 ms period (`hex_api::MIN_CPU_MILLI`) | `charge::tests` |

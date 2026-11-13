@@ -15,8 +15,9 @@ fn res(cpu_milli: u64, mem_bytes: u64, disk_bytes: u64) -> Amounts {
     }
 }
 
+/// Class `n` of VMs of `cpu` and `mem`, admitted at their ceiling (no VMM allowance).
 fn class_of(n: u8, cpu: u64, mem: u64) -> ClassKey {
-    ClassKey::new(Class::Shards, [n; 32], res(cpu, mem, 0))
+    ClassKey::new(Class::Shards, [n; 32], res(cpu, mem, 0), res(cpu, mem, 0))
 }
 
 fn node(budget: Amounts) -> Node<u32> {
@@ -278,16 +279,23 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
     );
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C2: do admit a VM of a class no VM has warmed; expect its allocation. Do warm one
-/// whose windows are low but for two high; expect the class's prior the high one (the p99.9 of its last SEEDABLE
-/// warmed windows) and a second VM booked at it. Do read SEEDABLE more low windows; expect the prior to fall to the
-/// low, as the outlier's windows leave the sample.
+/// Joint plan step 14 (AC-T7.4.1), C2: do admit a VM of a class no VM has warmed, its 8-CPU, 8 GiB envelope below its
+/// ceiling by a census allowance of half a CPU and 256 MiB; expect it booked at the envelope, what its workload is
+/// admitted at (ROOT, 2026-11-13: the census is evidence only). Do warm one whose windows are low but for two high;
+/// expect the class's prior the high one (the p99.9 of its last SEEDABLE warmed windows) and a second VM booked at it.
+/// Do read SEEDABLE more low windows; expect the prior to fall to the low, as the outlier's windows leave the sample.
 #[test]
 fn w14_the_prior_is_the_p999_of_the_class_last_warmed_windows_and_falls() {
     let mut n = node(res(16_000, 64 * GIB, 0));
-    let class = class_of(1, 8_000, 8 * GIB);
-    assert_eq!(n.prior(&class), class.ceiling());
-    n.admit(1, class, 0, 8).unwrap();
+    let envelope = res(8_000, 8 * GIB, 0);
+    let class = ClassKey::new(
+        Class::Shards,
+        [1; 32],
+        res(8_500, 8 * GIB + (256 << 20), 0),
+        envelope,
+    );
+    assert_eq!(n.prior(&class), envelope);
+    assert_eq!(n.admit(1, class, 0, 8).unwrap(), envelope);
     for t in 0..SEEDABLE {
         let cpu = if t == 10 || t == 20 { 3_000 } else { 200 };
         window(&mut n, &[(1, cpu, GIB)]);

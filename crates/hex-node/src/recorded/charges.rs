@@ -778,7 +778,7 @@ impl Learner {
             self.node
                 .track(
                     lifetime,
-                    ClassKey::new(class, allocation.cost.id, allocation.resources),
+                    ClassKey::of(class, allocation)?,
                     record.spec.band,
                     vcpus(allocation)?,
                     receipt,
@@ -904,7 +904,8 @@ impl Learner {
 }
 
 /// What a capacity answer for `class` carries of `node` (C2, C5, C8), shared by every OS's learner: the priors of
-/// `costs` (at most one per profile and ceiling, none booked whole), the class's learned use and each of its `vms`'
+/// `costs`, a cold class's its admission (at most one per profile and ceiling, none booked whole), so a VM is booked
+/// below its whole receipt only where a learner learns its VMs' use; the class's learned use and each of its `vms`'
 /// holdings (by lifetime, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
 /// class's `ended` VMs.
 pub(crate) fn learned(
@@ -916,8 +917,9 @@ pub(crate) fn learned(
 ) -> Result<Learned, Refusal> {
     let mut priors: Vec<hex_api::LearnedPrior> = Vec::new();
     for cost in costs {
-        let ceiling = cost.allocate(CapacityResources::default())?.resources;
-        let booking = node.prior(&ClassKey::new(class, cost.id, ceiling));
+        let receipt = cost.allocate(CapacityResources::default())?;
+        let ceiling = receipt.resources;
+        let booking = node.prior(&ClassKey::of(class, receipt)?);
         let known = priors
             .iter()
             .any(|prior| prior.profile == cost.id && prior.ceiling == ceiling);

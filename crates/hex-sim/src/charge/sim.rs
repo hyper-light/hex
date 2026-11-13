@@ -218,7 +218,8 @@ pub fn run(s: &Scenario) -> Result<Report, ChargeError> {
             classes: 1,
         },
     )?;
-    let class = ClassKey::new(Class::Shards, [14; 32], s.envelope);
+    // Its VMs' envelope is their ceiling and their admission alike: the sim models no VMM allowance.
+    let class = ClassKey::new(Class::Shards, [14; 32], s.envelope, s.envelope);
     let mut report = Report {
         envelope_density: envelope_density(s.capacity, s.envelope),
         jain_least_ppm: 1_000_000,
