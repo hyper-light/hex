@@ -162,6 +162,7 @@ fn spec(
         nesting: false,
         ready_by: None,
         credentials: Vec::new(),
+        lessor: None,
         binary: Some(shards.to_path_buf()),
         env,
         control: None,

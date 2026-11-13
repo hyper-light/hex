@@ -1,6 +1,6 @@
 # Hex's changes to hyper-raft
 
-hyper-raft is vendored (vendor/MANIFEST.toml) at `0856e05df3d136f0870a98808113294a73399206`, the revision kiln
+hyper-raft is vendored (vendor/MANIFEST.toml) at `045cf3ff82e1d96d1f8c339d6e644d17afc998a3`, the revision kiln
 vendors, only the files its `take` list names. Each recorded change (`vendor/patches/hyper-raft/*.patch`,
 applied in name order) is a row here. `scripts/vendor.py check hyper-raft` proves the tree is that upstream plus
 these, byte for byte.

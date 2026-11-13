@@ -1,29 +1,36 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `e0cc059c`**, on Linux, macOS and Windows hosts, its run
+runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `740fa372`**, on Linux, macOS and Windows hosts, its run
 host started holding only its stdio by Shards' own spawn (D248, §1) and each vCPU's guest time in its usage (D241,
 §4); its real-VM runs and the records its waits seed from are owed (§8).
 
 Sources, read at the revisions named:
-- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`) and its research
-  record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision this class
-  binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested runtime's
-  grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member, `ImageGuest::plug` and
-  `ImageRefusal::Plug`), D236 (destinations by name, `Narrowing::destinations`, `Bound::to`), the joint plan's step 5
-  (a member's stdin and working directory, `MemberSpec::stdin` and `workdir`, `ImageGuest::take_input`), D241 (the
-  room an orchestrator's budget leaves the run, and the run's microVM cost in its stats, `Stats::microvm`), D242
-  (credentials granted by reference), D244 (a member's terminal), D246 (each member held to its reach of the names
-  kept, `Narrowing::members`), D247 (the run's CPU rate), D248 (the run host started holding its three standard
-  streams alone, through `shards_ipc`'s spawn), D249 (a run whose command never started ends failed, in its VM's
-  words) and D250 (a run that keeps nothing past the microVM keeps the network its image links its members to, its
-  network process letting nothing past), D251 and D252 (a lane to a socket of the run's own command, and the run's
-  own agent-control endpoint, `ImageSpec::control` and `ImageGuest::control`), D234's `gpus=` (`ImageSpec::gpu_devices`)
-  and D247's period (`ImageGuest::rate_period`): image channel version 17.
-- `shards_api::image` at `e0cc059c`: `crates/api/src/image.rs` (`Images`, its `boot` and patience, `ImageGuest`,
-  `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, `shards_ipc::spawn_with`, `stop`,
-  `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`, `StatsScope`, `RunEnd`, `Narrowing`,
-  `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it answers).
+- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c` and `740fa372`) and
+  its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
+  this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
+  runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
+  `ImageGuest::plug` and `ImageRefusal::Plug`), D236 (destinations by name, `Narrowing::destinations`, `Bound::to`), the
+  joint plan's step 5 (a member's stdin and working directory, `MemberSpec::stdin` and `workdir`,
+  `ImageGuest::take_input`), D241 (the room an orchestrator's budget leaves the run, and the run's microVM cost in its
+  stats, `Stats::microvm`), D242 (credentials granted by reference), D244 (a member's terminal), D246 (each member held
+  to its reach of the names kept, `Narrowing::members`), D247 (the run's CPU rate), D248 (the run host started holding
+  its three standard streams alone, through `shards_ipc`'s spawn), D249 (a run whose command never started ends failed,
+  in its VM's words) and D250 (a run that keeps nothing past the microVM keeps the network its image links its members
+  to, its network process letting nothing past), D251 and D252 (a lane to a socket of the run's own command, and the
+  run's own agent-control endpoint, `ImageSpec::control` and `ImageGuest::control`), D234's `gpus=`
+  (`ImageSpec::gpu_devices`) and D247's period (`ImageGuest::rate_period`): image channel version 17. At `740fa372`,
+  versions 18 to 21: D256 (a member's run-time arguments, `MemberSpec::args`), D253 (a run's microVM restored from its
+  image's template, or a warm run host's, `ImageGuest::started_from`, which a box's usage says and its record keeps;
+  `ImagePools`, not used here), D242's leases (`ImageSpec::lessor`: none here, as no box grants a credential) and D257
+  (the setup keys a run's spec may name), and D258 (a run's end saying why: its asks' end typed, its VM's failure to
+  serve it told, its end kept once seen, and its run host's diagnostics kept whole in a file its orchestrator names,
+  `ImageGuest::keep_diagnostics`).
+- `shards_api::image` at `e0cc059c` and `740fa372`: `crates/api/src/image.rs` (`Images`, its `boot` and patience,
+  `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, `shards_ipc::spawn_with`,
+  `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`, `StatsScope`, `RunEnd`,
+  `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it
+  answers).
 - Shards' guest-cpu-time-v1 (221c7377, 6396a78b; its record
   `docs/research/measurements/guest-cpu-time-v1/README.md`): each vCPU's guest time, given to the daemon's runs, and
   through D241 to D231's.
@@ -94,6 +101,15 @@ Sources, read at the revisions named:
   guest holds to that guest's node, but an image VM's: its guest runs no node of Hex's, so the guest runtime here
   answers it (`hex-node` `recorded.rs` `forward_for`), as the Linux node runs an image VM's exec here
   (`node/backends.rs` `guest_node_class`).
+- **Its run host's diagnostics, whole** (D258's `ImageGuest::keep_diagnostics`; ROOT, 2026-11-13). A box's start
+  names `state/image-diagnostics/<box>.log` in its record with its boot's intent and makes the file before the boot;
+  the booted run's host writes every part of its diagnostics, its VM's among them, there from then on, after what it
+  kept until then (a run whose host can't is dropped, which ends it, and its boot is refused in those words). The file
+  is kept whole, with no bound of Hex's: it is for diagnosing the run. A failed run's `BoxInfo.ended` carries its
+  words, then the file's last bytes, as many as Shards quotes of a VM's end (`shards_abi::bounds::console_said` over
+  the kernel's console records, as the dedicated guest reads them). The node Store keeps the file's name, the run's
+  words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the
+  box's delete removes the file before its record.
 
 ## 2. Mapping onto D231
 
@@ -257,7 +273,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   (§6).
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `e0cc059c` or later (image channel version 17: Hex's `shards`, rebuilt on each host by
+  `740fa372` or later (image channel version 21: Hex's `shards`, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and
@@ -268,6 +284,8 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   command's end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own:
   it runs in the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run
   host per box, nor read its use on the host (§4).
+- **Its diagnostics' disk use** (§1): the bytes of a box's diagnostics file are its own use of the node's disk, which
+  no usage the image class reports counts yet (`Usage` has no disk use).
 
 ## 9. What would falsify it
 

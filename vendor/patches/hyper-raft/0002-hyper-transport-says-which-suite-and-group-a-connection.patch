@@ -2,10 +2,10 @@ Subject: hyper-transport says which suite and group a connection negotiated
 Why: Every link of the joint kiln, Hex and Shards plan takes TLS13_AES_256_GCM_SHA384 alone, and a test at each end of a connection asserts the suite it negotiated (Ada, 2026-11-11: "all such communications should be AESGCM256 bidirectional encrypted"); hyper-transport holds each connection's TLS session and gave no way to read it. Endpoint::negotiated reads it from hyper-quic's handshake data, as kiln's reach links read theirs from rustls.
 
 diff --git a/crates/hyper-transport/src/endpoint.rs b/crates/hyper-transport/src/endpoint.rs
-index 02865bb3a70485fbf765830109fce73cf016651d..2cab7925d53964cb99f03b8ce63261ecce9e059c 100644
+index 0b3d6d8507b01a352e2fe19f93ff8c46f292a148..9760487f2c1222be65990fa569b66b57a2bd6466 100644
 --- a/crates/hyper-transport/src/endpoint.rs
 +++ b/crates/hyper-transport/src/endpoint.rs
-@@ -1768,6 +1768,29 @@ impl<C: Classes, B: Budget<C::Class>, D: Directory<Role = C::Role>> Endpoint<C,
+@@ -1787,6 +1787,29 @@ impl<C: Classes, B: Budget<C::Class>, D: Directory<Role = C::Role>> Endpoint<C,
          Ok(conn.epoch)
      }
  
