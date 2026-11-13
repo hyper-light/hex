@@ -1004,7 +1004,7 @@ impl Driver {
     }
 
     /// Opens the machine's capacity view in `dir` (joint plan step 13, `docs/design/capacity-view.md`),
-    /// serving `holders` holders, each bounded as the node's own records are. The node admits nothing of
+    /// serving `holders` holders, each holding as many as one sync lists (CV8). The node admits nothing of
     /// its own until its next facts refresh gives the view its room: the reservations the view recovered
     /// come off the node's room first.
     pub fn open_view(&self, dir: &Path, holders: usize) -> Result<(), Error> {
@@ -1017,7 +1017,7 @@ impl Driver {
             }
             .into());
         }
-        let opened = view::View::open(dir, holders, state.node.budget().ran);
+        let opened = view::View::open(dir, holders);
         let mut opened = finish(&mut state, opened, false)?;
         match state.facts.as_ref() {
             Some(facts) => {

@@ -225,7 +225,7 @@ view, so the next decision is made on the room there is (Omega §3.4: resync, th
 | Bound | Value | Derivation | Overflow |
 |---|---|---|---|
 | Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` |
-| Reservations per holder | `Budget::reservations` | the host's own record bound: what its records directory is sized to hold (the shell's, checkpoint 2) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
+| Reservations per holder | `Budget::reservations` | the most one sync lists (`hex_core::capacity::most_held`: the wire's message bound over the widest reservation), so every holder's sync fits one message (CV9); the keeper's records folder is sized to it, whatever runtime classes the host runs of its own (a Mac that places none still keeps a holder's) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
 | A holder's name | `Budget::name_bytes` | the host's wire message bound (`hex_core::wire::MAX_MESSAGE` on Hex's shell), so a hello always fits one message | `Closed { Invalid }` |
 | Hints owed | one per holder | coalesced: the newest view replaces the unsent one | none: a flag |
 
@@ -245,7 +245,7 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   away (CV5); a connection that breaks the framing or says a message that isn't one is reset as breaking
   the protocol.
 - **A sync fits one message**: the keeper holds each holder to the most reservations one sync lists at
-  their widest (`hex_core::capacity::most_held`), beside the node's own record bound (CV8).
+  their widest (`hex_core::capacity::most_held`), its bound (CV8).
 - **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
   a link within the endpoint's connection bound, to the holders its host authorizes alone, each by the name its
   certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it delivers each hint to the
@@ -492,6 +492,4 @@ window, which would under-count Hex here.
 - A holder's GPU reservations need device grants by identity (CV3).
 - The lane's log events (`hex.capacity event=refused`, `forgotten`, `lane_ended`, `hint_failed`) are to be agreed
   with kiln's Observe owner (CLAUDE.md §10).
-- A scheduler with no runtime class keeps no holder reservation: CV8 bounds a holder's by the node's own record
-  bound, which such a node derives as none.
 - kiln's runner implements its side (the section above); until it does, the lane serves no holder in production.

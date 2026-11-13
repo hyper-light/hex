@@ -16,7 +16,6 @@ use super::View;
 use crate::placement::{Driver, Notice, Payload, Runtimes, Step};
 
 const HOLDERS: usize = 2;
-const RAN: usize = 8;
 
 fn refusal(stop: Stop) -> Refusal {
     Refusal::Broken(format!("{stop:?}"))
@@ -41,7 +40,7 @@ struct NodeHost {
 impl NodeHost {
     fn new() -> Result<Self, Refusal> {
         let dir = tempfile::tempdir().map_err(|e| Refusal::Broken(e.to_string()))?;
-        let mut view = View::open(dir.path(), HOLDERS, RAN).map_err(refusal)?;
+        let mut view = View::open(dir.path(), HOLDERS).map_err(refusal)?;
         view.set_room(conformance::ROOM);
         Ok(Self {
             dir,
@@ -83,7 +82,7 @@ impl Host for NodeHost {
     }
 
     fn restart(&mut self) -> Result<(), Refusal> {
-        self.view = View::open(self.dir.path(), HOLDERS, RAN).map_err(refusal)?;
+        self.view = View::open(self.dir.path(), HOLDERS).map_err(refusal)?;
         self.view.set_room(self.room);
         Ok(())
     }

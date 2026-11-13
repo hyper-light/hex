@@ -75,10 +75,10 @@ pub(super) struct View {
 
 impl View {
     /// Opens the keeper's records in `dir`, its bounds derived from the node's (CV8): `holders`, the
-    /// holders the node authorizes; each holding at most as many as the node's records keep of its own
-    /// boxes (`ran`) and as one sync message lists (`hex_core::capacity::most_held`), so every holder's sync
-    /// fits its lane; a name at most a record's bytes less its epoch field.
-    pub(super) fn open(dir: &Path, holders: usize, ran: usize) -> Result<Self, Stop> {
+    /// holders the node authorizes; each holding at most as many as one sync message lists
+    /// (`hex_core::capacity::most_held`), so every holder's sync fits its lane, whatever runtime classes the node
+    /// has of its own; a name at most a record's bytes less its epoch field.
+    pub(super) fn open(dir: &Path, holders: usize) -> Result<Self, Stop> {
         let full = |what| Stop::Full {
             what,
             bound: usize::MAX,
@@ -86,9 +86,8 @@ impl View {
         let name_bytes = MAX_BYTES
             .checked_sub(EPOCH_FIELD)
             .ok_or_else(|| full("a capacity holder's name"))?;
-        let synced = hex_core::capacity::most_held()
+        let reservations = hex_core::capacity::most_held()
             .map_err(|e| Stop::Damaged(format!("a capacity sync's bound: {e}")))?;
-        let reservations = ran.min(synced);
         let budget = capacity::Budget {
             holders,
             reservations,
