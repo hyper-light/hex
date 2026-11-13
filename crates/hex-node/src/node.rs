@@ -2449,13 +2449,18 @@ fn outsiders(cg: &BoxCgroup, init: i32, start_ticks: Option<u64>) -> bool {
 /// box's. The listing ends at the wait learned from the listings before it, for as many entries as it has
 /// listed ([`LISTING`]), refused past it by type.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
+    ids_with(dir, prefix, &LISTING)
+}
+
+/// [`ids_in`], the listing's wait `learned`.
+fn ids_with(dir: &Path, prefix: &str, learned: &Patience) -> Result<BTreeSet<BoxId>, Refusal> {
     let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let per_entry = LISTING.deadline();
+    let per_entry = learned.deadline();
     let began = Instant::now();
     let mut listed = 0u32;
     let mut ids = BTreeSet::new();
@@ -2465,7 +2470,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             && began.elapsed() > per_entry.saturating_mul(listed)
         {
             // No sample (Karn's point), but the census is told an entry took longer than its bound.
-            LISTING.ran_out(per_entry);
+            learned.ran_out(per_entry);
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
@@ -2488,7 +2493,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
-    LISTING.answered(
+    learned.answered(
         began
             .elapsed()
             .checked_div(listed.max(1))
@@ -2868,6 +2873,22 @@ mod tests {
         let ids = ids_in(dir.path(), "hex-").unwrap();
         assert_eq!(ids.len(), 2, "{ids:?}");
         assert!(LISTING.slowest().is_some());
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it;
+    /// T-T7.1.2): a recovery's listing was refused once it took longer per entry than any listing before it, failing a
+    /// node's start on a slow disk. Do: list a directory holding three boxes' parts under a wait that has learned a
+    /// per-entry W* every entry outruns (1 ns). Expect: all three ids, the listing going on past W* (the listing is
+    /// in process, and its entries are its progress), never refused.
+    #[test]
+    fn original_a_listing_slower_than_any_before_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["hex-a", "hex-b", "hex-c"] {
+            fs::create_dir(dir.path().join(id)).unwrap();
+        }
+        let learned = Patience::seeded("test.node.listing", Duration::from_nanos(1));
+        let ids = ids_with(dir.path(), "hex-", &learned).unwrap();
+        assert_eq!(ids.len(), 3, "{ids:?}");
     }
 
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
