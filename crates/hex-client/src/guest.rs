@@ -132,9 +132,10 @@ pub trait Link: Send + Sync + 'static {
     fn reply_budget(&self) -> Option<Duration> {
         None
     }
-    /// The link's own bound on a connection's setup, its dial and the relay's token, spent once from
-    /// the setup's start where the caller gives no deadline. None: this link's dial has no bound of
-    /// its own (a test's loopback), and the token's read then waits as long as the relay takes.
+    /// The link's own W* for a connection's setup: what each attempt of a dial with no caller deadline
+    /// waits before the dial follows the guest (decision 9), and what a stream offer carries for a
+    /// caller's borrowed CONNECTs (HEX-RT-17). None: this link's dial has no bound of its own (a
+    /// test's loopback).
     fn setup_bound(&self) -> Option<Duration> {
         None
     }
@@ -1187,12 +1188,9 @@ impl<W: Waits> Stream<W> {
         budget: Option<Duration>,
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {
-        // AC-T7.4.1: with no caller deadline the link's own setup bound bounds the dial and the relay's
-        // token together, so a guest that takes the connection and never sends it can't hold the caller.
-        let deadline = match deadline {
-            Some(deadline) => Some(deadline),
-            None => ReplyDeadline::link(link.setup_bound())?,
-        };
+        // Decision 9 (AC-T7.4.1): a caller's deadline bounds the dial and the relay's token together. With
+        // none, the dial follows the guest past its link's bound (`Link::dial_before`), and the token is read
+        // as long as the link's transport takes, refused at the connection's end, never at a bound.
         if let Some(deadline) = deadline {
             deadline.remaining("dialing the guest control connection")?;
         }
