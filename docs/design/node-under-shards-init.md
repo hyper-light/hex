@@ -1,9 +1,10 @@
 # Decision (2026-11-13): Hex's node under shards-init, with Hex's own PID 1 kept
 
 Joint plan step 39 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d` version 12, "Hex's node under shards-init, with
-Hex's own PID 1 kept"), AC-T7.4.1. Status: **decided**. Hex's init under shards-init is to be built first (§2, §3).
-The host's boot through shards-init stops at its channel: Shards' step 11 has no lane to a nested workload's socket,
-so the node refuses that form by type until it does (§5). The real-VM runs and the measurements are ROOT's (§9).
+Hex's own PID 1 kept"), AC-T7.4.1. Status: **decided; Hex's side built**. Built: init under shards-init (§2, §3;
+hex-cli `guest.rs`'s `Host` and `duties`), and the node image and its build (§4). The host's boot through
+shards-init stops at its channel: Shards' step 11 has no lane to a nested workload's socket, so the node refuses that
+form by type until it does (§5, `Awaits(NestedChannel)`). The real-VM runs and the measurements are ROOT's (§9).
 
 The person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work with basically anything non-Shards.
 We are to have init work *with* that." So Hex's PID-1 path (§8) is permanent, and this step adds a second host for the
