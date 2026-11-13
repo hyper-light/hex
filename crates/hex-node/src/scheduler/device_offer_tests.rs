@@ -99,6 +99,7 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     }
 }
 

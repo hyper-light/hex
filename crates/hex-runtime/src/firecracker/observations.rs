@@ -320,6 +320,7 @@ mod tests {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
         capacity

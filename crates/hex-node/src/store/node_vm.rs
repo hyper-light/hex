@@ -81,6 +81,11 @@ impl Store {
         }
     }
 
+    /// Every node VM's record it keeps, in its runs' order. Original (red): none.
+    pub(crate) fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        Ok(Vec::new())
+    }
+
     /// A run for a node VM about to be booked: 16 bytes from the OS's random numbers, which no row it keeps names (a
     /// run met twice is refused, never drawn again: 2^-128 apart).
     pub(crate) fn mint_node_run(&self) -> Result<NodeRun, Refusal> {

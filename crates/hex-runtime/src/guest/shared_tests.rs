@@ -331,6 +331,7 @@ impl Books for Owner {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         })
     }
     fn with_transaction(
@@ -1021,6 +1022,7 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
         ],
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     native.check().unwrap();
     assert_eq!(owner.capacity_calls.load(Ordering::SeqCst), 0);
@@ -1332,6 +1334,7 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         capacity.free.mem_bytes = free;
         capacity

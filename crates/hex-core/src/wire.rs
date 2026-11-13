@@ -1261,6 +1261,8 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 })?,
                 // Last (joint plan step 14).
                 learned: r.option(learned)?,
+                // Original (red, joint plan step 39): no node VM's receipt crosses the wire.
+                node_vms: Vec::new(),
             };
             check_capacity(&capacity)?;
             Ok(capacity)

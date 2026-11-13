@@ -6,7 +6,8 @@
 
 use super::*;
 use hex_api::{
-    Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, StartedFrom, User,
+    Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    Program, Rootfs, StartedFrom, User,
 };
 use proptest::prelude::*;
 
@@ -56,6 +57,7 @@ fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
         devices,
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     }
 }
 
@@ -486,6 +488,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         },
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);
@@ -4668,6 +4671,61 @@ fn a_node_vms_learned_holding_and_end_cross_the_wire() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         offered
     );
+}
+
+fn node_vm_receipt(run: u8, phase: NodeVmPhase) -> NodeVmReceipt {
+    NodeVmReceipt {
+        run: hex_api::NodeRun::from_bytes([run; 16]),
+        booking: learned_resources(2_000, 4),
+        phase,
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
+/// answer, its record the one source): the node VMs a node runs for itself cross the wire on its capacity answer, last.
+/// Do: encode a capacity naming one node VM in each phase and read it back; read its JSON without them; check one naming
+/// a run twice; read one whose receipts' count says one more than a node's boxes, and one whose last phase is past the
+/// phases. Expect the first back exactly, the JSON read as naming none, and the other three refused.
+#[test]
+fn w39_a_capacitys_node_vms_cross_the_wire_last() {
+    let mut capacity = learned_capacity();
+    capacity.node_vms = vec![
+        node_vm_receipt(1, NodeVmPhase::Booting),
+        node_vm_receipt(2, NodeVmPhase::Ready),
+        node_vm_receipt(3, NodeVmPhase::Ended),
+    ];
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(39, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let mut json = serde_json::to_value(&capacity).unwrap();
+    json.as_object_mut().unwrap().remove("node_vms");
+    assert!(
+        serde_json::from_value::<Capacity>(json)
+            .unwrap()
+            .node_vms
+            .is_empty()
+    );
+    let mut twice = capacity.try_clone().unwrap();
+    twice.node_vms[1].run = twice.node_vms[0].run;
+    assert!(twice.check().is_err());
+    // The receipts' count, then each receipt: its run, its booking and its phase, the last of which ends it.
+    let at = bytes.len() - (size_of::<u32>() + 3 * (16 + 3 * size_of::<u64>() + 1));
+    let mut past = bytes.clone();
+    let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
+    past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
+    assert!(matches!(
+        read_answer(&received(&past, 0), MAX_MESSAGE),
+        Err(Fault::Value { .. })
+    ));
+    let mut unknown = bytes;
+    *unknown.last_mut().unwrap() = 3;
+    assert!(matches!(
+        read_answer(&received(&unknown, 0), MAX_MESSAGE),
+        Err(Fault::Value { .. })
+    ));
 }
 
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with

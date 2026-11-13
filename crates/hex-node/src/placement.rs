@@ -1054,6 +1054,13 @@ impl Driver {
     // The view's calls and rebook change only state under the core lock, never a runtime's: they don't take the
     // operation's, which refuses a call while another holds it, so a holder's word never waits on a placement.
 
+    /// Books each node VM in `booked` at its receipt, and releases each node VM it booked that `booked` no longer
+    /// names (joint plan step 39): what its node's answers say hold room. Original (red): it books none.
+    pub fn book_nodes(&self, booked: &BTreeMap<hex_api::NodeRun, Resources>) -> Result<(), Error> {
+        let _ = booked;
+        Ok(())
+    }
+
     /// What each microVM this node runs holds now, as the learned charge has it (joint plan step 14, C8):
     /// its learned booking, and the memory and disk it holds past it. The machine's capacity view counts
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,

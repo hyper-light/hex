@@ -1,9 +1,14 @@
 //! What the scheduler takes of its node's charge learner (joint plan step 14, AC-T7.4.1;
 //! `docs/design/learned-charge.md`).
 
+use std::sync::Arc;
+
 use super::*;
-use hex_api::{LearnedPrior, LearnedUse, RuntimeCost};
+use crate::placement::{Driver, Runtimes};
+use hex_api::{LearnedPrior, LearnedUse, NodeVmPhase, NodeVmReceipt, Runtime, RuntimeCost};
+use hex_sim::index::Pick;
 use hex_sim::model::{NodeId, Resources};
+use hex_sim::peer::Budget;
 
 const GIB: u64 = 1 << 30;
 
@@ -57,6 +62,7 @@ fn capacity(learned: Option<Learned>) -> hex_api::Capacity {
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned,
+        node_vms: Vec::new(),
     }
 }
 
@@ -270,4 +276,77 @@ fn w14_a_prior_books_a_receipt_of_its_own_ceiling_alone() {
     let at = |receipt| hex_sim::model::booked_at(Some(receipt), prior).unwrap();
     assert_eq!(at(least).booking(), booking);
     assert_eq!(at(largest).booking(), largest.resources, "booked whole");
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
+/// answer, its record the one source): do refresh a node's ledger from its answers, the node VM they name Booting, then
+/// Ready twice, then Ended; then Ready again, then named by no answer. Expect its booking held while it is Booting or
+/// Ready, once however many refreshes name it, and released once it is Ended and once no answer names it.
+#[test]
+fn w39_a_node_vms_receipt_is_booked_from_its_answer_while_it_runs_and_released_at_its_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = node().capacity;
+    let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());
+    let driver = Driver::boot(
+        NodeId(0),
+        &[NodeSpec::new(NodeId(0), room)],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+    )
+    .unwrap();
+    driver.refresh_node(NodeSpec::new(NodeId(0), room)).unwrap();
+    driver.open_view(&dir.path().join("capacity"), 1).unwrap();
+    let run = hex_api::NodeRun::from_bytes([39; 16]);
+    let booking = CapacityResources {
+        cpu_milli: 4_000,
+        mem_bytes: 8 * GIB,
+        disk_bytes: 0,
+    };
+    let refresh = |phase: Option<NodeVmPhase>| {
+        let mut answer = capacity(None);
+        answer.node_vms = phase
+            .map(|phase| NodeVmReceipt {
+                run,
+                booking,
+                phase,
+            })
+            .into_iter()
+            .collect();
+        driver
+            .book_nodes(&node_vms(&[(Class::Oci, Some(answer))]).unwrap())
+            .unwrap();
+        let held = driver.view().unwrap().held;
+        (held.cpu_milli, held.mem_bytes)
+    };
+    let booked = (4_000, 8 * GIB);
+    assert_eq!(refresh(Some(NodeVmPhase::Booting)), booked);
+    assert_eq!(refresh(Some(NodeVmPhase::Ready)), booked);
+    assert_eq!(
+        refresh(Some(NodeVmPhase::Ready)),
+        booked,
+        "booked once, however many refreshes name it"
+    );
+    assert_eq!(refresh(Some(NodeVmPhase::Ended)), (0, 0));
+    assert_eq!(refresh(Some(NodeVmPhase::Ready)), booked);
+    assert_eq!(refresh(None), (0, 0), "released once no answer names it");
+}
+
+/// Joint plan step 39: one node's records name each of its node VMs once. Do: take two classes' answers naming the same
+/// node VM. Expect them refused, never booked twice.
+#[test]
+fn w39_answers_naming_a_node_vm_twice_are_refused() {
+    let mut answer = capacity(None);
+    answer.node_vms = vec![NodeVmReceipt {
+        run: hex_api::NodeRun::from_bytes([39; 16]),
+        booking: CapacityResources::default(),
+        phase: NodeVmPhase::Ready,
+    }];
+    let twice = [
+        (Class::Oci, Some(answer.try_clone().unwrap())),
+        (Class::Shards, Some(answer)),
+    ];
+    assert!(matches!(node_vms(&twice), Err(Refusal::Invalid { .. })));
 }

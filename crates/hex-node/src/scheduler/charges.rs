@@ -104,5 +104,14 @@ pub(super) fn holds(
     Ok(out)
 }
 
+/// The node VMs `reports` name that hold room (joint plan step 39), by their runs, each at what its receipt books.
+/// Original (red): none.
+pub(super) fn node_vms(
+    reports: &[(Class, Option<hex_api::Capacity>)],
+) -> Result<BTreeMap<hex_api::NodeRun, hex_sim::model::Resources>, Refusal> {
+    let _ = reports;
+    Ok(BTreeMap::new())
+}
+
 #[cfg(test)]
 mod tests;

@@ -6,22 +6,10 @@
 
 use std::path::PathBuf;
 
-use hex_api::{Allocation, Exit, NodeRun, Refusal};
+use hex_api::{Allocation, Exit, NodeRun, NodeVmPhase, Refusal};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_RECORD_BYTES, RECORD_VERSION};
-
-/// Where a node VM's run stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NodeVmPhase {
-    /// Its run is asked of Shards' run host, its receipt booked: its init hasn't said it is ready.
-    Booting,
-    /// Its init said it is ready, and its node reaches it.
-    Ready,
-    /// Its run ended, its exit kept.
-    Ended,
-}
 
 /// What the node knows of one node VM it runs for itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

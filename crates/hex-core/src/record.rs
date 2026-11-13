@@ -14,7 +14,7 @@ use crate::cgroup::Baseline;
 
 mod node_vm;
 mod pool;
-pub use node_vm::{NodeVmPhase, NodeVmRecord};
+pub use node_vm::NodeVmRecord;
 pub use pool::{NativeRecord, NativeStage, OwnerKey, OwnerRef, PoolRecord};
 
 /// The record format's version; a record of another is refused, never guessed at.

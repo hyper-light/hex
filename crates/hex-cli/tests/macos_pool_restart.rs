@@ -79,6 +79,7 @@ impl Runtime for GuestNode {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         }))
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

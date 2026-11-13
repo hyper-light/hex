@@ -349,8 +349,8 @@ impl RouteKey {
 /// A node VM's run (joint plan step 39): a VM the node runs for itself, its `oci` class's guest under shards-init, never
 /// a box. Minted by the node's store as the VM is booked, it names the VM's record and its receipt among the node's
 /// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one, so no
-/// box API can name the node's VM; the wire carries one only as the holder a node's learned capacity names
-/// ([`LearnedHolder`]), which no call reads back as a box.
+/// box API can name the node's VM; the wire carries one only in a node's capacity answer, as the holder its learned
+/// capacity names ([`LearnedHolder`]) and as a node VM's receipt ([`NodeVmReceipt`]), which no call reads back as a box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeRun([u8; 16]);
 
@@ -363,6 +363,30 @@ impl NodeRun {
     pub const fn bytes(&self) -> &[u8; 16] {
         &self.0
     }
+}
+
+/// Where a node VM's run stands (joint plan step 39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeVmPhase {
+    /// Its run is asked of Shards' run host, its receipt booked: its init hasn't said it is ready.
+    Booting,
+    /// Its init said it is ready, and its node reaches it.
+    Ready,
+    /// Its run ended, its exit kept.
+    Ended,
+}
+
+/// A node VM as its node's record keeps it (joint plan step 39; ROOT, 2026-11-13: its receipt reaches the scheduler on
+/// its node's capacity answer, the record its one source): its run, what its receipt books of the node's room
+/// ([`Allocation::booking`]), and where its run stands. The scheduler books it in its node's ledger while it is Booting
+/// or Ready, and releases it once it is Ended or no answer names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeVmReceipt {
+    pub run: NodeRun,
+    pub booking: CapacityResources,
+    pub phase: NodeVmPhase,
 }
 
 /// Pool configuration identity and the Store-generated native incarnation; neither PID nor path
@@ -1363,6 +1387,15 @@ pub struct Capacity {
     /// None from a node that learns none: no window on its platform, or an older build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<Learned>,
+    /// The node VMs its node runs for itself, each as its record keeps it (joint plan step 39): carried on the `oci`
+    /// answer of a node whose guest is a node VM, each run named once. Added after `learned`, so absent means none
+    /// (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_node_vms"
+    )]
+    pub node_vms: Vec<NodeVmReceipt>,
 }
 
 impl Capacity {
@@ -1396,6 +1429,18 @@ impl Capacity {
             deserializer,
             MAX_RUNTIME_ROUTES,
             "runtime backing count exceeds the route mask",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: a node's most boxes, which bound the runs its image class holds, node VMs among
+    /// them.
+    pub fn deserialize_node_vms<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<NodeVmReceipt>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "node VM receipts exceed a node's boxes",
         )
     }
 
@@ -1464,6 +1509,7 @@ impl Capacity {
             backings,
             unavailable,
             learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
+            node_vms: copy_capacity_values(&self.node_vms, "runtime capacity node VMs")?,
         })
     }
 
@@ -2784,6 +2830,7 @@ mod route_tests {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         }
     }
     /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own

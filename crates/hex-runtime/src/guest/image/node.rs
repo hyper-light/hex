@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hex_api::{Allocation, Exit, HostUse, NodeRun, Refusal};
+use hex_api::{Allocation, Exit, HostUse, NodeRun, NodeVmPhase, Refusal};
 use hex_core::patience::Patience;
-use hex_core::record::{NodeVmPhase, NodeVmRecord, RECORD_VERSION};
+use hex_core::record::{NodeVmRecord, RECORD_VERSION};
 use shards_api::image::{
     BootStop, ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep,
     Narrowing, Ready, SocketGrant, StatsScope,

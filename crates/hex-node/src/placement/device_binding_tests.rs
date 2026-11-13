@@ -150,6 +150,7 @@ impl Runtime for DeviceRuntime {
             devices,
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         report.check()?;
         Ok(Some(report))

@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::devices::{Books, Records, Transaction};
-use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, Runtime};
-use hex_core::record::{NodeVmPhase, NodeVmRecord};
+use hex_api::{
+    Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, NodeVmPhase, Runtime,
+};
+use hex_core::record::NodeVmRecord;
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
     Receiving, StartedFrom, VcpuTime,
@@ -3361,9 +3363,10 @@ fn serve_lanes(
 }
 
 /// The node's relay in the guest under shards-init, as far as its first connection needs it: its control socket in
-/// `dir`, one connection's token, then its node's hello answered; held until the client goes. Says whether it greeted.
+/// `dir`, one connection's token, then its node's hello answered, and each capacity ask after it with `pool`, its
+/// guest's own, where one is given; held until the client goes. Says whether it greeted.
 #[cfg(unix)]
-fn greeting_relay(dir: &std::path::Path) -> std::thread::JoinHandle<bool> {
+fn greeting_relay(dir: &std::path::Path, pool: Option<Capacity>) -> std::thread::JoinHandle<bool> {
     use std::io::{Read, Write};
     let listener = std::os::unix::net::UnixListener::bind(
         dir.join(hex_core::stream::socket_name(hex_core::stream::CONTROL_PORT).unwrap()),
@@ -3374,34 +3377,46 @@ fn greeting_relay(dir: &std::path::Path) -> std::thread::JoinHandle<bool> {
         conn.write_all(&7u64.to_le_bytes()).unwrap();
         let mut d = hex_core::stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
         let mut byte = [0u8; 1];
-        let message = loop {
-            conn.read_exact(&mut byte).unwrap();
-            if let (_, Some(m)) = d.take(&byte).unwrap() {
-                break m;
-            }
-        };
-        let (h, _) =
-            hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
-        let hello = hex_core::wire::Answer::Hello(hex_core::wire::Hello {
-            build: hex_core::wire::build(),
-            classes: vec![hex_api::Class::Oci],
-            limits: hex_core::wire::Limits {
-                connections: 1,
-                message_bytes: hex_core::wire::MAX_MESSAGE,
-                in_flight: 1,
-                programs: 1,
-            },
-            budgets: hex_core::wire::Budgets {
-                in_flight: 1,
-                programs: 1,
-            },
-        });
-        let bytes = hex_core::wire::answer(h.id, &hello, hex_core::wire::MAX_MESSAGE).unwrap();
-        conn.write_all(&hex_core::stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
-            .unwrap();
-        // Held until the client goes, as a relay's connection is.
-        let _ = conn.read(&mut byte);
-        true
+        let mut greeted = false;
+        loop {
+            let message = loop {
+                // Held until the client goes, as a relay's connection is.
+                if !matches!(conn.read(&mut byte), Ok(1)) {
+                    return greeted;
+                }
+                if let (_, Some(m)) = d.take(&byte).unwrap() {
+                    break m;
+                }
+            };
+            let (h, request) =
+                hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+            let answer = match (request, &pool) {
+                (hex_core::wire::Request::Hello { .. }, _) => {
+                    greeted = true;
+                    hex_core::wire::Answer::Hello(hex_core::wire::Hello {
+                        build: hex_core::wire::build(),
+                        classes: vec![hex_api::Class::Oci],
+                        limits: hex_core::wire::Limits {
+                            connections: 1,
+                            message_bytes: hex_core::wire::MAX_MESSAGE,
+                            in_flight: 1,
+                            programs: 1,
+                        },
+                        budgets: hex_core::wire::Budgets {
+                            in_flight: 1,
+                            programs: 1,
+                        },
+                    })
+                }
+                (hex_core::wire::Request::Call(hex_core::wire::Call::Capacity(_)), Some(pool)) => {
+                    hex_core::wire::Answer::Capacity(Some(pool.try_clone().unwrap()))
+                }
+                (other, _) => panic!("the relay was asked {other:?}"),
+            };
+            let bytes = hex_core::wire::answer(h.id, &answer, hex_core::wire::MAX_MESSAGE).unwrap();
+            conn.write_all(&hex_core::stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+        }
     })
 }
 
@@ -3423,6 +3438,35 @@ fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
     }
 }
 
+/// A node's guest runtime of the image form, its node VM booted through `images`, its records `owner`'s, its node
+/// having fitted it six lanes: with the configuration it was made from.
+fn image_form(
+    images: &Arc<ModelImages>,
+    owner: &Arc<Owner>,
+) -> (GuestRuntime, crate::guest::GuestConfig) {
+    let config = crate::guest::GuestConfig {
+        boot: crate::guest::Boot::Image(hex_api::sim::SIM_IMAGE.to_owned()),
+        ..super::super::tests::config()
+    };
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        config.clone(),
+    )
+    .with_images(
+        Ok(Arc::clone(images) as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    )
+    .with_runtime_cost(fixed_cost(&config))
+    .unwrap();
+    runtime.set_lanes(6).unwrap();
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    (runtime, config)
+}
+
 /// Joint plan step 39 (AC-T7.4.1; docs/design/node-under-shards-init.md §4, §5; ROOT, 2026-11-13: one code path): do
 /// boot a node's guest under shards-init. Expect it booted through the image class as a node VM, its run's endpoint
 /// taking this runtime's key and admitting the lanes its node fitted; its record a node VM's, Ready, charged at the
@@ -3435,28 +3479,9 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
     let images = ModelImages::new();
     let sockets = super::super::tests::socket_fixture();
     *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
-    let relay = greeting_relay(sockets.path());
-    let config = crate::guest::GuestConfig {
-        boot: crate::guest::Boot::Image(hex_api::sim::SIM_IMAGE.to_owned()),
-        ..super::super::tests::config()
-    };
+    let relay = greeting_relay(sockets.path(), None);
     let owner = Arc::new(Owner::new());
-    let runtime = GuestRuntime::new(
-        Arc::new(shards_api::sim::SimGuests::new(|_| {
-            shards_api::End::PowerOff
-        })),
-        config.clone(),
-    )
-    .with_images(
-        Ok(Arc::clone(&images) as Arc<dyn Images>),
-        waits(),
-        owner.diagnostics(),
-    )
-    .with_runtime_cost(fixed_cost(&config))
-    .unwrap();
-    runtime.set_lanes(6).unwrap();
-    let books: Arc<dyn Books> = owner.clone();
-    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let (runtime, config) = image_form(&images, &owner);
     runtime.boot().unwrap();
     let asked = images.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
@@ -3509,28 +3534,9 @@ fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stoppe
     let images = ModelImages::new();
     let sockets = super::super::tests::socket_fixture();
     *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
-    let relay = greeting_relay(sockets.path());
-    let config = crate::guest::GuestConfig {
-        boot: crate::guest::Boot::Image(hex_api::sim::SIM_IMAGE.to_owned()),
-        ..super::super::tests::config()
-    };
+    let relay = greeting_relay(sockets.path(), None);
     let owner = Arc::new(Owner::new());
-    let runtime = GuestRuntime::new(
-        Arc::new(shards_api::sim::SimGuests::new(|_| {
-            shards_api::End::PowerOff
-        })),
-        config.clone(),
-    )
-    .with_images(
-        Ok(Arc::clone(&images) as Arc<dyn Images>),
-        waits(),
-        owner.diagnostics(),
-    )
-    .with_runtime_cost(fixed_cost(&config))
-    .unwrap();
-    runtime.set_lanes(6).unwrap();
-    let books: Arc<dyn Books> = owner.clone();
-    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let (runtime, _) = image_form(&images, &owner);
     runtime.join_loop(Arc::new(FullLoop)).unwrap();
     let refused = runtime.boot().unwrap_err();
     assert!(
@@ -3550,6 +3556,69 @@ fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stoppe
         (record.phase, record.exit.is_some()),
         (NodeVmPhase::Ended, true),
         "{record:?}"
+    );
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// The guest node's own pool as its relay answers it: two CPUs and 4 GiB, all of them free.
+fn guest_pool() -> Capacity {
+    let room = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 4 << 30,
+        disk_bytes: 0,
+    };
+    Capacity {
+        id: "guest-node".to_owned(),
+        total: room,
+        free: room,
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
+/// answer, its record the one source): do ask the `oci` class's capacity of a node whose guest is a node VM under
+/// shards-init. Expect its guest's pool, fenced by its node VM's run, carrying that node VM's receipt as its record
+/// keeps it: its run, what its allocation books, Ready.
+#[cfg(unix)]
+#[test]
+fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    let record = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let run: String = record
+        .run
+        .bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(capacity.id, format!("node-vm:{run}"));
+    assert_eq!(
+        capacity.node_vms,
+        vec![hex_api::NodeVmReceipt {
+            run: record.run,
+            booking: record.allocation.booking(),
+            phase: NodeVmPhase::Ready,
+        }]
     );
     drop(runtime);
     assert!(relay.join().unwrap());

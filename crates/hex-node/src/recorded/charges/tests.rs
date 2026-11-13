@@ -925,6 +925,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     learner
         .answer(Class::Shards, &mut capacity, &records)

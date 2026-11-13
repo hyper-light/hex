@@ -138,6 +138,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     hex_runtime::devices::native_routes(&mut native, hex_api::Class::Process, image).unwrap();
     let cost = RuntimeCost {
@@ -190,6 +191,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         }],
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     observer_report.check().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
@@ -380,6 +382,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         backings: Vec::new(),
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     hex_runtime::devices::native_routes(&mut native, hex_api::Class::Process, image).unwrap();
     let cost = RuntimeCost {
@@ -432,6 +435,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         }],
         unavailable: Vec::new(),
         learned: None,
+        node_vms: Vec::new(),
     };
     observer_report.check().unwrap();
     let failed = Arc::new(AtomicBool::new(false));

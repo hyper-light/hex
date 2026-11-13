@@ -501,6 +501,7 @@ mod tests {
             backings,
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         }
     }
     fn facts() -> Facts {
