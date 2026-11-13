@@ -468,6 +468,8 @@ struct ModelImages {
     /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
     /// boot whose thread failed would.
     abandon: AtomicBool,
+    /// The boots its stop ended (D231's `BootStop`), each `Ended(Stopped)`.
+    stopped: AtomicUsize,
 }
 
 impl ModelImages {
@@ -484,6 +486,7 @@ impl ModelImages {
             named: Mutex::new(Vec::new()),
             started_from: Mutex::new(StartedFrom::Booted),
             abandon: AtomicBool::new(false),
+            stopped: AtomicUsize::new(0),
         })
     }
 
@@ -568,6 +571,13 @@ impl ModelImages {
         *self.gate.lock().unwrap() = gate;
         self.opened.notify_all();
     }
+
+    /// Wakes every boot held at the gate, so one whose stop has come sees it (D231's stop kills the run host it holds,
+    /// which the model has none of).
+    fn poke(&self) {
+        drop(self.gate.lock().unwrap());
+        self.opened.notify_all();
+    }
 }
 
 impl Images for ModelImages {
@@ -579,14 +589,29 @@ impl Images for ModelImages {
         spec: &ImageSpec,
         patience: Duration,
     ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+        self.boot_stoppable(spec, patience, &shards_api::image::BootStop::new())
+    }
+    /// D231's boot ended by its stop: one held before its run host's start ends `Ended(Stopped)` once stopped, as the
+    /// run host Shards kills ends it, the model told it as the test wakes it ([`ModelImages::poke`]); a stop that came
+    /// first boots nothing.
+    fn boot_stoppable(
+        &self,
+        spec: &ImageSpec,
+        patience: Duration,
+        stop: &shards_api::image::BootStop,
+    ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
         self.patience.lock().unwrap().push(patience);
         *self.run.lessor.lock().unwrap() = spec.lessor.clone();
         let gate = self.gate.lock().unwrap();
         let gate = self
             .opened
-            .wait_while(gate, |gate| *gate == Gate::Host)
+            .wait_while(gate, |gate| *gate == Gate::Host && !stop.is_stopped())
             .unwrap();
+        if stop.is_stopped() {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+            return Err(ImageRefusal::Ended(RunEnd::Stopped));
+        }
         let (gate, _) = self
             .opened
             .wait_timeout_while(gate, patience, |gate| *gate == Gate::Run)
@@ -1805,6 +1830,62 @@ fn w12_a_delete_over_a_boot_follows_it_and_answers_no_use_where_its_run_never_st
         Runtime::delete_with_host_use(&runtime.images, &id),
         Err(Refusal::NoSuchBox(_))
     ));
+}
+
+/// The delete over a boot held forever under way: this test's fact alone.
+static DELETE_STOPS_BOOT: Patience =
+    Patience::measuring("test.hex_runtime.image_delete_stops_boot");
+
+/// Kiln's choice (b), the real thing (ROOT, 2026-11-13; Shards' D231 `BootStop` at ed1136305): a delete of a box still
+/// booting stops its boot, its run host killed mid-boot, and follows the boot to its end, `Ended(Stopped)`, never Pending.
+/// Do: start a VM whose boot is held before its run host's start forever, past a 1 ns W*, its start Pending; delete it
+/// with its host use, its own wait past a 1 ns W* too, so it follows the boot once it has asked its stop; then wake
+/// the held boot, and, where no stop came, let it go so the test ends. Expect: the boot ended by its stop, the delete's
+/// answer no use (the run never started), the box gone, one boot.
+#[test]
+fn w12_a_delete_over_a_boot_held_forever_stops_it_and_answers_no_use() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_delete_stops",
+            Duration::from_nanos(1),
+        ),
+        delete_boot: Patience::seeded(
+            "test.hex_runtime.image_delete_boot_stops",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(spec("image-deleted-held-forever", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
+        hex_testkit::waits::until(&DELETE_STOPS_BOOT, "the delete following the boot", || {
+            deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none()
+        })
+        .unwrap();
+        images.poke();
+        if images.stopped.load(Ordering::SeqCst) == 0 && !deleting.is_finished() {
+            // No stop came: let the boot go, so the test ends either way.
+            images.gate(Gate::Open);
+        }
+        deleting.join().unwrap()
+    });
+    assert_eq!(images.stopped.load(Ordering::SeqCst), 1, "{answered:?}");
+    assert_eq!(answered, Ok(None));
+    assert!(record(&owner, &id).is_none());
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
 /// Kiln's choice (b), as above: do start a VM whose boot is held past a 1 ns W*, its start Pending; delete it with its
