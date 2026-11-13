@@ -848,6 +848,104 @@ fn this_hosts_image_boot_is_shards_on_every_host() {
     assert!(record(&owner, &id).is_some());
 }
 
+/// The variable naming the case the guest pair's check runs, in a test process of its own whose environment holds
+/// that case's SHARDS_KERNEL and SHARDS_INIT.
+const GUEST_PAIR_CASE: &str = "HEX_IMAGE_GUEST_PAIR_CASE";
+
+/// A path this host calls absolute (`Path::is_absolute`), as D231's run host asks of SHARDS_KERNEL and SHARDS_INIT.
+fn absolute(name: &str) -> String {
+    if cfg!(windows) {
+        format!("C:\\shards\\{name}")
+    } else {
+        format!("/shards/{name}")
+    }
+}
+
+/// ROOT (2026-11-12), joint plan step 12: D231's run host boots the guest its environment names, which it inherits
+/// from the node: SHARDS_KERNEL and SHARDS_INIT, each taken only as an absolute path, both or neither (Shards
+/// 66113379: api_run.rs `as_run`, one alone refused "SHARDS_KERNEL and SHARDS_INIT go together"). A node whose pair
+/// is broken would have every image VM's start refused. Do start a node's image boot (`host_images`, which `hex node`
+/// calls once as it starts) and create an image VM, each case in a test process of its own whose environment holds
+/// the case's pair. Expect: with neither, or both absolute, created; with one alone, or one the run host would drop
+/// (a relative path), refused before any record, naming both variables.
+#[test]
+fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
+    let Some(case) = std::env::var_os(GUEST_PAIR_CASE) else {
+        for (case, kernel, init) in [
+            ("neither", None, None),
+            (
+                "both",
+                Some(absolute("vmlinux")),
+                Some(absolute("shards-init")),
+            ),
+            ("kernel-alone", Some(absolute("vmlinux")), None),
+            ("init-alone", None, Some(absolute("shards-init"))),
+            (
+                "kernel-relative",
+                Some("vmlinux".to_owned()),
+                Some(absolute("shards-init")),
+            ),
+            (
+                "both-relative",
+                Some("vmlinux".to_owned()),
+                Some("shards-init".to_owned()),
+            ),
+        ] {
+            let mut alone = std::process::Command::new(std::env::current_exe().unwrap());
+            alone
+                .args([
+                    "--exact",
+                    "guest::image::tests::image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither",
+                    "--test-threads=1",
+                ])
+                .env(GUEST_PAIR_CASE, case);
+            for (name, value) in [("SHARDS_KERNEL", kernel), ("SHARDS_INIT", init)] {
+                match value {
+                    Some(value) => alone.env(name, value),
+                    None => alone.env_remove(name),
+                };
+            }
+            let ran = alone.output().unwrap();
+            assert!(
+                ran.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        }
+        return;
+    };
+    let owner = Arc::new(Owner::default());
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        super::super::tests::config(),
+    )
+    .with_images(host_images(), waits());
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let made = runtime
+        .create(spec("image-pair", None))
+        .map(|info| info.state);
+    if matches!(case.to_str(), Some("neither" | "both")) {
+        assert_eq!(made, Ok(BoxState::Created));
+        return;
+    }
+    match made {
+        Err(Refusal::Platform {
+            what: "Shards image VMs",
+            why,
+            ..
+        }) => assert!(
+            why.contains("SHARDS_KERNEL") && why.contains("SHARDS_INIT"),
+            "{case:?}: {why}"
+        ),
+        other => panic!("{case:?}: {other:?}"),
+    }
+    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+}
+
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded
 /// Signal(9) and shown Empty, and its start then NotRunning.
 #[test]
