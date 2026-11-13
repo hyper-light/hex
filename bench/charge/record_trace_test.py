@@ -41,5 +41,96 @@ class StepsTest(unittest.TestCase):
         self.assertEqual(sum(ms * threads for ms, threads, _ in every), 101)
 
 
+class FakeCgroup:
+    """A cgroup v2 tree under a temporary directory: the session's own and its parent, each file as the kernel writes it."""
+
+    def __init__(self, root, cpu_max_on_session=True):
+        self.root = root
+        self.parent = os.path.join(root, "runner.slice")
+        self.session = os.path.join(self.parent, "agent-1.scope")
+        os.makedirs(self.session)
+        self.write(self.parent, "cpu.max", "max 100000\n")
+        if cpu_max_on_session:
+            self.write(self.session, "cpu.max", "max 50000\n")
+        self.set(0, 0, populated=True)
+
+    @staticmethod
+    def write(cgroup, name, text):
+        with open(os.path.join(cgroup, name), "w") as f:
+            f.write(text)
+
+    def set(self, usage_usec, memory, populated):
+        self.write(self.session, "cpu.stat", f"usage_usec {usage_usec}\nuser_usec 0\nsystem_usec 0\n")
+        self.write(self.session, "memory.current", f"{memory}\n")
+        self.write(self.session, "cgroup.events", f"populated {int(populated)}\nfrozen 0\n")
+
+
+class AttachTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def test_w14_the_window_is_the_period_of_the_nearest_cpu_max(self):
+        """Do read the window of a session whose own cpu.max names a 50 ms period, and of one whose cpu.max is absent
+        under a parent naming 100 ms. Expect 50 ms, then 100 ms; and a session no cgroup of whose path has a cpu.max
+        refused, naming it."""
+        own = FakeCgroup(os.path.join(self.dir.name, "a"))
+        self.assertEqual(rt.period_us(own.session, own.root), 50_000)
+        inherited = FakeCgroup(os.path.join(self.dir.name, "b"), cpu_max_on_session=False)
+        self.assertEqual(rt.period_us(inherited.session, inherited.root), 100_000)
+        os.remove(os.path.join(inherited.parent, "cpu.max"))
+        with self.assertRaises(SystemExit) as refused:
+            rt.period_us(inherited.session, inherited.root)
+        self.assertIn(inherited.session, str(refused.exception))
+
+    def test_w14_an_attached_session_is_recorded_until_it_empties(self):
+        """Do attach to a running session whose window is 100 ms, then let three windows pass in which it uses 50, 150
+        and 0 ms of CPU and holds 1, 2 and 2 MiB, after which it empties. Expect the trace's header to name the cgroup
+        and the window, and its steps to be those three windows', from the attach on, then its end."""
+        fake = FakeCgroup(os.path.join(self.dir.name, "c"), cpu_max_on_session=False)
+        fake.set(1_000_000, MIB, populated=True)
+        windows = iter([(1_050_000, MIB, True), (1_200_000, 2 * MIB, True), (1_200_000, 2 * MIB, False)])
+        clock = [0]
+
+        def now_ns():
+            return clock[0]
+
+        def sleep_until(deadline_ns):
+            clock[0] = deadline_ns
+            usage, memory, populated = next(windows)
+            fake.set(usage, memory, populated)
+
+        out = os.path.join(self.dir.name, "trace.txt")
+        rt.attach(out, fake.session, fake.root, now_ns=now_ns, sleep_until=sleep_until)
+        with open(out) as f:
+            text = f.read()
+        self.assertIn(f"attached to the cgroup {fake.session}", text)
+        self.assertIn("# window: 100000 us", text)
+        steps = [tuple(map(int, line.split())) for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(steps, [(50, 1, 1), (50, 0, 1), (50, 2, 2), (50, 1, 2), (100, 0, 2)])
+        self.assertIn("# ended: 300 ms, 200 ms of CPU, the cgroup emptied", text)
+
+    def test_w14_a_cgroup_is_named_as_proc_names_it_or_by_its_directory(self):
+        """Do name a session's cgroup as /proc/<pid>/cgroup and systemd name it (rooted at the cgroup mount, with or
+        without its leading slash), and by its directory under the mount. Expect each the directory under the mount."""
+        root = "/sys/fs/cgroup"
+        scope = "user.slice/user-1000.slice/user@1000.service/app.slice/agent-1.scope"
+        for named in (f"/{scope}", scope, f"{root}/{scope}"):
+            self.assertEqual(rt.cgroup_dir(named, root), f"{root}/{scope}")
+
+    def test_w14_an_empty_or_missing_cgroup_is_refused(self):
+        """Do attach to a session that has emptied, and to a path that is no cgroup. Expect each refused, naming it,
+        and no trace written."""
+        fake = FakeCgroup(os.path.join(self.dir.name, "d"))
+        fake.set(0, 0, populated=False)
+        out = os.path.join(self.dir.name, "none.txt")
+        for path in (fake.session, os.path.join(fake.parent, "gone.scope")):
+            with self.assertRaises(SystemExit) as refused:
+                rt.attach(out, path, fake.root)
+            self.assertIn(path, str(refused.exception))
+            self.assertFalse(os.path.exists(out))
+
+
 if __name__ == "__main__":
     unittest.main()
