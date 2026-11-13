@@ -99,13 +99,18 @@ checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
    (`oci_box.rs`, `oci_reuse.rs`, `node_socket.rs`, `oci_spec_box.rs`, `serve/linux_tests.rs`, `netcheck/tests.rs`)
    and the rest in hex-client, hex-node, hex-runtime and hex-testkit.
 
-A finding beside them, the lead's to weigh: where a learned bound ends a call (a client's call with no caller's
+A finding beside them, the lead's to weigh: where a learned bound ended a call (a client's call with no caller's
 deadline, `ReplyDeadline::combine`: "the learned wait is the call's bound"; a listing, a seed's line, `serve.reads`),
-the call is refused at the slowest answer seen. With no seed and no margin, the `n`-th answer is the slowest yet with
-chance `1 / n` where answers are exchangeable, so a fresh process's second call of a kind is refused whenever its
-answer is slower than the first's: half the time. The cost above, with `p = 0` measured, is least with no bound at
-all: at the learned bound the wait would record its run-out and go on following its party, as `wait_past` already
-does under a caller's deadline, refused only at the party's end, reset or stall.
+the call was refused at the slowest answer seen. With no seed and no margin, the `n`-th answer is the slowest yet with
+chance `1 / n` where answers are exchangeable, so a fresh process's second call of a kind was refused whenever its
+answer was slower than the first's: half the time. The cost above, with `p = 0` measured, is least with no bound at
+all. Since 2026-11-13 (decision 9's (c), the person's ruling) none ends at it: each records its run-out there and goes
+on following its party, as `wait_past` does under a caller's deadline. `combine` gives a call with no caller's deadline
+no budget, and it follows its agent's connection; a listing goes on, in process; `serve.reads` follows its client by
+the messages it takes; and the create seeds' line (`Seeds::claim`) and the exec seeds' (`SeedPool::acquire`) follow the
+seeds freed. Each is refused only at its party's end, a reset, or a whole W* window with no advance. Where that progress
+is no finer than the answer itself (a client taking one waiting part, a create first in line), the stall is judged one
+whole window past the run-out.
 
 The turns (`node.turns`, `store.turns`) do so since 2026-11-13: a hold past the slowest seen is told to the census and
 the wait follows the holder, this process's own thread, to its let-go. Refused there, the store failed HEX-SOCK-6
