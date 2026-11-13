@@ -1122,6 +1122,25 @@ impl GuestRuntime {
         Ok(b)
     }
 
+    /// Each node VM's receipt as its record keeps it (joint plan step 39): its run, what its allocation books and where
+    /// its run stands, from its record owner's rows.
+    fn node_vm_receipts(&self) -> Result<Vec<hex_api::NodeVmReceipt>, Refusal> {
+        let records = self.authority()?.all_node_vms()?;
+        let mut receipts = Vec::new();
+        receipts
+            .try_reserve_exact(records.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "node VM receipts",
+                bound: records.len(),
+            })?;
+        receipts.extend(records.into_iter().map(|record| hex_api::NodeVmReceipt {
+            run: record.run,
+            booking: record.allocation.booking(),
+            phase: record.phase,
+        }));
+        Ok(receipts)
+    }
+
     /// `why` a node VM's boot failed past its READY, its run stopped first; where its stop fails too, both.
     fn stopped_for(&self, run: hex_api::NodeRun, why: Refusal) -> Refusal {
         match self.images.stop_node(run) {
@@ -1292,7 +1311,12 @@ impl Runtime for GuestRuntime {
                 format!("guest:{}:{}", identity.pid, identity.started)
             }
         };
-        let capacity = guest_capacity(capacity, &self.config, fence)?;
+        let mut capacity = guest_capacity(capacity, &self.config, fence)?;
+        // The node VM under shards-init is charged through the oci answer, its receipt as its record keeps it, which the
+        // scheduler books in its node's ledger (joint plan step 39; ROOT's option (a), 2026-11-13).
+        if class == Class::Oci && matches!(booted.guest, GuestHandle::Node(_)) {
+            capacity.node_vms = self.node_vm_receipts()?;
+        }
         Ok(Some(capacity))
     }
 

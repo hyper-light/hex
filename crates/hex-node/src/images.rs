@@ -140,6 +140,9 @@ impl Books for ImageRuntime {
     fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
         self.store.put_node_vm(record)
     }
+    fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
+        self.store.all_node_vms()
+    }
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.store.remove_node_vm(run)
     }

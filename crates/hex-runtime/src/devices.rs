@@ -598,6 +598,11 @@ pub trait Books: Send + Sync {
         let _ = run;
         Err(no_node_vms())
     }
+    /// Every node VM's record it keeps, in their runs' order: their receipts' one source, which the node's capacity
+    /// answer carries (joint plan step 39). An owner that keeps no node VM refuses, naming it.
+    fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        Err(no_node_vms())
+    }
     /// Writes node VM `record.run`'s record whole, replacing what it held, durable before it returns.
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         let _ = record;

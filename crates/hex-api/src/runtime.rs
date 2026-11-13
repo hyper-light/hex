@@ -1517,6 +1517,23 @@ impl Capacity {
         if let Some(learned) = &self.learned {
             learned.check()?;
         }
+        if self.node_vms.len() > MAX_LEARNED_HOLDINGS {
+            return Err(Refusal::Exhausted {
+                what: "runtime capacity node VMs",
+                bound: MAX_LEARNED_HOLDINGS,
+            });
+        }
+        let mut runs = std::collections::BTreeSet::new();
+        if self
+            .node_vms
+            .iter()
+            .any(|receipt| !runs.insert(receipt.run))
+        {
+            return Err(Refusal::Invalid {
+                what: "runtime capacity",
+                why: "a node VM's run repeats".to_owned(),
+            });
+        }
         if self.id.is_empty()
             || self.free.cpu_milli > self.total.cpu_milli
             || self.free.mem_bytes > self.total.mem_bytes

@@ -50,10 +50,10 @@ use hex_api::{
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
     LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
     LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
-    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
-    PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
-    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User,
-    check_credentials, check_grants, check_published,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs,
+    RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream,
+    Usage, User, check_credentials, check_grants, check_published,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, Value};
@@ -761,9 +761,16 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 put_cost_option(w, capacity.cost)?;
                 put_capacity_routes(w, capacity)?;
                 put_unavailable_devices(w, &capacity.unavailable)?;
-                // Joint plan step 14: last, after `unavailable`.
+                // Joint plan step 14: after `unavailable`.
                 w.reserve_fixed(1)?;
-                w.option_with(capacity.learned.as_ref(), put_learned)
+                w.option_with(capacity.learned.as_ref(), put_learned)?;
+                // Joint plan step 39: last, after `learned`.
+                w.reserve_fixed(size_of::<u32>())?;
+                w.device_count(capacity.node_vms.len(), NODE_VM_RECEIPT_BYTES)?;
+                for receipt in &capacity.node_vms {
+                    put_node_vm_receipt(w, receipt)?;
+                }
+                Ok(())
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1259,10 +1266,15 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                         why: r.device_string("unavailable.why")?,
                     })
                 })?,
-                // Last (joint plan step 14).
+                // Joint plan step 14.
                 learned: r.option(learned)?,
-                // Original (red, joint plan step 39): no node VM's receipt crosses the wire.
-                node_vms: Vec::new(),
+                // Last (joint plan step 39).
+                node_vms: r.bounded_list(
+                    NODE_VM_RECEIPT_BYTES,
+                    MAX_LEARNED_HOLDINGS,
+                    "node VM receipts",
+                    node_vm_receipt,
+                )?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -2126,6 +2138,41 @@ fn holder_bytes(holder: &LearnedHolder) -> usize {
             .saturating_add(id.as_str().len()),
         LearnedHolder::Node(_) => 1 + 16,
     }
+}
+
+/// One node VM's receipt (joint plan step 39): its run, its booking, then its phase's tag.
+const NODE_VM_RECEIPT_BYTES: usize = 16 + RESOURCE_BYTES + 1;
+
+/// A node VM's receipt: its run's 16 bytes, its booking, then its phase, 0 Booting, 1 Ready and 2 Ended.
+fn put_node_vm_receipt(w: &mut Writer, receipt: &NodeVmReceipt) -> Result<(), Fault> {
+    w.reserve_fixed(NODE_VM_RECEIPT_BYTES)?;
+    w.raw(receipt.run.bytes());
+    put_resources(w, receipt.booking);
+    w.u8(match receipt.phase {
+        NodeVmPhase::Booting => 0,
+        NodeVmPhase::Ready => 1,
+        NodeVmPhase::Ended => 2,
+    });
+    Ok(())
+}
+
+/// The receipt [`put_node_vm_receipt`] wrote.
+fn node_vm_receipt(r: &mut Reader<'_>) -> Result<NodeVmReceipt, Fault> {
+    Ok(NodeVmReceipt {
+        run: hex_api::NodeRun::from_bytes(r.array::<16>()?),
+        booking: resources(r)?,
+        phase: match r.u8()? {
+            0 => NodeVmPhase::Booting,
+            1 => NodeVmPhase::Ready,
+            2 => NodeVmPhase::Ended,
+            tag => {
+                return Err(Fault::value(
+                    "a node VM's phase",
+                    format!("tag {tag} names no phase"),
+                ));
+            }
+        },
+    })
 }
 
 /// The holder [`put_holder`] wrote.

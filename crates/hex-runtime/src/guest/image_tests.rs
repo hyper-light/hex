@@ -205,6 +205,9 @@ impl Books for Owner {
             .insert(record.run, record.clone());
         Ok(())
     }
+    fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        Ok(self.node_vms.lock().unwrap().values().cloned().collect())
+    }
     fn remove_node_vm(&self, run: &NodeRun) -> Result<(), Refusal> {
         self.node_vms.lock().unwrap().remove(run);
         Ok(())

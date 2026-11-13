@@ -1634,6 +1634,9 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
         self.books.store.put_node_vm(record)
     }
+    fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
+        self.books.store.all_node_vms()
+    }
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.books.store.remove_node_vm(run)
     }
