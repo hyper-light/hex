@@ -156,7 +156,7 @@ impl Transaction for Owner {
     }
     fn remove_pool(&self, key: &BackingKey) -> Result<(), Refusal> {
         let boxes = self.boxes.lock().unwrap();
-        if boxes.values().any(|boxed| matches!(boxed, Ok(boxed) if boxed.spec.route.and_then(|route| route.backing) == Some(*key))) {
+        if boxes.values().any(|boxed| matches!(boxed, Ok(boxed) if !boxed.retired && boxed.spec.route.and_then(|route| route.backing) == Some(*key))) {
             return Err(refused(*key, LifecycleCause::Busy));
         }
         let mut held = self.pool.lock().unwrap();
@@ -391,6 +391,14 @@ fn configured_for(path: &Path, owner: &Arc<Owner>) -> GuestRuntime {
     runtime
 }
 
+/// A runtime bound to `owner`'s books whose profile is the census-free one (joint plan step 14,
+/// `RuntimeCost::census_free`): a node restarted after decision 9's census-free cost.
+fn configured_census_free(path: &Path, owner: &Arc<Owner>) -> GuestRuntime {
+    let mut runtime = configured_for(path, owner);
+    runtime.runtime_cost = runtime.runtime_cost.map(hex_api::RuntimeCost::census_free);
+    runtime
+}
+
 fn grant(offer: &BackingOffer) -> BackingGrant {
     BackingGrant {
         key: offer.key,
@@ -558,6 +566,56 @@ fn shared_charge_survives_controller_only_exit_and_failed_native_finalization() 
     assert_eq!(owner.row().exit, Some(hex_api::Exit::Code(7)));
     assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
     assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13, by decision 9's rule: a census row is evidence only): a shared
+/// backing its node recorded under a census cost is retired at the node's start, never leaked. Do prepare and grant a
+/// shared backing under a cost whose census measured both overheads, with one box on it; then start a node whose
+/// profile is the census-free one, prepare its backing, and call the box. Expect the box's every call but delete refused
+/// as retired, typed, its record kept, ready, its end unknown, until its owner's delete removes it; the old backing's
+/// scope stopped and released, no VM process left; and neither its pool record nor its receipt kept.
+#[test]
+fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
+    let dir = socket_fixture();
+    let (old, owner) = configured(dir.path());
+    let offer = old.prepare_backing().unwrap();
+    assert!(old.initialize_backing(grant(&offer)).is_err());
+    let mut spec = super::super::tests::oci(
+        hex_api::Rootfs::Dir(dir.path().join("rootfs.tar")),
+        Vec::new(),
+    );
+    spec.route = Some(hex_api::RouteReceipt {
+        key: old.capacity(Class::Oci).unwrap().unwrap().routes[0].key,
+        backing: Some(offer.key),
+    });
+    let id = spec.id.clone();
+    Transaction::put(
+        owner.as_ref(),
+        &BoxRecord::new(spec, hex_core::record::Phase::Ready, Vec::new()),
+    )
+    .unwrap();
+    owner.native.stop_releases.store(true, Ordering::SeqCst);
+    let restarted = configured_census_free(dir.path(), &owner);
+    let fresh = restarted.prepare_backing().unwrap();
+    assert_ne!(fresh.key, offer.key);
+    assert_eq!(
+        restarted.inspect(&id),
+        Err(Refusal::Backing {
+            key: offer.key,
+            cause: LifecycleCause::Retired,
+        })
+    );
+    let kept = Transaction::read(owner.as_ref(), &id).unwrap().unwrap();
+    assert!(kept.retired);
+    assert_eq!(kept.phase, hex_core::record::Phase::Ready);
+    assert_eq!(kept.exit, Some(hex_api::Exit::Unknown));
+    assert!(
+        owner.native.released.load(Ordering::SeqCst),
+        "its scope released: no VM process left"
+    );
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+    restarted.delete(&id).unwrap();
 }
 
 #[test]

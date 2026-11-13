@@ -2133,6 +2133,11 @@ pub enum LifecycleCause {
     Uncertain,
     #[error("another operation owns this box's lifecycle")]
     Busy,
+    /// Its backing was retired at its node's start (joint plan step 14; ROOT, 2026-11-13): recorded under a census
+    /// cost, its identity is no longer its node's profile's. A box on it keeps its record, ready, until its owner's
+    /// delete. Appended (wire append-only).
+    #[error("its backing's identity changed with decision 9's census-free cost")]
+    Retired,
 }
 
 /// Why a CONNECT handshake failed: the phase it failed in and what it saw.

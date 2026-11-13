@@ -73,6 +73,12 @@ pub struct BoxRecord {
     /// agent, reads as `None` (append-only) until its store counts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<u64>,
+    /// Its backing was retired at its node's start, its identity no longer its node's profile's (joint plan step 14;
+    /// `hex_api::LifecycleCause::Retired`): the box is kept, ready, until its owner's delete, every other call refused
+    /// with why. Outside the spec, so no native commitment covers it. Added within version 1, so a record without it
+    /// reads as not retired (append-only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -194,6 +200,7 @@ impl BoxRecord {
             boot: None,
             last_resort: None,
             started: None,
+            retired: false,
         }
     }
 
