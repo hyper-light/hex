@@ -2191,15 +2191,21 @@ struct Managed<'a, R> {
 }
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
-    fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+    fn usage(&self, holder: charges::Holder<'_>) -> Result<Usage, Refusal> {
+        let charges::Holder::Box(record) = holder;
         self.runtime.managed_usage(NativeRecord::Box(record))
     }
 
-    fn host_use(&self, record: &BoxRecord) -> Result<hex_api::HostUse, Refusal> {
+    fn host_use(&self, holder: charges::Holder<'_>) -> Result<hex_api::HostUse, Refusal> {
+        let charges::Holder::Box(record) = holder;
         self.runtime.host_use(&record.spec.id)
     }
 
-    fn rate_period(&self, record: &BoxRecord) -> Result<Option<std::time::Duration>, Refusal> {
+    fn rate_period(
+        &self,
+        holder: charges::Holder<'_>,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
+        let charges::Holder::Box(record) = holder;
         if charges::running_image(record) {
             return self.runtime.image_rate_period(record).map(Some);
         }
@@ -2210,7 +2216,12 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
     /// its platform's cap holds it, told why. On Windows its job's CPU rate is set at the same rate besides, the hard
     /// ceiling: the job covers the VMM's own CPU too, so it binds first, the learner holding none apart (owed on
     /// Shards: a managed guest's per-vCPU guest time). On macOS the CPU control stays at the VM's ceiling, a backstop.
-    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
+    fn set_rate(
+        &self,
+        holder: charges::Holder<'_>,
+        rate: u64,
+    ) -> Result<hex_api::RateHeld, Refusal> {
+        let charges::Holder::Box(record) = holder;
         if charges::running_image(record) {
             return self
                 .runtime
@@ -2232,11 +2243,13 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         }
     }
 
-    fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
+    fn set_room(&self, holder: charges::Holder<'_>, room: i64) -> Result<(), Refusal> {
+        let charges::Holder::Box(record) = holder;
         self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
     }
 
-    fn stop(&self, record: &BoxRecord) -> Result<(), Refusal> {
+    fn stop(&self, holder: charges::Holder<'_>) -> Result<(), Refusal> {
+        let charges::Holder::Box(record) = holder;
         if charges::running_image(record) {
             return self.runtime.signal(&record.spec.id, Signal::KILL);
         }
@@ -2245,7 +2258,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
 
     fn intend(
         &self,
-        id: &BoxId,
+        id: &hex_api::LearnedHolder,
         scope: charges::Scope,
         end: &hex_api::LearnedEnd,
     ) -> Result<bool, Refusal> {
@@ -2345,13 +2358,14 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             store: &self.books.store,
         };
         // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
-        if let Err(why) = learner.govern(&io, &records) {
+        if let Err(why) = charges::boxes(&records).and_then(|holders| learner.govern(&io, &holders))
+        {
             learner.failed(why);
             return learner.next_window();
         }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let sorted = match charges::sort(records, |record| learner.learns(record)) {
+        let sorted = match charges::sort(&records, |holder| learner.learns(holder)) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
@@ -2366,9 +2380,8 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             mem_bytes: machine.mem_bytes.saturating_sub(booked(|c| c.mem_bytes)),
             disk_bytes: machine.disk_bytes,
         };
-        let running = sorted.learned;
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&io, &running, budget, std::time::Instant::now());
+        let _ = learner.window(&io, &sorted.learned, budget, std::time::Instant::now());
         let next = learner.next_window();
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
@@ -2447,7 +2460,11 @@ impl Books {
         learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
-            .answer(class, capacity, records.values().flatten())
+            .answer(
+                class,
+                capacity,
+                records.values().flatten().map(charges::Holder::Box),
+            )
     }
 
     /// The same Store identity backs both initialized backend capacities and the native report.
