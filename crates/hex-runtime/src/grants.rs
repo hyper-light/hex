@@ -1,11 +1,16 @@
 //! A box's network grants as Shards' image boot (D231) takes them (joint plan step 15; docs/design/network-grants.md
-//! N4 and N6): exactly what Shards `66113379` can hold, or a typed refusal naming the capability Hex awaits. Pure: the
-//! Shards image class hands [`ImageNetwork`] to `shards_api::image::ImageSpec` as it boots, and holds the run to its
-//! grants as the boot returns ([`bound`]).
+//! N4 and N6): exactly what Shards `66113379`, with Hex's recorded change holding each member to its reach of the
+//! destinations kept, can hold, or a typed refusal naming the capability Hex awaits. Pure: the Shards image class hands
+//! [`ImageNetwork`] to `shards_api::image::ImageSpec` as it boots, and holds the run to its grants as the boot returns
+//! ([`bound`]).
+
+use std::borrow::Cow;
 
 use hex_api::{
-    Grant, MemberKind, Proto, Published, Receiver, Refusal, ShardsImage, check_grants, unheld,
+    Destination, Grant, MemberKind, Proto, Published, Receiver, Refusal, ShardsImage, check_grants,
+    unheld,
 };
+use shards_api::image::wire::MemberReach;
 use shards_api::image::{Bound, Keep, MemberInfo, Narrowing, Publish, Receiving};
 
 /// What an image boot is told of a box's grants: the ports it publishes, and how the image's own grants past the
@@ -16,20 +21,23 @@ pub struct ImageNetwork {
     pub egress: Narrowing,
 }
 
-/// `image`'s grants as its boot takes them, or the refusal of what Shards can't hold exactly ([`hex_api::unheld`],
-/// N4): any destination, which Shards' D236 keeps image-wide where Hex can't name the image's members before its boot,
-/// and what D236's destinations can't express at all. A publish is programmed on any run: Shards names whom each
-/// reaches as the boot returns, and [`bound`] holds the run to them there (N6).
+/// `image`'s grants as its boot takes them, or the refusal of what D236's destinations can't express at all
+/// ([`hex_api::unheld`], N4). Each destination a grant names by TCP (a host's name, an IPv4 address, the host itself)
+/// is kept as D236 writes it, `host:port`, one for each port of the grant's range, and each member is held to its own
+/// (`Narrowing::members`): the run host refuses the boot, before anything starts, where any member the image declares
+/// would reach other than that, Hex's recorded change to Shards (vendor/shards UPSTREAM.md). A publish is programmed on
+/// any run: Shards names whom each reaches as the boot returns, and [`bound`] holds the run to them there (N6).
 ///
-/// The image's own grants are never kept, where `Narrowing::default()` would keep them whole, its destinations among
-/// them. So with no grant the run has no network at all (`shards api-run`'s `network none`), and every published port
-/// is a grant's, at the host address it names.
+/// Nothing else of the image's grants is kept, where `Narrowing::default()` would keep them whole: no port egress, no
+/// remote MCP server, no name past the VM but the destinations'. So with no grant the run has no network at all
+/// (`shards api-run`'s `network none`), and every published port is a grant's, at the host address it names.
 pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
     let grants = image.grants.as_slice();
     check_grants(grants)?;
     if let Some(needs) = unheld(grants) {
         return Err(Refusal::Awaits { needs });
     }
+    let (kept, members) = reach(grants)?;
     let mut publish = Vec::new();
     publish
         .try_reserve_exact(grants.len())
@@ -60,11 +68,81 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
         egress: Narrowing {
             egress: Keep::Only(Vec::new()),
             mcp: Keep::Only(Vec::new()),
-            destinations: Keep::Only(Vec::new()),
+            destinations: Keep::Only(kept),
             dns: false,
-            members: None,
+            // Version 5 of D231's channel only where a destination is kept, so a stock run host of version 4 serves
+            // every boot but those.
+            members: if members.is_empty() {
+                None
+            } else {
+                Some(members)
+            },
         },
     })
+}
+
+/// The destinations `grants` name by TCP, each once and sorted, and each member's, the members sorted by kind and
+/// name: a grant's every port, as D236 writes a destination (`<name>:<port>`, `<a.b.c.d>:<port>`,
+/// `host.docker.internal:<port>`). Bounded by its input, refused `Exhausted` past what memory gives (N7).
+fn reach(grants: &[Grant]) -> Result<(Vec<String>, Vec<MemberReach>), Refusal> {
+    let exhausted = |bound: usize| Refusal::Exhausted {
+        what: "destinations",
+        bound,
+    };
+    let mut each = Vec::new();
+    for grant in grants {
+        let (member, host, ports) = match grant {
+            Grant::Egress {
+                member,
+                to: Destination::Name(name),
+                ports,
+            } => (member, Cow::Borrowed(name.as_str()), ports),
+            Grant::Egress {
+                member,
+                to: Destination::Address(address),
+                ports,
+            } => (member, Cow::Owned(address.to_string()), ports),
+            Grant::Host { member, ports } => {
+                (member, Cow::Borrowed(Destination::SHARDS_HOST), ports)
+            }
+            Grant::Publish { .. } => continue,
+        };
+        for port in ports.first..=ports.last {
+            each.try_reserve(1).map_err(|_| exhausted(each.len()))?;
+            each.push((member.kind, member.name.as_str(), format!("{host}:{port}")));
+        }
+    }
+    each.sort_unstable();
+    each.dedup();
+    let mut kept: Vec<String> = Vec::new();
+    kept.try_reserve_exact(each.len())
+        .map_err(|_| exhausted(each.len()))?;
+    kept.extend(each.iter().map(|(_, _, at)| at.clone()));
+    kept.sort_unstable();
+    kept.dedup();
+    let mut members: Vec<MemberReach> = Vec::new();
+    for (kind, name, at) in each {
+        let kind = shards_kind(kind);
+        match members.last_mut() {
+            Some(last) if last.kind == kind && last.name == name => {
+                last.destinations
+                    .try_reserve(1)
+                    .map_err(|_| exhausted(last.destinations.len()))?;
+                last.destinations.push(at);
+            }
+            _ => {
+                members
+                    .try_reserve(1)
+                    .map_err(|_| exhausted(members.len()))?;
+                members.push(MemberReach {
+                    kind,
+                    name: name.to_owned(),
+                    destinations: vec![at],
+                });
+            }
+        }
+    }
+    Ok((kept, members))
 }
 
 /// A booted VM's publishes as its run reports them, held to its grants (N6): each publish grant's member is one its
@@ -97,10 +175,7 @@ pub fn bound(
         else {
             continue;
         };
-        let kind = match member.kind {
-            MemberKind::Agent => shards_api::image::MemberKind::Agent,
-            MemberKind::Harness => shards_api::image::MemberKind::Harness,
-        };
+        let kind = shards_kind(member.kind);
         let Some(runs) = members
             .iter()
             .find(|m| m.kind == kind && m.name == member.name && m.runs)
@@ -181,6 +256,13 @@ fn whom(to: &[Receiving], members: &[MemberInfo]) -> Result<String, Refusal> {
         ));
     }
     Ok(named.join(" and "))
+}
+
+fn shards_kind(kind: MemberKind) -> shards_api::image::MemberKind {
+    match kind {
+        MemberKind::Agent => shards_api::image::MemberKind::Agent,
+        MemberKind::Harness => shards_api::image::MemberKind::Harness,
+    }
 }
 
 fn shards_proto(proto: Proto) -> shards_api::image::Proto {
