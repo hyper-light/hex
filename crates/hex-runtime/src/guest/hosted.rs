@@ -14,10 +14,9 @@ use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::patience::Patience;
-use shards_api::image::{
-    ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready, StatsScope,
-};
+use shards_api::image::{ImageGuest, ImageShare, ImageSpec, Images, Keep, Narrowing, Ready};
 
+use super::image::node::{follow_ready, refused};
 use super::shares::Share;
 
 /// The command shards-init runs: Hex's own init, `argv[0]` `/init` as the kernel names an initramfs's first process,
@@ -157,124 +156,10 @@ impl Hosted {
 }
 
 const BOOTING: &str = "booting the node VM under shards-init";
-const WAITING: &str = "waiting for the node VM under shards-init to say it is ready";
-
-/// Follows a node VM's run to its init's READY: the person's rule of 2026-11-13, as decision 9 builds it.
-/// - **Within W*** (`bound`, the slowest READY its node has seen, from `began`), READY is the answer.
-/// - **Past W*** the run-out is told to the census (`ready`), and is no sample (Karn's point). The wait goes on a W*
-///   window at a time while the run progresses, and is refused, stalled, only where a whole window shows none. Its
-///   progress is its VM process's CPU time as its host counts it (D241). A window with no reading of it judges no
-///   stall: the run is then followed by its life alone, as at a cold start.
-/// - **At the cold start**, or after a run-out (no W*), the wait follows the run's life.
-/// - **The run's end**, its host's end or a refusal of Shards' ends the wait at any time, typed.
-/// - **A ready-by passed**, of a run that carries one (Hex gives none), is waited past to its late READY: D234's table
-///   moves from it to ready alone.
-fn follow_ready(
-    guest: &dyn ImageGuest,
-    bound: Option<Duration>,
-    began: Instant,
-    ready: &Patience,
-) -> Result<Ready, Refusal> {
-    let mut seen = None;
-    let Some(window) = bound else {
-        return wait_to(guest, &mut seen, Duration::MAX)?.ok_or_else(|| {
-            Refusal::Broken("Shards answered no readiness to a wait with no timeout".to_owned())
-        });
-    };
-    if let Some(said) = wait_to(guest, &mut seen, window.saturating_sub(began.elapsed()))? {
-        return Ok(said);
-    }
-    ready.ran_out(window);
-    let mut last = progress(guest, window)?;
-    // Ends at READY, the run's end, or a whole window with its progress standing: the run's progress is its bound.
-    loop {
-        if let Some(said) = wait_to(guest, &mut seen, window)? {
-            return Ok(said);
-        }
-        let now = progress(guest, window)?;
-        if let (Some(was), Some(is)) = (last, now)
-            && is <= was
-        {
-            return Err(Refusal::Os {
-                op: WAITING,
-                why: format!(
-                    "no progress over a whole {window:?} past the slowest READY its node has seen: its VM \
-                     process's CPU time stood at {was} ns"
-                ),
-            });
-        }
-        last = now.or(last);
-    }
-}
-
-/// The run's READY within `timeout`, none by then. A ready-by passed, `seen` already or said now, is waited past to its
-/// late READY: D234's table moves at most twice before ready, from starting to ready-by passed, then to ready late.
-fn wait_to(
-    guest: &dyn ImageGuest,
-    seen: &mut Option<Ready>,
-    timeout: Duration,
-) -> Result<Option<Ready>, Refusal> {
-    for _ in 0..2 {
-        match guest.wait_ready(*seen, timeout) {
-            Ok(Some(Ready::Passed(past))) => *seen = Some(Ready::Passed(past)),
-            Ok(said) => return Ok(said),
-            Err(why) => return Err(refused(WAITING, why)),
-        }
-    }
-    Err(Refusal::Broken(
-        "the node VM's readiness moved past D234's table".to_owned(),
-    ))
-}
-
-/// The run's progress as its host counts it: its VM process's CPU time, D241's `Microvm` in the run's stats, read
-/// within `window`. None where its run host has no such reading, or no answer came within the window.
-fn progress(guest: &dyn ImageGuest, window: Duration) -> Result<Option<u64>, Refusal> {
-    match guest.stats(StatsScope::Run, window) {
-        Ok(stats) => Ok(stats
-            .microvm
-            .and_then(|microvm| microvm.host.ok())
-            .map(|host| host.cpu_ns)),
-        Err(ImageRefusal::Unsupported { .. }) => Ok(None),
-        Err(why) => Err(refused(WAITING, why)),
-    }
-}
 
 /// Ends a node VM that won't serve: a stop is never refused (D231), and its run's end is the stop's own return.
 fn stop(guest: &dyn ImageGuest) {
     let _ = guest.stop();
-}
-
-/// Shards' refusal, typed by what it refused.
-fn refused(op: &'static str, why: ImageRefusal) -> Refusal {
-    const WHAT: &str = "the node VM under shards-init";
-    match why {
-        ImageRefusal::NoBackend { os, arch } => Refusal::Platform {
-            what: WHAT,
-            platform: os,
-            why: format!("shards boots no guest on {os} {arch}"),
-        },
-        ImageRefusal::Spec { what, why } => Refusal::Invalid {
-            what: WHAT,
-            why: format!("{what}: {why}"),
-        },
-        ImageRefusal::Image(why) | ImageRefusal::Widening(why) => Refusal::Invalid {
-            what: "the node image (HEX_GUEST_IMAGE)",
-            why,
-        },
-        ImageRefusal::Unsupported { what, why } => Refusal::Platform {
-            what,
-            platform: std::env::consts::OS,
-            why,
-        },
-        ImageRefusal::Ended(end) => Refusal::Os {
-            op,
-            why: format!("its run ended before its init said it was ready: {end:?}"),
-        },
-        other => Refusal::Os {
-            op,
-            why: other.to_string(),
-        },
-    }
 }
 
 #[cfg(test)]

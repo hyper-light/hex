@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HostUse, ImageMember,
-    LifecycleCause, Member, MemberKind, Proc, Refusal, ShardsImage, Signal, Upstream, Usage,
-    VmSize,
+    LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
+    Usage, VmSize,
 };
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -39,7 +39,7 @@ use shards_api::image::{
 use super::{GuestRuntime, poisoned};
 use crate::devices::{self, Books};
 
-mod node;
+pub(super) mod node;
 pub use node::{NodeBooted, NodeVm};
 
 /// The waits an image box's calls make, each learned (decision 9): Shards' boot of an image to its members' start, a
@@ -96,10 +96,64 @@ pub(super) struct ImageBoot {
     session: OnceLock<Option<BootSession>>,
 }
 
-/// This process's runs: one for each box with a boot, run or stop of this process; at most a box's every own, so
-/// bounded by the node's boxes ([`crate::MAX_BOXES`]). A run moves on under their lock alone, which no Shards call is
-/// made under: a call takes the answer its boot's or stop's thread gave ([`Runs::settle`]), or marks its stop.
-struct Runs(Mutex<BTreeMap<BoxId, Run>>);
+/// This process's runs: one for each box or node VM with a boot, run or stop of this process, at most
+/// [`crate::MAX_BOXES`] in all, the most VMs a node holds. A run moves on under their lock alone, which no Shards call
+/// is made under: a call takes the answer its boot's or stop's thread gave ([`Runs::settle`]), or marks its stop.
+struct Runs(Mutex<Maps>);
+
+/// The runs by whose they are: a box's by its id, a node VM's by its run (joint plan step 39), an id space of its own,
+/// so no box's key names one.
+#[derive(Default)]
+struct Maps {
+    boxes: BTreeMap<BoxId, Run>,
+    nodes: BTreeMap<NodeRun, Run>,
+}
+
+/// Whose run: a box's, or a node VM's the node runs for itself.
+#[derive(Clone, Copy)]
+enum Key<'a> {
+    Box(&'a BoxId),
+    Node(NodeRun),
+}
+
+impl<'a> From<&'a BoxId> for Key<'a> {
+    fn from(id: &'a BoxId) -> Self {
+        Self::Box(id)
+    }
+}
+
+impl From<NodeRun> for Key<'_> {
+    fn from(run: NodeRun) -> Self {
+        Self::Node(run)
+    }
+}
+
+impl Maps {
+    fn get(&self, key: Key<'_>) -> Option<&Run> {
+        match key {
+            Key::Box(id) => self.boxes.get(id),
+            Key::Node(run) => self.nodes.get(&run),
+        }
+    }
+
+    fn get_mut(&mut self, key: Key<'_>) -> Option<&mut Run> {
+        match key {
+            Key::Box(id) => self.boxes.get_mut(id),
+            Key::Node(run) => self.nodes.get_mut(&run),
+        }
+    }
+
+    fn remove(&mut self, key: Key<'_>) {
+        match key {
+            Key::Box(id) => drop(self.boxes.remove(id)),
+            Key::Node(run) => drop(self.nodes.remove(&run)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.boxes.len().saturating_add(self.nodes.len())
+    }
+}
 
 /// The Shards class on Agentfile images, whole (joint plan step 12's item B): Shards' image boot or why its node
 /// serves none ([`ImageClass::with_boot`]), the record authority its boxes' records are kept by, bound once
@@ -256,6 +310,23 @@ fn wait_refused(why: hex_wait::Failed) -> Refusal {
             why: why.to_string(),
         },
     }
+}
+
+/// `guest`'s run's stats, its wait told to `waits`: Shards waits for the run's answer or its end alone (`Duration::MAX`),
+/// and the stats wait's learned W* is where the census is told a run-out, never where the ask ends (decision 9); its
+/// answer, however late, the sample W* rises to.
+fn timed_stats(waits: &ImageWaits, guest: &dyn ImageGuest) -> Result<Stats, ImageRefusal> {
+    let asked = Instant::now();
+    let bound = waits.stats.deadline();
+    let answer = guest.stats(StatsScope::Run, Duration::MAX);
+    let took = asked.elapsed();
+    if let Some(bound) = bound.filter(|bound| took > *bound) {
+        waits.stats.ran_out(bound);
+    }
+    if answer.is_ok() {
+        waits.stats.answered(took);
+    }
+    answer
 }
 
 /// What a call does with a stop that has no answer by the stop's W* (decision 9), its run-out told either way: answer
@@ -477,14 +548,18 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
 /// `shards_api::envelope` (Shards' least memory and unit, its `check`'s rule from one source) gives back unchanged;
 /// any other refused naming the allocation and what Shards would boot for it. Hex states none of Shards' numbers.
 fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
-    let size = spec
-        .allocation
-        .ok_or_else(|| Refusal::Invalid {
+    admitted_size(&spec.allocation.ok_or_else(|| {
+        Refusal::Invalid {
             what: "shards image",
             why: "allocation is missing: a Shards image VM is sized by its admitted allocation"
                 .to_owned(),
-        })?
-        .vm_size()?;
+        }
+    })?)
+}
+
+/// The VM size `allocation` admits, held to what Shards boots on this host, as [`vm_size`] holds a box's.
+fn admitted_size(allocation: &hex_api::Allocation) -> Result<VmSize, Refusal> {
+    let size = allocation.vm_size()?;
     let invalid = |why: String| Refusal::Invalid {
         what: "shards image",
         why,
@@ -732,53 +807,70 @@ fn held() -> Refusal {
 
 impl Runs {
     fn new() -> Self {
-        Self(Mutex::new(BTreeMap::new()))
+        Self(Mutex::new(Maps::default()))
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Run>>, Refusal> {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Maps>, Refusal> {
         self.0.lock().map_err(poisoned)
     }
 
-    /// When box `id`'s run started, as its boot answered, where it runs in this process.
-    fn started(&self, id: &BoxId) -> Result<Option<Instant>, Refusal> {
-        Ok(match self.lock()?.get(id) {
+    /// When `key`'s run started, as its boot answered, where it runs in this process.
+    fn started<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Instant>, Refusal> {
+        Ok(match self.lock()?.get(key.into()) {
             Some(Run::Running(_, at)) => Some(*at),
+            _ => None,
+        })
+    }
+
+    /// `key`'s run's guest, where it runs in this process.
+    fn guest<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Arc<dyn ImageGuest>>, Refusal> {
+        Ok(match self.lock()?.get(key.into()) {
+            Some(Run::Running(guest, _)) => Some(Arc::clone(guest)),
             _ => None,
         })
     }
 
     /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
     /// D231 stops a run it drops and that stop would wait on this lock's holder.
-    fn forget(&self, id: &BoxId) -> Result<(), Refusal> {
+    fn forget<'k>(&self, key: impl Into<Key<'k>>) -> Result<(), Refusal> {
+        let key = key.into();
         let mut runs = self.lock()?;
-        if matches!(runs.get(id), Some(Run::Ended(_))) {
-            runs.remove(id);
+        if matches!(runs.get(key), Some(Run::Ended(_))) {
+            runs.remove(key);
         }
         Ok(())
     }
 
-    fn insert(&self, id: &BoxId, run: Run) -> Result<(), Refusal> {
+    fn insert<'k>(&self, key: impl Into<Key<'k>>, run: Run) -> Result<(), Refusal> {
+        let key = key.into();
         let mut runs = self.lock()?;
-        if !runs.contains_key(id) && runs.len() >= crate::MAX_BOXES {
+        if runs.get(key).is_none() && runs.len() >= crate::MAX_BOXES {
             return Err(Refusal::Full(crate::MAX_BOXES));
         }
-        runs.insert(id.try_clone()?, run);
+        match key {
+            Key::Box(id) => drop(runs.boxes.insert(id.try_clone()?, run)),
+            Key::Node(node) => drop(runs.nodes.insert(node, run)),
+        }
         Ok(())
     }
 
-    /// Box `id`'s boot under way, where it is booting.
-    fn booting(&self, id: &BoxId) -> Result<Option<Arc<Slot<Booted>>>, Refusal> {
-        Ok(match self.lock()?.get(id) {
+    /// `key`'s boot under way, where it is booting.
+    fn booting<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Arc<Slot<Booted>>>, Refusal> {
+        Ok(match self.lock()?.get(key.into()) {
             Some(Run::Booting(slot)) => Some(Arc::clone(slot)),
             _ => None,
         })
     }
 
-    /// Box `id`'s run as its lock finds it, an answer its boot's or stop's thread gave taken and its time told to
-    /// `waits` (`None` where the node has none): the sample W* rises to, of an answer past W*, its call refused Pending.
-    fn settle(&self, id: &BoxId, waits: Option<&ImageWaits>) -> Result<Settled, Refusal> {
+    /// `key`'s run as its lock finds it, an answer its boot's or stop's thread gave taken and its time told to `waits`
+    /// (`None` where the node has none): the sample W* rises to, of an answer past W*, its call refused Pending.
+    fn settle<'k>(
+        &self,
+        key: impl Into<Key<'k>>,
+        waits: Option<&ImageWaits>,
+    ) -> Result<Settled, Refusal> {
         let mut runs = self.lock()?;
-        let Some(run) = runs.get_mut(id) else {
+        let Some(run) = runs.get_mut(key.into()) else {
             return Ok(Settled::None);
         };
         Ok(match run {
@@ -820,16 +912,16 @@ impl Runs {
         })
     }
 
-    /// Box `id`'s boot answer, `slot`'s, taken by the start that asked it, unless another call took it first: its run
+    /// `key`'s boot answer, `slot`'s, taken by the call that asked it, unless another call took it first: its run
     /// started, or its boot refused, the refusal given back in Shards' words. Its time is told to `waits`.
-    fn booted(
+    fn booted<'k>(
         &self,
-        id: &BoxId,
+        key: impl Into<Key<'k>>,
         slot: &Slot<Booted>,
         waits: &ImageWaits,
     ) -> Result<Result<(), ImageRefusal>, Refusal> {
         let mut runs = self.lock()?;
-        Ok(match runs.get_mut(id) {
+        Ok(match runs.get_mut(key.into()) {
             Some(run @ Run::Booting(_)) => match slot.take()? {
                 Some((Ok(guest), took)) => {
                     waits.boot.answered(took);
@@ -850,23 +942,27 @@ impl Runs {
         })
     }
 
-    /// Box `id`'s stop, its owner's, under way in `slot`, whatever its run was doing.
-    fn stop_asked(&self, id: &BoxId, slot: &Arc<Slot<RunEnd>>) -> Result<(), Refusal> {
-        if let Some(run) = self.lock()?.get_mut(id) {
+    /// `key`'s stop, its owner's, under way in `slot`, whatever its run was doing.
+    fn stop_asked<'k>(
+        &self,
+        key: impl Into<Key<'k>>,
+        slot: &Arc<Slot<RunEnd>>,
+    ) -> Result<(), Refusal> {
+        if let Some(run) = self.lock()?.get_mut(key.into()) {
             *run = Run::Stopping(Arc::clone(slot), Stop::Asked);
         }
         Ok(())
     }
 
-    /// Box `id`'s stop under way in `slot`, its run having ended on its own (`reached`), where it still runs: another
+    /// `key`'s stop under way in `slot`, its run having ended on its own (`reached`), where it still runs: another
     /// call may have moved it on first, and then its stop is that call's.
-    fn stop_reached(
+    fn stop_reached<'k>(
         &self,
-        id: &BoxId,
+        key: impl Into<Key<'k>>,
         slot: &Arc<Slot<RunEnd>>,
         reached: Stop,
     ) -> Result<(), Refusal> {
-        if let Some(run @ Run::Running(..)) = self.lock()?.get_mut(id) {
+        if let Some(run @ Run::Running(..)) = self.lock()?.get_mut(key.into()) {
             *run = Run::Stopping(Arc::clone(slot), reached);
         }
         Ok(())
@@ -922,6 +1018,28 @@ impl ImageBoot {
             .map_err(|e| Refusal::os("starting a Shards image VM's stop", e))?;
         Ok(slot)
     }
+}
+
+/// Boots `spec` on a thread of its own, its answer `slot`'s: Shards waits for the run's start or its host's end alone
+/// (`Duration::MAX`), and a booted run's host keeps its diagnostics in `kept` from then on, after what it kept until
+/// then; a run whose host can't is dropped, which ends it, and its boot is refused in those words.
+fn boot_on_its_thread(
+    images: Arc<dyn Images>,
+    spec: ImageSpec,
+    kept: std::fs::File,
+    slot: Arc<Slot<Booted>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("hex-image-boot".to_owned())
+        .spawn(move || {
+            let party = Party(slot);
+            let booted = images.boot(&spec, Duration::MAX).and_then(|guest| {
+                guest.keep_diagnostics(kept)?;
+                Ok(guest)
+            });
+            party.0.put(booted);
+        })
+        .map(drop)
 }
 
 /// Shards' image boot (D231), or why this node serves no image VM: every host runs it, its run host started
@@ -1118,17 +1236,7 @@ impl ImageClass {
     /// holds the image.
     fn image_spec(&self, image: &ShardsImage, size: VmSize) -> Result<ImageSpec, Refusal> {
         let network = crate::grants::program(image)?;
-        let mut env = Vec::new();
-        if let Some(paths) = &self.native_paths {
-            env.push((
-                OsString::from("SHARDS_HOME"),
-                paths.home().as_os_str().to_owned(),
-            ));
-            env.push((
-                OsString::from("SHARDS_CACHE"),
-                paths.cache().as_os_str().to_owned(),
-            ));
-        }
+        let env = self.run_host_env();
         Ok(ImageSpec {
             image: image.image.clone(),
             vcpus: size.vcpus,
@@ -1162,6 +1270,22 @@ impl ImageClass {
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
         })
+    }
+
+    /// Its run hosts' own environment: the Shards home and cache whose store holds the images, where it has its own.
+    fn run_host_env(&self) -> Vec<(OsString, OsString)> {
+        let mut env = Vec::new();
+        if let Some(paths) = &self.native_paths {
+            env.push((
+                OsString::from("SHARDS_HOME"),
+                paths.home().as_os_str().to_owned(),
+            ));
+            env.push((
+                OsString::from("SHARDS_CACHE"),
+                paths.cache().as_os_str().to_owned(),
+            ));
+        }
+        env
     }
 
     /// Writes the box's end, its exit and why where its run failed, once, where its record lacks it: a failed run's
@@ -1387,25 +1511,12 @@ impl ImageClass {
         };
         let slot = Arc::new(Slot::new());
         image.runs.insert(&id, Run::Booting(Arc::clone(&slot)))?;
-        let answer = Arc::clone(&slot);
         // Shards waits for the run's start or its host's end alone (`Duration::MAX`): the boot's learned W* is where
         // the start answers Pending and tells the census, never where a boot ends (decision 9, the person's ruling of
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        // A booted run's host keeps its diagnostics in the box's file from then on, after what it kept until then; a run
-        // whose host can't is dropped, which ends it, and its boot is refused in those words.
-        let spawned = std::thread::Builder::new()
-            .name("hex-image-boot".to_owned())
-            .spawn(move || {
-                let party = Party(answer);
-                let booted = images.boot(&spec, Duration::MAX).and_then(|guest| {
-                    guest.keep_diagnostics(kept)?;
-                    Ok(guest)
-                });
-                party.0.put(booted);
-            });
-        if let Err(why) = spawned {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot)) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
@@ -1588,19 +1699,8 @@ impl ImageClass {
     ) -> Result<(Arc<dyn ImageGuest>, Stats), Refusal> {
         let id = &record.spec.id;
         let guest = self.image_guest(record, call)?;
-        let waits = self.image()?.waits()?;
-        let asked = Instant::now();
-        let bound = waits.stats.deadline();
-        let answer = guest.stats(StatsScope::Run, Duration::MAX);
-        let took = asked.elapsed();
-        if let Some(bound) = bound.filter(|bound| took > *bound) {
-            waits.stats.ran_out(bound);
-        }
-        match answer {
-            Ok(stats) => {
-                waits.stats.answered(took);
-                Ok((guest, stats))
-            }
+        match timed_stats(self.image()?.waits()?, guest.as_ref()) {
+            Ok(stats) => Ok((guest, stats)),
             Err(ImageRefusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, call)),
             Err(why) => Err(refused(id, "reading a Shards image VM's stats", why)),
         }

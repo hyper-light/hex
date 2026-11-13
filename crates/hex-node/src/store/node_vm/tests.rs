@@ -51,7 +51,11 @@ fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
         allocation: allocation(),
         phase,
         diagnostics: None,
-        exit: (phase == NodeVmPhase::Ended).then(|| Exit::Code(0)),
+        exit: if phase == NodeVmPhase::Ended {
+            Some(Exit::Code(0))
+        } else {
+            None
+        },
     }
 }
 

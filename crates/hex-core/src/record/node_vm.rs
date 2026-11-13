@@ -50,8 +50,10 @@ fn damaged(why: &str) -> Refusal {
 }
 
 impl NodeVmRecord {
-    /// A record whole: this format's version, an image named, its allocation's own check, and an exit where and only
-    /// where its run ended.
+    /// A record whole: this format's version, an image named, its receipt whole, and an exit where and only where its
+    /// run ended. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
+    /// and units) and to booking no more than it charges: the node sized the VM, so no workload of a box's is kept
+    /// for it to be rederived from.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.version != RECORD_VERSION {
             return Err(damaged("a format version this node doesn't read"));
@@ -59,8 +61,14 @@ impl NodeVmRecord {
         if self.image.is_empty() {
             return Err(damaged("no image named"));
         }
-        self.allocation
-            .check(hex_api::CapacityResources::default())?;
+        self.allocation.vm_size()?;
+        if self
+            .allocation
+            .booked
+            .is_some_and(|booked| !self.allocation.resources.holds(booked))
+        {
+            return Err(damaged("its receipt books past what it charges"));
+        }
         match (self.phase, self.exit.is_some()) {
             (NodeVmPhase::Ended, false) => Err(damaged("an ended run with no exit")),
             (NodeVmPhase::Booting | NodeVmPhase::Ready, true) => {

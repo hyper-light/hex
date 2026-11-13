@@ -70,3 +70,37 @@ fn a_node_vms_record_not_whole_is_refused() {
     let bytes = record(NodeVmPhase::Ready, None).encode().unwrap();
     assert!(NodeVmRecord::decode(&bytes[..bytes.len() - 1]).is_err());
 }
+
+/// Joint plan step 39: a node VM's receipt is held to the VM it sizes, not to a workload of none. Do: check a record
+/// whose receipt was admitted for a VM of two CPUs and 256 MiB within a profile from none to that, and one booking past
+/// what it charges. Expect: the first whole, the second refused.
+#[test]
+fn a_node_vms_receipt_is_held_to_the_vm_it_sizes() {
+    let vm = hex_api::CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 256 << 20,
+        disk_bytes: 0,
+    };
+    let sized = hex_api::RuntimeCost {
+        id: [4; 32],
+        floor: hex_api::CapacityResources::default(),
+        ceiling: vm,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 1 << 20,
+            disk_bytes: 1,
+        },
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources::default(),
+    }
+    .allocate(vm)
+    .unwrap();
+    let mut kept = record(NodeVmPhase::Ready, None);
+    kept.allocation = sized;
+    kept.check().unwrap();
+    kept.allocation.booked = Some(hex_api::CapacityResources {
+        cpu_milli: 3_000,
+        ..vm
+    });
+    assert!(kept.check().is_err());
+}
