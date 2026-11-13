@@ -1997,7 +1997,7 @@ impl Runtime for WinRuntime {
                 && !self.features_off()?.contains(&WindowsFeature::Containers));
         let (memory, free_memory) =
             sys::memory().map_err(|e| Refusal::os("reading native memory capacity", e))?;
-        let (disk, free_disk) = sys::disk_space(&self.scratch_root)
+        let (disk, free_disk) = scratch_volume(&self.scratch_root)
             .map_err(|e| Refusal::os("reading native disk capacity", e))?;
         let cpu = u64::from(self.processors.get())
             .checked_mul(1000)
@@ -2249,6 +2249,21 @@ fn default_scratch_root() -> PathBuf {
         .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
         .join("hex")
         .join("boxes")
+}
+
+/// The size of the volume `dir` is on and the bytes this user may still write there ([`sys::disk_space`]),
+/// read at `dir`, or while it isn't made yet at its nearest folder that is: the volume it will be made on,
+/// as no folder Hex makes there is a mount point. An outliving node's scratch folder is made by its first
+/// `oci` box, and a scheduler opening over a fresh node reads its capacity before any (joint plan step 13,
+/// HEX-CV-L1). It only reads, and is bounded by `dir`'s components.
+fn scratch_volume(dir: &Path) -> std::io::Result<(u64, u64)> {
+    let mut at = dir;
+    loop {
+        match sys::disk_space(at) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => at = at.parent().ok_or(e)?,
+            read => return read,
+        }
+    }
 }
 
 /// Every standard stream the NUL device: an `oci` box's init has no caller to read it.
