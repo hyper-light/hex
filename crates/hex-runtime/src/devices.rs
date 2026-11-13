@@ -608,6 +608,10 @@ pub trait Books: Send + Sync {
         let _ = run;
         Err(no_node_vms())
     }
+    /// A run for a node VM about to be booked: named by no record it keeps.
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
+        Err(no_node_vms())
+    }
 }
 
 /// An owner's answer for the node VM records it doesn't keep: one of a test's, or of a runtime that runs none.

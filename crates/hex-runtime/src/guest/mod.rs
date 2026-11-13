@@ -522,6 +522,9 @@ pub struct GuestRuntime {
     joins: Mutex<Option<Arc<dyn Joins>>>,
     /// The Shards class on Agentfile images ([`GuestRuntime::with_images`]), its boot none until given.
     images: image::ImageClass,
+    /// The lanes its guest under shards-init admits at once to its relay's sockets, as its node fitted them
+    /// ([`GuestRuntime::with_lanes`]); none until given, and that guest is refused without them.
+    lanes: Option<u32>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -633,7 +636,15 @@ impl GuestRuntime {
             gpu_observer: None,
             joins: Mutex::new(None),
             images,
+            lanes: None,
         }
+    }
+
+    /// The lanes its guest under shards-init admits at once to its relay's sockets: what its node fitted to its
+    /// descriptors (hex-node's `serve::fit`), each a guest frame wide each way. Kept here: no such guest boots.
+    pub fn with_lanes(mut self, lanes: u32) -> Self {
+        self.lanes = Some(lanes);
+        self
     }
 
     /// Records the guest it boots at `path` ([`held`]), and takes back the guest recorded there when the
