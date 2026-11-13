@@ -419,8 +419,8 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // The longest a create or delete has held its turn here; before the first, a wait follows the holder
-                // until it lets go (decision 9: no record is read).
+                // The longest a create or delete has held its turn here; before the first, and past it, a wait
+                // follows the holder until it lets go (decision 9: no record is read).
                 Patience::measuring("node.turns"),
             ),
             #[cfg(debug_assertions)]

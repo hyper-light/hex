@@ -215,12 +215,14 @@ impl Store {
             disk_fd: Arc::new(open_directory(disk)?),
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
-            // A change waits for the change of the same box before it: that one's write and its fsyncs.
-            // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
-            // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. Before the first change is let go, and after a wait that ran out, a wait follows the
-            // holder until it lets go (decision 9: no record is read; the `store.turns` rows of
-            // `bench/competitive/probes/waits_census.md` are evidence, never a seed).
+            // A change waits for the change of the same box before it: that one's write and its fsyncs, made by
+            // this process's own thread. The slowest hold is learned from the changes made (decision 9); a hold
+            // past it is a run-out, told to the census, and the wait follows the holder until it lets go, as before
+            // the first change is let go: a live holder is waited for, so changes of one box made at once all land
+            // (HEX-SOCK-6). A disk that has stopped answering holds its writer in the kernel; refusing that wait,
+            // typed, takes the hold's progress, owed (`docs/research/runtime/learned-waits.md`'s sites). No record
+            // is read (the `store.turns` rows of `bench/competitive/probes/waits_census.md` are evidence, never a
+            // seed).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
@@ -246,8 +248,8 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past the wait the store's changes taught it, or past [`TURNS`] boxes
-    /// changed at once.
+    /// another box's, bounded by the slowest hold the store's changes taught it and following the holder
+    /// past it ([`Turns::take`]); refused past [`TURNS`] boxes changed at once.
     fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.turns.take(id)
     }
@@ -1483,8 +1485,7 @@ mod tests {
     /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by the
     /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
     /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
-    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
-    /// (decision 9: a hold past the slowest seen is a fault the store refuses).
+    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half.
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
         let write = STORE_TURN;
