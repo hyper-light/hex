@@ -41,8 +41,7 @@
 )]
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -54,7 +53,7 @@ use hex_client::Client;
 
 #[path = "image_node/mod.rs"]
 mod image_node;
-use image_node::{Node, allocation, input, number, own_cgroup, pull, records, shards_dirs, step};
+use image_node::{Node, allocation, built, input, number, own_cgroup, pull, records, step};
 
 /// The name an image built from `HEX_IMAGE_CONTEXT` is tagged with in the node's Shards home; the cases pin it by
 /// its digest.
@@ -66,42 +65,6 @@ enum Source {
     Context(PathBuf),
     /// An image pinned by its digest, pulled there.
     Pinned(String),
-}
-
-/// Builds the Agentfile image in `context` into the node's Shards home (`work`'s state), as `shards build image`
-/// builds one, then ends the daemon the build left there, so none of its processes runs beside the node; returns the
-/// image pinned by the manifest digest its build says (`--metadata-file`'s `containerimage.digest`), which Shards'
-/// store finds whatever it is named.
-fn built(shards: &Path, context: &Path, work: &Path) -> String {
-    let (home, cache) = shards_dirs(&work.join("state"));
-    let metadata = work.join("build-metadata.json");
-    let in_home = |command: &mut Command| {
-        let status = command
-            .env("SHARDS_HOME", &home)
-            .env("SHARDS_CACHE", &cache)
-            .stdin(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "{command:?}: {status}");
-    };
-    let begun = Instant::now();
-    in_home(
-        Command::new(shards)
-            .args(["build", "image", "-t", BUILT, "--metadata-file"])
-            .arg(&metadata)
-            .arg(context),
-    );
-    in_home(Command::new(shards).args(["daemon", "stop"]));
-    let said: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
-    let digest = said["containerimage.digest"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{metadata:?} names no containerimage.digest: {said}"));
-    let image = format!("{BUILT}@{digest}");
-    eprintln!(
-        "IMAGE built {image} from {context:?} in {:?}",
-        begun.elapsed()
-    );
-    image
 }
 
 /// Shards image VMs of the pinned image, each admitted for the run's workload: running its members alone, or a
@@ -196,14 +159,14 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     eprintln!("IMAGE each VM {:?}", allocation.vm_size().unwrap());
     let own = own_cgroup("hex-image-real");
     let image = match source {
-        Source::Context(context) => built(&shards, &context, &work),
+        Source::Context(context) => built(&shards, &context, &work, BUILT),
         Source::Pinned(image) => {
             pull(&shards, &image, &work.join("state"));
             image
         }
     };
     ShardsImage::new(&image).check().unwrap();
-    let node = Node::start(&work, &own, wait, "hex-image-node");
+    let node = Node::start(&work, Some(&own.join("hex-image-node")), wait);
     let socket = node.socket.clone();
     let (done, verdicts) = mpsc::channel();
     std::thread::spawn(move || {

@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hex_api::capacity::{Amounts, Close, Event, Holder, Out, ToHolder, ToKeeper};
+use hex_api::capacity::{Amounts, Close, Event, Holder, Out, ToKeeper};
 use hex_core::patience::Patience;
 use hex_core::schedule as dto;
 use hex_quic::capacity::Link;
@@ -111,10 +111,11 @@ fn forget(service: &Service, holder: &str) -> Option<dto::Forget> {
         .forget
 }
 
-/// AC-T7.4.1, CV6, CV8, CV9: a scheduler whose configuration names a capacity lane on loopback, its enrollment, and
-/// kiln-a and kiln-b alone; kiln-a joins and the scheduler refreshes; kiln-b says hello as kiln-a; the person releases
-/// kiln-a while it is connected, again once its link has ended, and a name never seen. Expect the lane bound, kiln-a
-/// welcomed and hinted the measured room after the scheduler's own word; kiln-b's hello closed as not authorized and
+/// AC-T7.4.1, CV6, CV8, CV9, CV11: a scheduler whose configuration names a capacity lane on loopback, its enrollment,
+/// and kiln-a and kiln-b alone; kiln-a joins before the scheduler takes any command; kiln-b says hello as kiln-a; the
+/// person releases kiln-a while it is connected, again once its link has ended, and a name never seen. Expect the lane
+/// bound, kiln-a welcomed with the machine's measured room (a keeper started knows its room before a holder reserves,
+/// with no command of Hex's to measure it); kiln-b's hello closed as not authorized and
 /// that logged; the release refused as connected, then done and logged as `hex.capacity event=forgotten`, and the name
 /// never seen unknown. (A peer the lane doesn't name never reaches it: refused at its handshake,
 /// `a_peer_the_lane_doesnt_name_holds_none_of_its_connections`. This scheduler has no backend, so its node runs
@@ -131,10 +132,7 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
         credentials,
         holders: [KILN, KILN_B]
             .into_iter()
-            .map(|name| CapacityHolder {
-                name: name.into(),
-                user: None,
-            })
+            .map(|name| CapacityHolder { name: name.into() })
             .collect(),
     };
     let (report, lines) = kept();
@@ -149,15 +147,11 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
         matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
         "{joined:?}"
     );
-    service.command(dto::Command::Retry).unwrap();
-    let hint = within(&HEAR, |by| link.hear(by)).unwrap();
-    let ToHolder::Hint { view, .. } = hint.clone() else {
-        panic!("no hint after the scheduler measured its room: {hint:?}");
-    };
-    assert!(view.room.cpu_milli >= 1000, "{view:?}");
-    let mut out = Out::default();
-    kiln.hear(hint, &mut out);
-    assert_eq!(kiln.view().map(|v| v.room), Some(view.room));
+    let view = kiln.view().unwrap();
+    assert!(
+        view.room.cpu_milli >= 1000,
+        "welcomed before the room was measured: {view:?}"
+    );
 
     let (_b_end, mut posing_link) = linked(&ca, address, KILN_B);
     let mut posing = Holder::start(KILN.into(), 2, 4, &[]).unwrap();
@@ -215,10 +209,7 @@ fn a_peer_the_lane_doesnt_name_holds_none_of_its_connections() {
     let lane = CapacityLane {
         bind: loopback(),
         credentials,
-        holders: vec![CapacityHolder {
-            name: KILN.into(),
-            user: None,
-        }],
+        holders: vec![CapacityHolder { name: KILN.into() }],
     };
     let (report, _) = kept();
     let service = Service::open(&config(dir.path(), Some(lane)), report).unwrap();
@@ -277,10 +268,7 @@ fn without_a_lane_nothing_is_bound_and_a_release_is_refused() {
     let lane = CapacityLane {
         bind: loopback(),
         credentials: begun,
-        holders: vec![CapacityHolder {
-            name: KILN.into(),
-            user: None,
-        }],
+        holders: vec![CapacityHolder { name: KILN.into() }],
     };
     let (report, _) = kept();
     let opened = Service::open(&config(&dir.path().join("some"), Some(lane)), report);

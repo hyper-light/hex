@@ -168,6 +168,16 @@ The second step, std's channel receives and timed parks:
 - `ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline` (macOS) holds the reader's turn as another
   call's would be, so a delete with an absolute deadline waits for its answer on its mailbox. It expects the same
   bound, and was red on std's mpsc (44.00 ms late at 36864a83 on 75694786).
+- **The bound under load.** Twice `OVERSHOOT` alone is an idle machine's bound. Under load a refusal also carries its
+  thread's wait for a core. ROOT saw 5 of 15 runs come 6.23 to 9.00 ms late at load 18.5 on 18 cores at af9131d4. Here
+  one of 15 whole-binary runs did, 8.68 and 7.92 ms late, at load 33.8 to 39.5 beside 18 spinners at nice 0. So each
+  test now makes three refusals between 24 precise waits on its own thread: poll(2) to the same deadline, which is
+  none of hex-wait's and takes the kernel's own leeway whatever the QoS. Each precise wait teaches a Patience seeded
+  from `OVERSHOOT`, and every refusal is held to that Patience's deadline, twice the slowest precise wait recorded or
+  seen (`hex_core::patience`). The precise waits also go to the waits census, as `test.hex_client.budget.precise_late`.
+  - Under the same load both tests passed 15 of 15, at load 36.4 to 42.5.
+  - With std's condition variable and channel back in their places (a mutation), both failed 15 of 15, 24 to 150 ms
+    late against bounds of 5.5 to 8.6 ms, at load 32.6 to 35.0.
 - hex-wait's own tests hold its semantics on every platform: the condition variable's, the channel's (order,
   fullness, a timeout, disconnection, a rendezvous, what a gone receiver left) and the rest's.
 

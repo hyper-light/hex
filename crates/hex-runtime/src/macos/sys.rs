@@ -168,13 +168,6 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
     }))
 }
 
-/// The user process `pid` runs as, its effective uid (`pbi_uid`, XNU's `kauth_cred_getuid` of its credential,
-/// `bsd/kern/proc_info.c`), or `None` when no process has that pid (`ESRCH`): what proves a capacity holder's
-/// process group its own (joint plan step 13, CV12).
-pub fn user_of(pid: i32) -> io::Result<Option<u32>> {
-    Ok(bsdinfo(pid)?.map(|info| info.pbi_uid))
-}
-
 /// `proc_pidinfo(PROC_PIDTBSDINFO)` of `pid`, or `None` when no process has that pid (`ESRCH`).
 fn bsdinfo(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
