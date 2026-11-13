@@ -348,8 +348,11 @@ pub struct BackingOffer {
     /// Exact administrator-provisioned claims. These IDs supply no model, memory or load facts.
     #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
-    /// The guest's own overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13). Original
-    /// (red): read by nothing.
+    /// Its guest's own overhead as its runtime measured it (joint plan step 14, C7; ROOT, 2026-11-13): what its guest
+    /// agent says it uses past what its boxes hold, the most seen in each dimension, only rising, each none until the
+    /// backing's first capacity answer measures it (its cold start: its boxes' sum alone). Never the census's
+    /// `guest_overhead`, which a census-free cost carries as none. A shared backing's payload fits its envelope with it
+    /// ([`BackingOffer::check_inner`]). Absent from an older JSON report, read as cold.
     #[serde(default, skip_serializing_if = "LearnedOverhead::cold")]
     pub guest: LearnedOverhead,
 }
@@ -387,8 +390,18 @@ impl BackingOffer {
 
     /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
     /// and host allowances and quantization. A residual host debit alone is not guest admission.
+    /// With them, the guest's own overhead as its runtime measured it, in each dimension it has
+    /// measured (joint plan step 14, C7): cold, the boxes' sum alone.
     pub fn check_inner(&self, used: CapacityResources) -> Result<(), Refusal> {
         let granted = self.allocation()?;
+        let guest = CapacityResources {
+            cpu_milli: self.guest.cpu_milli.unwrap_or(0),
+            mem_bytes: self.guest.mem_bytes.unwrap_or(0),
+            disk_bytes: self.guest.disk_bytes.unwrap_or(0),
+        };
+        let used = used.checked_add(guest).ok_or_else(|| {
+            invalid_route("aggregate payload and the guest's own overhead overflow")
+        })?;
         if self.cost.allocate(used)? != granted {
             return Err(invalid_route(
                 "aggregate payload differs from its fixed backing grant",

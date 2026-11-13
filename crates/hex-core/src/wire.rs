@@ -1436,7 +1436,11 @@ const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES + 1 + R
 const ROUTE_KEY_BYTES: usize = 5;
 const BACKING_KEY_BYTES: usize = 32 + 16;
 const ROUTE_OFFER_MIN_BYTES: usize = ROUTE_KEY_BYTES + 2;
-const BACKING_OFFER_MIN_BYTES: usize = BACKING_KEY_BYTES + COST_BYTES + 1 + size_of::<u32>();
+/// A backing offer's guest at its least (joint plan step 14, C7): its three dimensions none, a byte each.
+const BACKING_OFFER_GUEST_MIN_BYTES: usize = 3;
+/// A backing offer at its least: its key, cost and phase, its claims' count, then its guest at its least.
+const BACKING_OFFER_MIN_BYTES: usize =
+    BACKING_KEY_BYTES + COST_BYTES + 1 + size_of::<u32>() + BACKING_OFFER_GUEST_MIN_BYTES;
 const BACKING_GRANT_MIN_BYTES: usize =
     BACKING_KEY_BYTES + RESOURCE_BYTES + COST_BYTES + size_of::<u32>();
 
@@ -1655,7 +1659,13 @@ fn put_backing_offer(w: &mut Writer, offer: &BackingOffer) -> Result<(), Fault> 
         BackingPhase::Draining => 3,
         BackingPhase::Released => 4,
     });
-    put_provisioning(w, &offer.devices)
+    put_provisioning(w, &offer.devices)?;
+    // Its guest's own overhead as its runtime measured it, each dimension none while cold (joint plan step 14, C7).
+    let guest = offer.guest;
+    for dim in [guest.cpu_milli, guest.mem_bytes, guest.disk_bytes] {
+        w.option(dim, Writer::u64);
+    }
+    Ok(())
 }
 
 fn backing_offer(r: &mut Reader<'_>) -> Result<BackingOffer, Fault> {
@@ -1669,12 +1679,17 @@ fn backing_offer(r: &mut Reader<'_>) -> Result<BackingOffer, Fault> {
         4 => BackingPhase::Released,
         _ => return Err(Fault::value("backing.phase", "unsupported tag")),
     };
+    let devices = r.device_list(9, device_id)?;
     let offer = BackingOffer {
-        guest: Default::default(),
         key,
         cost,
         phase,
-        devices: r.device_list(9, device_id)?,
+        devices,
+        guest: LearnedOverhead {
+            cpu_milli: r.option(Reader::u64)?,
+            mem_bytes: r.option(Reader::u64)?,
+            disk_bytes: r.option(Reader::u64)?,
+        },
     };
     offer
         .allocation()
