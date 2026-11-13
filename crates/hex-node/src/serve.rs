@@ -60,6 +60,7 @@ use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Strea
 
 pub use hex_core::wire::Limits;
 
+pub mod fit;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

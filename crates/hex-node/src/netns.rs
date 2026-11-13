@@ -150,6 +150,9 @@ pub struct Pools {
     /// Whether the node runs VM boxes (a Firecracker VM's or a Shards guest's), each holding descriptors of the node's
     /// past a box's ([`Pools::running_vms`]).
     pub vms: bool,
+    /// The node VMs under shards-init its guest runtime can hold at once, each with its lanes and controller among the
+    /// node's own descriptors ([`Pools::hosting`]; `crate::serve::fit::hosted_descriptors`).
+    pub hosted: usize,
 }
 
 impl Pools {
@@ -164,6 +167,7 @@ impl Pools {
             sizes,
             files_ahead,
             vms: false,
+            hosted: 0,
         }
     }
 
@@ -177,6 +181,7 @@ impl Pools {
             sizes,
             files_ahead,
             vms: false,
+            hosted: 0,
         }
     }
 
@@ -184,6 +189,12 @@ impl Pools {
     /// descriptors among its own (`crate::node::Runs`).
     pub fn running_vms(self, vms: bool) -> Self {
         Self { vms, ..self }
+    }
+
+    /// These pools for a node whose guest runtime can hold `hosted` node VMs under shards-init: its start counts each
+    /// one's lanes and controller among its own (`crate::node::Runs`).
+    pub fn hosting(self, hosted: usize) -> Self {
+        Self { hosted, ..self }
     }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
@@ -242,7 +253,7 @@ fn kept_at_most(sizes: Sizes) -> u64 {
 /// (its standard streams, the node's store, keeper and roots, and the GPU handles of a prober made before it). Each
 /// bound among them is fitted to the hard limit as the node starts ([`hold_descriptors`]), so they hold no more than
 /// it (the lead, 2026-11-11, over 2026-11-06's connections taking what these left).
-fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 17] {
+fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 18] {
     let parked = if pools.devfs {
         FDS_A_PARKED.saturating_add(FDS_A_PARKED_PROC)
     } else {
@@ -296,6 +307,8 @@ fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 17] {
         ("the exec'd programs the supervisor keeps", of(places, 1)),
         ("VM boxes", vm_boxes),
         ("the VM boxes' root", vm_root),
+        // Kept at none here: the hosted VMs aren't counted yet.
+        ("the hosted VMs' lanes", 0),
         ("the supervisor's epoll set", FDS_THE_SUPERVISOR),
         ("beside those", beside),
     ]
@@ -412,7 +425,8 @@ pub fn needed_on_this_host(state: &std::path::Path, runs: crate::Runs) -> Result
     } else {
         Pools::rootless(sizes, files_ahead)
     }
-    .running_vms(runs.vms);
+    .running_vms(runs.vms)
+    .hosting(runs.hosted);
     let _prober = crate::facts::shared_prober(state, crate::facts::Declared::default())?;
     let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
@@ -530,6 +544,7 @@ fn shrunk(pools: Pools, num: u64, den: u64) -> Pools {
         sizes,
         files_ahead: pools.files_ahead,
         vms: pools.vms,
+        hosted: pools.hosted,
     }
 }
 

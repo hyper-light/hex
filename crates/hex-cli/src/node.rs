@@ -165,6 +165,7 @@ const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--quic <addr
 fn descriptors(state: &Path) -> u8 {
     let runs = hex_node::Runs {
         vms: guest_requested() || std::env::var_os("HEX_FIRECRACKER_CONFIG").is_some(),
+        hosted: 0,
     };
     let needed = hex_node::netns::needed_on_this_host(state, runs);
     match needed {
@@ -515,6 +516,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     // Its start counts what it runs past its own boxes among its own descriptors: VM boxes where a backend is configured.
     let runs = hex_node::Runs {
         vms: guest_config.is_some() || firecracker_config.is_some(),
+        hosted: 0,
     };
     // Made before the node's start, so the GPU handles it holds are among what the start counts as held.
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
