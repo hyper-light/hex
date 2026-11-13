@@ -46,7 +46,8 @@ pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 /// The kinds whose answer no box's class times, in their table's order ([`Transport::answers`]): a hello, a list, the
 /// network namespaces' counts; then the scheduler's operations in [`WaitKind`] order up to the person's release; then
 /// a native physical report and the backing lifecycle's three; then the release (joint plan step 13); then the node's
-/// links (docs/design/hex-quic.md Q12). Waits only append.
+/// links (docs/design/hex-quic.md Q12); then a connection's lessors (docs/design/credential-grants.md C7). Waits only
+/// append.
 #[repr(usize)]
 enum PlainKind {
     Hello,
@@ -62,7 +63,7 @@ impl PlainKind {
 const SCHEDULED: usize = WaitKind::Forget as usize;
 
 /// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
-pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 6;
+pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 7;
 
 /// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
 /// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
@@ -178,6 +179,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::ReleaseBacking(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(2)?,
             Call::BackingUsage(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(3)?,
             Call::Links => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(5)?,
+            Call::Lessors => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(6)?,
             Call::Create(_)
             | Call::Start(_)
             | Call::Exec { .. }
@@ -191,7 +193,11 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Capacity(_)
             | Call::Member { .. } => return None,
         },
-        Request::Release | Request::Taken | Request::StreamsReady => return None,
+        Request::Release
+        | Request::Taken
+        | Request::StreamsReady
+        | Request::Lessor(_)
+        | Request::Leased { .. } => return None,
     };
     waits.get(n)
 }
@@ -229,7 +235,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         | Call::InitializeBacking(_)
         | Call::ReleaseBacking(_)
         | Call::BackingUsage(_)
-        | Call::Links => return None,
+        | Call::Links
+        | Call::Lessors => return None,
     })
 }
 
@@ -898,6 +905,9 @@ struct State {
     /// said, each peer holding one at least (docs/design/hex-quic.md Q12). None before the hello, which every call
     /// follows.
     links_bound: Option<usize>,
+    /// Its lessors, once it leases the credentials of the boxes it creates ([`Core::with_lessors`]): what the node asks
+    /// of them is handed there.
+    leasing: Option<Arc<leasing::Leasing>>,
 }
 
 impl State {
@@ -1022,6 +1032,23 @@ impl<T: Transport> Shared<T> {
         answer: Answer,
         fds: Vec<hex_api::End>,
     ) -> Result<(), Refusal> {
+        // What the node asks of this connection's lessors, or tells them, sent unasked (docs/design/credential-grants.md
+        // C7): handed to them, in order. A node asking a connection that leases nothing breaks the wire's promise.
+        if matches!(
+            answer,
+            Answer::LessorAsk(_)
+                | Answer::LeaseAsk { .. }
+                | Answer::LeaseGiven(_)
+                | Answer::LessorEnded
+        ) {
+            let leasing = self.state()?.leasing.clone();
+            return match leasing {
+                Some(leasing) => leasing.hear(header.id, answer),
+                None => Err(Refusal::Broken(
+                    "the node agent asked a lease of a connection that leases nothing".to_owned(),
+                )),
+            };
+        }
         if let Answer::Given { .. } = &answer {
             // Owed before its taker wakes below, so the word goes ahead of anything its caller sends after.
             self.owe(header.id, &Request::Taken)?;
@@ -1212,6 +1239,30 @@ impl<T: Transport> Shared<T> {
         Ok(())
     }
 
+    /// Owes the node `request`, its header's id `id`, ahead of every later request ([`Owed`]), and sends what is owed now
+    /// where it can: a lessor's answer to the node's ask (docs/design/credential-grants.md C7), which may carry a
+    /// lease's value, its bytes wiped once they have gone ([`Shared::send_owed`]). Past the words the agent's budgets
+    /// let be owed, refused.
+    pub(crate) fn owe_word(&self, id: u64, request: &Request) -> Result<(), Refusal> {
+        let word = wire::request(id, request, wire::MAX_MESSAGE)
+            .map_err(Refusal::from)
+            .and_then(T::frame)?;
+        {
+            let mut owed = self.owed.lock().map_err(poisoned)?;
+            if owed.words.len() >= owed.bound {
+                let mut word = word;
+                hex_api::lease::wipe(&mut word);
+                return Err(Refusal::Exhausted {
+                    what: "words owed to the node agent, its programs and its lease asks",
+                    bound: owed.bound,
+                });
+            }
+            owed.words.push_back(word);
+        }
+        self.send_owed_now();
+        Ok(())
+    }
+
     /// Whether anything is owed ([`Owed`]).
     fn owing(&self) -> bool {
         self.owed.lock().is_ok_and(|owed| !owed.words.is_empty())
@@ -1231,6 +1282,7 @@ impl<T: Transport> Shared<T> {
             let Some(word) = word else {
                 return Ok(true);
             };
+            let mut word = word;
             let mut at = 0;
             let sent = self.transport.try_send(&word, &mut at, NONE);
             if !matches!(sent, Ok(true)) {
@@ -1241,6 +1293,8 @@ impl<T: Transport> Shared<T> {
                     .words
                     .push_front(rest);
             }
+            // A word may carry a lease's value (docs/design/credential-grants.md C7): its bytes here are wiped as they go.
+            hex_api::lease::wipe(&mut word);
             match sent {
                 Ok(true) => {}
                 Ok(false) => return Ok(false),
@@ -1307,6 +1361,12 @@ impl<T: Transport> Shared<T> {
             }
             state.closed = Some(why);
             state.reading = false;
+        }
+        // What was owed goes nowhere now: its bytes, which may carry a lease's value, wiped.
+        if let Ok(mut owed) = self.owed.lock() {
+            for mut word in std::mem::take(&mut owed.words) {
+                hex_api::lease::wipe(&mut word);
+            }
         }
         for run in due {
             run();
@@ -1946,6 +2006,8 @@ pub struct Deferred<T: Transport> {
     reserved: bool,
 }
 
+mod leasing;
+
 #[cfg(test)]
 mod tests;
 
@@ -2308,6 +2370,46 @@ impl<T: Transport> Core<T> {
             Answer::Refused(r) => Err(r),
             other => Err(unexpected("links", &other)),
         }
+    }
+
+    /// This connection leases the credentials of the Shards image VMs it creates from now on, through `lessors`, its
+    /// orchestrator's (joint plan step 33; docs/design/credential-grants.md C7): the node asks them over this connection
+    /// for each run's lessor and each lease, and gives each lease and each run's end back, which a thread of the
+    /// client's own hears from now on, reading the connection for every call and program too (the event form's loop).
+    /// Every lease handed over and not given back is given back as the connection ends, by either side. Refused by type
+    /// where the node leases through no connection's lessors.
+    pub fn with_lessors(self, lessors: Arc<dyn hex_api::lease::Lessors>) -> Result<Self, Refusal> {
+        match self
+            .call(&Request::Call(Call::Lessors), |_| Ok(NONE), None)?
+            .1
+        {
+            Answer::Done => {}
+            Answer::Refused(why) => return Err(why),
+            other => return Err(unexpected("lessors", &other)),
+        }
+        let shared = SharedOwner::clone(&self.conn.shared);
+        let leasing = leasing::Leasing::new(lessors);
+        {
+            // Each ask the node may have waiting on this connection, its in-flight limit, is owed one answer.
+            let mut owed = shared.owed.lock().map_err(poisoned)?;
+            owed.bound = owed.bound.saturating_add(self.limits.in_flight);
+        }
+        shared.state()?.leasing = Some(Arc::clone(&leasing));
+        shared.read_by_loop()?;
+        std::thread::Builder::new()
+            .name("hex-client-lessors".to_owned())
+            .spawn(move || {
+                loop {
+                    let read = shared.turn(None);
+                    leasing.act(&shared);
+                    if read.is_err() {
+                        break;
+                    }
+                }
+                leasing.end();
+            })
+            .map_err(|e| Refusal::os("starting a connection's lessors' thread", e))?;
+        Ok(self)
     }
 
     /// The agent's network namespace counts within the caller's original absolute deadline, its kind's learned wait
@@ -2741,6 +2843,10 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::PhysicalReport(_) => "a native physical report",
         Answer::BackingOffer(_) => "a native backing receipt",
         Answer::Links { .. } => "the node's links",
+        Answer::LessorAsk(_) => "a lessor's ask",
+        Answer::LeaseAsk { .. } => "a lease's ask",
+        Answer::LeaseGiven(_) => "a lease given back",
+        Answer::LessorEnded => "a run's end of its leases",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
