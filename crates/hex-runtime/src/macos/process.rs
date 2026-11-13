@@ -82,6 +82,10 @@ pub struct Status {
     /// Reads that held any of the box's members stopped across their wait ([`watch::Watch::runs`];
     /// observability: what the hold costs the box).
     pub holds: u64,
+    /// CPU holds whose response went unmeasured (joint plan step 14, 2c): a member that ended, left or couldn't be
+    /// read meanwhile, or a measurement its control refused. Each is no sample, never the scope's refusal; counted here
+    /// so none goes unseen.
+    pub unmeasured_holds: u64,
 }
 
 /// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
@@ -2246,20 +2250,24 @@ impl Watcher {
             Some(super::cpu::Decision::Run(wait)) => wait,
             Some(super::cpu::Decision::Hold(_)) => {
                 // Its response runs from when its credit ran out, read off the observation that held it (2c).
-                let ran_out = scope.cpu_ran_out(owner)?;
+                let ran_out = scope.cpu_ran_out(owner).ok().flatten();
                 *held = self.state.apply(&self.order, &[], &self.last)?;
                 scope.cpu_held(owner)?;
                 // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
-                // every member it holds reads stopped, followed with no timer while they live. A member that ended or
-                // left meanwhile, or a response of no time, is no sample (Karn's point).
-                if let Some(from) = ran_out
-                    && let Some(stopped) = stopped_after(&self.order, sys::run_state)?
-                    && let Some(response) = stopped
-                        .checked_duration_since(from)
-                        .filter(|response| !response.is_zero())
-                {
-                    scope.cpu_learn(owner, response)?;
-                    self.shared.observe_cpu_response(response)?;
+                // every member it holds reads stopped, followed with no timer while they live. A member that ended,
+                // left or couldn't be read meanwhile, a response of no time, or one its control or the helper refuses,
+                // is no sample (Karn's point): counted, never the scope's refusal.
+                let learned = ran_out
+                    .zip(stopped_after(&self.order, sys::run_state))
+                    .and_then(|(from, stopped)| stopped.checked_duration_since(from))
+                    .filter(|response| !response.is_zero())
+                    .is_some_and(|response| {
+                        scope.cpu_learn(owner, response).is_ok()
+                            && self.shared.observe_cpu_response(response).is_ok()
+                    });
+                if !learned {
+                    let mut status = self.state.status()?;
+                    status.unmeasured_holds = status.unmeasured_holds.saturating_add(1);
                 }
                 match scope.cpu_decision(owner)? {
                     Some(super::cpu::Decision::Hold(wait)) => Some(wait),
@@ -2757,7 +2765,7 @@ fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
         .ok_or_else(|| Refusal::os("the CPU response probe's spinner", "its pid"))?;
     rustix::process::kill_process(target, rustix::process::Signal::STOP)
         .map_err(|error| Refusal::os("holding the CPU response probe", io::Error::from(error)))?;
-    let stopped = stopped_after(&[pid], sys::run_state)?;
+    let stopped = stopped_after(&[pid], sys::run_state);
     Ok(ran_out
         .zip(stopped)
         .and_then(|(from, at)| at.checked_duration_since(from))
@@ -2765,27 +2773,23 @@ fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
 }
 
 /// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer
-/// while it lives, as `macos_cpu_response` reads a stop; none where one ended or left meanwhile, so its hold is no
-/// sample.
+/// while it lives, as `macos_cpu_response` reads a stop; none where one ended, left or couldn't be read meanwhile (ROOT,
+/// 2026-11-13: a measurement that fails is no sample, never the scope's refusal), so its hold is no sample.
 fn stopped_after(
     order: &[u32],
     run_state: impl Fn(i32) -> std::io::Result<Option<sys::Run>>,
-) -> Result<Option<Instant>, Refusal> {
+) -> Option<Instant> {
     for &member in order {
-        let Ok(pid) = i32::try_from(member) else {
-            return Ok(None);
-        };
+        let pid = i32::try_from(member).ok()?;
         loop {
-            match run_state(pid)
-                .map_err(|error| Refusal::os("reading a held member's run state", error))?
-            {
+            match run_state(pid).ok()? {
                 Some(sys::Run::Stopped) => break,
                 Some(sys::Run::Live) => std::thread::yield_now(),
-                Some(sys::Run::Ended) | None => return Ok(None),
+                Some(sys::Run::Ended) | None => return None,
             }
         }
     }
-    Ok(Some(Instant::now()))
+    Some(Instant::now())
 }
 
 #[cfg(test)]
@@ -2812,10 +2816,10 @@ mod hold_response_tests {
             })
         };
         let before = Instant::now();
-        let stopped = stopped_after(&[11, 12], read).unwrap().unwrap();
+        let stopped = stopped_after(&[11, 12], read).unwrap();
         assert!(stopped >= before);
         assert_eq!(reads.borrow().get(&12), Some(&3));
-        assert_eq!(stopped_after(&[11, 13], read).unwrap(), None);
+        assert_eq!(stopped_after(&[11, 13], read), None);
     }
 
     /// Joint plan step 14 (2c; ROOT, 2026-11-13: a hold's measurement that fails is no sample, never the scope's
@@ -2827,7 +2831,7 @@ mod hold_response_tests {
         let read = |_: i32| -> std::io::Result<Option<sys::Run>> {
             Err(std::io::Error::from_raw_os_error(libc::EPERM))
         };
-        assert_eq!(stopped_after(&[11], read).unwrap(), None);
+        assert_eq!(stopped_after(&[11], read), None);
     }
 }
 
