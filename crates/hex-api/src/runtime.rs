@@ -348,8 +348,9 @@ impl RouteKey {
 
 /// A node VM's run (joint plan step 39): a VM the node runs for itself, its `oci` class's guest under shards-init, never
 /// a box. Minted by the node's store as the VM is booked, it names the VM's record and its receipt among the node's
-/// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one and no
-/// wire input parses one, as hex-core's wire neither writes nor reads it, so no box API can name the node's VM.
+/// holders, beside its boxes. It is an id space of its own (ROOT's ruling of 2026-11-13): no box call takes one, so no
+/// box API can name the node's VM; the wire carries one only as the holder a node's learned capacity names
+/// ([`LearnedHolder`]), which no call reads back as a box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeRun([u8; 16]);
 
@@ -1044,12 +1045,33 @@ pub struct LearnedPrior {
 /// equal by a test in hex-node), so a node never has more running VMs to report than this.
 pub const MAX_LEARNED_HOLDINGS: usize = 1 << u16::BITS;
 
-/// Joint plan step 14 (C3, C8): one running microVM's holding, by its box: its booking and the memory and disk it
-/// holds past it. The scheduler books the VM at it in the machine's capacity view (goal 13's `Driver::rebook`).
+/// Who holds room among a node's learned holdings and ends (joint plan steps 14 and 39, ROOT's ruling of 2026-11-13): a
+/// box, or a node VM the node runs for itself, a holder of its own in its ledger beside the boxes. Written as a box's id
+/// alone, as a box's record named the box its last resort ended before node VMs held room, so those records read as
+/// they were written (append-only); a node VM's as its run's bytes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LearnedHolder {
+    Box(BoxId),
+    Node(NodeRun),
+}
+
+impl LearnedHolder {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(match self {
+            Self::Box(id) => Self::Box(id.try_clone()?),
+            Self::Node(run) => Self::Node(*run),
+        })
+    }
+}
+
+/// Joint plan step 14 (C3, C8): one running microVM's holding, by its holder (a box's, a node VM's): its booking and
+/// the memory and disk it holds past it. The scheduler books the VM at it in the machine's capacity view (goal 13's
+/// `Driver::rebook`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedHolding {
-    pub id: BoxId,
+    pub id: LearnedHolder,
     pub holding: CapacityResources,
 }
 
@@ -1059,7 +1081,7 @@ pub struct LearnedHolding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LearnedEnd {
-    pub id: BoxId,
+    pub id: LearnedHolder,
     /// What it held, and its memory budget, in bytes.
     pub held: u64,
     pub budget: u64,
@@ -1232,10 +1254,10 @@ impl Learned {
         }
         let mut ids = std::collections::BTreeSet::new();
         for holding in &self.holdings {
-            if !ids.insert(holding.id.as_str()) {
+            if !ids.insert(&holding.id) {
                 return Err(Refusal::Invalid {
                     what: "learned holdings",
-                    why: "a box's holding repeats".to_owned(),
+                    why: "a holder's holding repeats".to_owned(),
                 });
             }
         }
