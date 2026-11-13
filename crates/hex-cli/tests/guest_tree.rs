@@ -312,10 +312,7 @@ impl Side for Guest {
         // exists, it waits within the suites' program-end patience, a program's end being its fact.
         let text = reader.join().unwrap();
         let after = std::time::Instant::now();
-        let exit = p
-            .wait_for(hex_api::conformance::PATIENCE)
-            .unwrap()
-            .expect("the walk ended");
+        let exit = hex_api::conformance::end_of(&mut p).unwrap();
         eprintln!(
             "{}: the walk ended {} us after its output did",
             image.name,
@@ -477,10 +474,7 @@ impl Guest {
             )
             .unwrap();
         let text = reader.join().unwrap();
-        let exit = p
-            .wait_for(hex_api::conformance::PATIENCE)
-            .unwrap()
-            .expect("the room read ended");
+        let exit = hex_api::conformance::end_of(&mut p).unwrap();
         self.client.delete(&id).unwrap();
         assert_eq!(exit, Exit::Code(0), "the room read: {text}");
         text.trim()

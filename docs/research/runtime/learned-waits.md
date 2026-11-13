@@ -84,8 +84,8 @@ resets.
 
 ## Owed (2026-11-13)
 
-Three places still seed a wait from a record, the first in production. Each needs code that this change's one-host
-checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
+Three places seeded a wait from a record, the first in production; the second is done. Each needs code that this
+change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
 
 1. **The guest's first boot reads records.tsv: a production R03 violation, the first to close.**
    `hex_client::guest::shards::RECORDS` takes `bench/native/guest/records.tsv` by `include_str!`; `recorded_boot`
@@ -103,18 +103,18 @@ checks (macOS, arm64) can't compile, so each is the Hex lead's, with its design:
    or its VM's end (`Option<Instant>`, `None` for "until either"), with no slices; Shards is ROOT's to change. Then
    `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
    alone.
-2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`): `conformance::PATIENCE`, the program-end record
-   of this host's class (`HostClass::slowest_recorded_end`: Linux 957 ms, macOS 939 ms, Windows 6,239 ms), and `ENDS`,
-   a `LearnedWait` seeded from it. hex-api can't name `hex_core::patience` (hex-core depends on hex-api), so the design
-   moves the pure core down: `crates/hex-core/src/patience.rs` and its tests to `hex_api::patience`, with
-   `pub use hex_api::patience;` in hex-core, so every `hex_core::patience` path stands, and `test-seeds` with it.
-   `ENDS` becomes `Patience::measuring("conformance.ends")`: a case's wait for a program it expects to end follows the
-   program until the first end (`Proc::try_wait` looked at on its own events, the end the answer), then is bounded at
-   the slowest end seen; `still_running()`, the negative watch, is the slowest end seen, or a typed refusal where none
-   has been (the suite runs its ending cases before it). `PATIENCE`, `seed`, `seed_from`, `SLOWEST_RECORDED_END`,
-   `slowest_recorded_end` and `LearnedWait` go, and their users outside the suite (about 45 calls, in hex-cli's Linux
-   and Windows tests and in hex-node, hex-client and hex-bench) take a helper, `conformance::end_of(&mut proc)`,
-   that waits as the suite does.
+2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
+   goal 12's macOS checks had failed hex_quic_20, HEX-RT-2 "still running after 939ms", macOS's record). The pure
+   core moved down: `hex_api::patience`, with `pub use hex_api::patience;` in hex-core, so every `hex_core::patience`
+   path stands, and `test-seeds` with it. `ENDS` is `Patience::measuring("conformance.ends")`, and a case's wait for a
+   program's end follows the program to it (`conformance::end_of`: within W*, then by its own events until its end,
+   the run-out told). The exit and removal waits read the box while the runtime under test lives
+   (`Fixture::party`), and each differential reading follows that party: a double whose answers can't change has
+   ended, and fails at once at the step that differs. `still_running()`, the negative watch, is the slowest end seen:
+   a check that something doesn't happen needs a learned bound, and that is the one. `PATIENCE`, `seed`, `seed_from`,
+   `SLOWEST_RECORDED_END`, `HostClass` and `LearnedWait` went, their users (about 45 calls, in hex-cli's tests and in
+   hex-node, hex-client and hex-bench) taking `conformance::end_of`, and hex-bench's checker of the record's uses
+   with them.
 3. **The tests' own waits**: `Patience::seeded` seeds them from `hex_testkit::waits`' census constants (`PROGRAM` to
    `SEEDS`, adacachy2's debug run 5) under the lead's rule of 2026-11-08, and a dozen tests double a record
    (`node_socket.rs`'s `ANSWERED` and emptying, `oci_box.rs`'s namespaces, program end and creates, `oci_reuse.rs`'s

@@ -86,6 +86,17 @@ pub fn census_full_line(max: u64) -> String {
     format!("census full at {max} lines\n")
 }
 
+/// What a following wait's party is doing as its shell looks at it (decision 9): alive, so its answer may yet come; or
+/// ended (it died or finished, or its connection was reset or closed), so nothing can change its answer now. A wait
+/// past W* follows its party by this alone ([module docs](self)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Party {
+    /// Alive: its answer may yet come.
+    Live,
+    /// Ended: nothing can change its answer now.
+    Ended,
+}
+
 /// A wait's bound, learned from its answers, following its party where it has none ([module docs](self)).
 #[derive(Debug)]
 pub struct Patience {
@@ -107,9 +118,9 @@ impl Patience {
         }
     }
 
-    /// For tests alone (cfg(test), or the `test-seeds` feature, which only hex-testkit's dependency turns on and which
-    /// is a dev-dependency everywhere): the wait `name` as it would be once it had seen an answer of `slowest`. No
-    /// production wait is seeded (decision 9).
+    /// For tests alone (cfg(test), or the `test-seeds` feature, which only dev-dependencies turn on: hex-core's own
+    /// tests', and hex-testkit's through hex-core's, hex-testkit a dev-dependency everywhere): the wait `name` as it
+    /// would be once it had seen an answer of `slowest`. No production wait is seeded (decision 9).
     #[cfg(any(test, feature = "test-seeds"))]
     pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
         Self {
