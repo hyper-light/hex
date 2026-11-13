@@ -793,6 +793,7 @@ fn guest_requested() -> bool {
         hex_runtime::guest::ENV_SHARDS_BIN,
         hex_runtime::guest::ENV_KERNEL,
         hex_runtime::guest::ENV_INITRD,
+        hex_runtime::guest::ENV_IMAGE,
         hex_runtime::guest::ENV_CPUS,
         hex_runtime::guest::ENV_MEMORY_MIB,
         hex_runtime::guest::ENV_GPU,
