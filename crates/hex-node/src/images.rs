@@ -131,6 +131,18 @@ impl Books for ImageRuntime {
     ) -> Result<(), Refusal> {
         Err(unasked("pool"))
     }
+    fn node_vm(
+        &self,
+        run: &hex_api::NodeRun,
+    ) -> Result<Option<hex_core::record::NodeVmRecord>, Refusal> {
+        self.store.node_vm(run)
+    }
+    fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
+        self.store.put_node_vm(record)
+    }
+    fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
+        self.store.remove_node_vm(run)
+    }
 }
 
 /// The runtime's records within one transaction: the Store's lifecycle reads and writes.

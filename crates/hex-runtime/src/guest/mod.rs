@@ -28,7 +28,7 @@ pub mod selected;
 mod shared;
 pub mod shares;
 
-pub use image::{ImageClass, ImageWaits, host_images};
+pub use image::{ImageClass, ImageWaits, NodeBooted, NodeVm, host_images};
 pub use observer::config::{
     ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
     GpuObserverInput,
