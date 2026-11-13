@@ -27,9 +27,10 @@
 //! Every number it runs with is derived, none picked:
 //! - each VM's workload, what it is admitted for and the class's cost sizes: the most busy threads (a CPU each) and the
 //!   most MiB any step of any trace asks, so every trace and the riser fit their VM's envelope;
-//! - the process box's CPU cap, which it books and asks whole: the median CPU (mean cores, in milli-CPU, nearest rank)
-//!   of the `build` legs kiln's CI ran from 2026-10-22 to 2026-11-05 (bench/sched/kiln-ci-20261022-20261105.trace),
-//!   a CI job's box beside the agents;
+//! - the process box's CPU cap and memory bound, which it books (the run's admission leaves it both) and of which it
+//!   asks the CPU whole: the median CPU (mean cores, in milli-CPU) and the median peak memory, each by nearest rank, of
+//!   the `build` legs kiln's CI ran from 2026-10-22 to 2026-11-05 (bench/sched/kiln-ci-20261022-20261105.trace), a CI
+//!   job's box beside the agents;
 //! - the deadline guarding the node's start and each create (a VM's create boots it, past the client's learned create
 //!   bound): twice the node's own boot bound for the class, so the node's refusal, typed, comes first. `shards`: the
 //!   guest's dial bound, twice the slowest boot to ready this host's class records (bench/native/guest/records.tsv);
@@ -263,28 +264,36 @@ fn workload(traces: &[(String, Vec<Step>)]) -> CapacityResources {
 /// kiln's CI legs from 2026-10-22 to 2026-11-05, as hex-sim's trace (bench/sched/kiln_trace.py made it).
 const CI_LEGS: &str = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
 
-/// The process box's CPU cap: the median, by nearest rank, of the CPU (mean cores, in milli-CPU) of [`CI_LEGS`]' `build`
-/// legs, a CI job's box beside the agents.
-fn box_cpu() -> u64 {
-    let mut cpu: Vec<u64> = CI_LEGS
+/// The process box's caps, a CI job's box beside the agents: the median, each by nearest rank, of the CPU (mean cores,
+/// in milli-CPU) and of the peak memory (bytes) of [`CI_LEGS`]' `build` legs (bench/sched/kiln_trace.py's
+/// `leg,arrival,runs_for,cpu,mem,gpus,kind`).
+fn ci_box() -> CapacityResources {
+    let legs: Vec<(u64, u64)> = CI_LEGS
         .lines()
         .filter_map(|line| line.strip_prefix("leg,"))
         .map(|leg| leg.split(',').collect::<Vec<_>>())
         .filter(|fields| fields.get(5) == Some(&"build"))
-        .map(|fields| fields[2].parse().unwrap())
+        .map(|fields| (fields[2].parse().unwrap(), fields[3].parse().unwrap()))
         .collect();
-    assert!(!cpu.is_empty(), "the CI trace holds no build leg");
-    cpu.sort_unstable();
-    cpu[cpu.len().div_ceil(2) - 1]
+    assert!(!legs.is_empty(), "the CI trace holds no build leg");
+    let median = |mut values: Vec<u64>| {
+        values.sort_unstable();
+        values[values.len().div_ceil(2) - 1]
+    };
+    CapacityResources {
+        cpu_milli: median(legs.iter().map(|(cpu, _)| *cpu).collect()),
+        mem_bytes: median(legs.iter().map(|(_, mem)| *mem).collect()),
+        disk_bytes: 0,
+    }
 }
 
-/// The process box beside the fleet, `id`, bounded at its CPU cap `cpu_milli`, which it books and asks whole.
-fn box_spec(id: BoxId, cpu_milli: u64) -> BoxSpec {
+/// The process box beside the fleet, `id`, bounded at its caps `caps`, which it books.
+fn box_spec(id: BoxId, caps: CapacityResources) -> BoxSpec {
     BoxSpec {
         id,
         bounds: Bounds {
-            cpu_max_milli: Some(u32::try_from(cpu_milli).unwrap()),
-            memory_max: Some(hex_api::MIN_MEMORY),
+            cpu_max_milli: Some(u32::try_from(caps.cpu_milli).unwrap()),
+            memory_max: Some(caps.mem_bytes),
             ..Bounds::default()
         },
         class: ClassSpec::Process,
@@ -674,11 +683,14 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     let cost = capacity.cost.expect("the class's cost profile");
     let allocation = cost.allocate(workload).unwrap();
     let vcpus = allocation.guest().unwrap().cpu_milli.div_ceil(1000);
-    let box_cpu = box_cpu();
-    let budget = CapacityResources {
-        cpu_milli: capacity.total.cpu_milli.saturating_sub(box_cpu),
-        ..capacity.total
-    };
+    // The fleet's budget: the machine less the process box's caps, which it books (a native box's booking is its caps,
+    // as the node's learner reads them, C4).
+    let box_caps = ci_box();
+    let box_cpu = box_caps.cpu_milli;
+    let budget = capacity
+        .total
+        .checked_sub(box_caps)
+        .expect("the machine holds the process box's caps");
     let envelope = [
         (budget.cpu_milli, allocation.resources.cpu_milli),
         (budget.mem_bytes, allocation.resources.mem_bytes),
@@ -688,11 +700,11 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     .map(|(all, each)| all / each)
     .min()
     .unwrap();
-    // The process box under contention: it books its caps and asks them whole.
+    // The process box under contention: it books its caps and asks its CPU whole.
     let boxed = BoxId::new("charge-box").unwrap();
     let _spinning = client
         .run_before(
-            box_spec(boxed.clone(), box_cpu),
+            box_spec(boxed.clone(), box_caps),
             spinner(box_cpu),
             Stdio::null(),
             Instant::now() + wait,
@@ -935,10 +947,11 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     );
     println!(
         "HEX-CHARGE-FLEET inputs workload_cpu_milli={} workload_mem_bytes={} allocation={:?} box_cpu_milli={box_cpu} \
-         guard_ms={} traces={}",
+         box_mem_bytes={} guard_ms={} traces={}",
         workload.cpu_milli,
         workload.mem_bytes,
         allocation.resources,
+        box_caps.mem_bytes,
         wait.as_millis(),
         traces.len()
     );
@@ -997,21 +1010,27 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
         hex_core::watch::lateness_seed(&model),
     )
     .unwrap();
-    let cpu = box_cpu();
+    let caps = ci_box();
     let id = BoxId::new("w14-charge-box").unwrap();
     let _ = rt.delete(&id);
-    rt.create(box_spec(id.clone(), cpu)).unwrap();
-    let mut program = rt.exec(&id, spinner(cpu), Stdio::null()).unwrap();
+    rt.create(box_spec(id.clone(), caps)).unwrap();
+    let mut program = rt
+        .exec(&id, spinner(caps.cpu_milli), Stdio::null())
+        .unwrap();
     // The shell and one member a CPU of its cap.
-    let members = cpu.div_ceil(1000) + 1;
+    let members = caps.cpu_milli.div_ceil(1000) + 1;
     let mut ended = None;
-    hex_testkit::waits::until(&RUNNING, "the box's spinners running, or its program's end", || {
-        if let Ok(Some(exit)) = program.try_wait() {
-            ended = Some(exit);
-            return true;
-        }
-        rt.usage(&id).is_ok_and(|usage| usage.pids >= members)
-    })
+    hex_testkit::waits::until(
+        &RUNNING,
+        "the box's spinners running, or its program's end",
+        || {
+            if let Ok(Some(exit)) = program.try_wait() {
+                ended = Some(exit);
+                return true;
+            }
+            rt.usage(&id).is_ok_and(|usage| usage.pids >= members)
+        },
+    )
     .unwrap();
     let usage = rt.usage(&id).unwrap();
     rt.delete(&id).unwrap();
@@ -1019,6 +1038,21 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
         ended,
         None,
         "the box's spinner ended before its {members} members ran, under {:?}: {usage:?}",
-        box_spec(id, cpu).bounds
+        box_spec(id, caps).bounds
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1): the process box is a CI job's, each of its caps derived from kiln's CI. Do reckon
+/// the box from the CI trace; expect the nearest-rank medians of its 3,946 build legs: 363 milli-CPU and a peak of
+/// 2,228,883,456 bytes, and no disk.
+#[test]
+fn w14_the_box_beside_the_fleet_is_a_median_ci_build_leg() {
+    assert_eq!(
+        ci_box(),
+        CapacityResources {
+            cpu_milli: 363,
+            mem_bytes: 2_228_883_456,
+            disk_bytes: 0,
+        }
     );
 }
