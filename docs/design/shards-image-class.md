@@ -198,22 +198,22 @@ The record (the guest's Books, the node's Store) and this process's run:
 
 A call on a Booting box but a delete waits on nothing: it answers what is known (`Created`'s inspect, `Lifecycle {
 Pending }` for a stop), as `LifecycleCause::Pending` says. A delete answers once the box is gone, never Pending (kiln's
-choice (b), ROOT 2026-11-13), so its caller needs no retry: its intent written (`Deleting`), it follows the boot to its
-answer as decision 9 has a wait follow its party, by a wait of its own, `hex.image.delete_boot` (past its W* the run-out
-is told under that name, the boot it ends still under way, and the delete waits on, refused only where the boot's thread
-ends with no answer, as the node's broken state in those words, its record kept), stops a run that started and follows
-its stop to its end however long past the stop's W*, then removes the box's diagnostics and record.
-`delete_with_host_use` answers the run's final use of its host, read as it ran before its stop, or none where its run
-never started (kiln charges nothing then); a delete retried then is NoSuchBox. D231's boot gives no stop for a boot
-under way (`Images::boot` blocks until its run starts or its host ends, the host its caller's only then), so the delete
-can't end a boot early, and a boot that neither starts nor ends holds the delete with it: Shards' stop for a boot under
-way is owed (§8), which the delete then asks. A caller waits for a start past W* with `Runtime::started` rather than
-polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed to its boot's answer as a delete
-follows it, by a wait of its own, `hex.image.started` (refused only where the boot's thread ends with no answer, the
-boot it follows still under way), then answered as inspect answers it, Running, or as its run's own failure in its
-runtime's words (`Refusal::Failed`), as `start` answers a run that failed; a box not booting is answered at once. A Held
-box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among them, and is listed running: Hex
-can't prove it isn't.
+choice (b), ROOT 2026-11-13), so its caller needs no retry: its intent written (`Deleting`), it stops the boot (D231's
+`BootStop`, Shards `ed1136305`: its run host killed mid-boot, with its process group, or on Windows its job) and follows
+the boot to its end, `Ended(Stopped)` once that host is reaped and every holder of its stderr has closed it, or its
+run's start where that came first, as decision 9 has a wait follow its party, by a wait of its own,
+`hex.image.delete_boot` (past its W* the run-out is told under that name, the boot it ends still under way, and the
+delete waits on, refused only where the boot's thread ends with no answer, as the node's broken state in those words,
+its record kept), stops a run that started and follows its stop to its end however long past the stop's W*, then removes
+the box's diagnostics and record. `delete_with_host_use` answers the run's final use of its host, read as it ran before
+its stop, or none where its run never started (kiln charges nothing then); a delete retried then is NoSuchBox. A stopped
+boot's time is no sample of the boot's W*: it is the time to its stop, no boot's answer. A caller waits for a start past
+W* with `Runtime::started` rather than polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed
+to its boot's answer as a delete follows it, by a wait of its own, `hex.image.started` (refused only where the boot's
+thread ends with no answer, the boot it follows still under way), then answered as inspect answers it, Running, or as
+its run's own failure in its runtime's words (`Refusal::Failed`), as `start` answers a run that failed; a box not
+booting is answered at once. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among
+them, and is listed running: Hex can't prove it isn't.
 
 ## 4. Usage
 
@@ -310,14 +310,13 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and signals
   (`MemberExec`, `MemberSignal`; step 11), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
-  (unbuilt, D231), and a stop for a boot under way (ROOT asked g121, 2026-11-13: a stop handle on `Images::boot`, or a
-  boot that hands over its host before its run starts), which a delete of a booting box then asks rather than
-  following the boot to its answer (§3). Given since 482c5d78: the Windows run host (`WindowsRunHost`, 731b5e54), a
-  boot patience (`Images::boot`'s), guest time per vCPU in the run's stats (D241), the run host holding only its stdio
-  (D248, Hex's 0001 upstream), each member held to its reach (D246, Hex's 0002 upstream) and a never-started command's
-  end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own: it runs in
-  the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run host per
-  box, nor read its use on the host (§4).
+  (unbuilt, D231). Given since 482c5d78: a stop for a boot under way (D231's `BootStop`, `ed1136305`), which a delete
+  of a booting box asks (§3); the Windows run host (`WindowsRunHost`, 731b5e54), a boot patience (`Images::boot`'s),
+  guest time per vCPU in the run's stats (D241), the run host holding only its stdio (D248, Hex's 0001 upstream), each
+  member held to its reach (D246, Hex's 0002 upstream) and a never-started command's end in its VM's words (D249). The
+  native-owner launch would also give the run host a scope of its own: it runs in the node's process tree today, so
+  Hex charges the VM's envelope by admission but cannot contain the run host per box, nor read its use on the host
+  (§4).
 - **Its diagnostics' disk use** (§1): the bytes of a box's diagnostics file are its own use of the node's disk, which
   no usage the image class reports counts yet (`Usage` has no disk use).
 
