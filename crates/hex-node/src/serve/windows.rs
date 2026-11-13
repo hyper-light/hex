@@ -488,7 +488,7 @@ impl Windows {
                     events.push(Event::Listener);
                 }
             }
-            Done::Received { tag, buf, n } => {
+            Done::Received { tag, mut buf, n } => {
                 let Some((conn, interest)) = self.completed(tag)? else {
                     return Ok(());
                 };
@@ -521,7 +521,14 @@ impl Windows {
                 };
                 match n {
                     Ok(0) => st.ended = true,
-                    Ok(n) => frame(&mut st, buf.get(..n).unwrap_or_default()),
+                    Ok(n) => {
+                        frame(&mut st, buf.get(..n).unwrap_or_default());
+                        // Framed into the messages it holds now: what was read here, which may carry a lease's
+                        // value, wiped (docs/design/credential-grants.md C7).
+                        if let Some(held) = buf.get_mut(..n) {
+                            hex_api::lease::wipe_in_place(held);
+                        }
+                    }
                     Err(e) => {
                         st.reset = socket::is_reset(&e);
                         st.ended = true;
@@ -798,10 +805,14 @@ impl Os for Windows {
         let Ok(mut st) = conn.state.lock() else {
             return Recv::Gone;
         };
-        if let Some(m) = st.ready.pop_front() {
+        if let Some(mut m) = st.ready.pop_front() {
             let n = m.bytes.len().min(buf.len());
             if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.get(..n)) {
                 into.copy_from_slice(from);
+            }
+            // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
+            if wire::carries_secret(&m.bytes) {
+                hex_api::lease::wipe(&mut m.bytes);
             }
             conn.read_on(&mut st);
             return Recv::Message {

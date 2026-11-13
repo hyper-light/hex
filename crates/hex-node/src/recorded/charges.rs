@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedUse,
+    BoxId, BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
     MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::record::{BoxRecord, Phase};
@@ -271,6 +271,16 @@ pub(crate) enum Resort {
     Refused(Refusal),
 }
 
+/// The box an end this learner made names: every VM it learns is a box's, so a node VM's holder here is no end of its.
+fn boxed(end: &LearnedEnd) -> Result<BoxId, Refusal> {
+    match &end.id {
+        LearnedHolder::Box(id) => id.try_clone(),
+        LearnedHolder::Node(_) => Err(Refusal::Broken(
+            "the last resort holds a node VM's end, which this learner never makes".to_owned(),
+        )),
+    }
+}
+
 /// How a learner's last resort reaches a VM (C5): its record, to say why before the VM is ended, and the VM itself.
 pub(crate) trait Reach {
     /// Writes `end`, why the VM of `scope` is to be ended, into box `id`'s record where it is still that VM's lifetime,
@@ -381,12 +391,12 @@ impl LastResort {
                     self.remember(class, &end)?;
                     Resort::Ending {
                         scope,
-                        id: end.id.try_clone()?,
+                        id: boxed(&end)?,
                         why: excess(&end),
                     }
                 }
                 Err(refusal) => {
-                    self.write(end.id.try_clone()?, scope, None)?;
+                    self.write(boxed(&end)?, scope, None)?;
                     Resort::Refused(refusal)
                 }
             };
@@ -404,7 +414,7 @@ impl LastResort {
                     Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
                 })?;
                 let end = LearnedEnd {
-                    id: id.try_clone()?,
+                    id: LearnedHolder::Box(id.try_clone()?),
                     held: why.held,
                     budget: why.budget,
                     band: why.band,
@@ -518,7 +528,7 @@ impl LastResort {
         why: Excess,
     ) -> Result<(), Refusal> {
         let end = LearnedEnd {
-            id: id.try_clone()?,
+            id: LearnedHolder::Box(id.try_clone()?),
             held: why.held,
             budget: why.budget,
             band: why.band,
@@ -1067,7 +1077,7 @@ pub(crate) fn learned(
         holdings.push((
             past,
             hex_api::LearnedHolding {
-                id: id.try_clone()?,
+                id: LearnedHolder::Box(id.try_clone()?),
                 holding,
             },
         ));

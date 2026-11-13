@@ -507,7 +507,10 @@ fn get(
             })
         })
     {
-        return Err(scope.refusal(boxed.owner()));
+        return Err(scope.uncertain(
+            boxed.owner(),
+            "its attached controller isn't the one its record names",
+        ));
     }
     Ok(boxed)
 }
@@ -526,13 +529,20 @@ fn attached(
     let scope = boxed
         .scope()
         .ok_or_else(|| super::super::configuration("native helper slot has no scope"))?;
-    *scope
-        .notification
-        .lock()
-        .map_err(|_| scope.refusal(boxed.owner()))? = Some(writer);
+    *scope.notification.lock().map_err(|_| {
+        scope.uncertain(
+            boxed.owner(),
+            "its native scope's notification is poisoned as it is attached",
+        )
+    })? = Some(writer);
     // Covers a controller/member that became terminal before the new pipe was attached. This is
     // a notification only; every proxy query still proves the exact same native scope.
-    scope.notify().map_err(|_| scope.refusal(boxed.owner()))?;
+    scope.notify().map_err(|_| {
+        scope.uncertain(
+            boxed.owner(),
+            "its native scope's notification failed as it was attached",
+        )
+    })?;
     let controller = boxed.identity.get().map(|identity| ProcId {
         pid: identity.pid,
         start_ticks: identity.started,
@@ -542,7 +552,12 @@ fn attached(
         .get()
         .map(|vsock| copy_raw(vsock.as_os_str().as_bytes()))
         .transpose()?
-        .ok_or_else(|| scope.refusal(boxed.owner()))?;
+        .ok_or_else(|| {
+            scope.uncertain(
+                boxed.owner(),
+                "its native scope has no vsock to answer its attach with",
+            )
+        })?;
     Ok((
         protocol::Answer::Attached {
             key,
@@ -587,10 +602,12 @@ fn dispatch(
                 || record.stage() != hex_core::record::NativeStage::Creating
                 || record.init().is_some()
             {
-                return Err(record.refusal(LifecycleCause::Uncertain));
+                return Err(record.uncertain("its launch isn't a fresh creation of its record"));
             }
             if record.devices().is_empty() != launch.report_scope.is_none() {
-                return Err(record.refusal(LifecycleCause::Uncertain));
+                return Err(
+                    record.uncertain("its launch's report scope doesn't follow its devices")
+                );
             }
             // Exact owner is created once. A retry cannot silently duplicate its VMM. A terminal
             // receipt is retained in this SAME slot for lost-reply/finalize retries, not another map.
@@ -603,7 +620,10 @@ fn dispatch(
                     Ok(boxed) => {
                         boxed
                             .scope()
-                            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
+                            .ok_or_else(|| {
+                                record
+                                    .uncertain("its failed preparation's slot has no native scope")
+                            })?
                             .preparation_failed(error)?;
                         attached(&boxed, key.try_clone()?)
                     }
@@ -650,7 +670,12 @@ fn dispatch(
                         .get()
                         .map(|vsock| copy_raw(vsock.as_os_str().as_bytes()))
                         .transpose()?
-                        .ok_or_else(|| scope.refusal(boxed.owner()))?;
+                        .ok_or_else(|| {
+                            scope.uncertain(
+                                boxed.owner(),
+                                "its native scope has no vsock to answer its inspection with",
+                            )
+                        })?;
                     Ok((
                         protocol::Answer::Metadata {
                             key: key.try_clone()?,
@@ -752,7 +777,12 @@ fn census(runtime: &MacRuntime, process: ProcId) -> Result<protocol::census::Cen
             super::super::configuration("a rootless native helper owns an ordinary process slot")
         })?;
         if matches!(
-            *scope.lock().map_err(|_| scope.refusal(owner.as_ref()))?,
+            *scope.lock().map_err(|_| {
+                scope.uncertain(
+                    owner.as_ref(),
+                    "its native scope's phase is poisoned as its helper's census is taken",
+                )
+            })?,
             super::super::Phase::Finalized(_)
         ) {
             continue;
@@ -783,14 +813,21 @@ fn completed(
         let scope = boxed.scope().ok_or_else(|| {
             super::super::configuration("helper completion has ordinary process slot")
         })?;
-        let end = match *scope.lock().map_err(|_| scope.refusal(owner.as_ref()))? {
+        let end = match *scope.lock().map_err(|_| {
+            scope.uncertain(
+                owner.as_ref(),
+                "its native scope's phase is poisoned as its helper's completion is taken",
+            )
+        })? {
             super::super::Phase::Finalized(end) if end.scope == TerminalScope::Released => end,
             _ => return Ok(None),
         };
-        let vsock = scope
-            .vsock
-            .get()
-            .ok_or_else(|| scope.refusal(owner.as_ref()))?;
+        let vsock = scope.vsock.get().ok_or_else(|| {
+            scope.uncertain(
+                owner.as_ref(),
+                "its finalized native scope has no vsock for its helper's completion",
+            )
+        })?;
         owners.push(protocol::completed::Completed {
             key: protocol::Key {
                 owner: owner.try_clone()?,
