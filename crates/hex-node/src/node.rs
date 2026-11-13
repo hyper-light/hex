@@ -68,15 +68,25 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// Waits for `cg`, killed at `killed`, to empty within the learned wait ([`EMPTYING`]), which it teaches
 /// when it empties: the time from its kill. Says whether it emptied, and the wait it had from the kill.
 pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
-    let wait = EMPTYING.deadline();
-    let emptied = cg.wait_empty(empty_patience(killed))?;
+    wait_empty_with(cg, killed, &EMPTYING)
+}
+
+/// [`wait_empty`] on any box that empties ([`crate::emptying::Emptying`]), its wait as `wait` has learned it.
+fn wait_empty_with(
+    cg: &impl crate::emptying::Emptying,
+    killed: Instant,
+    wait: &Patience,
+) -> Result<(bool, Duration), Refusal> {
+    let bound = wait.deadline();
+    let left = bound.map_or(Duration::MAX, |w| w.saturating_sub(killed.elapsed()));
+    let emptied = cg.empties_within(left)?;
     if emptied {
-        EMPTYING.answered(killed.elapsed());
-    } else if let Some(after) = wait {
+        wait.answered(killed.elapsed());
+    } else if let Some(after) = bound {
         // A fault to report here, but the census is told it took longer than its bound.
-        EMPTYING.ran_out(after);
+        wait.ran_out(after);
     }
-    Ok((emptied, wait.unwrap_or(Duration::MAX)))
+    Ok((emptied, bound.unwrap_or(Duration::MAX)))
 }
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
@@ -2785,6 +2795,40 @@ fn seed_prune_for(owner: &Owner, oci_root: &Path, classic_roots: bool) -> Prune 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A killed box in the test's hands, slower to empty than any wait of a time: it holds processes through every look
+    /// bounded by a time, and empties only for one that waits until it does (`Duration::MAX`), as a real box's
+    /// emptying ends that wait. It counts the looks.
+    struct Killed {
+        looks: std::cell::Cell<u32>,
+    }
+
+    impl crate::emptying::Emptying for Killed {
+        fn empties_within(&self, timeout: Duration) -> Result<bool, Refusal> {
+            self.looks.set(self.looks.get() + 1);
+            Ok(timeout == Duration::MAX)
+        }
+    }
+
+    /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it), goal
+    /// 13's find at 67dc2ed8: a box whose processes took longer to exit than every earlier emptying was refused "still
+    /// holds processes 12-19µs after cgroup.kill", its wait bounded at the slowest emptying seen and following no
+    /// party. Do: a wait whose W* is 1 ns; a killed box slower to empty than that. Expect: it emptied, waited for past
+    /// W* by its life alone (a look within W*, then one until it empties), the run-out told on the way, and its time
+    /// the sample W* rises to.
+    #[test]
+    fn original_a_box_slower_to_empty_than_any_before_is_waited_for_until_it_empties() {
+        let learned = Duration::from_nanos(1);
+        let wait = Patience::measuring("test.node.emptying.slower");
+        wait.answered(learned);
+        let killed = Killed {
+            looks: std::cell::Cell::new(0),
+        };
+        let (emptied, _) = wait_empty_with(&killed, Instant::now(), &wait).unwrap();
+        assert!(emptied, "refused at W*");
+        assert_eq!(killed.looks.get(), 2);
+        assert!(wait.slowest().is_some_and(|slowest| slowest > learned));
+    }
 
     /// AC-T7.1.3, decision 8: deleting an OCI box after its init was reaped still waits for that init's cgroup to
     /// drain. Do: choose deletion from an init+exit record with no watched init. Expect its identity retained for

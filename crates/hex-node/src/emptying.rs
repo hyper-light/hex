@@ -15,6 +15,20 @@ use hex_core::patience::Patience;
 /// `bench/competitive/probes/waits_census.md` are the evidence the rule is held to, never a seed.
 pub(crate) static EMPTYING: Patience = Patience::measuring("node.emptying");
 
+/// A killed box as its emptying's wait looks at it: whether it empties within a time (`Duration::MAX`: until it does).
+#[cfg(target_os = "linux")]
+pub(crate) trait Emptying {
+    /// Waits until the box holds no process, at most `timeout`; whether it holds none.
+    fn empties_within(&self, timeout: Duration) -> Result<bool, hex_api::Refusal>;
+}
+
+#[cfg(target_os = "linux")]
+impl Emptying for hex_runtime::linux::cgroup::BoxCgroup {
+    fn empties_within(&self, timeout: Duration) -> Result<bool, hex_api::Refusal> {
+        self.wait_empty(timeout)
+    }
+}
+
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
 /// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
 pub(crate) fn empty_patience(killed: Instant) -> Duration {
