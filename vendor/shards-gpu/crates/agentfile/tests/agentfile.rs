@@ -1609,6 +1609,54 @@ fn destinations_are_what_joined_networks_name_and_open() {
     assert_eq!(af::spec(&read), af::spec(&directives));
 }
 
+/// Each member's reach by name (D236, §4.4), as an orchestrator holds it per member: a
+/// harness its network's destinations, the host itself among them, an agent its own and its
+/// remote MCP server's, and a member that joins no network nothing; each in the order the
+/// Agentfile declares its members, and none of another member's.
+#[test]
+fn each_member_reaches_its_own_names() {
+    use shards_agentfile::agentfile::{self as af, TargetKind};
+    let text = "FROM alpine\nHARNESS codex FROM ./codex\nAGENT helper FROM ./helper\nAGENT idle FROM ./idle\n\
+        NETWORK --egress=api.openai.com:443 --egress=host.docker.internal:7070 provider FOR codex\n\
+        NETWORK --egress=api.example:8443 other FOR helper\n\
+        EXPOSE --harnesses=codex 443 7070 AS egress FOR provider\nEXPOSE --agents=helper 8443 AS egress FOR other\n\
+        CONNECT codex WITH codex ON provider\nCONNECT helper WITH helper ON other\n\
+        MCP web FROM https://mcp.example:9443/sse FOR helper\n";
+    let directives = af::resolve_targets(&stage_directives(text)).unwrap();
+    af::connections(&directives).unwrap();
+    af::held(&directives).unwrap();
+    let reach = af::named_reach(&directives);
+    let said: Vec<(TargetKind, String, Vec<String>)> = reach
+        .iter()
+        .map(|(kind, name, named)| {
+            let named = named
+                .iter()
+                .map(|(host, port)| format!("{}:{port}", String::from_utf8_lossy(host)))
+                .collect();
+            (*kind, String::from_utf8_lossy(name).into_owned(), named)
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (
+                TargetKind::Harness,
+                "codex".to_string(),
+                vec![
+                    "api.openai.com:443".to_string(),
+                    "host.docker.internal:7070".to_string()
+                ]
+            ),
+            (
+                TargetKind::Agent,
+                "helper".to_string(),
+                vec!["api.example:8443".to_string(), "mcp.example:9443".to_string()]
+            ),
+            (TargetKind::Agent, "idle".to_string(), Vec::new()),
+        ]
+    );
+}
+
 /// What no destination of a network's is, refused by name and why: one let in rather than
 /// reached, of a network carrying no TCP, an all-digit or patterned host, an IPv6 address,
 /// UDP, and the member's own loopback; a port, a range and a Unix socket read as before.

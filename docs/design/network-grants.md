@@ -209,14 +209,15 @@ alternatives:
    to it is a change to the `shards` binary.
 3. **Chosen, as a recorded change to Hex's vendored Shards (Ada, 2026-11-12: an upstream blocker is fixed in Hex's
    vendored copy and carried to Shards' ROOT): each member's reach in the narrowing, held by the run host.** The
-   orchestrator names what each member may reach (`Narrowing::members`, `MemberReach`, D231's channel version 5,
-   written only where some destination is kept, so a stock run host of version 4 serves every other boot). The run
-   host, from the Agentfile it already reads, refuses the boot before the VM starts unless every member the image
-   declares, named or not, reaches exactly what it is let: `named(X) ∩ K` equal to the member's reach, sorted, each
-   once (`api_run`'s `held_apart`, a widening of what was asked). Neither init nor the network process changes. The
-   API half is vendor/shards change 0002 (`crates/api/src/image/wire.rs`); the run host's half is vendor/shards-gpu
-   change 0002 (the agentfile crate's `named_reach`, `crates/shards/src/agentfile.rs`, `api_run.rs`), built into
-   Hex's `shards` by `scripts/shards-gpu/build.sh` on Linux, macOS and Windows.
+   orchestrator names what each member may reach (`Narrowing::members`, `MemberReach`, D231's channel version 9,
+   the next after Shards main's 7 and 8 (D241, D242), written only where some destination is kept, so a stock run
+   host of version 6 serves every other boot). The run host, from the Agentfile it already reads, refuses the boot
+   before the VM starts unless every member the image declares, named or not, reaches exactly what it is let:
+   `named(X) ∩ K` equal to the member's reach, sorted, each once (`api_run`'s `held_apart`, a widening of what was
+   asked). Neither init nor the network process changes. The API half is vendor/shards change 0002
+   (`crates/api/src/image/wire.rs`); the run host's half is vendor/shards-gpu change 0002 (the agentfile crate's
+   `named_reach`, `crates/shards/src/agentfile.rs`, `api_run.rs`), built into Hex's `shards` by
+   `scripts/shards-gpu/build.sh` on Linux, macOS and Windows.
 
 So Hex keeps `K`, every destination its grants name, and names each member's reach, its own grants'. The image's
 grants bound it from above (a destination the image grants no one is refused as a widening as before), and the
@@ -225,9 +226,9 @@ host that lacks the change, a boot keeping a destination is refused by its chann
 
 | A box's grants | What Shards `e82b9403` with change 0002 holds | Hex |
 |---|---|---|
-| none | `network none`: no NIC, no network process | programmed: nothing kept, no publish, version 4 |
+| none | `network none`: no NIC, no network process | programmed: nothing kept, no publish, version 6 |
 | `Publish` of a member's port at a host address, on any run | `Publish { guest_port, proto, host: Some(addr), host_port }`, for a port the image gives a member coming in, or (a run with a command of its own) any port the image doesn't declare as egress, which then reaches the command (D122) | programmed; held to the receiver Shards names as the boot returns (N6) |
-| `Egress` by TCP to a name or an IPv4 address | a destination the image grants, kept, and each member held to its reach of what is kept | programmed: kept, its member held to it alone (version 5) |
+| `Egress` by TCP to a name or an IPv4 address | a destination the image grants, kept, and each member held to its reach of what is kept | programmed: kept, its member held to it alone (version 9) |
 | `Host` by TCP (kiln's endpoint beside the VM) | `host.docker.internal:<port>`, the host's loopback at that port alone, held alike | programmed alike |
 | `Egress` by UDP to a name | no UDP destination (D236 is TCP) | refused `Awaits(MemberGrantsByName)` |
 | `Egress` to an IPv6 address, or by UDP to an address | no IPv6 or UDP destination | refused `Awaits(MemberGrantsByAddress)` |
@@ -318,7 +319,7 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
   - an inspect's grants and bound ports.
 - `crates/hex-core/src/record.rs`: a Shards image VM's record keeps every way a grant takes, whole.
 - `crates/hex-runtime/src/grants/tests.rs`:
-  - no grant is no network, no destination kept (`Narrowing::default()` keeps them all), no reach named (version 4);
+  - no grant is no network, no destination kept (`Narrowing::default()` keeps them all), no reach named (version 6);
   - each destination by TCP kept as D236 writes it and its member held to it alone, several members' and ports'
     each kept once and sorted, and what D236 can't express refused naming its own capability, first;
   - a publish is programmed alike on a run with a command of its own and on one of the members alone;
@@ -338,9 +339,9 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
     where it reaches the run's own command;
   - a publish to a member the image doesn't run stops the VM.
 - Conformance `HEX-IMG-7`, which the simulator passes.
-- Shards' own tests of change 0002, on its workspace at `66113379` plus the change: `named_reach` reads each member's
+- Shards' own tests of change 0002, on its workspace at `e82b9403` plus the change: `named_reach` reads each member's
   reach (the agentfile crate), the run host's hold refuses every case above and passes the exact one (`api_run`), and
-  the request carries each reach by version 5 alone (`wire`); a guard-removal mutant of the hold fails its test.
+  the request carries each reach by version 9 alone (`wire`); a guard-removal mutant of the hold fails its test.
 - `crates/hex-cli/tests/image_grants_real.rs`, without a VM, on Linux, macOS and Windows: the grants probe
   (`image_grants_probe/probe.rs`) answers a connection with its targets' outcomes, typed (connected, refused,
   unresolved), and its report and arguments read back as written, each malformed one refused.
@@ -367,10 +368,10 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 
 ## Sources
 
-- Shards at `66113379`:
+- Shards at `e82b9403`:
   - `docs/design/architecture.md`: D31, D59 parts seven, ten and eleven, D109, D122, D124, D192, D231, D236;
   - `docs/research/measurements/s9-grants-v1/README.md`, step 9's record;
-  - `crates/api/src/image.rs` and `image/wire.rs` (`Narrowing.destinations`, `Bound::to`, channel version 4);
+  - `crates/api/src/image.rs` and `image/wire.rs` (`Narrowing.destinations`, `Bound::to`, channel version 6);
   - `crates/shards/src/api_run.rs` (`kept`, `egress`, `ports_granted`, `published`);
   - `crates/net/src/lib.rs` (`Stack::allows`, `host_granted`);
   - `crates/dns/src/lib.rs` (`destination`, `HOST`);

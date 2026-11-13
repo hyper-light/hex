@@ -350,6 +350,98 @@ fn egress(
     Ok(Some(shards_net::encode_policy(&ports, &named, dns)))
 }
 
+/// Each member held to its reach of the destinations kept, where the request holds members
+/// apart (`Narrowing::members`, version 9). A member reaches each kept destination it reaches
+/// by name, its networks' destinations and its remote MCP servers' (`Agentfile::named`): its
+/// init lets it out to those alone and its agents' resolver answers it them, the network
+/// process holds the whole microVM to those kept, and D236's `held` makes the members that
+/// reach a port by name reach it alike. So a run that would let a member the image declares
+/// reach other than the request lets it (one the request names nowhere: none) is refused
+/// before it starts, a widening of what was asked; as is a member the request names that the
+/// image declares not, or names twice.
+fn held_apart(
+    agentfile: Option<&crate::agentfile::Agentfile>,
+    narrowing: &wire::Narrowing,
+) -> Result<(), No> {
+    use shards_agentfile::agentfile::TargetKind;
+    let Some(asked) = &narrowing.members else {
+        return Ok(());
+    };
+    let none = crate::agentfile::Agentfile::default();
+    let a = agentfile.unwrap_or(&none);
+    let kept: Vec<String> = match &narrowing.destinations {
+        wire::Keep::Only(items) => items.clone(),
+        wire::Keep::All => a
+            .grants
+            .destinations
+            .iter()
+            .map(|d| String::from_utf8_lossy(d).into_owned())
+            .collect(),
+    };
+    let kind_of = |k: TargetKind| match k {
+        TargetKind::Agent => wire::MemberKind::Agent,
+        TargetKind::Harness => wire::MemberKind::Harness,
+    };
+    for (i, m) in asked.iter().enumerate() {
+        if !a
+            .named
+            .iter()
+            .any(|n| kind_of(n.kind) == m.kind && n.name == m.name)
+        {
+            return Err(No(
+                Cause::Image,
+                format!("{:?} {}: the image declares no such member", m.kind, m.name),
+            ));
+        }
+        if asked.iter().take(i).any(|o| o.kind == m.kind && o.name == m.name) {
+            return Err(No(
+                Cause::Request,
+                format!("{:?} {}: its reach is named twice", m.kind, m.name),
+            ));
+        }
+    }
+    let said = |list: &[&str]| {
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(", ")
+        }
+    };
+    for n in &a.named {
+        let mut reach: Vec<&str> = n
+            .reaches
+            .iter()
+            .map(String::as_str)
+            .filter(|d| kept.iter().any(|k| k == d))
+            .collect();
+        reach.sort_unstable();
+        reach.dedup();
+        let mut lets: Vec<&str> = asked
+            .iter()
+            .find(|m| m.kind == kind_of(n.kind) && m.name == n.name)
+            .map(|m| m.destinations.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        lets.sort_unstable();
+        lets.dedup();
+        if reach != lets {
+            let word = match n.kind {
+                TargetKind::Agent => "agent",
+                TargetKind::Harness => "harness",
+            };
+            return Err(No(
+                Cause::Widening,
+                format!(
+                    "{word} {}: of the destinations kept it would reach {}, where the request lets it reach {} (D236)",
+                    n.name,
+                    said(&reach),
+                    said(&lets)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Refuses a published port that would widen the run: one the image's Agentfile declares
 /// `AS egress` (a destination, never a listener), and, for a run with no command of its
 /// own, one the image gives no member for ingress (D122).
@@ -621,6 +713,7 @@ mod hosted {
         let inputs = super::inputs(request, &members)?;
         super::ports_granted(&request.publish, agentfile.as_ref(), request.command.is_some())?;
         let egress = super::egress(agentfile.as_ref().map(|a| &a.grants), &request.egress)?;
+        super::held_apart(agentfile.as_ref(), &request.egress)?;
         if egress.is_some() {
             run.network = "bridge".into();
         }
@@ -2496,6 +2589,7 @@ mod tests {
             mcp: wire::Keep::Only(Vec::new()),
             destinations: wire::Keep::Only(vec!["host.docker.internal:7070".into()]),
             dns: false,
+            members: None,
         };
         let one = egress(Some(&grants), &narrowed).ok().unwrap().unwrap();
         assert_ne!(Some(one.clone()), all);
@@ -2508,6 +2602,7 @@ mod tests {
             mcp: wire::Keep::Only(Vec::new()),
             destinations: wire::Keep::Only(Vec::new()),
             dns: false,
+            members: None,
         };
         assert_eq!(egress(Some(&grants), &none).ok().unwrap(), None);
         // A destination the image does not grant, of another port or host: a widening.
@@ -2536,6 +2631,114 @@ mod tests {
             ..wire::Narrowing::default()
         };
         assert!(matches!(egress(None, &asked), Err(No(Cause::Widening, _))));
+    }
+
+    /// Each member held to its reach of the destinations kept (D236, version 9). Do: keep a
+    /// destination that harness codex and agent helper both reach by name, beside the host
+    /// itself that codex alone reaches, and hold each member to what the request lets it reach.
+    /// Expect: a request letting both reach the destination, and codex the host, passes; one
+    /// letting codex alone reach the destination, which helper would reach too, letting codex
+    /// none of what it would reach, or letting it reach more than it would, is refused as a
+    /// widening, naming the member and both reaches; a member the image declares not refused as
+    /// the image's, one named twice as the request's; a request holding no member apart, and
+    /// one keeping nothing, pass.
+    #[test]
+    fn each_member_is_held_to_its_reach_of_the_destinations_kept() {
+        use crate::agentfile::{Agentfile, NamedReach};
+        use shards_agentfile::agentfile::TargetKind;
+        let agentfile = Agentfile {
+            named: vec![
+                NamedReach {
+                    kind: TargetKind::Harness,
+                    name: "codex".into(),
+                    reaches: vec!["api.example:443".into(), "host.docker.internal:7070".into()],
+                },
+                NamedReach {
+                    kind: TargetKind::Agent,
+                    name: "helper".into(),
+                    reaches: vec!["api.example:443".into()],
+                },
+            ],
+            ..Agentfile::default()
+        };
+        let reach = |kind, name: &str, destinations: &[&str]| wire::MemberReach {
+            kind,
+            name: name.into(),
+            destinations: destinations.iter().map(|d| (*d).to_string()).collect(),
+        };
+        let held = |members: Option<Vec<wire::MemberReach>>| wire::Narrowing {
+            egress: wire::Keep::Only(Vec::new()),
+            mcp: wire::Keep::Only(Vec::new()),
+            destinations: wire::Keep::Only(vec![
+                "api.example:443".into(),
+                "host.docker.internal:7070".into(),
+            ]),
+            dns: false,
+            members,
+        };
+        let (harness, agent) = (wire::MemberKind::Harness, wire::MemberKind::Agent);
+        let both = vec![
+            reach(
+                harness,
+                "codex",
+                &["api.example:443", "host.docker.internal:7070"],
+            ),
+            reach(agent, "helper", &["api.example:443"]),
+        ];
+        assert!(held_apart(Some(&agentfile), &held(Some(both))).is_ok());
+        for (members, says) in [
+            (
+                vec![reach(
+                    harness,
+                    "codex",
+                    &["api.example:443", "host.docker.internal:7070"],
+                )],
+                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach none",
+            ),
+            (
+                vec![
+                    reach(harness, "codex", &[]),
+                    reach(agent, "helper", &["api.example:443"]),
+                ],
+                "harness codex: of the destinations kept it would reach api.example:443, host.docker.internal:7070, where the request lets it reach none",
+            ),
+            (
+                vec![
+                    reach(
+                        harness,
+                        "codex",
+                        &["api.example:443", "host.docker.internal:7070"],
+                    ),
+                    reach(agent, "helper", &["api.example:443", "host.docker.internal:7070"]),
+                ],
+                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach api.example:443, host.docker.internal:7070",
+            ),
+        ] {
+            match held_apart(Some(&agentfile), &held(Some(members))) {
+                Err(No(Cause::Widening, why)) => assert!(why.starts_with(says), "{why}"),
+                other => panic!("{says}: {:?}", other.map_err(|No(c, w)| (c, w))),
+            }
+        }
+        assert!(matches!(
+            held_apart(Some(&agentfile), &held(Some(vec![reach(harness, "nobody", &[])]))),
+            Err(No(Cause::Image, _))
+        ));
+        assert!(matches!(
+            held_apart(
+                Some(&agentfile),
+                &held(Some(vec![
+                    reach(agent, "helper", &[]),
+                    reach(agent, "helper", &[])
+                ]))
+            ),
+            Err(No(Cause::Request, _))
+        ));
+        assert!(held_apart(Some(&agentfile), &held(None)).is_ok());
+        let nothing_kept = wire::Narrowing {
+            destinations: wire::Keep::Only(Vec::new()),
+            ..held(Some(Vec::new()))
+        };
+        assert!(held_apart(Some(&agentfile), &nothing_kept).is_ok());
     }
 
     /// The run's request is one a warm VM takes: its log keeps something by the VM's own
