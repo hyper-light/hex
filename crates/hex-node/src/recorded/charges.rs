@@ -26,6 +26,27 @@ use crate::store::Store;
 /// A VM by its native scope: one VM's lifetime.
 pub(crate) type Scope = [u8; 16];
 
+/// A VM as a learner's core holds it (C3): its lifetime's place in its node's start order, then its scope, so every
+/// order the rule takes among VMs is the order the node began them, kept in their records across the node's restarts,
+/// never their scopes' random bytes: the room, of a band, to the earliest begun; a budget's spare bytes and a CPU share's
+/// spare milli-CPU to the first; of VMs equally past their budgets, the end to the latest. A record that holds no place
+/// (an earlier boot's, which its store leaves as that boot wrote it) comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Lifetime {
+    pub(crate) started: u64,
+    pub(crate) scope: Scope,
+}
+
+impl Lifetime {
+    /// The lifetime of `scope`, its record's place `started` in its node's start order.
+    pub(crate) fn of(scope: Scope, started: Option<u64>) -> Self {
+        Self {
+            started: started.unwrap_or(0),
+            scope,
+        }
+    }
+}
+
 /// One CPU in milli-CPU, the unit a vCPU and the machine's CPU are counted in.
 const CPU_MILLI: u64 = 1_000;
 
@@ -36,6 +57,9 @@ pub(crate) trait Managed {
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal>;
     /// Ends the VM through its managed receipt: the last resort (C5).
     fn stop(&self, record: &BoxRecord) -> Result<(), Refusal>;
+    /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
+    /// lifetime, before its end (C5, intent first): whether it was written.
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
 fn refused(why: ChargeError) -> Refusal {
@@ -91,18 +115,50 @@ pub(crate) enum Resort {
     Refused(Refusal),
 }
 
+/// How a learner's last resort reaches a VM (C5): its record, to say why before the VM is ended, and the VM itself.
+pub(crate) trait Reach {
+    /// Writes `end`, why the VM of `scope` is to be ended, into box `id`'s record where it is still that VM's lifetime,
+    /// before the VM is ended (intent first): whether it was written.
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
+    /// Ends the VM of `scope`: Linux kills its cgroup, macOS and Windows stop it through its managed receipt.
+    fn end(&self, scope: &Scope) -> Result<(), Refusal>;
+}
+
+/// Writes into VMs' records the last resort keeps for after its window, oldest first: by box and VM lifetime, why it
+/// ended the VM, or none, an intent withdrawn (C5).
+pub(crate) type Writes = VecDeque<(BoxId, Scope, Option<LearnedEnd>)>;
+
 /// The last resort and its record of why (C5), the same on every OS: one VM ended at a time, as the core's verdict
-/// (`charge::Node::last_resort`) chooses it, and why kept for its class's capacity answers and its box's record.
+/// (`charge::Node::last_resort`) chooses it, why written into its record before it is ended (intent first) and kept for
+/// its class's capacity answers.
 pub(crate) struct LastResort {
     resort: Resort,
     /// The VMs it ended and why, by class, oldest first: at most `ends` of them, the oldest forgotten first, a machine
     /// never holding more VMs than its population at once.
     ended: VecDeque<(Class, LearnedEnd)>,
     ends: usize,
-    /// The same ends not yet in their boxes' records, oldest first, by box and VM lifetime: the node writes each into
-    /// its record after the window ([`write_ends`]) and keeps one whose write failed for the next, at most `ends` of
-    /// them, the oldest forgotten first.
-    unrecorded: VecDeque<(BoxId, Scope, LearnedEnd)>,
+    /// Writes into VMs' records not yet made, oldest first, one per VM lifetime, the latest asked: why it ended a VM whose
+    /// intent wasn't written first, or none, an intent withdrawn because its end was refused. The node makes them after
+    /// the window ([`write_ends`]) and keeps one that failed for the next, at most `ends` of them, the oldest forgotten
+    /// first.
+    unrecorded: Writes,
+    /// Ends a node before this one wrote into its VMs' records and stopped before making, their VMs running when this
+    /// one met them, oldest first: carried out as they were decided, before the rule is asked again. At most `ends`.
+    due: VecDeque<(Scope, Class, LearnedEnd)>,
+}
+
+/// A recorded end's why as the core says it.
+fn excess(end: &LearnedEnd) -> Excess {
+    Excess {
+        held: end.held,
+        budget: end.budget,
+        band: end.band,
+        fleet: charge::Pressure {
+            held: end.fleet_held,
+            growth: end.fleet_growth,
+            budget: end.fleet_budget,
+        },
+    }
 }
 
 impl LastResort {
@@ -113,21 +169,71 @@ impl LastResort {
             ended: VecDeque::new(),
             ends,
             unrecorded: VecDeque::new(),
+            due: VecDeque::new(),
         }
     }
 
+    /// The learner met the VM of `scope` and class `class` for the first time, its record naming `intent`: why a node
+    /// before this one was ending it, which this one carries out (intent first).
+    pub(crate) fn met(
+        &mut self,
+        class: Class,
+        scope: Scope,
+        intent: Option<LearnedEnd>,
+    ) -> Result<(), Refusal> {
+        let Some(end) = intent else {
+            return Ok(());
+        };
+        if self.due.len() >= self.ends {
+            return Err(Refusal::Exhausted {
+                what: "the last resort's ends due",
+                bound: self.ends,
+            });
+        }
+        self.due.try_reserve(1).map_err(|_| Refusal::Exhausted {
+            what: "the last resort's ends due",
+            bound: self.ends,
+        })?;
+        self.due.push_back((scope, class, end));
+        Ok(())
+    }
+
+    /// The VM of `scope` is gone: nothing of it is due.
+    pub(crate) fn gone(&mut self, scope: &Scope) {
+        self.due.retain(|(due, ..)| due != scope);
+    }
+
     /// One window's last resort, once the placement holds what it can: while a VM it ended still runs (`vm` names it),
-    /// nothing more, so one end is never two; else the core's verdict on `node`, the VM it chooses ended by `end` and
-    /// why recorded, or refused, typed, where the node can't act. `vm` names each VM the learner holds: its class and box.
+    /// nothing more, so one end is never two; else an end a node before this one decided, as it decided it; else the
+    /// core's verdict on `node`, why written into the chosen VM's record before `reach` ends it, or refused, typed,
+    /// where the node can't act. An end refused withdraws its intent; an intent that couldn't be written holds no end,
+    /// and is written after it. `vm` names each VM the learner holds: its class and box.
     pub(crate) fn window<'a>(
         &mut self,
-        node: &charge::Node<Scope>,
+        node: &charge::Node<Lifetime>,
         vm: impl Fn(&Scope) -> Option<(Class, &'a BoxId)>,
-        end: impl FnOnce(&Scope) -> Result<(), Refusal>,
+        reach: &impl Reach,
     ) -> Result<(), Refusal> {
         if let Resort::Ending { scope, .. } = &self.resort
             && vm(scope).is_some()
         {
+            return Ok(());
+        }
+        if let Some((scope, class, end)) = self.due.pop_front() {
+            self.resort = match reach.end(&scope) {
+                Ok(()) => {
+                    self.remember(class, &end)?;
+                    Resort::Ending {
+                        scope,
+                        id: end.id.try_clone()?,
+                        why: excess(&end),
+                    }
+                }
+                Err(refusal) => {
+                    self.write(end.id.try_clone()?, scope, None)?;
+                    Resort::Refused(refusal)
+                }
+            };
             return Ok(());
         }
         self.resort = match node.last_resort().map_err(refused)? {
@@ -136,59 +242,76 @@ impl LastResort {
                 what: "a microVM fleet's memory budget, every VM within its own",
                 bound: usize::try_from(fleet.budget).unwrap_or(usize::MAX),
             }),
-            charge::Resort::End { vm: scope, why } => {
+            charge::Resort::End { vm: lifetime, why } => {
+                let scope = lifetime.scope;
                 let (class, id) = vm(&scope).ok_or_else(|| {
                     Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
                 })?;
-                let id = id.try_clone()?;
-                match end(&scope) {
+                let end = LearnedEnd {
+                    id: id.try_clone()?,
+                    held: why.held,
+                    budget: why.budget,
+                    band: why.band,
+                    fleet_held: why.fleet.held,
+                    fleet_growth: why.fleet.growth,
+                    fleet_budget: why.fleet.budget,
+                    unmoved: move_awaits(class),
+                };
+                // What was kept for the VM's record before is this end's to say now.
+                self.unrecorded.retain(|(_, kept, _)| *kept != scope);
+                let written = matches!(reach.intend(id, scope, &end), Ok(true));
+                match reach.end(&scope) {
                     Ok(()) => {
-                        self.record_end(class, &id, scope, why)?;
-                        Resort::Ending { scope, id, why }
+                        if !written {
+                            self.write(id.try_clone()?, scope, Some(end.try_clone()?))?;
+                        }
+                        self.remember(class, &end)?;
+                        Resort::Ending {
+                            scope,
+                            id: id.try_clone()?,
+                            why,
+                        }
                     }
-                    Err(refusal) => Resort::Refused(refusal),
+                    Err(refusal) => {
+                        if written {
+                            self.write(id.try_clone()?, scope, None)?;
+                        }
+                        Resort::Refused(refusal)
+                    }
                 }
             }
         };
         Ok(())
     }
 
-    /// Keeps why the last resort ended the VM `id` of lifetime `scope`, for its class's capacity answers and for its
-    /// box's record, forgetting the oldest end past the bound.
-    fn record_end(
-        &mut self,
-        class: Class,
-        id: &BoxId,
-        scope: Scope,
-        why: Excess,
-    ) -> Result<(), Refusal> {
-        let end = LearnedEnd {
-            id: id.try_clone()?,
-            held: why.held,
-            budget: why.budget,
-            band: why.band,
-            fleet_held: why.fleet.held,
-            fleet_growth: why.fleet.growth,
-            fleet_budget: why.fleet.budget,
-            unmoved: move_awaits(class),
-        };
-        let bound = self.ends;
-        let full = |what| Refusal::Exhausted { what, bound };
-        if self.ended.len() >= bound {
+    /// Keeps why the last resort ended a VM of `class`, for its class's capacity answers, forgetting the oldest past the
+    /// bound.
+    fn remember(&mut self, class: Class, end: &LearnedEnd) -> Result<(), Refusal> {
+        if self.ended.len() >= self.ends {
             self.ended.pop_front();
         }
-        if self.unrecorded.len() >= bound {
+        self.ended.try_reserve(1).map_err(|_| Refusal::Exhausted {
+            what: "the last resort's ends",
+            bound: self.ends,
+        })?;
+        self.ended.push_back((class, end.try_clone()?));
+        Ok(())
+    }
+
+    /// Keeps `end` (none: an intent withdrawn) for box `id`'s record of lifetime `scope`, after the window, in place of
+    /// any kept for it before, forgetting the oldest past the bound.
+    fn write(&mut self, id: BoxId, scope: Scope, end: Option<LearnedEnd>) -> Result<(), Refusal> {
+        self.unrecorded.retain(|(_, kept, _)| *kept != scope);
+        if self.unrecorded.len() >= self.ends {
             self.unrecorded.pop_front();
         }
-        self.ended
-            .try_reserve(1)
-            .map_err(|_| full("the last resort's ends"))?;
         self.unrecorded
             .try_reserve(1)
-            .map_err(|_| full("the last resort's unrecorded ends"))?;
-        self.unrecorded
-            .push_back((id.try_clone()?, scope, end.try_clone()?));
-        self.ended.push_back((class, end));
+            .map_err(|_| Refusal::Exhausted {
+                what: "the last resort's unrecorded ends",
+                bound: self.ends,
+            })?;
+        self.unrecorded.push_back((id, scope, end));
         Ok(())
     }
 
@@ -207,13 +330,15 @@ impl LastResort {
         Ok(ended)
     }
 
-    /// Takes the ends not yet in their boxes' records, oldest first (C5).
-    pub(crate) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, LearnedEnd)> {
+    /// Takes the writes into VMs' records not yet made, oldest first (C5).
+    pub(crate) fn unrecorded(&mut self) -> Writes {
         std::mem::take(&mut self.unrecorded)
     }
 
-    /// Keeps `left`, ends whose record writes failed, for the next window, before any made since and within the bound.
-    pub(crate) fn keep_unrecorded(&mut self, mut left: VecDeque<(BoxId, Scope, LearnedEnd)>) {
+    /// Keeps `left`, writes that failed, for the next window: before any asked since, none for a VM one asked since
+    /// replaces, within the bound.
+    pub(crate) fn keep_unrecorded(&mut self, mut left: Writes) {
+        left.retain(|(_, scope, _)| !self.unrecorded.iter().any(|(_, kept, _)| kept == scope));
         left.append(&mut self.unrecorded);
         while left.len() > self.ends {
             left.pop_front();
@@ -226,36 +351,56 @@ impl LastResort {
     pub(crate) fn resort(&self) -> &Resort {
         &self.resort
     }
+
+    /// Keeps why the last resort ended the VM `id` of lifetime `scope` and class `class` for `why`, as an end does.
+    #[cfg(test)]
+    fn record_end(
+        &mut self,
+        class: Class,
+        id: &BoxId,
+        scope: Scope,
+        why: Excess,
+    ) -> Result<(), Refusal> {
+        let end = LearnedEnd {
+            id: id.try_clone()?,
+            held: why.held,
+            budget: why.budget,
+            band: why.band,
+            fleet_held: why.fleet.held,
+            fleet_growth: why.fleet.growth,
+            fleet_budget: why.fleet.budget,
+            unmoved: move_awaits(class),
+        };
+        self.write(id.try_clone()?, scope, Some(end.try_clone()?))?;
+        self.remember(class, &end)
+    }
 }
 
-/// Writes why the last resort ended VM `id` into its record in `store`, where the record is still that VM's lifetime
-/// (`scope`): false where none is, the box deleted since or made again.
+/// Writes `end`, why the last resort ended or is ending VM `id`, into its record in `store` where the record is still
+/// that VM's lifetime (`scope`), or withdraws it (none): false where none is, the box deleted since or made again.
 pub(crate) fn record_last_resort(
     store: &Store,
     id: &BoxId,
     scope: Scope,
-    end: &LearnedEnd,
+    end: Option<&LearnedEnd>,
 ) -> Result<bool, Refusal> {
-    let end = end.try_clone()?;
+    let end = end.map(LearnedEnd::try_clone).transpose()?;
     store.update(id, move |record| {
         if record.native_scope.as_ref().map(|s| *s.bytes()) != Some(scope) {
             return false;
         }
-        record.last_resort = Some(end);
+        record.last_resort = end;
         true
     })
 }
 
-/// Writes each of `ends` into its box's record in `store` (C5), off the learner's lock, as the node does after each
-/// window: the ends whose writes failed, which the node keeps for the next window, and the first failure, which fails
-/// this one.
-pub(crate) fn write_ends(
-    store: &Store,
-    mut ends: VecDeque<(BoxId, Scope, LearnedEnd)>,
-) -> (VecDeque<(BoxId, Scope, LearnedEnd)>, Option<Refusal>) {
+/// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
+/// window: the writes that failed, which the node keeps for the next window, and the first failure, which fails this
+/// one.
+pub(crate) fn write_ends(store: &Store, mut writes: Writes) -> (Writes, Option<Refusal>) {
     let mut failed = None;
-    ends.retain(
-        |(id, scope, end)| match record_last_resort(store, id, *scope, end) {
+    writes.retain(
+        |(id, scope, end)| match record_last_resort(store, id, *scope, end.as_ref()) {
             Ok(_) => false,
             Err(why) => {
                 failed.get_or_insert(why);
@@ -263,7 +408,7 @@ pub(crate) fn write_ends(
             }
         },
     );
-    (ends, failed)
+    (writes, failed)
 }
 
 /// A VM box's inspect from its backend, with why the last resort ended it where its record says so (C5), across the
@@ -277,9 +422,33 @@ pub(crate) fn with_last_resort(info: &mut BoxInfo, record: &BoxRecord) -> Result
     Ok(())
 }
 
+/// The last resort's reach on macOS and Windows: a VM's record through the node's records, its end through its managed
+/// receipt.
+struct Stops<'a, M> {
+    io: &'a M,
+    running: &'a [BoxRecord],
+}
+
+impl<M: Managed> Reach for Stops<'_, M> {
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        self.io.intend(id, scope, end)
+    }
+
+    fn end(&self, scope: &Scope) -> Result<(), Refusal> {
+        let record = self
+            .running
+            .iter()
+            .find(|record| record.native_scope.as_ref().map(|s| *s.bytes()) == Some(*scope))
+            .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
+        self.io.stop(record)
+    }
+}
+
 /// One VM the learner holds.
 struct Vm {
     id: BoxId,
+    /// How the core holds it: its place in the node's start order and its scope (C3).
+    lifetime: Lifetime,
     class: Class,
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
@@ -291,7 +460,7 @@ struct Vm {
 
 /// The node's learner (module docs).
 pub(crate) struct Learner {
-    node: charge::Node<Scope>,
+    node: charge::Node<Lifetime>,
     vms: BTreeMap<Scope, Vm>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
@@ -380,8 +549,11 @@ impl Learner {
             .copied()
             .collect();
         for scope in gone {
-            self.node.end(&scope).map_err(refused)?;
+            if let Some(vm) = self.vms.get(&scope) {
+                self.node.end(&vm.lifetime).map_err(refused)?;
+            }
             self.vms.remove(&scope);
+            self.last.gone(&scope);
         }
         // What each VM used of the cap it ran under in this window, for its next cap.
         let mut used = BTreeMap::new();
@@ -402,7 +574,7 @@ impl Learner {
                 let span = now.saturating_duration_since(at);
                 self.node
                     .observe(
-                        scope,
+                        vm.lifetime,
                         &Sample {
                             cpu: Cpu::Whole(cpu),
                             span,
@@ -417,7 +589,7 @@ impl Learner {
                     .and_then(|n| n.checked_div(span.as_micros().max(1)))
                     .and_then(|n| u64::try_from(n).ok())
                     .unwrap_or(u64::MAX);
-                used.insert(scope, (milli, vm.rate));
+                used.insert(vm.lifetime, (milli, vm.rate));
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
@@ -427,9 +599,10 @@ impl Learner {
                 hex_api::Class::Process | hex_api::Class::Oci => continue,
             };
             let receipt = allocation.booking();
+            let lifetime = Lifetime::of(scope, record.started);
             self.node
                 .track(
-                    scope,
+                    lifetime,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
                     record.spec.band,
                     vcpus(allocation)?,
@@ -440,12 +613,19 @@ impl Learner {
                 scope,
                 Vm {
                     id: record.spec.id.try_clone()?,
+                    lifetime,
                     class,
                     receipt,
                     last: (usage.cpu_usec, now),
                     rate: allocation.resources.cpu_milli,
                 },
             );
+            let intent = record
+                .last_resort
+                .as_ref()
+                .map(LearnedEnd::try_clone)
+                .transpose()?;
+            self.last.met(class, scope, intent)?;
         }
         self.node.set_budget(budget);
         self.node.settle().map_err(refused)?;
@@ -453,7 +633,8 @@ impl Learner {
             .node
             .rates(budget.cpu_milli, &used, u64::from(hex_api::MIN_CPU_MILLI))
             .map_err(refused)?;
-        for (scope, rate) in rates {
+        for (lifetime, rate) in rates {
+            let scope = lifetime.scope;
             let Some(vm) = self.vms.get_mut(&scope) else {
                 continue;
             };
@@ -471,23 +652,17 @@ impl Learner {
         self.last.window(
             &self.node,
             |scope| vms.get(scope).map(|vm| (vm.class, &vm.id)),
-            |scope| {
-                let record = running
-                    .iter()
-                    .find(|record| scope_of(record) == Some(*scope))
-                    .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-                io.stop(record)
-            },
+            &Stops { io, running },
         )
     }
 
-    /// Takes the ends not yet in their boxes' records, oldest first (C5).
-    pub(crate) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, LearnedEnd)> {
+    /// Takes the writes into VMs' records not yet made, oldest first (C5).
+    pub(crate) fn unrecorded(&mut self) -> Writes {
         self.last.unrecorded()
     }
 
-    /// Keeps `left`, ends whose record writes failed, for the next window (C5).
-    pub(crate) fn keep_unrecorded(&mut self, left: VecDeque<(BoxId, Scope, LearnedEnd)>) {
+    /// Keeps `left`, writes that failed, for the next window (C5).
+    pub(crate) fn keep_unrecorded(&mut self, left: Writes) {
         self.last.keep_unrecorded(left);
     }
 
@@ -527,7 +702,7 @@ impl Learner {
             if let Some(vm) = self.vms.get(&scope)
                 && vm.class == class
             {
-                vms.push((scope, &record.spec.id, vm.receipt));
+                vms.push((vm.lifetime, &record.spec.id, vm.receipt));
             }
         }
         learned(&self.node, class, costs, vms, self.last.ended(class)?).map(Some)
@@ -536,13 +711,13 @@ impl Learner {
 
 /// What a capacity answer for `class` carries of `node` (C2, C5, C8), shared by every OS's learner: the priors of
 /// `costs` (at most one per profile and ceiling, none booked whole), the class's learned use and each of its `vms`'
-/// holdings (by scope, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
+/// holdings (by lifetime, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
 /// class's `ended` VMs.
 pub(crate) fn learned(
-    node: &charge::Node<Scope>,
+    node: &charge::Node<Lifetime>,
     class: Class,
     costs: &[RuntimeCost],
-    vms: Vec<(Scope, &hex_api::BoxId, CapacityResources)>,
+    vms: Vec<(Lifetime, &hex_api::BoxId, CapacityResources)>,
     ended: Vec<hex_api::LearnedEnd>,
 ) -> Result<Learned, Refusal> {
     let mut priors: Vec<hex_api::LearnedPrior> = Vec::new();
@@ -568,9 +743,9 @@ pub(crate) fn learned(
             what: "a class's learned holdings",
             bound: vms.len(),
         })?;
-    for (scope, id, receipt) in vms {
+    for (lifetime, id, receipt) in vms {
         let holding = node
-            .holding(&scope)
+            .holding(&lifetime)
             .ok_or_else(|| Refusal::Broken("a learned VM without a holding".into()))?;
         used = used
             .checked_add(LearnedUse {
