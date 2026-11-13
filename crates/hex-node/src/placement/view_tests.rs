@@ -9,7 +9,7 @@ use hex_api::capacity::{
 };
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Refusal, Runtime};
 use hex_sim::index::Pick;
-use hex_sim::model::{Ask, Class, Demand, Kind, NodeId, NodeSpec, Resources};
+use hex_sim::model::{Ask, Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
 use hex_sim::peer::{Budget, Stop};
 
 use super::View;
@@ -586,4 +586,40 @@ fn cv12_withdrawn_a_holders_used_memory_is_counted_twice_never_credited() {
     let (d, p) = demand_mem(GIB);
     let (_, step) = driver.submit(d, p).unwrap();
     assert!(started(&quiesce(&driver, step)));
+}
+
+/// AC-T7.4.1, CV8 (the open item "a scheduler with no runtime class keeps no holder reservation"): a node of four CPUs
+/// with no runtime class of its own (a macOS machine without Hypervisor.framework, where Hex places nothing: its facts'
+/// classes are none, so its own boxes' record bound is none) opens its view for one holder, and the holder reserves one
+/// CPU. Expect it granted: a holder's reservations are bounded by what one sync lists, not by the boxes Hex would run
+/// on the machine.
+#[test]
+fn cv8_a_node_with_no_runtime_class_of_its_own_keeps_a_holders_reservations() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = NodeSpec::new(NodeId(0), four_cpus());
+    spec.classes = Classes::NONE;
+    let driver = Driver::boot(
+        NodeId(0),
+        &[spec.try_clone().unwrap()],
+        &[],
+        Budget { owned: 1, ran: 0 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new(std::iter::empty::<(Class, Arc<dyn Runtime>)>()).unwrap(),
+    )
+    .unwrap();
+    driver.refresh_node(spec).unwrap();
+    driver.open_view(&dir.path().join("capacity"), 1).unwrap();
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let hello = kiln.connect().unwrap();
+    let joined = talk(&driver, &mut kiln, vec![hello]);
+    assert!(
+        matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{joined:?}"
+    );
+    let (run, msg) = kiln.reserve(cpu(1000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(run)]
+    );
 }
