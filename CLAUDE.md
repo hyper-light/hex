@@ -151,7 +151,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   and environment, and `sysctlbyname("kern.maxprocperuid")` is a box-user box's default process cap, and the
   node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`, `vm.page_free_count`,
   `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
-  and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
+  and `getloadavg` read the node's own cost for the bench and observability; and, in its tests alone,
+  `proc_pidinfo(PROC_PIDLISTFDS)` and `proc_pidfdinfo` read a process's descriptors and whether each is
+  close-on-exec (`proc_fileinfo`'s `PROC_FP_CLEXEC`), so a test proves the runtime leaves none a spawn would hand on. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
   Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
