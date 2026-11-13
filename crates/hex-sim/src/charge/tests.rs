@@ -754,11 +754,12 @@ proptest! {
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C4 and C5: the bounds that hold the rule. Do place three cold VMs (booked at their
-/// ceilings) on a machine of twice the fleet's CPU budget; expect the parent capped at the budget and weighing half
-/// the machine, each VM weighed by its booking and capped at its ceiling, its budget past its ceiling held at the
-/// ceiling. Then warm them below their ceilings and narrow the fleet's memory budget; expect each held at its budget,
-/// the budgets summing to the fleet's. A fleet with no CPU budget is capped at the kernel's least quota. Every bound
-/// is one the kernel holds.
+/// admissions) on a machine of twice the fleet's CPU budget; expect the parent capped at the budget and weighing half
+/// the machine, each VM weighed by its booking, capped in CPU at its ceiling, and held in memory at its budget alone,
+/// no `memory.max` (ROOT, 2026-11-13: Hex can't read a VMM's own memory apart from its guest's touched RAM, so a hard
+/// cap there would be a chosen bound). Then warm them below their admissions and narrow the fleet's memory budget;
+/// expect each held at its budget, the budgets summing to the fleet's. A fleet with no CPU budget is capped at the
+/// kernel's least quota. Every bound is one the kernel holds.
 #[test]
 fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booking_budget_and_ceiling()
  {
@@ -768,13 +769,14 @@ fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booki
         n.admit(id, class_of(u8::try_from(id).unwrap(), cpu, mem), 0, 1)
             .unwrap();
     }
-    let vm = |weight: u16, cpu: u64, high: u64, max: u64| hex_api::Bounds {
+    let vm = |weight: u16, cpu: u64, high: u64| hex_api::Bounds {
         cpu_weight: Some(weight),
         cpu_max_milli: Some(u32::try_from(cpu).unwrap()),
         memory_high: Some(high),
-        memory_max: Some(max),
         ..hex_api::Bounds::default()
     };
+    let budgets: BTreeMap<u32, Budget> = n.budgets().unwrap().into_iter().collect();
+    let budget = |id: u32| budgets[&id].bytes;
     let placed = n.placement(32_000).unwrap();
     assert_eq!(
         placed.fleet,
@@ -787,9 +789,9 @@ fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booki
     assert_eq!(
         placed.vms,
         vec![
-            (1, vm(2_500, 1_000, GIB, GIB)),
-            (2, vm(5_000, 2_000, 2 * GIB, 2 * GIB)),
-            (3, vm(WEIGHT_MAX, 4_000, 3 * GIB, 3 * GIB)),
+            (1, vm(2_500, 1_000, budget(1))),
+            (2, vm(5_000, 2_000, budget(2))),
+            (3, vm(WEIGHT_MAX, 4_000, budget(3))),
         ]
     );
     for _ in 0..SEEDABLE {
@@ -814,8 +816,7 @@ fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booki
             vm(
                 [2_500, 5_000, WEIGHT_MAX][usize::try_from(*id - 1).unwrap()],
                 cpu,
-                budget,
-                mem
+                budget
             )
         );
         held += budget;
@@ -831,6 +832,32 @@ fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booki
             "{bounds:?} is no bound the kernel holds"
         );
     }
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 with no chosen bound (ROOT, 2026-11-13): a VMM whose memory rises past the most
+/// its windows have shown is held by its budget and the last resort, never killed at a cap. Do place a VM admitted at
+/// 2 CPUs and 4 GiB, alone in a 16 GiB fleet, after windows at 5 GiB; then read it at 7 GiB, past every window before,
+/// and place it again. Expect each placement's `memory.max` none and its `memory.high` its budget, the whole fleet's;
+/// the most seen risen to 3 GiB past the envelope; and the last resort holding, the fleet within its budget.
+#[test]
+fn w14_a_vmm_rising_past_the_most_seen_is_held_by_its_budget_and_the_last_resort() {
+    let mut n = node(res(16_000, 16 * GIB, 0));
+    let class = class_of(1, 2_000, 4 * GIB);
+    n.admit(1, class, 0, 2).unwrap();
+    for _ in 0..3 {
+        window(&mut n, &[(1, 100, 5 * GIB)]);
+    }
+    let held = hex_api::Bounds {
+        cpu_weight: Some(WEIGHT_MAX),
+        cpu_max_milli: Some(2_000),
+        memory_high: Some(16 * GIB),
+        ..hex_api::Bounds::default()
+    };
+    assert_eq!(n.placement(16_000).unwrap().vms, vec![(1, held.clone())]);
+    window(&mut n, &[(1, 100, 7 * GIB)]);
+    assert_eq!(n.overhead(&class), [Some(0), Some(3 * GIB), Some(0)]);
+    assert_eq!(n.placement(16_000).unwrap().vms, vec![(1, held)]);
+    assert_eq!(n.last_resort().unwrap(), Resort::Held);
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: every child on one scale. Do weigh the VM fleet by its
