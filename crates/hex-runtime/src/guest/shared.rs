@@ -1204,8 +1204,8 @@ impl GuestRuntime {
             .lock()
             .map_err(|_| refused(key, LifecycleCause::Uncertain))?
         {
-            Some((seen, overhead)) if seen == key => overhead,
-            _ => hex_api::LearnedOverhead::default(),
+            Some((seen, kept)) if seen == key => kept,
+            _ => Seen::default(),
         };
         let measured = self
             .shared_running()
@@ -1213,12 +1213,14 @@ impl GuestRuntime {
             .and_then(|booted| {
                 let guest = booted.client.capacity(Class::Oci).ok()??;
                 let records = self.authority().ok()?.records().ok()?;
-                let mut boxes = 0u64;
+                let mut boxes = Boxes::default();
                 for record in records.values().flatten() {
                     if record.spec.route.and_then(|route| route.backing) == Some(key) {
-                        boxes = boxes.saturating_add(
-                            booted.client.usage(&record.spec.id).ok()?.memory_bytes,
-                        );
+                        let usage = booted.client.usage(&record.spec.id).ok()?;
+                        boxes.memory = boxes.memory.saturating_add(usage.memory_bytes);
+                        boxes.cpu_ns = boxes
+                            .cpu_ns
+                            .saturating_add(usage.cpu_usec.saturating_mul(1_000));
                     }
                 }
                 Some(guest_seen(kept, &guest, boxes))
@@ -1228,16 +1230,16 @@ impl GuestRuntime {
             .guest_overhead
             .lock()
             .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
-        // Another answer may have measured meanwhile: the most of the two.
+        // Another answer may have measured meanwhile: its reading gives way to this one's, the most of each kept.
         let merged = match *seen {
-            Some((at, other)) if at == key => hex_api::LearnedOverhead {
-                mem_bytes: measured.mem_bytes.max(other.mem_bytes),
+            Some((at, other)) if at == key => Seen {
+                overhead: most(measured.overhead, other.overhead),
                 ..measured
             },
             _ => measured,
         };
         *seen = Some((key, merged));
-        Ok(merged)
+        Ok(merged.overhead)
     }
 
     pub(super) fn shared_running(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
@@ -1862,21 +1864,59 @@ fn push_offer(
     Ok(())
 }
 
-/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13): what
-/// its agent says it uses (its total memory less its free) past what its boxes hold, `boxes_memory`, the most seen,
-/// only rising from `kept`. Its CPU and disk its agent's answer doesn't read, so they stay as kept: none.
-fn guest_seen(
-    kept: hex_api::LearnedOverhead,
-    guest: &hex_api::Capacity,
-    boxes_memory: u64,
-) -> hex_api::LearnedOverhead {
+/// What a shared backing's boxes held at one capacity answer, as their usage says (joint plan step 14, C7): memory and
+/// CPU time; their disk no usage reads, so none of the guest's used disk is taken as theirs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Boxes {
+    pub(super) memory: u64,
+    pub(super) cpu_ns: u64,
+}
+
+/// A guest's machine at one capacity answer, for the next answer's interval: its CPU time and uptime, and its boxes'
+/// CPU time then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Reading {
+    cpu_ns: u64,
+    uptime_ns: u64,
+    boxes_cpu_ns: u64,
+}
+
+/// What a shared backing's runtime keeps of its guest (joint plan step 14, C7): its own overhead, its last reading, and
+/// whether its CPU is still the one reading since boot (ROOT's pin 2), which the first interval replaces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Seen {
+    pub(super) overhead: hex_api::LearnedOverhead,
+    last: Option<Reading>,
+    cpu_from_boot: bool,
+}
+
+/// The most of `a` and `b` in each dimension, none only where both are.
+fn most(a: hex_api::LearnedOverhead, b: hex_api::LearnedOverhead) -> hex_api::LearnedOverhead {
+    let max = |x: Option<u64>, y: Option<u64>| match (x, y) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    };
+    hex_api::LearnedOverhead {
+        cpu_milli: max(a.cpu_milli, b.cpu_milli),
+        mem_bytes: max(a.mem_bytes, b.mem_bytes),
+        disk_bytes: max(a.disk_bytes, b.disk_bytes),
+    }
+}
+
+/// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13).
+/// Original (red): its memory past its boxes, the most seen; its CPU and disk unread.
+pub(super) fn guest_seen(kept: Seen, guest: &hex_api::Capacity, boxes: Boxes) -> Seen {
     let own = guest
         .total
         .mem_bytes
         .saturating_sub(guest.free.mem_bytes)
-        .saturating_sub(boxes_memory);
-    hex_api::LearnedOverhead {
-        mem_bytes: Some(kept.mem_bytes.map_or(own, |seen| seen.max(own))),
+        .saturating_sub(boxes.memory);
+    Seen {
+        overhead: hex_api::LearnedOverhead {
+            mem_bytes: Some(kept.overhead.mem_bytes.map_or(own, |seen| seen.max(own))),
+            ..kept.overhead
+        },
         ..kept
     }
 }

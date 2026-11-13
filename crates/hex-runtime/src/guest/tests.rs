@@ -1698,6 +1698,7 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
     config.vcpus = 2;
     config.memory_mib = 632;
     let reported = hex_api::Capacity {
+        own: Default::default(),
         devices: Vec::new(),
         cost: None,
         routes: Vec::new(),
@@ -1765,6 +1766,7 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
     };
     let actual = guest_capacity(
         hex_api::Capacity {
+            own: Default::default(),
             devices: Vec::new(),
             cost: None,
             routes: Vec::new(),

@@ -125,6 +125,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         generation: [82; 16],
     };
     let mut native = Capacity {
+        own: Default::default(),
         id: "one native physical CPU plane".into(),
         total: room,
         free: room,
@@ -158,6 +159,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         overhead: CapacityResources::default(),
     };
     let observer_report = Capacity {
+        own: Default::default(),
         id: native.id.clone(),
         total: room,
         free: room,
@@ -367,6 +369,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         generation: [82; 16],
     };
     let mut native = Capacity {
+        own: Default::default(),
         id: "one native physical CPU plane".into(),
         total: room,
         free: room,
@@ -400,6 +403,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         overhead: CapacityResources::default(),
     };
     let observer_report = Capacity {
+        own: Default::default(),
         id: native.id.clone(),
         total: room,
         free: room,

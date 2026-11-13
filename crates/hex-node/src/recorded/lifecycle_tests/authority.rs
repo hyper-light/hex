@@ -364,6 +364,7 @@ fn native_offers_require_same_provider_identity_and_use_actual_metadata_without_
         holder: None,
     };
     let capacity = || Capacity {
+        own: Default::default(),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),

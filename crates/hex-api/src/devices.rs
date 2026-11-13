@@ -601,6 +601,7 @@ mod tests {
 
     fn capacity(devices: Vec<DeviceInfo>) -> Capacity {
         Capacity {
+            own: Default::default(),
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),

@@ -662,6 +662,7 @@ pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
         disk_bytes: disk.free.min(disk.total),
     };
     let capacity = hex_api::Capacity {
+        own: Default::default(),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),

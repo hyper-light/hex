@@ -491,6 +491,7 @@ mod tests {
         backings: Vec<BackingOffer>,
     ) -> Capacity {
         Capacity {
+            own: Default::default(),
             id: "same-native-host".into(),
             total: room(),
             free: room(),

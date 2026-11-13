@@ -586,7 +586,12 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 put_unavailable_devices(w, &capacity.unavailable)?;
                 // Joint plan step 14: last, after `unavailable`.
                 w.reserve_fixed(1)?;
-                w.option_with(capacity.learned.as_ref(), put_learned)
+                w.option_with(capacity.learned.as_ref(), put_learned)?;
+                // Joint plan step 14, C7: the machine's CPU time and uptime, after `learned`.
+                w.reserve_fixed(2)?;
+                w.option(capacity.own.cpu_ns, Writer::u64);
+                w.option(capacity.own.uptime_ns, Writer::u64);
+                Ok(())
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1030,8 +1035,13 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                         why: r.device_string("unavailable.why")?,
                     })
                 })?,
-                // Last (joint plan step 14).
+                // Then (joint plan step 14).
                 learned: r.option(learned)?,
+                // Last (joint plan step 14, C7).
+                own: hex_api::MachineTime {
+                    cpu_ns: r.option(Reader::u64)?,
+                    uptime_ns: r.option(Reader::u64)?,
+                },
             };
             check_capacity(&capacity)?;
             Ok(capacity)

@@ -65,6 +65,7 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
         },
     ];
     let report = Capacity {
+        own: Default::default(),
         id: "same native owner".into(),
         total,
         free: total,

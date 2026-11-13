@@ -309,6 +309,7 @@ impl Books for Owner {
             disk_bytes: 1 << 30,
         };
         Ok(Capacity {
+            own: Default::default(),
             id: "same-model-native-owner".into(),
             total: room,
             free: room,
@@ -967,6 +968,7 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
         arch: route::host_platform().unwrap().arch,
     };
     let native = Capacity {
+        own: Default::default(),
         id: "native-cpu-only-prefix".into(),
         total: CapacityResources {
             cpu_milli: 8000,
@@ -1240,6 +1242,7 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
     let gib = 1u64 << 30;
     let guest = |free: u64| {
         let mut capacity = hex_api::Capacity {
+            own: Default::default(),
             id: "guest".into(),
             total: CapacityResources {
                 cpu_milli: 2_000,
@@ -1262,21 +1265,64 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
         capacity.free.mem_bytes = free;
         capacity
     };
-    let first = super::guest_seen(
-        hex_api::LearnedOverhead::default(),
-        &guest(5 * gib),
-        2 * gib,
-    );
-    assert_eq!(
+    let boxes = |memory: u64| super::Boxes { memory, cpu_ns: 0 };
+    let first = super::guest_seen(super::Seen::default(), &guest(5 * gib), boxes(2 * gib));
+    assert_eq!(first.overhead.mem_bytes, Some(gib));
+    let second = super::guest_seen(first, &guest(6 * gib), boxes(3 * gib / 2));
+    assert_eq!(second.overhead.mem_bytes, Some(gib));
+    let third = super::guest_seen(second, &guest(5 * gib), boxes(4 * gib));
+    assert_eq!(third.overhead.mem_bytes, Some(gib));
+}
+
+/// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2): a shared guest's own CPU is its machine's CPU time past its boxes':
+/// at its first answer over its uptime, its boot's work among it, which the first interval between answers replaces;
+/// then the most seen over the intervals. Its disk is its used bytes, its boxes' disk no usage reads. Do measure a
+/// guest of 100 GiB of disk with 40 GiB free, up 10 s with 4 s of CPU and its boxes 1 s; then 1 s on with 0.5 s more
+/// and its boxes 0.3 s more; then 1 s on with 0.1 s more and its boxes none. Expect 300 milli-CPU first (3 s over 10
+/// s), then 200 (the interval's, in the boot's place), then 200 still (100 is less), and 60 GiB of disk throughout.
+#[test]
+fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_use() {
+    let gib = 1u64 << 30;
+    let second = 1_000_000_000u64;
+    let guest = |cpu_ns: u64, uptime_ns: u64| hex_api::Capacity {
+        id: "guest".into(),
+        total: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 100 * gib,
+        },
+        free: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 40 * gib,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: hex_api::MachineTime {
+            cpu_ns: Some(cpu_ns),
+            uptime_ns: Some(uptime_ns),
+        },
+    };
+    let boxes = |cpu_ns: u64| super::Boxes { memory: 0, cpu_ns };
+    let first = super::guest_seen(super::Seen::default(), &guest(4 * second, 10 * second), boxes(second));
+    assert_eq!(first.overhead.cpu_milli, Some(300));
+    assert_eq!(first.overhead.disk_bytes, Some(60 * gib));
+    let next = super::guest_seen(
         first,
-        hex_api::LearnedOverhead {
-            cpu_milli: None,
-            mem_bytes: Some(gib),
-            disk_bytes: None,
-        }
+        &guest(4 * second + second / 2, 11 * second),
+        boxes(second + 3 * second / 10),
     );
-    let second = super::guest_seen(first, &guest(6 * gib), 3 * gib / 2);
-    assert_eq!(second.mem_bytes, Some(gib));
-    let third = super::guest_seen(second, &guest(5 * gib), 4 * gib);
-    assert_eq!(third.mem_bytes, Some(gib));
+    assert_eq!(next.overhead.cpu_milli, Some(200));
+    let last = super::guest_seen(
+        next,
+        &guest(4 * second + 6 * second / 10, 12 * second),
+        boxes(second + 3 * second / 10),
+    );
+    assert_eq!(last.overhead.cpu_milli, Some(200));
+    assert_eq!(last.overhead.disk_bytes, Some(60 * gib));
 }

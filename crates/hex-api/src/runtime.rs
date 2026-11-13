@@ -1254,6 +1254,22 @@ impl Learned {
 
 /// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
 /// scheduler's authority; these facts do not grant resources or guess unread measurements.
+/// A node's machine's CPU time since its boot, every CPU's non-idle time together, and its uptime, each none where its
+/// platform's answer doesn't read it (joint plan step 14, C7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineTime {
+    pub cpu_ns: Option<u64>,
+    pub uptime_ns: Option<u64>,
+}
+
+impl MachineTime {
+    /// Whether neither is read.
+    pub fn unread(&self) -> bool {
+        self.cpu_ns.is_none() && self.uptime_ns.is_none()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capacity {
@@ -1299,6 +1315,10 @@ pub struct Capacity {
     /// None from a node that learns none: no window on its platform, or an older build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<Learned>,
+    /// What the answering node's machine has run and how long it has been up (joint plan step 14, C7): a shared
+    /// backing's runtime learns its guest's own CPU from its agent's answer. Absent from an older answer, read as unread.
+    #[serde(default, skip_serializing_if = "MachineTime::unread")]
+    pub own: MachineTime,
 }
 
 impl Capacity {
@@ -1400,6 +1420,7 @@ impl Capacity {
             backings,
             unavailable,
             learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
+            own: self.own,
         })
     }
 
@@ -2655,6 +2676,7 @@ mod route_tests {
     }
     fn capacity() -> Capacity {
         Capacity {
+            own: Default::default(),
             id: "native-owner".into(),
             total: CapacityResources {
                 cpu_milli: 4000,
@@ -2672,10 +2694,11 @@ mod route_tests {
         }
     }
     /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own
-    /// overhead its runtime measured, never the census's (a census-free cost carries none); cold, its boxes' sum alone.
-    /// Do check boxes summing 0.5 CPU and 512 MiB against a backing of a 1 CPU, 1 MiB-quantum envelope of 1 GiB, cold;
-    /// with a guest measured at 0.25 CPU and 256 MiB; then at 0.25 CPU and 600 MiB. Expect the first two to fit and the
-    /// third, its memory past the envelope with the boxes', refused.
+    /// overhead its runtime measured, never the census's (a census-free cost carries none); a dimension not yet measured
+    /// counts at the whole envelope, its ceiling, as no box is placed on a guest not heard from. Do check boxes summing
+    /// 0.5 CPU and 512 MiB against a backing of a 1 CPU, 1 MiB-quantum envelope of 1 GiB, cold; with a guest measured at
+    /// 0.25 CPU and 256 MiB; then at 0.25 CPU and 600 MiB; then at 0.6 CPU and 256 MiB. Expect the cold one refused, the
+    /// second to fit, and the third and fourth, past the envelope with the boxes', refused.
     #[test]
     fn w14_a_shared_backings_payload_fits_with_its_guests_measured_overhead() {
         let envelope = CapacityResources {
@@ -2702,14 +2725,20 @@ mod route_tests {
             mem_bytes: 512 << 20,
             disk_bytes: 0,
         };
-        backing.check_inner(boxes).unwrap();
+        assert!(
+            backing.check_inner(boxes).is_err(),
+            "no box fits a guest not heard from"
+        );
         backing.guest = LearnedOverhead {
             cpu_milli: Some(250),
             mem_bytes: Some(256 << 20),
-            disk_bytes: None,
+            disk_bytes: Some(0),
         };
         backing.check_inner(boxes).unwrap();
         backing.guest.mem_bytes = Some(600 << 20);
+        assert!(backing.check_inner(boxes).is_err());
+        backing.guest.mem_bytes = Some(256 << 20);
+        backing.guest.cpu_milli = Some(600);
         assert!(backing.check_inner(boxes).is_err());
     }
 

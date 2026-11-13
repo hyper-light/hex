@@ -44,6 +44,7 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
 
 fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
     Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -84,10 +85,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         .unwrap()
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
-    // additionally ends with four empty u32 lists and no learned use (joint plan step 14); a spec
-    // ends with one route option and its band, 0 here (joint plan step 14).
+    // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
+    // C7); a spec ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1
+        1 + 4 * size_of::<u32>() + 1 + 2
     } else {
         3
     };
@@ -203,11 +204,11 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 5..],
-        [0; 5],
-        "the empty list's count, then no learned use, ends it"
+        cut[cut.len() - 7..],
+        [0; 7],
+        "the empty list's count, then no learned use and its machine's time unread, ends it"
     );
-    cut.truncate(cut.len() - 5);
+    cut.truncate(cut.len() - 7);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -466,6 +467,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
+        own: Default::default(),
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -2616,9 +2618,9 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14) and
+    // its machine's time unread (C7), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2634,6 +2636,9 @@ fn route_wire_capacity_bytes(
         put_backing_offer(&mut w, backing).unwrap();
     }
     w.u32(0);
+    w.u8(0);
+    // Its machine's time unread (joint plan step 14, C7).
+    w.u8(0);
     w.u8(0);
     w.done().unwrap()
 }
@@ -3086,9 +3091,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14) and
+    // its machine's time unread (C7), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
