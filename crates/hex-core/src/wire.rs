@@ -2417,8 +2417,9 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
 }
 
 // Joint plan step 33 (Shards' D242): credential grants, a Shards image VM's after its shares and an inspect's after its
-// run's words. Each its member as a grant's, its reference, and its hosts. Both sides run `check_credentials` over the
-// network grants beside them, so a list the check refuses is neither sent nor read.
+// run's words. Each its member as a grant's, its reference, its hosts, and its placeholder (after its hosts, as Shards'
+// image channel carries it). Both sides run `check_credentials` over the network grants beside them, so a list the
+// check refuses is neither sent nor read.
 fn put_credentials(
     w: &mut Writer,
     credentials: &[CredentialGrant],
@@ -2429,7 +2430,8 @@ fn put_credentials(
     w.list(credentials, |w, grant| {
         put_member(w, &grant.member)?;
         w.string(&grant.reference)?;
-        w.list(&grant.toward, |w, host| w.string(host))
+        w.list(&grant.toward, |w, host| w.string(host))?;
+        w.string(&grant.placeholder)
     })
 }
 
@@ -2439,6 +2441,7 @@ fn credentials(r: &mut Reader<'_>, grants: &[Grant]) -> Result<Vec<CredentialGra
             member: member(r)?,
             reference: r.string("credential reference")?,
             toward: r.list(|r| r.string("credential host"))?,
+            placeholder: r.string("credential placeholder")?,
         })
     })?;
     check_credentials(&credentials, grants)

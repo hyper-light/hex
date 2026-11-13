@@ -25,18 +25,33 @@ fn egress(member: &Member, name: &str) -> Grant {
     }
 }
 
+/// Placeholders as kiln's broker mints them (Shards' D242): a visible marker, then 256 random bits in hex.
+const ADA: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const GITHUB: &str =
+    "kiln-placeholder-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const HELPERS: &str =
+    "kiln-placeholder-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 fn credential(member: &Member, reference: &str, toward: &[&str]) -> hex_api::CredentialGrant {
     hex_api::CredentialGrant {
         member: member.clone(),
         reference: reference.to_owned(),
         toward: toward.iter().map(|h| (*h).to_owned()).collect(),
+        placeholder: match reference {
+            "github/ada" => GITHUB,
+            _ => ADA,
+        }
+        .to_owned(),
     }
 }
 
-/// AC-T7.7.2, joint plan step 33 (C4): do lower a harness's and an agent's grants of one credential toward hosts in
-/// another order, and a second credential. Expect one grant of each credential toward every host its members' grants
-/// name, each once and sorted; every host lowered one a grant of the box names for that credential (Hex adds none);
-/// and a box granting none lowered to none.
+/// AC-T7.7.2, joint plan step 33 (C4; Shards' D242): do lower a harness's and an agent's grants of one credential with
+/// one placeholder toward hosts in another order, and a second credential. Expect one grant of each credential toward
+/// every host its members' grants name, each once and sorted, with its placeholder; every host lowered one a grant of
+/// the box names for that credential (Hex adds none); and a box granting none lowered to none. Do give the agent its
+/// own placeholder for the credential. Expect a grant of it for each placeholder, toward its own members' hosts alone,
+/// as Shards' injector fills a value in only where its grant's placeholder stands.
 #[test]
 fn w33_a_boxs_credentials_lower_to_one_grant_of_each_credential_toward_its_hosts() {
     let (claude, helper) = (
@@ -69,10 +84,12 @@ fn w33_a_boxs_credentials_lower_to_one_grant_of_each_credential_toward_its_hosts
                     "api.anthropic.com".to_owned(),
                     "platform.claude.com".to_owned()
                 ],
+                placeholder: ADA.to_owned(),
             },
             CredentialGrant {
                 reference: "github/ada".to_owned(),
                 toward: vec!["api.github.com".to_owned()],
+                placeholder: GITHUB.to_owned(),
             },
         ]
     );
@@ -82,12 +99,39 @@ fn w33_a_boxs_credentials_lower_to_one_grant_of_each_credential_toward_its_hosts
                 image
                     .credentials
                     .iter()
-                    .any(|c| c.reference == grant.reference && c.toward.contains(host)),
+                    .any(|c| c.reference == grant.reference
+                        && c.placeholder == grant.placeholder
+                        && c.toward.contains(host)),
                 "{} toward {host}: a grant the box doesn't name",
                 grant.reference
             );
         }
     }
+    // Sorted by credential, then by placeholder: the helper's before the harness's.
+    image.credentials[2].placeholder = HELPERS.to_owned();
+    assert_eq!(
+        lowered(&image).unwrap(),
+        vec![
+            CredentialGrant {
+                reference: "anthropic/ada".to_owned(),
+                toward: vec!["api.anthropic.com".to_owned()],
+                placeholder: HELPERS.to_owned(),
+            },
+            CredentialGrant {
+                reference: "anthropic/ada".to_owned(),
+                toward: vec![
+                    "api.anthropic.com".to_owned(),
+                    "platform.claude.com".to_owned()
+                ],
+                placeholder: ADA.to_owned(),
+            },
+            CredentialGrant {
+                reference: "github/ada".to_owned(),
+                toward: vec!["api.github.com".to_owned()],
+                placeholder: GITHUB.to_owned(),
+            },
+        ]
+    );
     image.credentials.clear();
     assert_eq!(lowered(&image).unwrap(), Vec::new());
 }
