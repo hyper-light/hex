@@ -111,6 +111,14 @@ class AttachTest(unittest.TestCase):
         self.assertEqual(steps, [(50, 1, 1), (50, 0, 1), (50, 2, 2), (50, 1, 2), (100, 0, 2)])
         self.assertIn("# ended: 300 ms, 200 ms of CPU, the cgroup emptied", text)
 
+    def test_w14_a_cgroup_is_named_as_proc_names_it_or_by_its_directory(self):
+        """Do name a session's cgroup as /proc/<pid>/cgroup and systemd name it (rooted at the cgroup mount, with or
+        without its leading slash), and by its directory under the mount. Expect each the directory under the mount."""
+        root = "/sys/fs/cgroup"
+        scope = "user.slice/user-1000.slice/user@1000.service/app.slice/agent-1.scope"
+        for named in (f"/{scope}", scope, f"{root}/{scope}"):
+            self.assertEqual(rt.cgroup_dir(named, root), f"{root}/{scope}")
+
     def test_w14_an_empty_or_missing_cgroup_is_refused(self):
         """Do attach to a session that has emptied, and to a path that is no cgroup. Expect each refused, naming it,
         and no trace written."""

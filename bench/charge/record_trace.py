@@ -3,8 +3,9 @@
 14, AC-T7.4.1; docs/design/learned-charge.md, "what ROOT measures"): the session runs in a cgroup of its own, and each
 window its CPU (`cpu.stat`'s usage_usec) and its memory (`memory.current`) become `millis threads mib` steps.
 
-The window is derived, not picked: the session cgroup's CFS period, the second field of its `cpu.max`, the period Hex
-writes into every `cpu.max` and so its Linux charge learner's window (hex-node's WINDOW is
+The window is derived, not picked: the CFS period of the session cgroup's `cpu.max`, its second field (its nearest
+ancestor's where the cpu controller isn't enabled for it), the period Hex writes into every `cpu.max` and so its Linux
+charge learner's window (hex-node's WINDOW is
 hex_core::cgroup::CPU_PERIOD_US): the trace holds what the learner reads of a VM, no finer and no coarser. Each window
 becomes at most two steps that keep its CPU to the millisecond: so many whole busy threads, and one more for the rest
 (a window that used 230 ms of CPU in 100 ms is `30 3 m` then `70 2 m`). Time and CPU are carried from window to
@@ -20,6 +21,15 @@ session's cgroup is empty: the session's whole tree, the harness, its tools and 
 new file, starts with a header naming the host, the command, when it began and the window; an interrupt (SIGINT,
 SIGTERM) ends the record there, its steps kept. The trace must outlast the riser's warm-up (SEEDABLE windows) for the
 driver to take it: with 100 ms windows, 100 s.
+
+Or attach to a session already running in a cgroup of its own, a harness under kiln's runner among them, passively:
+  python3 -B -I bench/charge/record_trace.py OUT --attach CGROUP
+CGROUP is its cgroup as `/proc/<pid>/cgroup` (or `systemctl show -p ControlGroup`) names it, rooted at the cgroup
+mount, or its directory under /sys/fs/cgroup. It moves no
+process and writes no cgroup file: it reads the cgroup's `cpu.stat`, `memory.current` (its parent must give it the
+memory controller) and `cgroup.events` each window, from the attach on, until the cgroup empties or is removed. A
+cgroup that has emptied, or a path that is no cgroup, is refused, naming it. OUT's header names the cgroup, never a
+command line: a session's arguments are its own.
 
 Test: python3 -B -I bench/charge/record_trace_test.py
 """
@@ -92,9 +102,98 @@ def populated(cgroup):
     raise SystemExit(f"{cgroup}/cgroup.events has no populated")
 
 
+def period_us(cgroup, root="/sys/fs/cgroup"):
+    """The CFS period at `cgroup`, in microseconds: the second field of the nearest `cpu.max` on its path up to `root`,
+    its own where the cpu controller is enabled for it, else its nearest ancestor's. Refused, naming the cgroup, where
+    no cgroup on its path has one."""
+    at, top = os.path.realpath(cgroup), os.path.realpath(root)
+    while True:
+        path = os.path.join(at, "cpu.max")
+        if os.path.exists(path):
+            return int(read(path).split()[1])
+        if at == top or os.path.dirname(at) == at:
+            raise SystemExit(f"no cgroup on {cgroup}'s path has a cpu.max to take the window from")
+        at = os.path.dirname(at)
+
+
+def cgroup_dir(named, root="/sys/fs/cgroup"):
+    """The directory of the cgroup `named`: as `/proc/<pid>/cgroup` names it, rooted at the mount `root` (its leading
+    slash or none), or its directory under `root` itself."""
+    if named == root or named.startswith(root.rstrip("/") + "/"):
+        return named
+    return os.path.join(root, named.lstrip("/"))
+
+
+def sleep_until_ns(deadline_ns):
+    time.sleep(max(deadline_ns - time.monotonic_ns(), 0) / 1e9)
+
+
+def record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop, ended):
+    """Each window of `period` microseconds from `start` (ns), the cgroup's CPU past `begun` (its `usage_us` then) and
+    its memory as steps into `trace`, until `ended()` says why the record ends, the cgroup is gone, or `stop` holds an
+    interrupt."""
+    steps = Steps()
+    tick, why = start, "interrupted"
+    while not stop:
+        tick += period * 1000
+        sleep_until(tick)
+        now = now_ns()
+        try:
+            cpu, mem = usage_us(cgroup), int(read(os.path.join(cgroup, "memory.current")))
+        except FileNotFoundError:
+            why = "the cgroup is gone"
+            break
+        for ms, threads, mib in steps.window((now - start) // 1000, cpu - begun, mem):
+            trace.write(f"{ms} {threads} {mib}\n")
+        trace.flush()
+        try:
+            why = ended()
+        except FileNotFoundError:
+            why = "the cgroup is gone"
+        if why:
+            break
+    trace.write(f"# ended: {steps.ms} ms, {steps.busy} ms of CPU, {why}\n")
+
+
+def interrupts():
+    """A list an interrupt (SIGINT, SIGTERM) is put in: the record ends there, its steps kept."""
+    stop = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.append(True))
+    return stop
+
+
+def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_until=sleep_until_ns):
+    """Records the session running in `cgroup` into `out` (module docs), passively, until the cgroup empties."""
+    if not os.path.exists(os.path.join(cgroup, "cgroup.events")):
+        raise SystemExit(f"{cgroup} is no cgroup: it has no cgroup.events")
+    if not populated(cgroup):
+        raise SystemExit(f"{cgroup} has emptied: nothing runs there to record")
+    if not os.path.exists(os.path.join(cgroup, "memory.current")):
+        raise SystemExit(f"{cgroup} has no memory.current: its parent gives it no memory controller")
+    period = period_us(cgroup, root)
+    if os.path.exists(out):
+        raise SystemExit(f"{out} exists: a record starts a new file")
+    stop = interrupts()
+    with open(out, "x") as trace:
+        began = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        trace.write(
+            f"# source: a harness session on {platform.node()} ({platform.system()} {platform.release()}), attached "
+            f"to the cgroup {cgroup} by bench/charge/record_trace.py from {began}\n"
+            f"# window: {period} us, the CFS period of the nearest cpu.max on its path (Hex's Linux learner's window)\n"
+            f"# lines: millis threads mib\n"
+        )
+        start, begun = now_ns(), usage_us(cgroup)
+        record(trace, cgroup, period, start, begun, now_ns, sleep_until, stop,
+               lambda: None if populated(cgroup) else "the cgroup emptied")
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--attach":
+        attach(argv[0], cgroup_dir(argv[2]))
+        return 0
     if len(argv) < 3 or argv[1] != "--":
-        raise SystemExit("usage: record_trace.py OUT -- COMMAND...")
+        raise SystemExit("usage: record_trace.py OUT -- COMMAND...  |  record_trace.py OUT --attach CGROUP")
     out, command = argv[0], argv[2:]
     if os.path.exists(out):
         raise SystemExit(f"{out} exists: a record starts a new file")
@@ -106,39 +205,31 @@ def main(argv):
         f.write(str(os.getpid()))
     with open(os.path.join(own, "cgroup.subtree_control"), "w") as f:
         f.write("+cpu +memory")
-    period_us = int(read(os.path.join(session, "cpu.max")).split()[1])
+    period = period_us(session, own)
 
     def into_session():
         with open(os.path.join(session, "cgroup.procs"), "w") as f:
             f.write(str(os.getpid()))
 
-    stop = []
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop.append(True))
-    steps = Steps()
+    stop = interrupts()
     with open(out, "x") as trace:
         began = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         trace.write(
             f"# source: a harness session on {platform.node()} ({platform.system()} {platform.release()}), "
             f"recorded by bench/charge/record_trace.py from {began}\n"
             f"# command: {shlex.join(command)}\n"
-            f"# window: {period_us} us, its cgroup's cpu.max period (Hex's Linux learner's window)\n"
+            f"# window: {period} us, its cgroup's cpu.max period (Hex's Linux learner's window)\n"
             f"# lines: millis threads mib\n"
         )
-        start = time.monotonic_ns()
+        start, begun = time.monotonic_ns(), usage_us(session)
         child = subprocess.Popen(command, preexec_fn=into_session)
-        tick = start
-        while not stop:
-            tick += period_us * 1000
-            time.sleep(max(tick - time.monotonic_ns(), 0) / 1e9)
-            now = time.monotonic_ns()
-            cpu, mem = usage_us(session), int(read(os.path.join(session, "memory.current")))
-            for ms, threads, mib in steps.window((now - start) // 1000, cpu, mem):
-                trace.write(f"{ms} {threads} {mib}\n")
-            trace.flush()
+
+        def ended():
             if child.poll() is not None and not populated(session):
-                break
-        trace.write(f"# ended: {steps.ms} ms, {steps.busy} ms of CPU, command exit {child.poll()}\n")
+                return f"command exit {child.poll()}"
+            return None
+
+        record(trace, session, period, start, begun, time.monotonic_ns, sleep_until_ns, stop, ended)
     return 0
 
 
