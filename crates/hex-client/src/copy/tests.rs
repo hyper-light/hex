@@ -8,7 +8,7 @@ use std::time::Instant;
 use hex_core::patience::Patience;
 use hex_testkit::waits::{answered, until};
 
-use super::{DuplexIo, copy};
+use super::{Cut, DuplexIo, copy};
 use crate::guest::own_duplex;
 
 // Each wait is for its own fact, named for it: no census records either yet, so each measures, for the fact alone
@@ -53,7 +53,13 @@ fn ac_t7_4_1_a_copied_stream_ends_with_its_peers_half_close() {
         let (mut caller, pipe) = std::io::pipe().unwrap();
         let mode = rustix::fs::fcntl_getfl(&caller).unwrap();
         rustix::fs::fcntl_setfl(&caller, mode | rustix::fs::OFlags::NONBLOCK).unwrap();
-        copy(DuplexIo(own_duplex(ours).unwrap()), pipe, drop).unwrap();
+        copy(
+            DuplexIo(own_duplex(ours).unwrap()),
+            pipe,
+            Cut::default(),
+            drop,
+        )
+        .unwrap();
         (&theirs).write_all(SAID).unwrap();
         // The line is looked for without giving the CPU up, so the half-close follows the copier's next read closely.
         let mut got = Vec::new();
