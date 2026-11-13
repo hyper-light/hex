@@ -140,6 +140,7 @@ impl Runtime for DeviceRuntime {
             disk_bytes: 0,
         };
         let report = Capacity {
+            own: Default::default(),
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),

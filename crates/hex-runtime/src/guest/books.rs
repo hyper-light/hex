@@ -640,6 +640,7 @@ mod tests {
         }
         fn capacity(&self) -> Result<Capacity, Refusal> {
             Ok(Capacity {
+                own: Default::default(),
                 id: "model-host".into(),
                 total: CapacityResources {
                     cpu_milli: 8000,
