@@ -1731,6 +1731,7 @@ impl WinRuntime {
                 abandoned: 0,
                 allocation: None,
                 last_resort: None,
+                ended: None,
             }),
             Held::Oci(b) => oci::info(b),
         }?;

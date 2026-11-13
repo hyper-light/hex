@@ -73,6 +73,11 @@ pub struct BoxRecord {
     /// agent, reads as `None` (append-only) until its store counts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<u64>,
+    /// Why its run ended where it failed, in its runtime's words ([`hex_api::BoxInfo::ended`]; joint plan step 12),
+    /// which its inspect reports across the node's restarts. Outside the spec, so no native commitment covers it. Added
+    /// within version 1, so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -194,6 +199,7 @@ impl BoxRecord {
             boot: None,
             last_resort: None,
             started: None,
+            ended: None,
         }
     }
 
