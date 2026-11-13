@@ -1190,6 +1190,32 @@ impl GuestRuntime {
         }))
     }
 
+    /// Retires image VM `record`, its receipt its profile's under its census numbers (joint plan step 14): its run stopped
+    /// as its delete stops it, its run forgotten, and the box kept retired (`BoxRecord::retire`). One held or still
+    /// booting is refused, typed, as its delete is.
+    pub(super) fn retire_image(&self, record: BoxRecord) -> Result<(), Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let state = self.settle(&record)?;
+        let stopped = match state {
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Running(_) | State::Stopping(_) => Some(self.stop_image(&id, state)?),
+            State::Created | State::Ended(_) => None,
+        };
+        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+            let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+            if let Some(exit) = stopped {
+                current.exit = Some(exit);
+            }
+            current.retire();
+            t.put(&current)
+        })?;
+        if let Some(image) = &self.image {
+            image.forget(&id)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn delete_image(&self, record: BoxRecord) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let state = self.settle(&record)?;

@@ -26,8 +26,10 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{Act, Fixture};
 use hex_api::differential;
-use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Signal, Stdio};
+use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Signal, Stdio};
+use hex_core::patience::Patience;
 use hex_node::Node;
+use hex_testkit::waits::until;
 
 struct BinFixture {
     exe: String,
@@ -122,6 +124,7 @@ fn process_boxes_hold_the_contract_and_recover() {
             exercise_conformance(&own, &cache, &exe);
             exercise_recovery(&own, &cache, &exe);
             exercise_clone_into_cgroup(&own);
+            exercise_a_delete_beside_a_runs_removal(&own, &cache, &exe);
         }
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
             let has_systemd = Command::new("systemd-run")
@@ -464,6 +467,69 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
         restarted.list().unwrap().is_empty(),
         "boxes left after cleanup"
     );
+}
+
+/// A claimer's stop at the hold on the runs' removals, and a delete's wait on that removal or its answer beside it:
+/// facts no recorded operation makes, each waited for measuring (`hex_testkit::waits`).
+static STOPPED: Patience = Patience::measuring("test.hex_cli.process_box.removal_stopped");
+static BESIDE: Patience = Patience::measuring("test.hex_cli.process_box.delete_beside_removal");
+
+/// Runtime goal 7 (decision 7), AC-T7.4.1: a delete of a run's box that its program's end is removing answers as that
+/// removal does, never beside it. Do: run a waiting program; hold the node's run removals at their start; kill the
+/// program through its run, so the supervising thread claims the run and stops before it removes the box, as a
+/// claimer descheduled there would; delete the box from another thread; once that delete waits on the removal or
+/// answers, let the removal go. Expect: the delete waits rather than answer while the removal is under way, then
+/// answers Ok; the run ends Signal(9); and the box is gone.
+fn exercise_a_delete_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) {
+    let state = tempfile::Builder::new()
+        .prefix("rundel-")
+        .tempdir_in(cache)
+        .expect("state dir");
+    let node =
+        Node::open(&own.join("hex-boxes-rundel"), state.path(), state.path()).expect("open a node");
+    let fx = BinFixture {
+        exe: exe.to_owned(),
+    };
+    let id = BoxId::new("rundel").unwrap();
+    let mut run = node
+        .run(
+            fx.spec(id.clone(), Bounds::default()),
+            fx.wait(),
+            Stdio::null(),
+        )
+        .expect("run a waiting program");
+    let held = node.hold_run_removals().expect("hold the runs' removals");
+    run.kill().expect("kill the run's program");
+    until(
+        &STOPPED,
+        "the supervising thread's claim of the run, stopped at the hold",
+        || held.stopped().unwrap() == 1,
+    )
+    .unwrap();
+    std::thread::scope(|s| {
+        let deleting = s.spawn(|| node.delete(&id));
+        until(
+            &BESIDE,
+            "the delete's wait on the removal, or its answer",
+            || held.waiting().unwrap() == 1 || deleting.is_finished(),
+        )
+        .unwrap();
+        assert!(
+            !deleting.is_finished(),
+            "the delete answered beside the run's removal under way"
+        );
+        drop(held);
+        assert_eq!(
+            deleting.join().unwrap(),
+            Ok(()),
+            "the delete once the removal went"
+        );
+    });
+    assert_eq!(
+        run.try_wait(),
+        Ok(Some(Exit::Signal(Signal::KILL.number())))
+    );
+    assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
 }
 
 fn orphan_id() -> BoxId {
