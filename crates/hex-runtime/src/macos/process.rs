@@ -2254,9 +2254,9 @@ impl Watcher {
                 *held = self.state.apply(&self.order, &[], &self.last)?;
                 scope.cpu_held(owner)?;
                 // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
-                // every member it holds reads stopped, followed with no timer while they live. A member that ended,
-                // left or couldn't be read meanwhile, a response of no time, or one its control or the helper refuses,
-                // is no sample (Karn's point): counted, never the scope's refusal.
+                // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
+                // didn't take its stop, ended, left or couldn't be read, a response of no time, or one its control or the
+                // helper refuses, is no sample (Karn's point): counted, never the scope's refusal.
                 let learned = ran_out
                     .zip(stopped_after(&self.order, sys::run_state))
                     .and_then(|(from, stopped)| stopped.checked_duration_since(from))
@@ -2695,9 +2695,9 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
 /// its own (`/usr/bin/yes`, one busy thread, as `macos_cpu_response`'s member) runs under a control at Hex's least CPU
 /// bound, `hex_api::MIN_CPU_MILLI` (the kernel's least quota, 1 ms a 100 ms period: the least the learner caps any VM
 /// at, so the charge window's cycle is the one at it; this control's quantum is a milli-CPU, so it holds it), from the
-/// cold response. Once its credit runs out it is held, followed by liveness with no timer, and its response is a
-/// hold's: from its credit's running out to its read stop. None where the spinner ended first, or the stop took no
-/// time.
+/// cold response. Once its credit runs out it is held, and its response is a hold's: from its credit's running out to
+/// its stop, read once ([`stopped_after`]). None where the spinner ended first, didn't take its stop, or the stop took
+/// no time.
 fn probe_response() -> Result<Option<Duration>, Refusal> {
     let mut spinner = super::command::Command::new("/usr/bin/yes")
         .stdin(super::command::Stdio::null())
@@ -2772,21 +2772,20 @@ fn probe_hold(pid: u32) -> Result<Option<Duration>, Refusal> {
         .filter(|response| !response.is_zero()))
 }
 
-/// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer
-/// while it lives, as `macos_cpu_response` reads a stop; none where one ended, left or couldn't be read meanwhile (ROOT,
-/// 2026-11-13: a measurement that fails is no sample, never the scope's refusal), so its hold is no sample.
+/// When every member of `order` read stopped (joint plan step 14, 2c), each read once after its stop was sent and never
+/// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it with the default action (`psignal_internal`,
+/// bsd/kern/kern_sig.c), so a member that reads anything else there didn't take its stop, and a wait for it to read
+/// stopped could last as long as it lives (Studio r214: one read live for the 5 s after its stop, and its watcher, spinning
+/// on it, missed the release's stop). None where one reads live, ended, left or couldn't be read (ROOT, 2026-11-13: a
+/// measurement that fails or can't be trusted is no sample, never the scope's refusal), so its hold is no sample.
 fn stopped_after(
     order: &[u32],
     run_state: impl Fn(i32) -> std::io::Result<Option<sys::Run>>,
 ) -> Option<Instant> {
     for &member in order {
         let pid = i32::try_from(member).ok()?;
-        loop {
-            match run_state(pid).ok()? {
-                Some(sys::Run::Stopped) => break,
-                Some(sys::Run::Live) => std::thread::yield_now(),
-                Some(sys::Run::Ended) | None => return None,
-            }
+        if run_state(pid).ok()? != Some(sys::Run::Stopped) {
+            return None;
         }
     }
     Some(Instant::now())
@@ -2820,7 +2819,11 @@ mod hold_response_tests {
             })
         };
         assert_eq!(stopped_after(&[11, 12], read), None);
-        assert_eq!(reads.borrow().get(&12), Some(&1), "read once, never followed");
+        assert_eq!(
+            reads.borrow().get(&12),
+            Some(&1),
+            "read once, never followed"
+        );
         assert_eq!(stopped_after(&[11, 13], read), None);
         let before = Instant::now();
         let stopped = stopped_after(&[11, 14], read).unwrap();
