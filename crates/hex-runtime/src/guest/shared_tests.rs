@@ -1148,6 +1148,33 @@ fn w14_c_a_pools_stop_follows_its_scope_and_never_waits_a_boots_record() {
     );
 }
 
+/// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a backing's refusal
+/// says why, in its refusing site's own words. Do prepare the shared backing, then release another generation of its
+/// pool, one its guest holds no record of. Expect it refused Uncertain, its key the one asked, and its reason that its
+/// guest holds no record of it.
+#[test]
+fn w14_b_a_release_of_a_backing_its_guest_holds_no_record_of_says_why() {
+    let dir = socket_fixture();
+    let (runtime, _owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    let other = BackingKey {
+        pool: offer.key.pool,
+        generation: [9; 16],
+    };
+    let refused = runtime.release_backing(other).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain,
+                why: Some(why),
+            } if *key == other && why == "its guest holds no record of it"
+        ),
+        "{refused:?}"
+    );
+}
+
 /// AC-T7.4.1: explicit Index ACK cannot erase a remaining shared workload or
 /// remove a later incarnation when the original key is replayed.
 #[test]
