@@ -69,9 +69,18 @@ impl Staging<'_> {
         Ok(())
     }
 
-    /// A read or a write that W*, `window`, ended: past W* from now on, its run-out told, once, and the connection
-    /// followed by its relay's life alone, its timeouts let go until an answer bounds it again.
-    fn past(&mut self, window: std::time::Duration) -> io::Result<()> {
+    /// A read or a write, begun at `began`, whose timeout ended: once W*, `window`, has passed since it began, past W*
+    /// from now on, its run-out told, once, and the connection followed by its relay's life alone, its timeouts let go
+    /// until an answer bounds it again. A socket's timeout counts the kernel's ticks, and can end before its window
+    /// has passed (a timeout of one tick ends at the next): such a read or write is only tried again.
+    fn timed_out(
+        &mut self,
+        began: std::time::Instant,
+        window: std::time::Duration,
+    ) -> io::Result<()> {
+        if began.elapsed() < window {
+            return Ok(());
+        }
         self.wait.ran_out(window);
         self.window = None;
         self.armed = false;
@@ -84,7 +93,7 @@ impl Staging<'_> {
 }
 
 /// Whether `e` is a timeout's end of a read or a write.
-fn timed_out(e: &io::Error) -> bool {
+fn timeout(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
@@ -94,9 +103,10 @@ fn timed_out(e: &io::Error) -> bool {
 impl Read for Staging<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.arm()?;
+        let began = std::time::Instant::now();
         loop {
             match (self.conn.read(buf), self.window) {
-                (Err(e), Some(window)) if timed_out(&e) => self.past(window)?,
+                (Err(e), Some(window)) if timeout(&e) => self.timed_out(began, window)?,
                 (got, _) => return got,
             }
         }
@@ -106,9 +116,10 @@ impl Read for Staging<'_> {
 impl Write for Staging<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.arm()?;
+        let began = std::time::Instant::now();
         loop {
             match (self.conn.write(buf), self.window) {
-                (Err(e), Some(window)) if timed_out(&e) => self.past(window)?,
+                (Err(e), Some(window)) if timeout(&e) => self.timed_out(began, window)?,
                 (got, _) => return got,
             }
         }
