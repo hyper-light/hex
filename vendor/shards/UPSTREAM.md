@@ -1,23 +1,28 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `3114e082f116b5251029dc9aeaaa88dfd66e75b8` (main).
+Revision: `097ec0047ffc913ee561755455df34bd59922187` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
 the measurement fixtures the API's and its transport's tests include by path. Cargo.toml is Hex's
 seven-member API-only workspace scaffold (listed as own in vendor/MANIFEST.toml),
 retaining upstream package/dependency/lint settings, and patching shards-remote's hyper-quic, which
-upstream takes from hyper-raft by git at the commit Hex vendors (045cf3ff, hyper-raft's main, whose
-patch Q34 is the `Connection::idle_timeout` shards-remote's keep-alive reads, D180), to Hex's one
-vendored copy (vendor/hyper-raft): one hyper-quic is built, and nothing is fetched. No VMM/kernel
+upstream takes from hyper-raft by git at the commit Hex vendors (e0613f52, patch Q35 on hyper-raft's
+branch p/q35-handshake-progress-v1, bound for its main: Q34's `Connection::idle_timeout`, which
+shards-remote's keep-alive reads, and Q35's `Connection::handshake_progress`, by which its listeners
+let a handshake that answers but never advances give its place, D180), to Hex's one vendored copy
+(vendor/hyper-raft): one hyper-quic is built, and nothing is fetched. No VMM/kernel
 binary or pin is changed here: the `shards` binary Hex boots GPU guests with is vendor/shards-gpu's.
 
 This revision holds what Hex's node speaks to: the direct boot (D215), its guest taken back on every
-host, Windows' among them (b4548fcf); launches through a client's native owner (D233); GPU selection
+host, Windows' among them (b4548fcf), and its use read on its vsock socket (D260, 867053aa1:
+`ManagedGuest::host_use`, its microVM's use in an image run's stats' form, `Microvm::vmm_ns` its VMM's
+own CPU, `Refusal::HostUse` an answer none of the protocol's; Hex reads it nowhere yet); launches
+through a client's native owner (D233); GPU selection
 by exact identity (D232), a VM process's refusal of its selection typed in place of a receipt
 (`GpuProbeError::Refused`, `Unreported`; 18f59d497); and an image booted under shards-init for an
-orchestrator (D231, `shards_api::image`, image channel version 24), with its nesting grant (D234)
+orchestrator (D231, `shards_api::image`, image channel version 25), with its nesting grant (D234)
 and, under it, the run's GPUs by identity (`ImageSpec::gpu_devices`, `gpus=`, version 16, e46299c07;
 its workload's cgroup sized by its microVM's CPUs, a853a8138), plugs (D235), destinations by name
 and the receivers a published port reaches (D236), a member's stdin, the room its orchestrator's
@@ -36,7 +41,8 @@ diagnostics kept whole in a file its orchestrator names (D258, `ImageGuest::keep
 run's microVM saved whole for its owner (D259, `ImageGuest::save`, version 23, 8a9fa413d; Hex asks
 none yet), a stop for a boot under way (D231, `BootStop` and `Images::boot_stoppable`, ed1136305: the
 run host killed with its process group, or on Windows its job, and the boot answering
-`Ended(Stopped)` once that host is reaped and every holder of its stderr has closed it), the sign-ins
+`Ended(Stopped)` once that host is reaped, on Windows once every process of the run has ended
+(9a65eb9bb), and every holder of its stderr has closed it), the sign-ins
 an orchestrator's injector captures and refreshes for a run (D242's step 8 slice 2b, version 24,
 `ImageSpec::sign_ins`, the lessor's `capture`, `refresh` and `revoked`, defaulted; Hex grants none
 yet, its pass-through goal 13's), its
@@ -46,15 +52,26 @@ past the microVM keeping the network its image links its members to, nothing let
 to a socket of the run's own command (D251), and the run's own agent-control endpoint, bound by its
 run host, whose controller shards-api carries from shards-remote (D252; `ImageSpec::control`,
 `ImageGuest::control`, version 15), with its members' own lanes and its log lanes (D238, 8bb81584d,
-638c05244; `Execs::log`, which Hex does not use yet); a member's MCP socket relayed to its init's
-port (D254, 6f786c91c); a guest's size held to `check`'s rule from one source,
+638c05244; `Execs::log`, which Hex does not use yet), an exec's output done once its end has reached
+its controller's lane (f24a4644e, 644ed4f64); a member's MCP bridge, its socket relayed to its init's
+port and its connections paired with its controller's asks (D254, 6f786c91c, af8f1ebe5;
+`MemberSpec::mcp`, version 25), which needs the run's agent-control endpoint, so that Hex, asking
+none of an image VM's run, refuses a member asking one by its field, as Shards' own spec check does;
+each credential and sign-in grant's field held to the two-byte length the network process's wire
+carries (`shards_dns::credential::WIRE_MOST`, 17fc36ecd), refused by field as a spec's
+(`ImageRefusal::Spec`), which Hex maps as it maps every spec refusal and bounds no further; a run
+host that ends before its microVM holds its layer leaving no layer file behind (D253, 712f791b3);
+a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
 parent's start tick (743c5b32) and its read test holding its wait from below alone (308895ef4);
 shards-remote's handshake judged as a send is, a closed port's refusal read from a send too
-(233c715f0, D180), so its loopback test of a closed port no longer waits on a refusal it never reads;
-the host endpoint resetting a cut lane (D251 amended, 8754b451f) and the guest legs' cure (shards-init's
-relay, the vsock muxer's host writes, Windows' warm pass; 275b4e178); and
+(233c715f0, D180), so its loopback test of a closed port no longer waits on a refusal it never reads,
+a handshake that answers but never advances giving its place after a whole window without progress
+(4fa48def2, D180, by Q35's `handshake_progress`), and its loopback test's waits judged by their
+subjects' progress (9ea642f0f, 0fdc1ffec); the host endpoint resetting a cut lane (D251 amended,
+8754b451f), on Windows too (e1973ee50), and the guest legs' cure (shards-init's relay, the vsock
+muxer's host writes, Windows' warm pass; 275b4e178); and
 an AF_UNIX read on Windows that waits in WSAPoll, which sees a peer's end that a waiting recv can
 sleep through (shards-afunix, 7ea3ce27, D140, PM M536). shards-api depends on `crates/ipc` (the run
 host's spawn), `crates/dns` (a credential grant's host names, checked as DNS names, D242) and

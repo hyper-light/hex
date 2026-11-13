@@ -1,9 +1,11 @@
 # Hex's changes to hyper-raft
 
-hyper-raft is vendored (vendor/MANIFEST.toml) at `045cf3ff82e1d96d1f8c339d6e644d17afc998a3`, the revision kiln
-vendors, only the files its `take` list names. Each recorded change (`vendor/patches/hyper-raft/*.patch`,
-applied in name order) is a row here. `scripts/vendor.py check hyper-raft` proves the tree is that upstream plus
-these, byte for byte.
+hyper-raft is vendored (vendor/MANIFEST.toml) at `e0613f524b0df198cc61dc1e82b33c22d604cf7b`, patch Q35 (hyper-quic's
+`Connection::handshake_progress`) on hyper-raft's branch `p/q35-handshake-progress-v1`, bound for its main (which
+fast-forwards to it once its consumers' suites pass): the revision Shards' shards-remote takes hyper-quic at, and kiln
+vendors with this Hex. Only the files its `take` list names are taken. Each recorded change
+(`vendor/patches/hyper-raft/*.patch`, applied in name order) is a row here. `scripts/vendor.py check hyper-raft`
+proves the tree is that upstream plus these, byte for byte.
 
 | Files | Change | Why | Patch |
 | --- | --- | --- | --- |

@@ -60,8 +60,10 @@ pub use shards_abi::run::nesting::Ready;
 /// none refuses the run as it is asked, before any save is; 24, the run's sign-in grants
 /// ([`Request::sign_ins`], D242 step 8) and their words ([`to_client::CAPTURE`],
 /// [`to_client::REFRESH`] and [`to_client::REVOKE`], answered [`to_host::CAPTURED`] and
-/// [`to_host::REFRESHED`]), so that a side that knows no sign-in refuses the run by its version.
-pub const VERSION: u8 = 24;
+/// [`to_host::REFRESHED`]), so that a side that knows no sign-in refuses the run by its version; 25, each member's MCP
+/// bridge ([`MemberStage::mcp`], D254), so that a side that makes none never starts a harness
+/// whose MCP config names one that is not there.
+pub const VERSION: u8 = 25;
 
 /// What the orchestrator's side sends.
 pub mod to_host {
@@ -275,6 +277,11 @@ pub struct MemberStage {
     /// Its run-time arguments (D256), on its command line after its config's `run.command`
     /// (its entrypoint and options), in their order; none, its command alone.
     pub args: Vec<String>,
+    /// An MCP bridge of its own (D254): a stdio server at `/run/shards/mcp` that its harness's
+    /// MCP config names, each connection to which reaches the run's controller as a lane of
+    /// its agent-control endpoint ([`Request::control`], which it needs); none, and it has
+    /// neither the bridge nor its socket.
+    pub mcp: bool,
 }
 
 /// A guest port published on the host.
@@ -760,43 +767,19 @@ pub struct Microvm {
     pub guest: Result<GuestTimes, String>,
 }
 
-/// What a VM process uses of its host, as the host counts it (`platform::process_usage`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostUse {
-    /// Its CPU time, user and system together, in ns: its vCPUs' guest time among it.
-    pub cpu_ns: u64,
-    pub resident_bytes: u64,
-    /// Its own memory, as memory per VM is counted (PM M30): macOS's physical footprint,
-    /// Linux's anonymous resident pages, Windows' private working set.
-    pub footprint_bytes: u64,
-}
+/// What a VM process uses of its host, and what a microVM's vCPUs have run of its guest, each
+/// by index, with what those it no longer has ran (guest-cpu-time-v1): one form for the VM
+/// process, an image run's stats and a managed guest's use (D260).
+pub use shards_abi::guest_time::{GuestTimes, HostUse, VcpuTime};
 
-/// What a microVM's vCPUs have run of its guest, as its hypervisor counts it: each by index,
-/// and what those it no longer has ran, which stay its machine's (guest-cpu-time-v1).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GuestTimes {
-    /// In index order, each index once.
-    pub vcpus: Vec<VcpuTime>,
-    pub departed_ns: u64,
-}
-
-impl GuestTimes {
-    /// Its machine's: what every vCPU it has had ran of its guest.
-    pub fn total_ns(&self) -> u64 {
-        self.vcpus
-            .iter()
-            .fold(self.departed_ns, |total, v| total.saturating_add(v.guest_ns))
+impl Microvm {
+    /// Its VMM's own CPU time, in ns: its VM process's less what its vCPUs ran of its guest,
+    /// none less than none past the clocks' steps (D241, D260); none where either was not read.
+    pub fn vmm_ns(&self) -> Option<u64> {
+        let host = self.host.as_ref().ok()?;
+        let guest = self.guest.as_ref().ok()?;
+        Some(host.cpu_ns.saturating_sub(guest.total_ns()))
     }
-}
-
-/// One vCPU's guest time, as a sample read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VcpuTime {
-    pub index: u32,
-    /// Nanoseconds, never less than an earlier sample of the same vCPU said.
-    pub guest_ns: u64,
-    /// Why this sample did not read it, typed: `guest_ns` is then the most it read before.
-    pub unread: Option<shards_abi::guest_time::Unread>,
 }
 
 impl Stats {
@@ -1585,6 +1568,10 @@ impl Request {
                 }
             }
         }
+        // Each member's MCP bridge, in the members' order, appended in version 25 (D254).
+        for m in &self.members {
+            w.u8(u8::from(m.mcp));
+        }
         w.done()
     }
 
@@ -1608,8 +1595,9 @@ impl Request {
             None
         };
         // Each member's kind, name, env and files, and, appended last, its working
-        // directory's flag, its input's, its terminal's and its arguments' count.
-        let n = r.count(1 + 4 + 4 + 4 + 1 + 1 + 1 + 4)?;
+        // directory's flag, its input's, its terminal's, its arguments' count and its MCP
+        // bridge's flag.
+        let n = r.count(1 + 4 + 4 + 4 + 1 + 1 + 1 + 4 + 1)?;
         let mut members = Vec::with_capacity(n);
         for _ in 0..n {
             let kind = member_kind(r.u8()?)?;
@@ -1632,12 +1620,13 @@ impl Request {
                 name,
                 env,
                 files,
-                // Read with the members' working directories, inputs, terminals and arguments,
-                // appended last.
+                // Read with the members' working directories, inputs, terminals, arguments and
+                // MCP bridges, appended last.
                 workdir: None,
                 input: false,
                 terminal: false,
                 args: Vec::new(),
+                mcp: false,
             });
         }
         let n = r.count(2 + 1 + 1 + 2)?;
@@ -1789,6 +1778,10 @@ impl Request {
                 toward,
                 captured,
             });
+        }
+        // Each member's MCP bridge, appended in version 25 (D254).
+        for m in &mut members {
+            m.mcp = r.flag()?;
         }
         r.end()?;
         Ok(Request {
@@ -3042,6 +3035,7 @@ mod tests {
             input: false,
             terminal: false,
             args: Vec::new(),
+            mcp: false,
         };
         let shown = format!("{staged:?}");
         assert!(
@@ -3175,6 +3169,7 @@ mod tests {
                 input: true,
                 terminal: false,
                 args: Vec::new(),
+                mcp: false,
             }],
             publish: vec![
                 Publish {
@@ -3232,10 +3227,10 @@ mod tests {
             },
         ];
         assert_eq!(Request::decode(&credited.encode().unwrap()).unwrap(), credited);
-        // A placeholder is the grants' last field, before the sign-ins' count (version 24): a
-        // request cut in it is refused.
+        // A placeholder is the grants' last field, before the sign-ins' count (version 24) and
+        // the member's MCP bridge's flag (version 25): a request cut in it is refused.
         let bytes = credited.encode().unwrap();
-        assert!(Request::decode(&bytes[..bytes.len() - 4 - 1]).is_err());
+        assert!(Request::decode(&bytes[..bytes.len() - 1 - 4 - 1]).is_err());
         // Each member's working directory, or none, in the members' order (version 5),
         // whether its input is the orchestrator's (version 6), and its run-time arguments, none,
         // several, or an empty one among others (version 18).
@@ -3251,12 +3246,15 @@ mod tests {
             input: false,
             terminal: false,
             args: Vec::new(),
+            mcp: false,
         });
+        // ... and its MCP bridge (version 25, D254).
         worked.members.push(MemberStage {
             workdir: Some("/".into()),
             input: true,
             terminal: true,
             args: vec![String::new(), "two words".into(), "--model=opüs".into()],
+            mcp: true,
             ..worked.members[1].clone()
         });
         assert_eq!(Request::decode(&worked.encode().unwrap()).unwrap(), worked);
@@ -3291,19 +3289,20 @@ mod tests {
         .encode()
         .unwrap();
         // ... the control ask's absence (version 15), the GPUs' count (version 16), the
-        // member's arguments' count (version 18) and the sign-ins' count (version 24) last.
+        // member's arguments' count (version 18), the sign-ins' count (version 24) and the
+        // member's MCP bridge (version 25) last.
         assert_eq!(
-            asked.get(asked.len() - 32..).unwrap(),
+            asked.get(asked.len() - 33..).unwrap(),
             [
                 1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0
+                0, 0
             ],
             "appended: the grant's flag, the deadline's, the destinations kept (all), the one \
              member's working directory (none) and its input, the credential grants' count \
              (zero, version 8), the member's terminal (none, version 11), whether the members \
              are held apart (no, version 12), the control ask (none, version 15), the GPUs' \
              count (zero, version 16), the member's arguments' count (zero, version 18), then \
-             the sign-ins' count (zero, version 24)"
+             the sign-ins' count (zero, version 24), then its MCP bridge (none, version 25)"
         );
         // Destinations kept by name, the host itself among them (D236), and none.
         for destinations in [
@@ -3476,7 +3475,7 @@ mod tests {
         // terminal's one, the reach's flag, the control ask's, the GPUs' count, its arguments'
         // count and the sign-ins' count follow it).
         let mut bad = request().encode().unwrap();
-        let at = bad.len() - 20;
+        let at = bad.len() - 21;
         assert_eq!(
             bad[at], 1,
             "the member's input flag precedes the credentials' count"
@@ -3558,7 +3557,7 @@ mod tests {
         // The reach's flag, before the control ask's, the GPUs' count, the member's arguments'
         // count and the sign-ins' count where none is held apart.
         let mut flag = held(None).encode().unwrap();
-        let at = flag.len() - 14;
+        let at = flag.len() - 15;
         flag[at] = 2;
         assert_eq!(
             Request::decode(&flag),
@@ -3573,7 +3572,7 @@ mod tests {
             .unwrap();
         // ... then the control ask's absence (version 15), the GPUs' count (version 16), the
         // one member's arguments' count (version 18) and the sign-ins' count (version 24).
-        let at = kindless.len() - (1 + 4 + "helper".len() + 4 + 1 + 4 + 4 + 4);
+        let at = kindless.len() - (1 + 4 + "helper".len() + 4 + 1 + 4 + 4 + 4 + 1);
         assert_eq!(kindless[at], MemberKind::Agent as u8);
         kindless[at] = 2;
         assert_eq!(
@@ -3586,7 +3585,7 @@ mod tests {
         // Held apart, with four billion members in a few bytes, in place of the reach's flag
         // and what follows it.
         let mut hostile = held(None).encode().unwrap();
-        hostile.truncate(hostile.len() - 14);
+        hostile.truncate(hostile.len() - 15);
         hostile.push(1);
         hostile.extend_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(Request::decode(&hostile), Err(WireError::Short));
@@ -3638,12 +3637,12 @@ mod tests {
         // The second member's one argument, "ü", last before the sign-ins' count (version 24):
         // its bytes made no UTF-8.
         let mut bad = with(&["--resume"], &["ü"]).encode().unwrap();
-        let at = bad.len() - 4 - "ü".len();
+        let at = bad.len() - 2 - 4 - "ü".len();
         bad[at] = 0xff;
         assert_eq!(Request::decode(&bad), Err(WireError::Text));
         // The second member's count, before the sign-ins', said as four billion in no bytes.
         let mut hostile = with(&[], &[]).encode().unwrap();
-        hostile.truncate(hostile.len() - 4);
+        hostile.truncate(hostile.len() - 2 - 4);
         let at = hostile.len() - 4;
         hostile[at..].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(Request::decode(&hostile), Err(WireError::Short));
@@ -3669,77 +3668,83 @@ mod tests {
         // arguments' count (version 18) four bytes, which every version before 18 lacks, and the
         // sign-ins' count (version 24) four, which every version before 24 lacks.
         let mut v1 = request().encode().unwrap();
-        v1.truncate(v1.len() - 24);
+        v1.truncate(v1.len() - 25);
         v1[0] = 1;
         assert_eq!(Request::decode(&v1), Err(WireError::Version(1)));
         let mut v4 = request().encode().unwrap();
-        v4.truncate(v4.len() - 21);
+        v4.truncate(v4.len() - 22);
         v4[0] = 4;
         assert_eq!(Request::decode(&v4), Err(WireError::Version(4)));
         let mut v5 = request().encode().unwrap();
-        v5.truncate(v5.len() - 20);
+        v5.truncate(v5.len() - 21);
         v5[0] = 5;
         assert_eq!(Request::decode(&v5), Err(WireError::Version(5)));
         // One of version 6 carries every field version 7 does, but its host ends the run at
         // a room: refused by its version, before any room is told (D241).
         let mut v6 = request().encode().unwrap();
-        v6.truncate(v6.len() - 19);
+        v6.truncate(v6.len() - 20);
         v6[0] = 6;
         assert_eq!(Request::decode(&v6), Err(WireError::Version(6)));
         // One of version 7, without the credential grants' count: refused by its version
         // (D242), so an older reader never reads a grant with its field defaulted.
         let mut v7 = request().encode().unwrap();
-        v7.truncate(v7.len() - 19);
+        v7.truncate(v7.len() - 20);
         v7[0] = 7;
         assert_eq!(Request::decode(&v7), Err(WireError::Version(7)));
         // One of version 8, without its members' terminals: refused by its version (D244), so
         // an older reader never starts a member with pipes where its owner asked a terminal.
         let mut v8 = request().encode().unwrap();
-        v8.truncate(v8.len() - 15);
+        v8.truncate(v8.len() - 16);
         v8[0] = 8;
         assert_eq!(Request::decode(&v8), Err(WireError::Version(8)));
         // One of version 11, without the members' reach: refused by its version (D246), so a
         // run host never takes a request that holds its members apart as one that holds none.
         let mut v11 = request().encode().unwrap();
-        v11.truncate(v11.len() - 14);
+        v11.truncate(v11.len() - 15);
         v11[0] = 11;
         assert_eq!(Request::decode(&v11), Err(WireError::Version(11)));
         // One of version 12 carries every field version 13 does, but its host ends the run at
         // a rate: refused by its version, before any rate is told (D247).
         let mut v12 = request().encode().unwrap();
-        v12.truncate(v12.len() - 13);
+        v12.truncate(v12.len() - 14);
         v12[0] = 12;
         assert_eq!(Request::decode(&v12), Err(WireError::Version(12)));
         // One of version 14, without the control ask: refused by its version (D252), so a run
         // host never takes a run that asked an endpoint as one that asked none.
         let mut v14 = request().encode().unwrap();
-        v14.truncate(v14.len() - 13);
+        v14.truncate(v14.len() - 14);
         v14[0] = 14;
         assert_eq!(Request::decode(&v14), Err(WireError::Version(14)));
         // One of version 15, without the GPUs it names: refused by its version (D232), so a run
         // host never starts a run without the GPUs its orchestrator asked.
         let mut v15 = request().encode().unwrap();
-        v15.truncate(v15.len() - 12);
+        v15.truncate(v15.len() - 13);
         v15[0] = 15;
         assert_eq!(Request::decode(&v15), Err(WireError::Version(15)));
         // One of version 16 asks what version 17 does, but its host tells no rate's period as
         // the run starts: refused by its version, so no orchestrator waits on one (D247).
         let mut v16 = request().encode().unwrap();
-        v16.truncate(v16.len() - 8);
+        v16.truncate(v16.len() - 9);
         v16[0] = 16;
         assert_eq!(Request::decode(&v16), Err(WireError::Version(16)));
         // One of version 17, without its members' arguments: refused by its version (D256), so
         // a run host never starts a member without the flags its orchestrator asked.
         let mut v17 = request().encode().unwrap();
-        v17.truncate(v17.len() - 8);
+        v17.truncate(v17.len() - 9);
         v17[0] = 17;
         assert_eq!(Request::decode(&v17), Err(WireError::Version(17)));
         // One of version 23, without the sign-ins' count: refused by its version (D242 step 8),
         // so a run host never takes a run that signs in as one that signs nothing in.
         let mut v23 = request().encode().unwrap();
-        v23.truncate(v23.len() - 4);
+        v23.truncate(v23.len() - 1 - 4);
         v23[0] = 23;
         assert_eq!(Request::decode(&v23), Err(WireError::Version(23)));
+        // One of version 24, without its members' MCP bridges: refused by its version (D254),
+        // so a run host never starts a harness without the bridge its MCP config names.
+        let mut v24 = request().encode().unwrap();
+        v24.truncate(v24.len() - 1);
+        v24[0] = 24;
+        assert_eq!(Request::decode(&v24), Err(WireError::Version(24)));
         // One of version 13 reads a vCPU's unread guest time as free words
         // (guest-cpu-time-v1), and one of 19 carries every field version 20 does, but its
         // client ends the run at a lease its host asks: each refused by its version, before
@@ -3755,7 +3760,7 @@ mod tests {
         // (version 15), the GPUs' count (version 16), its arguments' count (version 18) and the
         // sign-ins' count (version 24): no flag.
         let mut flag = request().encode().unwrap();
-        let at = flag.len() - 24;
+        let at = flag.len() - 25;
         flag[at] = 2;
         assert_eq!(
             Request::decode(&flag),
@@ -3769,7 +3774,7 @@ mod tests {
         // the GPUs' count, the member's arguments' count and the sign-ins' count: no list of
         // version 3's and on.
         let mut list = request().encode().unwrap();
-        let at = list.len() - 22;
+        let at = list.len() - 23;
         list[at] = 2;
         assert_eq!(
             Request::decode(&list),
@@ -3981,7 +3986,7 @@ mod tests {
         };
         assert_eq!(long.encode(), Err(WireError::TooLong));
         let mut bad = request().encode().unwrap();
-        let at = bad.len() - 15;
+        let at = bad.len() - 16;
         assert_eq!(
             bad[at], 0,
             "the member's terminal flag precedes the members' reach, the control ask, the GPUs, \
@@ -4172,6 +4177,7 @@ mod tests {
                 input: false,
                 terminal: false,
                 args: Vec::new(),
+                mcp: false,
             }],
             publish: Vec::new(),
             egress: Narrowing::default(),
@@ -4444,7 +4450,7 @@ mod tests {
         // The last identity's text, "metal:00000001000002a1", before the one member's arguments'
         // count (version 18) and the sign-ins' (version 24), made one D232's grammar refuses.
         let mut unnamed = bytes.clone();
-        let at = unnamed.len() - 4 - 4 - "metal:00000001000002a1".len();
+        let at = unnamed.len() - 1 - 4 - 4 - "metal:00000001000002a1".len();
         unnamed[at] = b'x';
         assert_eq!(Request::decode(&unnamed), Err(WireError::Gpu));
         let twice = Request {
@@ -4500,9 +4506,10 @@ mod tests {
         for cut in 1..=bytes.len() - request().encode().unwrap().len() {
             assert!(Request::decode(&bytes[..bytes.len() - cut]).is_err(), "cut {cut}");
         }
-        // The second sign-in's CLI, its code after its name, made one no version has.
+        // The second sign-in's CLI, its code after its name, made one no version has; the one
+        // member's MCP bridge's flag (version 25) after it.
         let mut cli = bytes.clone();
-        let at = cli.len() - (4 + "chatgpt.com".len() + 4 + "api.openai.com".len() + 4 + 1 + 1);
+        let at = cli.len() - (4 + "chatgpt.com".len() + 4 + "api.openai.com".len() + 4 + 1 + 1 + 1);
         assert_eq!(cli[at], Cli::Codex.code());
         cli[at] = 9;
         assert!(matches!(Request::decode(&cli), Err(WireError::Tag { .. })));

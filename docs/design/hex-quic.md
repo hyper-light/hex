@@ -14,7 +14,8 @@ Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae
 `a10f7fe7`), a Windows node dialable (`7e48ef7d`), the lanes a node grants a peer (Q8; `49500736`) and the node's
 links report (Q12; `09431b42`). HEX-QUIC-25 passed across Linux and macOS at `3045b824`, both its kill and its
 partition halves, and the QUIC conformance suite passed on Windows at `7e48ef7d`. Merged on Hex's main: one
-hyper-quic, from hyper-raft's main `045cf3ff` (Q1; `8aa7c028`), and the bridge shared with hex-client (`a8f6bfe4`).
+hyper-quic, from hyper-raft's main `045cf3ff` (Q1; `8aa7c028`), then `e0613f52` (Q1; `1314e5f2`), and the bridge shared
+with hex-client (`a8f6bfe4`).
 Owed: HEX-QUIC-27 on Windows, and the lanes raised on a live connection that Q8 asks of hyper-transport.
 
 Each decision says what it chose, its sources, the alternatives, and what would falsify it (CLAUDE.md §5, R02).
@@ -23,8 +24,11 @@ Each decision says what it chose, its sources, the alternatives, and what would 
 
 **Chosen.** Vendor hyper-raft at `0856e05df3d136f0870a98808113294a73399206`, the revision kiln vendors (kiln's
 `vendor/MANIFEST.toml`), so kiln, Hex and the fleet hold one hyper-raft (kiln's CP-M1); since 2026-11-13 at hyper-raft's
-main `045cf3ff`, the commit Shards' shards-remote pins (its patch Q34, `Connection::idle_timeout`, which
-shards-remote's keep-alive reads), which kiln takes with Hex. Hex already vendored
+main `045cf3ff`, the commit Shards' shards-remote pinned then (its patch Q34, `Connection::idle_timeout`, which
+shards-remote's keep-alive reads); and since Shards `097ec0047` at `e0613f52`, the commit shards-remote pins now: patch
+Q35 (`Connection::handshake_progress`, by which shards-remote's listeners let a handshake that answers but never
+advances give its place, D180) on hyper-raft's branch `p/q35-handshake-progress-v1`, bound for its main, which
+fast-forwards to it once its consumers' suites pass. Kiln takes each with Hex. Hex already vendored
 hyper-raft at `6a236ae4` (an ancestor of `0856e05d`, 2026-10-16) for hyper-swim and hyper-timing; both move to
 `0856e05d` with it (hyper-swim's sources are unchanged between the two; hyper-timing gains `folds.rs` and `link.rs`
 additions, its API kept). The take list adds `hyper-transport`, `hyper-quic` and `hyper-tls`, each manifest with the

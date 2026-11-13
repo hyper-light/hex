@@ -68,9 +68,11 @@ pub trait Host: Send + Sync {
     /// How many invitations the machine holds open: as many clients it has not enrolled may
     /// be connected at once, to join, as an invitation enrolls one client.
     fn invited(&self) -> usize;
-    /// How many handshakes of keys not yet known the machine holds at once: its own resources'
-    /// bound, past which the oldest unanswered is given up for the newest (the person's ruling,
-    /// 2026-11-13).
+    /// How many connections the machine holds at once, its own resources' bound (at the daemon,
+    /// the process's descriptors, as each connection served may hold a command and its stdio):
+    /// handshakes and established connections alike, past which a newcomer is refused and takes
+    /// the place of a holder, its handshake in flight or ended, that does not answer the PING it
+    /// was sent within its probe timeout (ROOT's rulings on #72, `net::Driver::hold_connections`).
     fn handshakes(&self) -> usize;
     /// A peer at `at` went `unheard` past the window its path has shown, a send of the daemon's
     /// unanswered (`net::RanOut::Stalled`): told once a stall, for the machine's log, as its
@@ -981,6 +983,12 @@ impl Stopper {
     pub fn stop(&self) -> Result<(), Error> {
         self.0.send(Command::Stop)
     }
+
+    /// What the daemon's driver has heard, and the window its connections have shown
+    /// ([`crate::net::View`]).
+    pub fn view(&self) -> crate::net::View {
+        self.0.view()
+    }
 }
 
 /// A daemon's listener on `at`, serving `host`'s clients until its [`Stopper`] stops it;
@@ -992,7 +1000,7 @@ pub fn serve<H: Host>(
     ready: impl FnOnce(SocketAddr, Stopper),
 ) -> Result<(), Error> {
     let config = tls::server(identity)?;
-    let slots = host.handshakes();
+    let places = host.handshakes();
     // Each start's worker is the scope's, the host shared with them: the listener returns once
     // every start under way as it stops has ended, each hung up where none relays it.
     std::thread::scope(|starts| {
@@ -1005,7 +1013,7 @@ pub fn serve<H: Host>(
         // A client is not known before its handshake says whose key it holds: each is held as
         // a peer never reached, its handshake waited for as long as its probing goes on.
         let (mut driver, sender) = Driver::bind(at, Some(config), server, tls::Known::Never)?;
-        driver.hold_handshakes(slots);
+        driver.hold_connections(places);
         driver.handler_mut().sender = Some(sender.try_clone()?);
         ready(driver.local()?, Stopper(sender));
         driver.run()

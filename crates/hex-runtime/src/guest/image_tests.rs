@@ -1039,6 +1039,64 @@ fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
     }
 }
 
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's MCP bridge reaches its run's controller over the
+/// run's agent-control endpoint alone, which this node asks none of for an image VM's run. Do create a VM driving a
+/// harness that asks no bridge and an agent that asks one. Expect the create refused as Invalid by the agent's field
+/// (`members[1].mcp`), as Shards' own spec check refuses it, before any record; and nothing booted.
+#[test]
+fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_field() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let mut boxed = spec("image-mcp", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members = vec![
+            ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            }),
+            ImageMember {
+                mcp: true,
+                ..ImageMember::new(Member {
+                    kind: MemberKind::Agent,
+                    name: "helper".to_owned(),
+                })
+            },
+        ];
+    }
+    let id = boxed.id.clone();
+    let created = runtime.create(boxed);
+    assert!(
+        matches!(
+            &created,
+            Err(Refusal::Invalid { what: "shards image", why }) if why.contains("members[1].mcp")
+        ),
+        "{created:?}"
+    );
+    assert!(record(&owner, &id).is_none());
+    assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's ask for an MCP bridge rides its boot's member as
+/// the box's spec says it (`MemberSpec::mcp`). Do lower a member asking none and one asking one. Expect the first's
+/// boot member to ask none and the second's to ask it.
+#[test]
+fn w12_a_members_mcp_bridge_rides_its_boot_member() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let claude = ImageMember::new(Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    });
+    assert!(!member_spec(&claude).mcp);
+    assert!(
+        member_spec(&ImageMember {
+            mcp: true,
+            ..claude
+        })
+        .mcp
+    );
+}
+
 /// Joint plan step 12 for kiln's step 18 (D231's shares): an image VM's guest sees the host directories its caller
 /// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only; one granted egress and
 /// sharing none; then one whose share Shards refuses. Expect the first boot to ask Shards for exactly those two shares,
@@ -1337,6 +1395,7 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
             env: vec![("TZ".to_owned(), "UTC".to_owned())],
             workdir: Some("/work/project".to_owned()),
             args: Vec::new(),
+            mcp: false,
         });
     }
     let id = runtime.create(boxed).unwrap().id;
