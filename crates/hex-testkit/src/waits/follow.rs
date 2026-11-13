@@ -3,48 +3,38 @@
 //! while answers come within it:
 //! - **Within W***, the slowest answer the wait has seen, the fact is the answer.
 //! - **Past W*** the run-out is told to the census, once and with no sample, and never fails the test: the wait goes on
-//!   while its party lives and advances, and fails ([`Unmet`]) only at its party's end or a whole window of W* with no
-//!   advance ([`Follow`]).
+//!   while its party lives, and fails ([`Unmet`]) only at its party's end. No stall of the party's progress is judged:
+//!   one judged over W*, or at the slowest gap seen, refuses healthy parties (learned-waits.md, decision 9's bound).
 //! - **With no W*** (before the fact's first answer, and from a run-out to the next) it follows its party from its
-//!   start ([`Patience::follow`]).
+//!   start.
 //! - **Its answer**, however long it took, is the sample W* rises to.
 //!
 //! A party ([`Party`]) is [`Party::Ended`] once nothing can make the fact true (the thread that would has finished,
-//! the child is reaped, the connection closed), [`Party::Alive`] with a count that rises while it works, or
-//! [`Party::Live`] where its work shows no count the test can read, followed by its life alone. [`Thread`] gives a
-//! thread's. The waits of [`super`] that take no party go as their tests move here.
+//! the child is reaped, the connection closed), and [`Party::Live`] while it can. [`Thread`] gives a thread's. The
+//! waits of [`super`] that take no party go as their tests move here.
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use hex_core::patience::{Follow, Patience};
-pub use hex_core::patience::{Party, Stopped};
+pub use hex_core::patience::Party;
+use hex_core::patience::Patience;
 
-/// A wait's fact that didn't come: its party ended, or stood still over a whole window.
+/// A wait's fact that didn't come: its party ended without it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unmet {
     /// The fact waited for.
     pub what: String,
-    /// Why the wait ended without it.
-    pub stopped: Stopped,
     /// How long it was waited for.
     pub after: Duration,
 }
 
 impl fmt::Display for Unmet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.stopped {
-            Stopped::Ended => write!(
-                f,
-                "no {} after {:?}: its party ended without it",
-                self.what, self.after
-            ),
-            Stopped::Stalled { since, window } => write!(
-                f,
-                "no {} after {:?}: its party stood still from {since:?} on, past a whole window of {window:?}",
-                self.what, self.after
-            ),
-        }
+        write!(
+            f,
+            "no {} after {:?}: its party ended without it",
+            self.what, self.after
+        )
     }
 }
 
@@ -66,22 +56,22 @@ pub fn until(
             wait.answered(waiting.began.elapsed());
             return Ok(looks);
         }
-        if let Err(stopped) = waiting.look(wait, party()) {
+        if waiting.look(wait, party()).is_err() {
             if fact() {
                 wait.answered(waiting.began.elapsed());
                 return Ok(looks.saturating_add(1));
             }
-            return Err(waiting.unmet(what, stopped));
+            return Err(waiting.unmet(what));
         }
         std::thread::yield_now();
     }
 }
 
 /// Waits for an answer through `call`, a wait that takes its own deadline (a read's, a channel's), as the
-/// [module](self) says: `call` is given the end of each slice (W* from the start; past it, where its party would be
-/// taken for stalled; `None` with no window, when its own answer or its party's end, as `call` sees it, ends it) and
-/// gives its answer, or `None` where the slice ended first; `party` is looked at between slices. A party that ends
-/// is taken for ended only once a last slice, with no time left, hasn't given the answer.
+/// [module](self) says: `call` is given the end of its slice (W*'s end within it; `None` past it and with no W*, when
+/// its own answer or its party's end, as `call` sees it, ends it) and gives its answer, or `None` where the slice
+/// ended first; `party` is looked at between slices. A party that ends is taken for ended only once a last slice, with
+/// no time left, hasn't given the answer.
 pub fn within<T>(
     wait: &Patience,
     what: &str,
@@ -90,7 +80,7 @@ pub fn within<T>(
 ) -> Result<T, Unmet> {
     super::census();
     let mut waiting = Waiting::new(wait);
-    let mut by = waiting.first();
+    let mut by = waiting.slice();
     loop {
         if let Some(answer) = call(by) {
             wait.answered(waiting.began.elapsed());
@@ -98,71 +88,67 @@ pub fn within<T>(
         }
         match waiting.look(wait, party()) {
             Ok(next) => by = next,
-            Err(stopped) => {
+            Err(Ended) => {
                 // The answer may have come as its party ended: one more look, with no time left.
                 if let Some(answer) = call(Some(Instant::now())) {
                     wait.answered(waiting.began.elapsed());
                     return Ok(answer);
                 }
-                return Err(waiting.unmet(what, stopped));
+                return Err(waiting.unmet(what));
             }
         }
     }
 }
 
-/// A wait under way: within its W* until that passes, then following its party.
+/// A wait's party, looked at, has ended.
+struct Ended;
+
+/// A wait under way: within its W* until that passes, then following its party by its life alone.
 struct Waiting {
     began: Instant,
     /// W*, where the wait has one.
     bound: Option<Duration>,
-    /// How it follows its party: from its start with no W*, from W*'s end with one.
-    follow: Option<Follow>,
+    /// Whether W* has passed, its run-out told.
+    past: bool,
 }
 
 impl Waiting {
     fn new(wait: &Patience) -> Self {
-        let bound = wait.deadline();
         Self {
             began: Instant::now(),
-            bound,
-            follow: bound.is_none().then(|| wait.follow()),
+            bound: wait.deadline(),
+            past: false,
         }
     }
 
-    /// When the first look comes at the latest: W*'s end, or none with no W*.
-    fn first(&self) -> Option<Instant> {
+    /// When the next look comes at the latest: W*'s end while within it; none past it or with no W*.
+    fn slice(&self) -> Option<Instant> {
+        if self.past {
+            return None;
+        }
         self.bound.and_then(|bound| self.began.checked_add(bound))
     }
 
-    /// The party as looked at now: when to look next at the latest (`None`: no time of its own, only the next look),
-    /// or why the wait is over. Past W* its run-out is told, once.
-    fn look(&mut self, wait: &Patience, party: Party) -> Result<Option<Instant>, Stopped> {
-        let now = self.began.elapsed();
-        if self.follow.is_none()
+    /// The party as looked at now: when to look next at the latest ([`Waiting::slice`]), or its end. Past W* its
+    /// run-out is told, once.
+    fn look(&mut self, wait: &Patience, party: Party) -> Result<Option<Instant>, Ended> {
+        if !self.past
             && let Some(bound) = self.bound
-            && now >= bound
+            && self.began.elapsed() >= bound
         {
             // No sample (Karn's point), but the census is told, and the wait goes on.
             wait.ran_out(bound);
-            self.follow = Some(Follow::past(bound));
+            self.past = true;
         }
-        let Some(follow) = self.follow.as_mut() else {
-            // Within W*: only the party's end ends the wait.
-            return match party {
-                Party::Ended => Err(Stopped::Ended),
-                Party::Alive { .. } | Party::Live => Ok(self.first()),
-            };
-        };
-        follow.look(party, now)?;
-        Ok(follow
-            .stalls_after()
-            .and_then(|at| self.began.checked_add(at)))
+        match party {
+            Party::Ended => Err(Ended),
+            Party::Live => Ok(self.slice()),
+        }
     }
 
-    fn unmet(&self, what: &str, stopped: Stopped) -> Unmet {
+    fn unmet(&self, what: &str) -> Unmet {
         Unmet {
             what: what.to_owned(),
-            stopped,
             after: self.began.elapsed(),
         }
     }
@@ -181,10 +167,8 @@ impl Thread {
         sys::current().map(Self)
     }
 
-    /// The thread as a party: ended once it has gone, which comes a moment after its join, as its task exits;
-    /// [`Party::Live`] while it runs or waits for a core to run on, so a loaded host's queue is never taken for a stall;
-    /// else alive, its count its CPU time, which stands while it sleeps. Linux reads `/proc/self/task/<tid>/stat` and `schedstat`; macOS `proc_pidinfo`'s
-    /// `PROC_PIDTHREADID64INFO`.
+    /// The thread as a party: ended once it has gone, which comes a moment after its join, as its task exits; live
+    /// until then. Linux reads `/proc/self/task/<tid>/stat`; macOS `proc_pidinfo`'s `PROC_PIDTHREADID64INFO`.
     pub fn party(&self) -> Party {
         sys::party(self.0)
     }

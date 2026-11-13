@@ -13,7 +13,9 @@ Each decision says what it chose, its sources, the alternatives, and what would 
 ## Q1. How Hex takes hyper-transport
 
 **Chosen.** Vendor hyper-raft at `0856e05df3d136f0870a98808113294a73399206`, the revision kiln vendors (kiln's
-`vendor/MANIFEST.toml`), so kiln, Hex and the fleet hold one hyper-raft (kiln's CP-M1). Hex already vendored
+`vendor/MANIFEST.toml`), so kiln, Hex and the fleet hold one hyper-raft (kiln's CP-M1); since 2026-11-13 at hyper-raft's
+main `045cf3ff`, the commit Shards' shards-remote pins (its patch Q34, `Connection::idle_timeout`, which
+shards-remote's keep-alive reads), which kiln takes with Hex. Hex already vendored
 hyper-raft at `6a236ae4` (an ancestor of `0856e05d`, 2026-10-16) for hyper-swim and hyper-timing; both move to
 `0856e05d` with it (hyper-swim's sources are unchanged between the two; hyper-timing gains `folds.rs` and `link.rs`
 additions, its API kept). The take list adds `hyper-transport`, `hyper-quic` and `hyper-tls`, each manifest with the

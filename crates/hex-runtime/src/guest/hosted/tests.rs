@@ -208,6 +208,10 @@ impl ImageGuest for Run {
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
         Ok(Some(RunEnd::Stopped))
     }
+
+    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
 }
 
 /// A node's guest under shards-init, its node image, size and shares as a node configures them: inputs to the boot,

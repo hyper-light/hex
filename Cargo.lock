@@ -514,6 +514,7 @@ version = "0.1.0"
 dependencies = [
  "hex-afunix",
  "hex-wait",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

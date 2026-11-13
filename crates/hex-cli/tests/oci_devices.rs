@@ -588,7 +588,7 @@ fn process_opens(node: &Node, lab: &Lab, id: &BoxId, paths: &[&str]) -> Vec<Open
         .unwrap();
     let mut text = String::new();
     out.read_to_string(&mut text).unwrap();
-    proc.wait_for(hex_api::conformance::PATIENCE).unwrap();
+    hex_api::conformance::end_of(&mut proc).unwrap();
     parse_opens(&text)
 }
 
@@ -599,7 +599,6 @@ fn opens_in_cgroup(
     lab: &Lab,
     paths: &[&str],
 ) -> Vec<Open> {
-    use hex_api::Proc;
     let (mut out, w) = std::io::pipe().unwrap();
     let mut args = vec![lab.exe.as_str(), "selftest-box", "open"];
     args.extend(paths);
@@ -614,7 +613,7 @@ fn opens_in_cgroup(
     .unwrap();
     let mut text = String::new();
     out.read_to_string(&mut text).unwrap();
-    proc.wait_for(hex_api::conformance::PATIENCE).unwrap();
+    hex_api::conformance::end_of(&mut proc).unwrap();
     parse_opens(&text)
 }
 
