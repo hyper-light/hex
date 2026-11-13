@@ -1118,6 +1118,7 @@ impl Node {
         // has been dispatched through the same Store/turn authority.
         let mut summary = self.recover_backends(&records)?;
         summary.boot_unknown = self.store.boot_unread().map(str::to_owned);
+        summary.node_vms = self.store.settle_node_vms()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();

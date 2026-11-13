@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
@@ -51,6 +51,7 @@ use crate::turns::{Turn, Turns};
 
 mod node_vm;
 mod pool;
+pub use node_vm::NodeVmSettled;
 use pool::scoped_paths;
 
 /// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's
@@ -184,6 +185,9 @@ pub struct Store {
     /// ([`BoxRecord::started`]): one past the most any of its records held when it opened, so the order runs on
     /// across the node's restarts. Shared by clones.
     begun: Arc<AtomicU64>,
+    /// The node VMs this process runs (joint plan step 39), each by its run with the one handle of its lock file, whose
+    /// owner-only lock it holds from its row's Booting write until its Ended one ([`node_vm`]). Shared by clones.
+    node_vm_owners: Arc<Mutex<BTreeMap<hex_api::NodeRun, File>>>,
 }
 
 #[derive(Debug, Default)]
@@ -252,6 +256,7 @@ impl Store {
             crash_before_write: Arc::default(),
             boot: host_boot().as_ref().ok().cloned().flatten(),
             begun: Arc::new(AtomicU64::new(1)),
+            node_vm_owners: Arc::default(),
         };
         store.count_starts()?;
         Ok(store)

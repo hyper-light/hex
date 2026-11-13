@@ -500,6 +500,14 @@ fn say_recovered(recovered: &RecoverySummary) {
              an earlier boot's, and the records written now carry none"
         );
     }
+    for (run, settled) in &recovered.node_vms {
+        let run: String = run
+            .bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let _ = writeln!(err, "hex node: recovered: node VM {run}: {settled}");
+    }
 }
 
 /// The Linux node: its boxes in cgroups under `--box-root` (else beside its own cgroup), recovered, its socket's

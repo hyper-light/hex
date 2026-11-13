@@ -208,10 +208,6 @@ impl Books for Owner {
     fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
         Ok(self.node_vms.lock().unwrap().values().cloned().collect())
     }
-    fn remove_node_vm(&self, run: &NodeRun) -> Result<(), Refusal> {
-        self.node_vms.lock().unwrap().remove(run);
-        Ok(())
-    }
     // One past the runs it keeps, in every byte: unique while it keeps fewer than 255.
     fn mint_node_run(&self) -> Result<NodeRun, Refusal> {
         let next = u8::try_from(self.node_vms.lock().unwrap().len() + 1).unwrap();

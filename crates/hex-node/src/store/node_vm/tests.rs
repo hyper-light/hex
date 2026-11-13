@@ -170,6 +170,8 @@ fn node_vm_role() {
     };
     let dir = PathBuf::from(dir);
     if role == "child" {
+        // Its pid, for a run that kills its test to stop it by.
+        std::fs::write(dir.join("child.pid"), std::process::id().to_string()).unwrap();
         hex_testkit::waits::until(&FACT, "its test's word to go", || {
             dir.join("done").exists() || !dir.exists()
         })
@@ -190,7 +192,10 @@ fn node_vm_role() {
     }
     #[cfg(not(unix))]
     child.stdin(std::process::Stdio::null());
-    // It outlives this process, as the case asks: never waited for here.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "it outlives this process, as the case asks: it is never waited for here"
+    )]
     let _outlives = child.spawn().unwrap();
     assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
     assert_eq!(store.all_node_vms().unwrap(), [row]);
@@ -273,6 +278,7 @@ fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
 fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_lock() {
     use std::io::{BufRead, Write};
     let dir = tempfile::tempdir().unwrap();
+    eprintln!("node VM rows test directory: {}", dir.path().display());
     let mut owner = role("holding owner", dir.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
