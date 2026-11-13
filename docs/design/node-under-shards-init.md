@@ -103,8 +103,11 @@ sets:
   shards-init's `/run/shards/notify`). `SHARDS_READY_BY`, where present, is decimal nanoseconds on CLOCK_BOOTTIME.
   shards-init sets both over anything the run or the image gives (`Inherited::env`).
 - **Refused**, typed, init saying why and ending:
-  - `NOTIFY_SOCKET` not an absolute path, or longer than `sun_path` holds;
+  - `NOTIFY_SOCKET` not an absolute path;
   - `SHARDS_READY_BY` without `NOTIFY_SOCKET`, or anything but decimal nanoseconds.
+
+  A socket path longer than `sun_path` holds is refused by the datagram's send (std's Unix socket address), and
+  init's boot ends with it.
 
 Why `NOTIFY_SOCKET` decides it:
 - sd_notify(3) names it as the variable by which a service manager tells its service it listens;
@@ -169,7 +172,10 @@ same way (`shards-image-class.md` §1). No success is stubbed. A node VM asked a
 ## 6. Waits
 
 The person's rule, 2026-11-13, applies to every wait: no record seeds, no chosen multiples. A cold start follows its
-party while that party lives, and after it the bound is the slowest answer seen.
+party while that party lives, and after it the bound is the slowest answer seen. The host's waits below come with
+its boot through shards-init, which waits on the channel (§5). Until then only `node_hosted_real` makes them, each for
+its fact (`Duration::MAX`). Inside the VM, init's own waits are those of its PID-1 path, held to the deadline its host
+told it.
 - **`guest.hosted.ready`**: the node VM's READY, through `ImageGuest::wait_ready`, on time or late.
   - At its cold start it follows the run, with no deadline: the run's end refuses it (`ImageRefusal::Ended`).
   - After that it is bounded by the slowest READY this node has seen (`hex_core::patience::Patience::measuring`).
