@@ -212,6 +212,19 @@ fn cycles(
     (runs, stops, periods)
 }
 
+/// `cpu` (in 100 ns) over `span` on `processors`, per `hex_core::job::RATE_SCALE` (10,000) of the machine.
+fn per_machine(cpu: u128, span: Duration, processors: u32) -> u128 {
+    let span = (span.as_nanos() / 100).max(1);
+    cpu * 10_000 / (span * u128::from(processors).max(1))
+}
+
+/// The machine's busy CPU (in 100 ns) between two of its `GetSystemTimes` readings, each its idle, kernel and user
+/// time: Windows counts idle time within kernel time, so busy is kernel and user less idle.
+fn busy(before: [u64; 3], after: [u64; 3]) -> u128 {
+    let _ = (before, after);
+    0
+}
+
 /// The gaps between the reads of consecutive samples: the sampler's own cadence.
 fn gaps(samples: &[(Duration, u64)]) -> Vec<Duration> {
     samples
@@ -268,8 +281,7 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
         let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
             return 0;
         };
-        let span = ((last.0 - first.0).as_nanos() / 100).max(1);
-        u128::from(last.1 - first.1) * 10_000 / (span * u128::from(processors))
+        per_machine(u128::from(last.1 - first.1), last.0 - first.0, processors)
     };
     let uncapped = run(None, threads, &timer);
     keep("uncapped", &uncapped);
@@ -351,4 +363,19 @@ fn w14_a_sampler_that_keeps_its_deadlines_measures_the_step() {
     assert_eq!(step, Duration::from_millis(15));
     let kept = cadence(&samples, step).unwrap();
     assert!(kept.contains("n=200 p50=1ms p99=1ms max=1ms"), "{kept}");
+}
+
+/// Joint plan step 14 (AC-T7.4.1), ROOT's question on the probe's rerun at e35e4811 (its uncapped run got 518/10000):
+/// the machine's other CPU over a run, beside the job's. Do reckon two `GetSystemTimes` readings 1 s apart on a
+/// 32-processor machine, 16 s more idle, 20 s more kernel and 12 s more user at the second, and a job that used 12 s of
+/// CPU between them. Expect the machine busy 16 s (kernel and user less idle, kernel time holding idle time), 5,000 of
+/// 10,000 of the machine, and 4 s of it past the job, 1,250 of 10,000.
+#[test]
+fn w14_the_machines_busy_cpu_is_kernel_and_user_less_idle() {
+    let s = 10_000_000u64;
+    let busy = busy([0, 0, 0], [16 * s, 20 * s, 12 * s]);
+    assert_eq!(busy, 16 * u128::from(s));
+    let second = Duration::from_secs(1);
+    assert_eq!(per_machine(busy, second, 32), 5_000);
+    assert_eq!(per_machine(busy - 12 * u128::from(s), second, 32), 1_250);
 }
