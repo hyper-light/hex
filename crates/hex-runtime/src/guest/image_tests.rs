@@ -355,8 +355,9 @@ struct ModelImages {
     /// Whom each guest port its image gives coming in reaches (D231's `Bound::to`), as the test sets them: a port
     /// not named here reaches no member, so the run's own command, or is refused on a run of the members alone.
     receivers: Mutex<Vec<(u16, Vec<Receiving>)>>,
-    /// What each member the image declares reaches by name (D236), as the test sets it: the run host holds every
-    /// one to its reach of the destinations kept where a boot holds members apart (`Narrowing::members`).
+    /// Each member the image declares and what it reaches by name (D236's destinations and its remote MCP servers',
+    /// `Agentfile::named`), as the test sets it: the run host holds every one to its reach of the names kept where a
+    /// boot holds members apart (`Narrowing::members`, D246).
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
 }
 
@@ -384,30 +385,59 @@ impl ModelImages {
         ));
     }
 
-    /// The run host's hold of each member apart, as Hex's recorded Shards change makes it (`api_run`'s
-    /// `held_apart`): every member the image declares reaches exactly what the boot lets it of the destinations
-    /// kept, else the boot is refused as a widening before anything starts.
+    /// The run host's hold of each member apart, as Shards' `api_run::held_apart` makes it (D246) and its session
+    /// types its causes: where the boot names members' reaches, an entry for a member the image declares not is the
+    /// image's refusal and a member's second entry the request's; every member the image declares reaches, of the
+    /// names kept (the destinations and remote MCP servers alike), exactly its entry's, sorted and each once (a
+    /// member in no entry, nothing), else the boot is refused as a widening; each before anything starts.
     fn held_apart(&self, egress: &shards_api::image::Narrowing) -> Result<(), ImageRefusal> {
         let Some(asked) = &egress.members else {
             return Ok(());
         };
-        let Keep::Only(kept) = &egress.destinations else {
+        let (Keep::Only(destinations), Keep::Only(mcp)) = (&egress.destinations, &egress.mcp)
+        else {
             return Err(ImageRefusal::Widening(
-                "the model keeps no destination wholesale".to_owned(),
+                "the model keeps no name wholesale".to_owned(),
             ));
         };
-        for (kind, name, reaches) in self.named.lock().unwrap().iter() {
-            let mut reach: Vec<&String> = reaches.iter().filter(|r| kept.contains(r)).collect();
+        let named = self.named.lock().unwrap();
+        for (i, m) in asked.iter().enumerate() {
+            if !named
+                .iter()
+                .any(|(kind, name, _)| *kind == m.kind && *name == m.name)
+            {
+                return Err(ImageRefusal::Image(format!(
+                    "{:?} {}: the image declares no such member",
+                    m.kind, m.name
+                )));
+            }
+            if asked[..i]
+                .iter()
+                .any(|o| o.kind == m.kind && o.name == m.name)
+            {
+                return Err(ImageRefusal::Spec {
+                    what: "the request",
+                    why: format!("{:?} {}: its reach is named twice", m.kind, m.name),
+                });
+            }
+        }
+        for (kind, name, reaches) in named.iter() {
+            let mut reach: Vec<&String> = reaches
+                .iter()
+                .filter(|r| destinations.contains(r) || mcp.contains(r))
+                .collect();
             reach.sort();
+            reach.dedup();
             let mut lets: Vec<&String> = asked
                 .iter()
                 .find(|m| m.kind == *kind && m.name == *name)
                 .map(|m| m.destinations.iter().collect())
                 .unwrap_or_default();
             lets.sort();
+            lets.dedup();
             if reach != lets {
                 return Err(ImageRefusal::Widening(format!(
-                    "{kind:?} {name}: of the destinations kept it would reach {reach:?}, where the request lets it reach {lets:?}"
+                    "{kind:?} {name}: of the names kept it would reach {reach:?}, where the request lets it reach {lets:?} (D246)"
                 )));
             }
         }
@@ -1551,6 +1581,48 @@ fn a_destination_another_member_would_reach_too_refuses_the_boot() {
         Err(Refusal::Invalid { what: "shards image", why })
             if why.contains("past the image's grants") && why.contains("helper")
     ));
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Unknown))
+    );
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
+}
+
+/// Joint plan step 15 (AC-T7.7.2; N4, D246): do start an image VM granting a provider to a harness its image doesn't
+/// declare, beside the image's own harness, which reaches nothing by name. Expect: the start refused Invalid naming
+/// the image (the run host's `Cause::Image`: it declares no such member), the run host having refused the boot before
+/// anything started, and the box ended; so no grant is kept for a member the image doesn't have.
+#[test]
+fn a_destination_for_a_member_its_image_doesnt_declare_refuses_the_boot() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
+    let images = ModelImages::new();
+    images.names(shards_api::image::MemberKind::Harness, "codex", &[]);
+    let (runtime, owner) = model_runtime(&images, waits());
+    let mut spec = spec("image-undeclared", None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Egress {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "ghost".to_owned(),
+            },
+            to: Destination::Name("api.openai.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }];
+    }
+    let id = runtime.create(spec).unwrap().id;
+    let refused = runtime.start(&id);
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { what: "shards image", why })
+            if why.starts_with("the image:") && why.contains("ghost") && why.contains("declares no such member")),
+        "{refused:?}"
+    );
     assert_eq!(images.asked.lock().unwrap().len(), 1);
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
     let shown = runtime.inspect(&id).unwrap();
