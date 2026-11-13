@@ -1037,7 +1037,15 @@ mod tests {
         let original = json();
         let bytes = serde_json::to_vec(&original).unwrap();
         let parsed = Config::parse(&bytes).unwrap();
-        assert_eq!(parsed.cost, cost());
+        // Its census's overheads are evidence alone (joint plan step 14; ROOT, 2026-11-13, by decision 9's rule).
+        assert_eq!(
+            parsed.cost,
+            RuntimeCost {
+                guest_overhead: hex_api::CapacityResources::default(),
+                overhead: hex_api::CapacityResources::default(),
+                ..cost()
+            }
+        );
         assert_eq!(parsed.operation_timeout, Duration::from_secs(1));
         for key in original.as_object().unwrap().keys() {
             let mut absent = original.clone();
