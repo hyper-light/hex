@@ -151,7 +151,7 @@ pub(super) fn same_native(
                 start_ticks: identity.started,
             })
     {
-        return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+        return Err(record.uncertain("its published controller isn't its record's"));
     }
     Ok(())
 }
