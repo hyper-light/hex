@@ -11,6 +11,17 @@ use hex_core::record::NodeVmRecord;
 
 use super::{Store, TURNS, scoped_paths};
 
+/// What a node's start did with a node VM row an earlier node process left (joint plan step 39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeVmSettled {
+    /// Its run had ended, its end kept: its row let go.
+    Ended,
+    /// No process held its lock, so its owner had ended, or the host's boot had, and its run with it: its row let go.
+    OwnerEnded,
+    /// Its owner still runs: its receipt stays booked, and a thread follows that owner to its end.
+    Followed,
+}
+
 fn allocation(bound: usize) -> Refusal {
     Refusal::Exhausted {
         what: "node VM record storage",
@@ -147,6 +158,20 @@ impl Store {
             return Err(damaged("a run minted names a row already kept"));
         }
         Ok(run)
+    }
+
+    /// Settles each node VM row a node process before this one left, as this node starts (joint plan step 39; ROOT,
+    /// 2026-11-13): says what it did with each. Original (red): nothing.
+    pub(crate) fn settle_node_vms(&self) -> Result<Vec<(NodeRun, NodeVmSettled)>, Refusal> {
+        Ok(Vec::new())
+    }
+
+    /// The handle of node VM `run`'s lock this process holds, a second descriptor of its one open file description:
+    /// for a test's child to share it as a forked child would. Original (red): none is held.
+    #[cfg(test)]
+    fn node_vm_lock(&self, run: &NodeRun) -> Option<File> {
+        let _ = run;
+        None
     }
 
     /// Lets node VM `run`'s record go, its directory flushed after.
