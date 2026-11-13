@@ -16,6 +16,7 @@ pub mod hosted;
 mod image;
 mod leases;
 mod managed;
+pub use managed::ManagedRate;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
 mod observer;
@@ -1574,6 +1575,45 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
+    /// Joint plan step 14 (D255; ROOT, 2026-11-13): asks the governor of managed box `record`'s VM to hold its vCPUs to
+    /// `rate` milli-CPU, through its booted managed guest ([`managed::rate`]). A box whose guest this runtime holds
+    /// through no managed guest of its own has no governor of its own to ask: its platform's cap is to hold it, told.
+    pub fn managed_rate(
+        &self,
+        record: &hex_core::record::BoxRecord,
+        rate: u64,
+    ) -> Result<ManagedRate, Refusal> {
+        let id = &record.spec.id;
+        let Some(booted) = self.booted_for_record(Some(record), id)? else {
+            return Err(Refusal::NoSuchBox(id.try_clone()?));
+        };
+        match &booted.guest {
+            GuestHandle::Managed(guest) => managed::rate(guest, id, rate),
+            GuestHandle::Shared(_) => Ok(ManagedRate::Platform(Refusal::Platform {
+                what: "a managed VM's governor",
+                platform: std::env::consts::OS,
+                why: "its guest is held through no managed guest of its own".to_owned(),
+            })),
+        }
+    }
+
+    /// Joint plan step 14 (D255): the period managed box `record`'s VM's governor holds its rate over, as its VM process
+    /// last answered: none before its first answer, and none for a box whose guest is held through no managed guest of
+    /// its own.
+    pub fn managed_rate_period(
+        &self,
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
+        let id = &record.spec.id;
+        let Some(booted) = self.booted_for_record(Some(record), id)? else {
+            return Err(Refusal::NoSuchBox(id.try_clone()?));
+        };
+        Ok(match &booted.guest {
+            GuestHandle::Managed(guest) => guest.rate_period(),
+            GuestHandle::Shared(_) => None,
+        })
+    }
+
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
     /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
     /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.

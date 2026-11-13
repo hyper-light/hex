@@ -1141,6 +1141,55 @@ impl LearnedEnd {
     }
 }
 
+/// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds a managed microVM's CPU to the rate its node's learner set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RateHeld {
+    /// Its VM's governor (Shards' D191, D255): its vCPUs held to the rate over its VM process's own period.
+    Governor,
+    /// Its VM's governor, under its job's CPU rate at the same rate as the hard ceiling (Windows). The job covers its
+    /// VMM's own CPU too, so it binds first: the learner holds no VMM CPU apart for a managed VM, a known limit owed on
+    /// Shards (a managed guest's per-vCPU guest time).
+    GovernorUnderJob,
+    /// Its platform's cap (macOS's CPU control, Windows' job), its VM process taking no rate: why, in its words.
+    Platform(String),
+}
+
+/// Joint plan step 14 (D255): how one running managed microVM's CPU is held to its rate, by its holder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedRate {
+    pub id: LearnedHolder,
+    pub held: RateHeld,
+}
+
+impl RateHeld {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(match self {
+            Self::Governor => Self::Governor,
+            Self::GovernorUnderJob => Self::GovernorUnderJob,
+            Self::Platform(why) => {
+                let mut copy = String::new();
+                copy.try_reserve_exact(why.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "a managed VM's rate's reason",
+                        bound: why.len(),
+                    })?;
+                copy.push_str(why);
+                Self::Platform(copy)
+            }
+        })
+    }
+}
+
+impl LearnedRate {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            held: self.held.try_clone()?,
+        })
+    }
+}
+
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): a profile's VMM overhead past its envelope as its node's learner has seen
 /// it, each dimension the most its VMs' windows showed past the envelope, or none yet: its cold start, typed, never a
 /// zero. A window in which a VM ran into its CPU cap is no CPU sample (Karn's point, decision 9).
@@ -1207,9 +1256,29 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_ceilings"
     )]
     pub ceilings: Vec<LearnedCeiling>,
+    /// What holds each running managed VM's CPU to its rate (D255): its governor, its governor under its job, or its
+    /// platform's cap and why, as many as the answer has room for, those its governor doesn't hold alone first. Added
+    /// after the ceilings, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_rates"
+    )]
+    pub rates: Vec<LearnedRate>,
 }
 
 impl Learned {
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_rates<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedRate>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned rates exceed a node's boxes",
+        )
+    }
+
     /// At most [`MAX_LEARNED_PRIORS`]: one for each profile it offers.
     pub fn deserialize_ceilings<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -1280,6 +1349,12 @@ impl Learned {
                 bound: MAX_LEARNED_HOLDINGS,
             });
         }
+        if self.rates.len() > MAX_LEARNED_HOLDINGS {
+            return Err(Refusal::Exhausted {
+                what: "learned rates",
+                bound: MAX_LEARNED_HOLDINGS,
+            });
+        }
         if self.holdings.len() > MAX_LEARNED_HOLDINGS {
             return Err(Refusal::Exhausted {
                 what: "learned holdings",
@@ -1340,12 +1415,23 @@ impl Learned {
         for end in &self.ended {
             ended.push(end.try_clone()?);
         }
+        let mut rates = Vec::new();
+        rates
+            .try_reserve_exact(self.rates.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned rates",
+                bound: self.rates.len(),
+            })?;
+        for rate in &self.rates {
+            rates.push(rate.try_clone()?);
+        }
         Ok(Self {
             priors: copy_capacity_values(&self.priors, "learned priors")?,
             used: self.used,
             holdings,
             ended,
             ceilings: copy_capacity_values(&self.ceilings, "learned ceilings")?,
+            rates,
         })
     }
 }

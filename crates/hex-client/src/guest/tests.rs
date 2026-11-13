@@ -678,6 +678,205 @@ impl shards_api::Guest for GoneRelay {
     }
 }
 
+/// A Shards simulator guest whose dials are each told, as they reach it, by their port on `dials`.
+struct Counted {
+    inner: Box<dyn shards_api::Guest>,
+    dials: std::sync::Mutex<std::sync::mpsc::Sender<u32>>,
+}
+
+impl Counted {
+    fn told(&self, port: u32) {
+        let _ = self.dials.lock().unwrap().send(port);
+    }
+}
+
+impl shards_api::Guest for Counted {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        self.inner.process_exited()
+    }
+
+    fn connect(
+        &self,
+        port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.inner.connect(port, patience)
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.told(port);
+        self.inner.connect_before(port, at)
+    }
+
+    fn connect_once_before(
+        &self,
+        port: u32,
+        at: Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.told(port);
+        self.inner.connect_once_before(port, at)
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.inner.stop()
+    }
+
+    fn wait_for(&self, timeout: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        self.inner.wait_for(timeout)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        self.inner.identity()
+    }
+}
+
+/// What a dialing thread tells the dials' channel as it ends, a port no guest serves: no dial is waited for past it.
+const DIALING_ENDED: u32 = u32::MAX;
+
+/// A simulator guest booted with `program`, its dials told on the returned receiver, and a sender for its dialing
+/// thread to tell its end ([`DIALING_ENDED`]).
+fn counted_guest(
+    program: impl Fn(&shards_api::sim::SimHost) -> shards_api::End + Send + Sync + 'static,
+) -> (
+    Arc<Counted>,
+    std::sync::mpsc::Sender<u32>,
+    std::sync::mpsc::Receiver<u32>,
+) {
+    use shards_api::Guests;
+    let inner = shards_api::sim::SimGuests::new(program)
+        .boot(&shards_api::GuestSpec {
+            kernel: "kernel".into(),
+            init: shards_api::Init::Executable("init".into()),
+            cmdline: String::new(),
+            vcpus: 1,
+            gpu: false,
+            gpu_devices: Vec::new(),
+            memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+            disks: vec![],
+            shares: vec![],
+            ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT],
+            binary: None,
+        })
+        .unwrap();
+    let (dials, dialed) = std::sync::mpsc::channel();
+    let ended = dials.clone();
+    let guest = Arc::new(Counted {
+        inner,
+        dials: std::sync::Mutex::new(dials),
+    });
+    (guest, ended, dialed)
+}
+
+/// The `n`th dial `dialed` tells, waited for while `dialing` lives (decision 9), never for a window of the test's own:
+/// its count, or the wait's end with none, `dialing` having told its own end ([`DIALING_ENDED`]).
+fn nth_dial(
+    wait: &hex_core::patience::Patience,
+    dialed: &std::sync::mpsc::Receiver<u32>,
+    dialing: &std::thread::JoinHandle<Result<(), Refusal>>,
+    n: usize,
+) -> Result<usize, hex_testkit::waits::follow::Unmet> {
+    use hex_testkit::waits::follow::{self, Party};
+    let mut seen = 0usize;
+    follow::within(
+        wait,
+        "a dial made again past its link's bound",
+        || {
+            if dialing.is_finished() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        |by| loop {
+            let got = match by {
+                None => dialed.recv().ok(),
+                Some(at) => dialed
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                    .ok(),
+            };
+            match got {
+                Some(DIALING_ENDED) | None => return None,
+                Some(_) => {
+                    seen += 1;
+                    if seen >= n {
+                        return Some(seen);
+                    }
+                }
+            }
+        },
+    )
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13; AC-T7.4.1), on every OS: dial, with no caller deadline, a Shards
+/// simulator guest that listens on the port only once the dial has been made again, its link's bound past. Expect the
+/// dial connected: past the bound, the run-out told, the dial made again while the guest lives, never refused there.
+#[test]
+fn a_dial_with_no_deadline_follows_its_guest_past_the_links_bound() {
+    static AGAIN: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_client.guest.link_dialed_again");
+    let (go, listen) = std::sync::mpsc::channel::<()>();
+    let listen = std::sync::Mutex::new(listen);
+    let (guest, ended, dialed) = counted_guest(move |host| {
+        if listen.lock().unwrap().recv().is_ok() {
+            host.listen(stream::CONTROL_PORT);
+            let _ = host.accept();
+        }
+        shards_api::End::PowerOff
+    });
+    let link = shards::ShardsLink::new(guest, CONNECT_CAP);
+    let dialing = std::thread::spawn(move || {
+        let dialed = link.dial(stream::CONTROL_PORT).map(drop);
+        let _ = ended.send(DIALING_ENDED);
+        dialed
+    });
+    let again = nth_dial(&AGAIN, &dialed, &dialing, 2);
+    let _ = go.send(());
+    let connected = dialing.join().unwrap();
+    eprintln!("link_follow_past_bound again={again:?} connected={connected:?}");
+    assert!(again.is_ok(), "{again:?}: the dial wasn't made again");
+    assert_eq!(connected, Ok(()));
+}
+
+/// Decision 9 (AC-T7.4.1), on every OS: dial, with no caller deadline, a Shards simulator guest that never listens on
+/// the port, and stop the guest once the dial has been made again past its link's bound. Expect the dial refused at
+/// the guest's end, by its end, never at a bound.
+#[test]
+fn a_dial_with_no_deadline_is_refused_at_its_guests_end() {
+    static AGAIN: hex_core::patience::Patience = hex_core::patience::Patience::measuring(
+        "test.hex_client.guest.link_dialed_again_to_its_end",
+    );
+    let (guest, ended, dialed) = counted_guest(|host| {
+        // No port listened on: an accept ends only with the guest.
+        let _ = host.accept();
+        shards_api::End::PowerOff
+    });
+    let link = shards::ShardsLink::new(guest.clone(), CONNECT_CAP);
+    let dialing = std::thread::spawn(move || {
+        let dialed = link.dial(stream::STDIO_PORT).map(drop);
+        let _ = ended.send(DIALING_ENDED);
+        dialed
+    });
+    let again = nth_dial(&AGAIN, &dialed, &dialing, 2);
+    let stopped = guest.inner.stop();
+    let refused = dialing.join().unwrap();
+    eprintln!("link_follow_to_end again={again:?} stopped={stopped:?} refused={refused:?}");
+    assert!(again.is_ok(), "{again:?}: the dial wasn't made again");
+    assert!(
+        matches!(
+            &refused,
+            Err(Refusal::Os {
+                op: "connecting to the guest",
+                why,
+            }) if why.contains("ended")
+        ),
+        "{refused:?}"
+    );
+}
+
 /// AC-T7.4.1: dial a guest whose relay answered the first dial and is then gone; expect the first dial
 /// through `connect_before`, which waits for the relay to listen, and each later dial one
 /// `connect_once_before` attempt, refused at once as closed unanswered, by type. The relay binds every
@@ -746,12 +945,12 @@ fn every_dial_carries_a_finite_deadline_after_the_first_listen() {
     }
 }
 
-/// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2): connect with no caller deadline, plainly and in the event form, through a
-/// Shards link whose guest takes the control connection and holds its relay's token until the link's bound has
-/// surely passed, then sends it and answers the hello: expect each connect refused by type at the link's own setup
-/// bound, the token's read with the dial, never connected late, as a relay that stays silent would hold it forever.
+/// Decision 9 (the person's ruling of 2026-11-13; AC-T7.4.1): connect with no caller deadline, plainly and in the
+/// event form, through a Shards link whose guest takes the control connection and holds its relay's token until the
+/// link's bound has surely passed, then sends it and answers the hello: expect each connect made, its token read late,
+/// waited for as long as the link's transport takes, never refused at the link's bound.
 #[test]
-fn a_relay_token_held_past_the_links_bound_refuses_the_connect() {
+fn a_relay_token_held_past_the_links_bound_is_waited_for() {
     let mut seen = Vec::new();
     for evented in [false, true] {
         let guest = Arc::new(Patient {
@@ -812,14 +1011,8 @@ fn a_relay_token_held_past_the_links_bound_refuses_the_connect() {
         seen.push((evented, connected, late));
     }
     for (evented, connected, late) in seen {
-        assert!(
-            matches!(&connected, Err(Refusal::Os { op, why }) if op.contains("token") && why.contains("setup bound")),
-            "evented={evented}: {connected:?}"
-        );
-        assert!(
-            !late,
-            "evented={evented}: connected on a token past its bound"
-        );
+        assert!(connected.is_ok(), "evented={evented}: {connected:?}");
+        assert!(late, "evented={evented}: its token wasn't read late");
     }
 }
 
@@ -859,11 +1052,11 @@ fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
 }
 
 /// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): through Shards' own client, a guest whose muxer answers the first
-/// CONNECT, then takes the next and never answers it: expect that dial refused by type at its deadline, the link's
-/// bound from its start, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM
-/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is the caller's own deadline for the
-/// dial, the case's input; the dial's answer is waited for while the thread that dials lives (decision 9), never for a
-/// window of the test's own, and the muxer is released once it has come, as Shards'
+/// CONNECT, then takes the next and never answers it: expect that dial, given its caller's deadline, refused by type at
+/// it, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM process, which Shards
+/// holds by its pidfd and kills as the guest drops. The deadline is the caller's own, the case's input (with none, the
+/// dial follows the guest past its link's bound, decision 9); the dial's answer is waited for while the thread that
+/// dials lives, never for a window of the test's own, and the muxer is released once it has come, as Shards'
 /// `withheld_reply_expires_before_fixture_release` releases its fixture.
 #[cfg(target_os = "linux")]
 #[test]
@@ -930,15 +1123,18 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
         let _ = held.recv();
         (first, second)
     });
-    // The caller's own deadline for its first dial (`ShardsLink::new`'s bound), the case's input: whatever it is, a dial
-    // the guest takes and never answers is refused at it, and not before. Short, so the case is.
+    // The caller's own deadline for its dial, the case's input: whatever it is, a dial the guest takes and never
+    // answers is refused at it, and not before. Short, so the case is.
     let bound = Duration::from_millis(200);
     let link = shards::ShardsLink::new(Arc::from(guest), bound);
     let control = link.dial(stream::CONTROL_PORT).unwrap();
     let (sent, answer) = std::sync::mpsc::channel();
     let began = Instant::now();
+    let deadline = began.checked_add(bound).unwrap();
     let dialing = std::thread::spawn(move || {
-        let dialed = link.dial(stream::STDIO_PORT).map(drop);
+        let dialed = link
+            .dial_before(stream::STDIO_PORT, Some(deadline))
+            .map(drop);
         let _ = sent.send((dialed, Instant::now()));
         link
     });
