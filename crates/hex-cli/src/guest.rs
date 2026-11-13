@@ -561,9 +561,8 @@ impl Boot {
                 Ok(())
             }
             Duty::Controllers => {
-                std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(
-                    |e| format!("enabling the cgroup controllers {CONTROLLERS}: {e}"),
-                )?;
+                std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS)
+                    .map_err(|e| format!("enabling the cgroup controllers {CONTROLLERS}: {e}"))?;
                 self.mounted = boottime_ns();
                 Ok(())
             }
@@ -590,9 +589,8 @@ impl Boot {
                         })
                     })
                     .transpose()?;
-                notify_ready(&socket, by).map_err(|e| {
-                    format!("telling {} the guest is ready: {e}", socket.display())
-                })
+                notify_ready(&socket, by)
+                    .map_err(|e| format!("telling {} the guest is ready: {e}", socket.display()))
             }
             Duty::Serve(end) => self.serve(end),
         }
