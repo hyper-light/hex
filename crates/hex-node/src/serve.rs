@@ -863,8 +863,11 @@ fn joined(own: hex_api::Given, stdio: Stdio) -> Result<Option<hex_api::Given>, R
         }
         (false, None) => {}
     }
-    let asked = stdio.ask != hex_api::Ask::default();
-    Ok(asked.then_some(given))
+    if stdio.ask == hex_api::Ask::default() {
+        Ok(None)
+    } else {
+        Ok(Some(given))
+    }
 }
 
 /// Copies `from` to `to` on a thread named `name` until `from` ends or either fails, then lets both go.
