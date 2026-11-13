@@ -41,14 +41,24 @@ Sources, read at the revisions named:
 - **Command.** `None` runs the image's members alone (D231's `ATTEND`: the standby holds, the members start), the
   usual harness VM. `Some(args)` is the run's own command, as `shards run IMAGE COMMAND` takes one; its exit is the
   box's.
-- **Hosts** (`hex_runtime::guest::host_images`). Linux boots image VMs. On Windows a create is refused
-  `Awaits(WindowsRunHost)`: D231's Windows run host is owed. On macOS it is refused `Awaits(RunHostStdioOnly)`:
-  D231 starts its run host (`shards api-run`, `image/session.rs`) through std's `Command`, whose macOS spawn passes
-  no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and macOS's pipe, socket, socketpair and accept take no close-on-exec flag, so
-  the run host would hold every descriptor another node thread had made and not yet marked (a box's pipe, a
-  client's connection, the box helper's socket) for as long as its VM runs. Every program Hex starts on macOS holds
-  only its stdio (`crates/hex-runtime/src/macos/command.rs`; CVE-2024-21626's class), and Hex's other Shards form
-  launches its VM through the client's native owner (D233), so this class waits for the same of D231.
+- **Hosts** (`hex_runtime::guest::host_images`). Linux boots image VMs. On macOS and Windows a create is refused
+  `Awaits(RunHostStdioOnly)`: D231 starts its run host (`shards api-run`, `image/session.rs`) through std's
+  `Command`, which hands it what the node holds inheritable at that moment, for as long as its VM runs.
+  - macOS: std's spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and macOS's pipe, socket, socketpair and accept
+    take no close-on-exec flag, so the run host would hold every descriptor another node thread had made and not
+    yet marked (a box's pipe, a client's connection, the box helper's socket). Hex's own red: 1341adc6, a tool
+    std started held the parent's descriptors (`macos/directory.rs`).
+  - Windows: std's spawn passes `bInheritHandles` with no `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (std's own comment:
+    "once an inheritable handle is created, *any* spawned child will inherit that handle"), and the node holds
+    inheritable handles: its own stdout and stderr, which it inherited, and each box member's stdio while
+    `sys::create` starts it. Hex's own red: e14ff1b2 on jupiter (r124, 2026-11-09), a keeper std started held the
+    node's stdout and stderr, so they didn't end with the node (fixed for the keeper by 6f4b8f7a).
+    D231's Windows run host itself is built at `2365d784` (D231: "on Windows the run host starts its VM as the
+    daemon does ... the VM process confined in an AppContainer"), so `WindowsRunHost` is refused no longer.
+  Every program Hex starts on macOS and Windows holds only its stdio (`crates/hex-runtime/src/macos/command.rs`,
+  `windows/sys.rs` `create`; CVE-2024-21626's class), and Hex's other Shards form launches its VM through the
+  client's native owner (D233), so this class waits for the same of D231. On Linux std and rustix open the node's
+  descriptors close-on-exec in the same call, so its run host inherits none of them.
 
 ## 2. Mapping onto D231
 
@@ -103,8 +113,9 @@ call, recovery's adoption among them, and is listed running: Hex can't prove it 
 
 `stats(StatsScope::Run)` reads the run's cgroup in the guest: `cpu_ns` becomes `cpu_usec`, `memory_bytes`,
 `pids`, `read_bytes` and `write_bytes` their counters. **Guest time per vCPU** is `GuestTime::Awaits
-(GuestCpuTimePerVcpu)`: Shards' guest CPU time work has no commits, and a number Hex made up would be worse than
-none. When it lands, `GuestTime::PerVcpuNs` carries it: nanoseconds each vCPU ran the guest since the VM booted,
+(GuestCpuTimePerVcpu)`: Shards reads each vCPU's guest time for its daemon's runs (6396a78b, `GUEST_TIME` on the
+VM process's link; docs/research/measurements/guest-cpu-time-v1), but D231's run host says none in `STATS`, init's
+cgroup lines alone (`api_run.rs` `stats`), and a number Hex made up would be worse than none. When it lands, `GuestTime::PerVcpuNs` carries it: nanoseconds each vCPU ran the guest since the VM booted,
 by vCPU index, one for each vCPU of the VM's size, each only growing, none past the wall time the VM ran. Its wire
 bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a Shards VM numbers its x86_64 vCPUs by 8-bit APIC id (at
 most 255) and has fewer on arm64 (123).
@@ -178,20 +189,21 @@ This class stays: it is how every Shards VM boots, once Hex's own node boots the
   its return, each `n` with its slowest, added to `bench/native/guest/records.tsv` with their RECORD.md. Until then
   a create is refused outside the waits census (§6). `image_real` prints each wait's answers (`IMAGE-RECORD`).
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
-  Linux KVM (`crates/hex-cli/tests/image_real.rs`), and on macOS HVF once its run host is given; HEX-IMG-4 fails
-  until Shards gives guest time per vCPU, naming it.
-- **From Shards:** the run host started holding only its stdio on macOS (`RunHostStdioOnly`;
-  `POSIX_SPAWN_CLOEXEC_DEFAULT` in D231's spawn, or the run host's launch through the client's native owner, as
-  D233's guests have), the Windows run host (`WindowsRunHost`), `attach` or the run's identity after an owner's
-  crash (`AttachAfterCrash`), guest time per vCPU (`GuestCpuTimePerVcpu`), member exec and signals (`MemberExec`,
-  `MemberSignal`; step 11), and STATS' memory peak, OOM kills and refused forks. Until those two
-  hosts are given, a create on each is refused naming its own. The native-owner launch would also give Linux what
+  Linux KVM (`crates/hex-cli/tests/image_real.rs`), and on macOS HVF and Windows WHP once their run host holds
+  only its stdio; HEX-IMG-4 fails until Shards gives guest time per vCPU, naming it.
+- **From Shards:** the run host started holding only its stdio on macOS and Windows (`RunHostStdioOnly`;
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` and a handle list in D231's spawn, or the run host's launch through the client's
+  native owner, as D233's guests have), `attach` or the run's identity after an owner's crash
+  (`AttachAfterCrash`), guest time per vCPU in the run's stats (`GuestCpuTimePerVcpu`: the run host asking its
+  VM's `GUEST_TIME` and saying it beside init's lines, as the daemon's stats do), member exec and signals
+  (`MemberExec`, `MemberSignal`; step 11), and STATS' memory peak, OOM kills and refused forks. Until the run
+  host holds only its stdio, a create on macOS and Windows is refused naming it. The native-owner launch would also give Linux what
   it lacks: the run host runs in the node's own process tree today, so Hex charges the VM's envelope by admission
   but cannot contain the run host per box, nor read its use on the host (§4).
-- **Hex, once the macOS or Windows host is given:** the node there forwards a call on a box its host runtime
-  doesn't hold to the guest's node (`hex-node` `recorded::forward_guest`), and an image VM's guest runs none, so
-  that node must pass an image VM's calls back to the guest runtime, as the Linux node passes its exec back
-  (`node/backends.rs` `guest_node_class`). No image VM exists on either host until then.
+- **Done for macOS and Windows nodes:** a node there forwarded a call on a box its host runtime doesn't hold to the
+  guest's node (`hex-node` `recorded::forward_guest`), and an image VM's guest runs none; now an image VM's calls
+  come back to the guest runtime (`Recover::forward_for` of `WithGuest`), as the Linux node runs its exec here
+  (`node/backends.rs` `guest_node_class`).
 
 ## 9. What would falsify it
 
