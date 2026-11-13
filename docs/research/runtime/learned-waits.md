@@ -7,8 +7,10 @@ as derived; an estimator of what's seen does"; "Account for cold starts well in 
 ## The bound (2026-11-13)
 
 A wait's bound is the slowest answer its node has seen, with no margin. Before its first answer, and after a run-out,
-it follows its party: it lasts while the party is alive and advancing, refused, typed, at its death, a reset or a
-stall of its own measured progress (`hex_core::patience::Follow`). No record seeds it, and no factor scales it.
+it follows its party. At the node's local sites it follows the party by its life alone, refused, typed, only at the
+party's death or a reset; a stall of the party's measured progress is judged only where that progress is continuous
+work toward the answer at a scale the window can see (a VM's boot, below). No record seeds it, and no factor scales
+it.
 
 - **Least expected cost.** A bound `T` costs a call `p·T + (1 − p)·P(answer > T)·C`: its wait for an answer that never
   comes, at rate `p`, and a run-out of an answer that would have come, costing `C > 0`. Over an empirical distribution
@@ -24,9 +26,26 @@ stall of its own measured progress (`hex_core::patience::Follow`). No record see
   1941. A bound past it rests on a model of the unseen tail, which Ada's rule refuses.
 - **The following wait.** Where nothing has been seen (the cold start) or the tail ran past what was (a run-out), no
   seen value bounds the wait; what the wait sees as it runs does. The party's liveness (a pidfd, a process handle, a
-  connection's state) ends it at the party's death or reset; its progress (a count that only rises while it works)
-  ends it at a stall longer than any gap between advances this wait has measured, the same estimator, the largest
-  seen, over the wait's own observations. Its answer comes in uncensored, so the learned bound rises to it.
+  connection's state) ends it at the party's death or reset. Its answer comes in uncensored, so the learned bound
+  rises to it.
+- **A stall judged at the slowest gap seen refuses healthy parties.** The person's rule of 2026-11-13 makes a stall
+  of the party's measured progress the typed refusal; the same record argument as the bound's says where such a stall
+  can be judged at all. A party's gaps between advances are exchangeable, so the `k`-th gap is the longest yet with
+  chance `1 / k`. A wait that refuses once a gap runs past the longest it has measured refuses at the first such
+  record: over `n` gaps, with chance `1 − 1 / n` (90% at 10), each time from a party that advances again a moment
+  later. Learned across waits, process-wide and only rising as W* is, the chance is still `1 / (N + 1)` a gap over all
+  `N` seen, high early, and asking for more gaps before judging is a picked count. Judged over W*, the slowest
+  answer, it fails wherever the party advances less often than W* is long, and it did, W* microseconds against
+  milliseconds between advances: CPU time judged at µs scale took a killed box for stalled (`node.emptying`, HEX-RT-1:
+  304 µs), and the seeds freed took a create in line for stalled (oci_reuse, "Exhausted create seeds"). The hang
+  bound, judging no progress at all, killed a seed still answering ("a create seed did not answer within 1.16752ms",
+  oci_box).
+- **Life alone at the node's local sites.** So at `node.emptying`, the seeds' line (`seeds.wait`), `seeds.hang`, the
+  exec seeds (`exec_seeds.answers`), `serve.reads` and `guest.stage`, past W* the wait follows its party's life alone,
+  the run-out told. A wedged party that stays alive is ended by its caller's own deadline or its owner's stop, never by
+  a guess at how long its next advance may take. Stall judgment stays only where progress is continuous work toward
+  the answer at a scale the window can see: Shards' Part B for a VM's boot (no CPU over a whole boot-scale W*), for
+  the image boot and the hosted boot once it is vendored.
 - **RFC 6298's back-off, considered and dropped.** RFC 6298 §5.5 (sha256 of the rfc-editor.org text
   `f3a6d937c0a7653bd431fdbbdcd7920f4e9d9cdb6134fa9db7a74b90d215edf6`): "(5.5) The host MUST set RTO <- RTO * 2 ("back
   off the timer")." Its factor is a cited number, not an estimate of what is seen (Ada, 2026-11-06, as the Hex lead
@@ -40,28 +59,25 @@ is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
-| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | its CPU time | liveness alone past W*, never taken for hung (`Seeds::past_hang`); progress owed |
-| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | a seed freed, too coarse at W*'s scale | liveness alone past W* |
+| `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | none: a local site | liveness alone past W*, never taken for hung (`Seeds::past_hang`) |
+| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | none: a local site | liveness alone past W* |
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
-| `node.emptying` | a killed box | its cgroup | members gone | owed (`Duration::MAX` meanwhile) |
-| `serve.reads` | a client reading a list | its connection | messages it takes, too coarse at W*'s scale | liveness alone past W* |
-| `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*`, `guest.stage` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
+| `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W* |
+| `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
+| `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
+| `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
 | `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
 
-**Life alone past W*, for now (2026-11-13, ROOT's (1) and (2)).** A whole W* window with no progress is a stall only
-where progress comes at least as often as W*. Where W* is the slowest answer seen, microseconds, and the party advances
-in milliseconds, it is not: a seed freed (oci_reuse's creates refused "Exhausted create seeds"), a message a client
-takes and a seed's CPU time each stood still over a µs window while their parties worked, and the hang bound, judging
-no progress at all, killed a seed still answering ("a create seed did not answer within 1.16752ms", oci_box). So
-past W* these waits follow their parties by their life alone, the run-out told: a seed past its hang bound is waited
-for until it answers or its pidfd says it ended; a create in line until a seed is handed to it, refused only when no
-seed is up, starting or asked for (`Seeds::none_can_come`); an exec until a seed frees or a slot opens; a list's part
-until the client reads or its connection closes. The stall window each will judge by is the one its party's own gaps
-teach (the next step), not W*.
+**What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
+alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
+its pidfd says it ended. A create in line waits until a seed is handed to it, refused only when no seed is up,
+starting or asked for (`Seeds::none_can_come`). An exec waits until a seed frees or a slot opens. A list's part waits
+until its client reads or its connection closes, and a stage until its relay answers or the connection ends or
+resets.
 
 ## Owed (2026-11-13)
 
