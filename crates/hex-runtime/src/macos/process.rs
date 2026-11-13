@@ -86,6 +86,10 @@ pub struct Status {
     /// read meanwhile, or a measurement its control refused. Each is no sample, never the scope's refusal; counted here
     /// so none goes unseen.
     pub unmeasured_holds: u64,
+    /// Held members a read found running and stopped again (joint plan step 14; ROOT, 2026-11-13): a stop that didn't
+    /// take, or a continue from elsewhere, which would run a member past its charge on its neighbours' CPU. Counted here
+    /// so none goes unseen.
+    pub restops: u64,
 }
 
 /// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
@@ -376,7 +380,19 @@ impl State {
     /// running members, each in `run` runs across the wait, continued if the watcher held it, and the rest are
     /// held, each stopped in turn. A member the box's own programs stopped is theirs, never held, so never
     /// continued. Returns how many members it holds.
-    fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<usize, Refusal> {
+    fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<Applied, Refusal> {
+        self.apply_by(order, run, members, sys::run_state)
+    }
+
+    /// [`Self::apply`], each member's run state read through `run_state`, the kernel's (`sys::run_state`): a test reads
+    /// a held member live, as one whose stop didn't take reads.
+    fn apply_by(
+        &self,
+        order: &[u32],
+        run: &[u32],
+        members: &[Member],
+        run_state: impl Fn(i32) -> io::Result<Option<sys::Run>>,
+    ) -> Result<Applied, Refusal> {
         let mut held = self.held()?;
         let additional = order
             .iter()
@@ -397,7 +413,7 @@ impl State {
                         held.continued.push(pid);
                     }
                 } else if !held.stopped.contains(&pid)
-                    && sys::run_state(pid)
+                    && run_state(pid)
                         .map_err(|error| Refusal::os("reading a member's run state", error))?
                         == Some(sys::Run::Live)
                     && let Some(member) = self.stopped_member(pid, members)?
@@ -418,7 +434,10 @@ impl State {
         stopped.retain(|pid| continued.binary_search(pid).is_err());
         stopped.append_reserved(added)?;
         result?;
-        Ok(held.stopped.len())
+        Ok(Applied {
+            held: held.stopped.len(),
+            restopped: 0,
+        })
     }
 
     /// Continues every member the watcher holds that is still in group `pgid`, and holds none: what a watcher
@@ -651,6 +670,14 @@ struct Hold {
     stopped: Stops,
     added: Stops,
     continued: Vec<i32>,
+}
+
+/// What a hold's [`State::apply`] did: how many members it holds, and how many of them it found running and stopped
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Applied {
+    held: usize,
+    restopped: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2209,7 +2236,7 @@ impl Watcher {
         if !cpu_run {
             self.run.clear();
         }
-        let mut held = self.state.apply(&self.order, &self.run, &self.last)?;
+        let mut held = self.state.apply(&self.order, &self.run, &self.last)?.held;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
         let next = self.cpu_pace(native.vm.as_ref(), next, &mut held)?;
@@ -2252,7 +2279,7 @@ impl Watcher {
             Some(super::cpu::Decision::Hold(_)) => {
                 // Its response runs from when its credit ran out, read off the observation that held it (2c).
                 let ran_out = scope.cpu_ran_out(owner).ok().flatten();
-                *held = self.state.apply(&self.order, &[], &self.last)?;
+                *held = self.state.apply(&self.order, &[], &self.last)?.held;
                 scope.cpu_held(owner)?;
                 // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
                 // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
