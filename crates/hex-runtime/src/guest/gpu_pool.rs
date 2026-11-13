@@ -91,7 +91,6 @@ impl GuestRuntime {
             return self.acknowledge_gpu_release(key);
         }
         let definition = self.gpu_definition_for_record(&snapshot)?;
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
         let keys = self.turn_keys(&definition.devices)?;
         let books = self
             .books
@@ -142,7 +141,7 @@ impl GuestRuntime {
             ) {
                 return Err(refused(key, LifecycleCause::Uncertain));
             }
-            self.stop_gpu_scope(transaction, &mut record, &definition, &budget)?;
+            self.stop_gpu_scope(transaction, &mut record, &definition)?;
             record.offer()
         })?;
         reservation.previous.take();
@@ -151,14 +150,13 @@ impl GuestRuntime {
     }
 
     /// Stops and releases dedicated GPU backing `record`'s scope through its receipt at `definition`'s path, in
-    /// `transaction` (its pool turn), within `budget`: drained, its scope stopped where its receipt names one, its
-    /// controller finalized, and its exit recorded, Released.
+    /// `transaction` (its pool turn): drained, its scope stopped where its receipt names one (its stop's own wait,
+    /// [`managed::stop_scope`]), its controller finalized, and its exit recorded, Released.
     fn stop_gpu_scope(
         &self,
         transaction: &dyn Transaction,
         record: &mut PoolRecord,
         definition: &GpuBacking,
-        budget: &managed::Budget,
     ) -> Result<(), Refusal> {
         let key = record.key;
         let mut receipt = match pool::read(&definition.path)? {
@@ -193,7 +191,6 @@ impl GuestRuntime {
         let terminal = managed::stop_scope(
             transaction,
             identity.as_ref(),
-            budget.remaining()?,
             refused(key, LifecycleCause::Uncertain),
         )?;
         receipt.phase = Phase::Released {
@@ -243,7 +240,6 @@ impl GuestRuntime {
                 continue;
             };
             let key = record.key;
-            let budget = managed::Budget::new(self.first_dial_bound()?)?;
             let keys = self.turn_keys(&definition.devices)?;
             let mut reservation =
                 self.reserve_owner(OwnerRef::Pool(&key.pool), Operation::Stopping)?;
@@ -272,7 +268,7 @@ impl GuestRuntime {
                         transaction.put_pool(&record)?;
                     }
                     BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining => {
-                        self.stop_gpu_scope(transaction, &mut record, &definition, &budget)?;
+                        self.stop_gpu_scope(transaction, &mut record, &definition)?;
                     }
                 }
                 if pool::read(&definition.path)?.is_some() {
@@ -290,7 +286,6 @@ impl GuestRuntime {
         &self,
         key: BackingKey,
         boxed: &hex_core::record::BoxRecord,
-        budget: managed::Budget,
     ) -> Result<BackingOffer, Refusal> {
         let definition = self.gpu_definition_for(key)?;
         if boxed.spec.route.and_then(|route| route.backing) != Some(key)
@@ -355,7 +350,6 @@ impl GuestRuntime {
             let terminal = managed::stop_scope(
                 transaction,
                 Some(&identity),
-                budget.remaining()?,
                 refused(key, LifecycleCause::Uncertain),
             )?;
             receipt.phase = Phase::Released {
@@ -632,7 +626,6 @@ impl GuestRuntime {
         snapshot: &PoolRecord,
     ) -> Result<bool, Refusal> {
         let key = snapshot.key;
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
         let keys = self.turn_keys(&definition.devices)?;
         let books = self
             .books
@@ -696,7 +689,6 @@ impl GuestRuntime {
                 _ => managed::stop_scope(
                     transaction,
                     identity.as_ref(),
-                    budget.remaining()?,
                     refused(key, LifecycleCause::Uncertain),
                 )?,
             };

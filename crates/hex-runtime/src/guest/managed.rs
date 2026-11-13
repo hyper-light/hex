@@ -5,6 +5,7 @@ use std::cell::RefCell;
 
 use super::*;
 use crate::devices::{ManagedLaunch, Transaction};
+use hex_core::patience::Patience;
 
 /// One create/attach attempt spends one existing measured boot bound. Native
 /// launch and the first relay dial consume its remainder rather than restarting it.
@@ -155,26 +156,29 @@ pub(super) fn same_native(
     Ok(())
 }
 
+/// A managed scope's stop (decision 9; ROOT, 2026-11-13): from its stop sent until its scope's end is seen, a wait of
+/// its own, measuring, never a boot's record. The slowest stop this process has seen bounds it. Before its first, and
+/// from a run-out (told) on, it follows the scope by the scope's own party: `ManagedProcess::wait_for` with
+/// `Duration::MAX` lasts until the scope's end, or refuses once its observer fails (on macOS the helper that keeps the
+/// scope, or the scope's watcher in it), so no wait is given up on a guess while the party that ends it lives.
+static STOP: Patience = Patience::measuring("managed.stop");
+
 /// A missing controller never prevents cleanup of its already-owned scope.
 /// Only Released, including every helper, permits canonical record removal.
 pub(super) fn stop(
     transaction: &dyn Transaction,
     id: &BoxId,
     identity: Option<&shards_api::Identity>,
-    patience: Duration,
 ) -> Result<shards_api::ManagedEnd, Refusal> {
-    stop_scope(
-        transaction,
-        identity,
-        patience,
-        super::books::uncertain(id)?,
-    )
+    stop_scope(transaction, identity, super::books::uncertain(id)?)
 }
 
+/// Stops the managed scope `identity` names (or the one with none published yet) and waits for its end ([`STOP`]): its
+/// end once Released. A stop that wasn't sent follows nothing (nothing would end the scope it waits on): the scope as
+/// it is then, or the stop's refusal.
 pub(super) fn stop_scope(
     transaction: &dyn Transaction,
     identity: Option<&shards_api::Identity>,
-    patience: Duration,
     uncertain: Refusal,
 ) -> Result<shards_api::ManagedEnd, Refusal> {
     let process = transaction.attach_managed(identity)?;
@@ -184,15 +188,31 @@ pub(super) fn stop_scope(
     {
         return Ok(*end);
     }
-    let stopped = process.stop();
-    let observed = process
-        .wait_for(patience)
-        .map_err(|why| refusal("observing complete Shards scope termination", &why))?;
-    if let Some(end) = observed.filter(|end| end.scope == shards_api::TerminalScope::Released) {
-        return Ok(end);
+    let began = Instant::now();
+    if let Err(why) = process.stop() {
+        return match process.terminal() {
+            Ok(Some(end)) if end.scope == shards_api::TerminalScope::Released => Ok(end),
+            _ => Err(refusal("stopping managed Shards scope", &why)),
+        };
     }
-    if let Err(why) = stopped {
-        return Err(refusal("stopping managed Shards scope", &why));
+    let wait = |patience| {
+        process
+            .wait_for(patience)
+            .map_err(|why| refusal("observing complete Shards scope termination", &why))
+    };
+    let observed = match STOP.deadline() {
+        Some(bound) => match wait(bound)? {
+            Some(end) => Some(end),
+            None => {
+                STOP.ran_out(bound);
+                wait(Duration::MAX)?
+            }
+        },
+        None => wait(Duration::MAX)?,
+    };
+    if let Some(end) = observed.filter(|end| end.scope == shards_api::TerminalScope::Released) {
+        STOP.answered(began.elapsed());
+        return Ok(end);
     }
     if let Err(why) = before {
         return Err(refusal("observing original managed native scope", &why));
