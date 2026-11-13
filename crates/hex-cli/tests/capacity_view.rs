@@ -257,8 +257,11 @@ fn hex_cv_l1() {
 ///    says `HEX_CV_LOST`, let it through again, then `touch $HEX_CV_DIR/healed` on B. The port, by A's OS (as root):
 ///    Linux `iptables -I INPUT -p udp --dport <port> -j DROP`, healed with `-D` for `-I`; macOS
 ///    `echo 'block drop in quick proto udp to any port <port>' | pfctl -a com.apple/hex-cv -f - && pfctl -E` (macOS's
-///    pf.conf loads `com.apple/*` anchors alone), healed with `pfctl -a com.apple/hex-cv -F rules`; Windows `New-NetFirewallRule -DisplayName hex-cv -Direction Inbound -Protocol UDP
-///    -LocalPort <port> -Action Block`, healed with `Remove-NetFirewallRule -DisplayName hex-cv`.
+///    pf.conf loads `com.apple/*` anchors alone), healed with `pfctl -a com.apple/hex-cv -F rules`; Windows
+///    `New-NetFirewallRule -DisplayName hex-cv -Direction Inbound -Protocol UDP -LocalPort <port> -Action Block`,
+///    healed with `Remove-NetFirewallRule -DisplayName hex-cv`. Where A's firewall admits no port the lane could bind,
+///    bind it on loopback behind a UDP relay on A whose address is B's `HEX_CV_ADDR`, and drop the holder's datagrams
+///    there instead (capacity-view.md's run notes).
 /// 8. On A, `touch $HEX_CV_DIR/stop`, then kill the scheduler as in 6: A3 says `HEX_CV_BOOKS` and `HEX_CV_LEFT=none`.
 /// 9. `b4`, on B, with `HEX_CV_BOOKS`.
 mod two_hosts {
