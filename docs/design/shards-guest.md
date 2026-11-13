@@ -118,9 +118,15 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   the sender's copy kept until received). Kept ends hold their program's place among the node's programs until
   taken.
 - **Windows through a host node (HEX-RT-17):** the node reserves the exec and returns `Offered` with the VM's
-  PID/start/socket identity, a dedicated control token, the reserved guest request id and the wanted streams.
-  The caller opens and names each stream through `shards_api::connect_borrowed`, then sends `StreamsReady`
-  with the original outer request id. The node commits the reserved request and returns `Started`/`Exited`
+  PID/start/socket identity, a dedicated control token, the reserved guest request id, the wanted streams and its
+  guest link's own setup bound. The caller opens and names each stream through `shards_api::connect_borrowed`,
+  within the call's deadline where it has one. A call with none (a plain exec, which HEX-RT-17 holds on every OS)
+  waits for each CONNECT's OK as decision 9 waits, its W* the link's setup bound, the one finite deadline the
+  borrowed connector waits in: within it the OK is the answer; past it, the run-out told
+  (`client.guest.offered.connect`), it follows the VM by its life, the CONNECT made again as each bound passes,
+  refused at the VM's end or by any failure but a deadline's, never at a bound. No CONNECT is given up sooner: one
+  given up costs the guest a connection it takes for nothing. Then it sends `StreamsReady` with the original outer
+  request id. The node commits the reserved request and returns `Started`/`Exited`
   on that same id. The common client retains the caller-owned socket ends through this preparation; its
   reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with
   `closesocket`; native pipe ends keep their file ownership.
