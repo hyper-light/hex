@@ -746,14 +746,20 @@ impl Lab {
     }
 
     fn with_limits(workers: usize, limits: Limits) -> Self {
+        Self::reading(workers, limits, &READS)
+    }
+
+    /// A lab whose server's list waits as `reads` has learned.
+    fn reading(workers: usize, limits: Limits, reads: &'static Patience) -> Self {
         let os = Arc::new(SimOs::default());
         let host = SimHost::new(&os);
-        let server = Server::with_os(
+        let server = Server::serving(
             Arc::clone(&os),
             Arc::clone(&host) as Arc<dyn Host>,
             limits,
             workers,
             Path::new("/nonexistent/hex-sim.sock"),
+            reads,
         )
         .unwrap();
         Self { os, host, server }
@@ -1447,6 +1453,115 @@ fn a_client_that_doesnt_read_stops_being_read_until_it_has_room() {
         (first.as_slice(), ids[2]),
         ([1, 2].as_slice(), 3),
         "{ids:?}"
+    );
+}
+
+/// A lab whose server's list waits as `reads` has learned, its host holding boxes enough for a list of three parts or
+/// more; and how many parts its list has.
+fn listing(reads: &'static Patience) -> (Lab, usize) {
+    let lab = Lab::reading(8, limits(), reads);
+    let mut n = 0usize;
+    loop {
+        let infos = lab.host.sim.list().unwrap();
+        let parts = wire::boxes(1, &infos, limits().message_bytes)
+            .unwrap()
+            .len();
+        if parts >= 3 {
+            return (lab, parts);
+        }
+        lab.host
+            .sim
+            .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
+                id: BoxId::new(&format!("listed-{n}")).unwrap(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Process,
+                owner: None,
+                band: 0,
+            })
+            .unwrap();
+        n += 1;
+    }
+}
+
+/// The parts of a list its client is sent, up to its last, each waited for at most [`PATIENCE`].
+fn list_parts(sock: &Sock) -> usize {
+    let mut parts = 0;
+    loop {
+        match answer_of(sock).1 {
+            Answer::Boxes { more, .. } => {
+                parts += 1;
+                if !more {
+                    return parts;
+                }
+            }
+            other => panic!("a list's part was {other:?}"),
+        }
+    }
+}
+
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): a
+/// client reading a list slower than any client before it had its connection closed at W*, the slowest read seen,
+/// though it was there to read. Do: a server whose reads have learned a W* of 200 ms; a client with no room asks for a
+/// list of three parts or more, and makes room only once the next part's wait has run out (told, the wait following)
+/// or its connection has closed. Expect: the connection standing past W*; once the client reads, every part, and W*
+/// risen to the read that passed it.
+#[test]
+fn original_a_client_reading_a_list_slower_than_any_before_is_followed_past_w_star() {
+    static READS: Patience = Patience::measuring("test.serve.reads.followed");
+    let learned = Duration::from_millis(200);
+    READS.answered(learned);
+    let (lab, parts) = listing(&READS);
+    let sock = lab.os.connect(true, 0);
+    lab.os.put(&sock, request(1, Call::List));
+    wait_until(
+        "the next part's wait to run out, or the client's connection to close",
+        || READS.deadline().is_none() || sock.shut.load(Ordering::SeqCst),
+    );
+    assert!(
+        !sock.shut.load(Ordering::SeqCst),
+        "the connection was closed at W*, its client there to read"
+    );
+    lab.os.give_room(&sock, 64);
+    assert_eq!(list_parts(&sock), parts);
+    assert!(
+        READS.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the read that passed it: {:?}",
+        READS.slowest()
+    );
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13): past W* a list's client is followed by what it takes, and one that
+/// takes nothing over a whole W* window has stopped reading. Do: a server whose reads have learned a W* of 20 ms; a
+/// client with no room asks for a list of three parts or more, and never makes room. Expect: the run-out told, then
+/// the connection closed, never before a whole window past W* (40 ms after the list was asked), and no sample taken.
+#[test]
+fn a_client_that_takes_nothing_over_a_whole_window_past_w_star_is_closed() {
+    static READS: Patience = Patience::measuring("test.serve.reads.stalled");
+    let learned = Duration::from_millis(20);
+    READS.answered(learned);
+    let (lab, _) = listing(&READS);
+    let sock = lab.os.connect(true, 0);
+    let asked = Instant::now();
+    lab.os.put(&sock, request(1, Call::List));
+    wait_until("the client's connection to close", || {
+        sock.shut.load(Ordering::SeqCst)
+    });
+    let closed = asked.elapsed();
+    assert!(
+        READS.deadline().is_none(),
+        "the run-out wasn't told before the close"
+    );
+    assert!(
+        closed >= learned.saturating_mul(2),
+        "closed {closed:?} after the list was asked, before a whole window past W* ({learned:?})"
+    );
+    assert_eq!(
+        READS.slowest(),
+        Some(learned),
+        "a client taken for stopped is no sample"
     );
 }
 

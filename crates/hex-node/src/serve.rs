@@ -498,6 +498,8 @@ struct Shared<O: Os> {
     limits: Limits,
     workers: usize,
     path: PathBuf,
+    /// How long a list's next part waits for the parts before it to go: [`READS`], or a test's own.
+    reads: &'static Patience,
     stopping: AtomicBool,
     /// Calls in flight on every connection together. With `idle_calls`, at most `limits.in_flight`: what is
     /// in flight and what is kept for the open connections that have none in flight never pass the budget.
@@ -925,6 +927,18 @@ impl<O: Os> Server<O> {
         workers: usize,
         path: &Path,
     ) -> Result<Self, Refusal> {
+        Self::serving(os, host, limits, workers, path, &READS)
+    }
+
+    /// [`Server::with_os`], a list's next part waiting as `reads` has learned.
+    fn serving(
+        os: O,
+        host: Arc<dyn Host>,
+        limits: Limits,
+        workers: usize,
+        path: &Path,
+        reads: &'static Patience,
+    ) -> Result<Self, Refusal> {
         check_limits(&limits, workers)?;
         os.accepting(true)?;
         let shared = Arc::new(Shared {
@@ -934,6 +948,7 @@ impl<O: Os> Server<O> {
             limits,
             workers,
             path: path.to_owned(),
+            reads,
             stopping: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
             idle_calls: AtomicUsize::new(0),
@@ -1480,7 +1495,10 @@ impl<O: Os> Shared<O> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         if after_read {
             let began = Instant::now();
-            let deadline = READS.deadline().and_then(|wait| began.checked_add(wait));
+            let deadline = self
+                .reads
+                .deadline()
+                .and_then(|wait| began.checked_add(wait));
             let waited = out.open && !out.backlog.is_empty();
             while out.open && !out.backlog.is_empty() {
                 out = match deadline {
@@ -1501,7 +1519,7 @@ impl<O: Os> Shared<O> {
                 };
             }
             if waited && out.open {
-                READS.answered(began.elapsed());
+                self.reads.answered(began.elapsed());
             }
         }
         if !out.open {
