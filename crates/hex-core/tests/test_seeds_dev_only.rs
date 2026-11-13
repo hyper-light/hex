@@ -5,6 +5,9 @@
 //! features into a build only where that build compiles the dev-dependencies, its tests, examples and benches (the
 //! Cargo Book, "Features", "Feature resolver version 2"), so no production build has it. This reads every manifest in
 //! the repository, the workspace's and the bench probes' outside it, and names each other use, by file and line.
+//! Cargo reaches a package under another key only through its `package` field (the Cargo Book, "Specifying
+//! Dependencies", "Renaming dependencies in Cargo.toml"), so a rename of hex-testkit is refused wherever it is, and
+//! its own key is the one name to hold.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -59,8 +62,8 @@ fn code(line: &str) -> &str {
 
 /// Do: read every manifest in the repository. Expect: `test-seeds` defined in hex-core's features and turned on in
 /// hex-testkit's dependencies, nowhere else; hex-testkit taken by every other crate as a dev-dependency alone, its
-/// workspace entry the definition; and, so the read is no vacuous pass, the definition and the one use each found once
-/// and at least one crate taking hex-testkit.
+/// workspace entry the definition, and never renamed; and, so the read is no vacuous pass, the definition and the one
+/// use each found once and at least one crate taking hex-testkit.
 #[test]
 fn only_a_dev_dependency_turns_the_test_seeds_on() {
     let root = root();
@@ -82,6 +85,13 @@ fn only_a_dev_dependency_turns_the_test_seeds_on() {
                     wrong.push(at(&section));
                 }
                 continue;
+            }
+            let spaceless = line
+                .split_whitespace()
+                .collect::<String>()
+                .replace('\'', "\"");
+            if spaceless.contains("package=\"hex-testkit\"") {
+                wrong.push(at(&section));
             }
             let key = line.split(['=', '.', ' ']).next().unwrap_or_default();
             if key == "hex-testkit" {
