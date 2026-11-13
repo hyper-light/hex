@@ -14,6 +14,7 @@ use hex_api::Upstream;
 use crate::model::Class;
 
 pub mod sim;
+pub mod trial;
 
 /// The fewest windows whose nearest-rank p99.9 is an observed sample rather than their maximum: decision 9's
 /// census rule (`SEEDABLE` in `bench/competitive/probes/waits_census.py`, held to it by a doc-truth test). A

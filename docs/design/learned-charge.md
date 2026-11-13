@@ -355,3 +355,19 @@ computes, per seed:
 
 ROOT measures on hardware: density and fairness under this rule with real harness VMs (Linux on 00aad, the Mac
 Studio), the CPU violation rate per OS on recorded agent traces, and f85's memory measurements before memory pools.
+The driver is hex-cli's `charge_fleet` (ignored, ROOT's run): a real `hex node` and a fleet of VMs of one class
+(`shards-image`, Agentfile images, Linux, macOS and Windows awaiting `RunHostStdioOnly`; `shards`, Shards guests whose
+box plays the trace; `firecracker`, Linux), each replaying one recorded trace (`millis threads mib` steps, played by
+the guest's shell) and deleted once it has played, the first admitted the riser (its trace until its charge has
+warmed, SEEDABLE windows, then every vCPU and the most any trace holds, to the run's end), beside a process box asking
+its whole cap. It admits as the scheduler's ledger books (each VM at its class's prior on the node's capacity answer,
+else its receipt; C2, C6), a start retried only once the room has changed, and reads each window, the node's learner's
+as the node says it on stderr (`the charge learner's window is N ns`, or why it doesn't run, which refuses the run),
+each read at least a window after the last, each VM's CPU given (its usage over its own span), asked (its trace's over
+the same span) and booked (its holding). `hex_sim::charge::trial` reckons the windows as `sim` reckons its own: ratios
+of given over min(asked, booked) and misses in the contended windows (C4's falsifier's), Jain's index, the riser's
+windows over its booking, its neighbours' and the box's misses while it rises, and each VM's windows past its charge
+(C1's falsifier); with the most VMs at once against envelope density, the starts refused while the riser rises, the
+riser's inspect (its exit and the last resort's why), and the learner's own CPU (Linux: its `hex-charges` thread;
+macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
+not a verdict.

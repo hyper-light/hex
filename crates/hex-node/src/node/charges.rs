@@ -722,6 +722,14 @@ impl Node {
         }
     }
 
+    /// The window the node's charge learner reads over, where one runs (C1): its VM backends' learner's.
+    pub fn charge_window(&self) -> Option<Duration> {
+        self.backends
+            .get()
+            .and_then(|b| b.learner.as_ref())
+            .map(|_| WINDOW)
+    }
+
     /// What `class`'s capacity answer carries of the learner (C8), fitted to one message.
     pub(super) fn attach_learned(
         &self,
