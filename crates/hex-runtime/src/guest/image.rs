@@ -99,7 +99,7 @@ enum Run {
     /// Its boot, on a thread of its own, answers here.
     Booting(Arc<Slot<Result<Box<dyn ImageGuest>, ImageRefusal>>>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
-    Running(Arc<dyn ImageGuest>),
+    Running(Arc<dyn ImageGuest>, Instant),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known, until its record says it.
@@ -403,7 +403,7 @@ fn started_from(from: shards_api::image::StartedFrom) -> hex_api::StartedFrom {
 /// What a running VM costs its host, from its run's microVM part (D241's `Stats::microvm`): its VM process's CPU time and
 /// own memory, as its run host read the process, and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). A part the run
 /// host did not read is refused, naming why, never read as none.
-fn host_use_of(stats: &Stats, vcpus: u32) -> Result<HostUse, Refusal> {
+fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, Refusal> {
     let unread = |why: String| Refusal::Os {
         op: "reading a Shards image VM's use of its host",
         why,
@@ -418,7 +418,7 @@ fn host_use_of(stats: &Stats, vcpus: u32) -> Result<HostUse, Refusal> {
         footprint_bytes: host.footprint_bytes,
         resident_bytes: host.resident_bytes,
         guest_ns: per_vcpu(stats, vcpus)?,
-        window: Duration::ZERO,
+        window,
     })
 }
 
@@ -601,6 +601,14 @@ impl ImageBoot {
 
     /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
     /// D231 stops a run it drops and that stop would wait on this lock's holder.
+    /// When box `id`'s run started, as its boot answered, where it runs in this process.
+    fn started(&self, id: &BoxId) -> Result<Option<Instant>, Refusal> {
+        Ok(match self.runs()?.get(id) {
+            Some(Run::Running(_, at)) => Some(*at),
+            _ => None,
+        })
+    }
+
     fn forget(&self, id: &BoxId) -> Result<(), Refusal> {
         let mut runs = self.runs()?;
         if matches!(runs.get(id), Some(Run::Ended(_))) {
@@ -1011,8 +1019,10 @@ impl ImageClass {
                             if let Ok(waits) = image.waits() {
                                 waits.boot.answered(took);
                             }
+                            // Its run started as its boot answered.
+                            let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                             let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                            *run = Run::Running(Arc::clone(&guest));
+                            *run = Run::Running(Arc::clone(&guest), at);
                             Next::Started(guest)
                         }
                         // The run host refused or ended the run before it started: its own answer, in its words.
@@ -1025,7 +1035,7 @@ impl ImageClass {
                             Next::Ends(end)
                         }
                     },
-                    Run::Running(guest) => Next::Running(Arc::clone(guest)),
+                    Run::Running(guest, _) => Next::Running(Arc::clone(guest)),
                     Run::Stopping(slot, stop) => match slot.take()? {
                         None => Next::Is(State::Stopping(Arc::clone(slot), stop.clone())),
                         Some((end, took)) => {
@@ -1084,7 +1094,7 @@ impl ImageClass {
         let mut runs = image.runs()?;
         // Another call may have moved it on first: then its stop is that call's, and this one's thread
         // returns with the same end.
-        if let Some(run @ Run::Running(_)) = runs.get_mut(id) {
+        if let Some(run @ Run::Running(..)) = runs.get_mut(id) {
             *run = Run::Stopping(Arc::clone(&slot), reached.clone());
         }
         Ok(State::Stopping(slot, reached))
@@ -1205,8 +1215,10 @@ impl ImageClass {
                 Some(run @ Run::Booting(_)) => match slot.take()? {
                     Some((Ok(guest), took)) => {
                         waits.boot.answered(took);
+                        // Its run started as its boot answered.
+                        let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                         let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                        *run = Run::Running(guest);
+                        *run = Run::Running(guest, at);
                         Ok(())
                     }
                     Some((Err(why), took)) => {
@@ -1426,8 +1438,27 @@ impl ImageClass {
 
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
+        let id = &record.spec.id;
         let (_, stats) = self.stats_image(&record, "host_use")?;
-        host_use_of(&stats, vm_size(&record.spec)?.vcpus)
+        // Its window from its run's start to this read; a run gone since its stats were read has none.
+        let window = self
+            .image()?
+            .started(id)?
+            .map(|at| at.elapsed())
+            .ok_or(Refusal::NotRunning(id.try_clone()?, "host_use"))?;
+        host_use_of(&stats, vm_size(&record.spec)?.vcpus, window)
+    }
+
+    /// Deletes image box `record` as [`ImageClass::delete_image`] does, answering its VM's final use of its host (goal
+    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none where it
+    /// wasn't running or that read failed, never a use made up.
+    pub(super) fn delete_image_used(&self, record: BoxRecord) -> Result<Option<HostUse>, Refusal> {
+        let last = match self.settle(&record)? {
+            State::Running(_) => self.host_use_image(record.clone()).ok(),
+            _ => None,
+        };
+        self.delete_image(record)?;
+        Ok(last)
     }
 
     /// Member `member` of a running image box, which its spec says its caller drives (joint plan step 17): its
@@ -1698,6 +1729,13 @@ impl hex_api::Runtime for ImageClass {
 
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         self.host_use_image(self.called(id)?)
+    }
+
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        self.delete_image_used(record)
     }
 }
 
