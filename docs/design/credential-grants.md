@@ -157,7 +157,10 @@ hosts alone (D242's `decide`).
 | a placeholder's characters | 1 or more of A-Z a-z 0-9 - . _ ~ + /, then any = | RFC 6750 §2.1's `b64token`, as Shards' `shards_dns::credential::placeholder` takes it |
 
 There is no count constant: a box's credential grants cross the node's wire in one message (`MAX_MESSAGE`) and live in
-its record (`MAX_RECORD_BYTES`). The check's three working lists (each grant's hosts, its member and credential, its
+its record (`MAX_RECORD_BYTES`). Nor is there a field's length of Hex's own: since Shards `17fc36ecd` (at `097ec0047`)
+its boot refuses a credential or sign-in grant's field past what its network process's wire carries behind a two-byte
+length (`shards_dns::credential::WIRE_MOST`, 65,535 bytes or hosts), by field and never quoting it, as a spec's
+(`ImageRefusal::Spec`), which the image class says as `Invalid` naming `shards image` as it says every spec refusal. The check's three working lists (each grant's hosts, its member and credential, its
 placeholder and credential) are reserved fallibly (refused `Exhausted` past what memory gives), sorted, O(n log n) in
 the hosts named, with no recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
 Shards' run host only as long as each passes it on, wiped as each lets go of it, and never printed.

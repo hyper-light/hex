@@ -5453,6 +5453,7 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
                 "--model".to_owned(),
                 "claude-opus-4".to_owned(),
             ],
+            mcp: false,
         },
         hex_api::ImageMember::new(Member {
             kind: MemberKind::Agent,
@@ -5477,6 +5478,51 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
         read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         create
     );
+}
+
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1): do create a Shards image VM driving a harness that asks an MCP bridge
+/// of its own, with run-time arguments, and an agent that asks none; then the same VM whose harness asks none. Expect
+/// the first read back whole, and its bytes the second's but for one: each member's ask is one byte after its
+/// run-time arguments.
+#[test]
+fn w12_a_members_mcp_bridge_crosses_the_wire_after_its_arguments() {
+    let create = |mcp: bool| {
+        Request::Call(Call::Create(Box::new(BoxSpec {
+            id: id("image-mcp"),
+            bounds: Bounds::default(),
+            class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+                members: vec![
+                    hex_api::ImageMember {
+                        args: vec!["--model".to_owned(), "claude-opus-4".to_owned()],
+                        mcp,
+                        ..hex_api::ImageMember::new(Member {
+                            kind: MemberKind::Harness,
+                            name: "claude".to_owned(),
+                        })
+                    },
+                    hex_api::ImageMember::new(Member {
+                        kind: MemberKind::Agent,
+                        name: "helper".to_owned(),
+                    }),
+                ],
+                ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+            })),
+            owner: None,
+            devices: Vec::new(),
+            allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+            route: None,
+            band: 0,
+        })))
+    };
+    let asked = create(true);
+    let bytes = request(94, &asked, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        asked
+    );
+    let none = request(94, &create(false), MAX_MESSAGE).unwrap();
+    assert_eq!(none.len(), bytes.len());
+    assert_eq!(none.iter().zip(&bytes).filter(|(a, b)| a != b).count(), 1);
 }
 
 /// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): do create a Shards image VM sharing two host directories, one

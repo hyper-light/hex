@@ -509,9 +509,13 @@ struct ModelImages {
     period: Mutex<Duration>,
     /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
     started_from: Mutex<StartedFrom>,
-    /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
-    /// boot whose thread failed would.
+    /// Whether the next boot's thread ends with no answer at all, as the test sets it before anything wakes that boot:
+    /// held, it hears its gate alone, never its stop, and once its gate opens it unwinds past it, as a boot whose
+    /// thread failed would.
     abandon: AtomicBool,
+    /// How often a boot held at its gate has looked again: each wake of its wait, the test's own or one the OS gives a
+    /// condition variable's waiter unasked.
+    woken: AtomicUsize,
     /// The boots its stop ended (D231's `BootStop`), each `Ended(Stopped)`.
     stopped: AtomicUsize,
     /// The boots that answered with a run started.
@@ -536,6 +540,7 @@ impl ModelImages {
             period: Mutex::new(MODEL_RATE_PERIOD),
             started_from: Mutex::new(StartedFrom::Booted),
             abandon: AtomicBool::new(false),
+            woken: AtomicUsize::new(0),
             stopped: AtomicUsize::new(0),
             answered: AtomicUsize::new(0),
             serve: Mutex::new(None),
@@ -656,9 +661,14 @@ impl Images for ModelImages {
         self.patience.lock().unwrap().push(patience);
         *self.run.lessor.lock().unwrap() = spec.lessor.clone();
         let gate = self.gate.lock().unwrap();
+        // Held at its gate until it opens, or, unless the test abandons it, until its stop has come: a wake finds only
+        // what the test or the boot's stop has opened.
         let gate = self
             .opened
-            .wait_while(gate, |gate| *gate == Gate::Host && !stop.is_stopped())
+            .wait_while(gate, |gate| {
+                self.woken.fetch_add(1, Ordering::SeqCst);
+                *gate == Gate::Host && (self.abandon.load(Ordering::SeqCst) || !stop.is_stopped())
+            })
             .unwrap();
         if self.abandon.swap(false, Ordering::SeqCst) {
             panic!("the model's boot thread ends with no answer, as the test asked");
@@ -1025,6 +1035,64 @@ fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
     }
 }
 
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's MCP bridge reaches its run's controller over the
+/// run's agent-control endpoint alone, which this node asks none of for an image VM's run. Do create a VM driving a
+/// harness that asks no bridge and an agent that asks one. Expect the create refused as Invalid by the agent's field
+/// (`members[1].mcp`), as Shards' own spec check refuses it, before any record; and nothing booted.
+#[test]
+fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_field() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let mut boxed = spec("image-mcp", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members = vec![
+            ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            }),
+            ImageMember {
+                mcp: true,
+                ..ImageMember::new(Member {
+                    kind: MemberKind::Agent,
+                    name: "helper".to_owned(),
+                })
+            },
+        ];
+    }
+    let id = boxed.id.clone();
+    let created = runtime.create(boxed);
+    assert!(
+        matches!(
+            &created,
+            Err(Refusal::Invalid { what: "shards image", why }) if why.contains("members[1].mcp")
+        ),
+        "{created:?}"
+    );
+    assert!(record(&owner, &id).is_none());
+    assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's ask for an MCP bridge rides its boot's member as
+/// the box's spec says it (`MemberSpec::mcp`). Do lower a member asking none and one asking one. Expect the first's
+/// boot member to ask none and the second's to ask it.
+#[test]
+fn w12_a_members_mcp_bridge_rides_its_boot_member() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    let claude = ImageMember::new(Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    });
+    assert!(!member_spec(&claude).mcp);
+    assert!(
+        member_spec(&ImageMember {
+            mcp: true,
+            ..claude
+        })
+        .mcp
+    );
+}
+
 /// Joint plan step 12 for kiln's step 18 (D231's shares): an image VM's guest sees the host directories its caller
 /// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only; one granted egress and
 /// sharing none; then one whose share Shards refuses. Expect the first boot to ask Shards for exactly those two shares,
@@ -1323,6 +1391,7 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
             env: vec![("TZ".to_owned(), "UTC".to_owned())],
             workdir: Some("/work/project".to_owned()),
             args: Vec::new(),
+            mcp: false,
         });
     }
     let id = runtime.create(boxed).unwrap().id;
@@ -2065,8 +2134,10 @@ fn w12_a_delete_follows_its_stop_past_the_stops_w_star() {
 /// Kiln's choice (b) (ROOT, 2026-11-13: the delete's wait follows the boot until its party's end, and says so there):
 /// a delete following a boot is refused only where the boot's thread ends with no answer, so neither its run's start
 /// nor its run host's end is known. Do: start a VM whose boot is held past a 1 ns W*, its start Pending; delete it as
-/// the boot is held; then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the
-/// node's broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
+/// the boot is held, its own wait past a 1 ns W* too, so it follows the boot once it has asked its stop; wake the held
+/// boot as the OS may wake a condition variable's waiter unasked (a signal's EINTR, the step-39 agent's finding of
+/// 2026-11-13); then let the boot's thread end with no answer. Expect: the delete never Pending, refused as the node's
+/// broken state in its own words, the boot it ends still under way; the box's record kept, Deleting.
 #[test]
 fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
     let images = ModelImages::new();
@@ -2074,6 +2145,10 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
     let held = ImageWaits {
         boot: Patience::seeded(
             "test.hex_runtime.image_boot_deleted_abandoned",
+            Duration::from_nanos(1),
+        ),
+        delete_boot: Patience::seeded(
+            "test.hex_runtime.image_delete_boot_abandoned",
             Duration::from_nanos(1),
         ),
         ..waits().unwrap()
@@ -2090,18 +2165,26 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
             ..
         })
     ));
+    images.abandon.store(true, Ordering::SeqCst);
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
         hex_testkit::waits::until(
             &DELETE_FOLLOWS_ABANDONED,
             "the delete following the boot",
-            || {
-                deleting.is_finished()
-                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
-            },
+            || deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none(),
         )
         .unwrap();
-        images.abandon.store(true, Ordering::SeqCst);
+        // The wake the test never opened, its stop come: the held boot looks again and stays held, the delete following.
+        let looked = images.woken.load(Ordering::SeqCst);
+        images.poke();
+        hex_testkit::waits::until(
+            &DELETE_FOLLOWS_ABANDONED,
+            "the held boot looking again",
+            || images.woken.load(Ordering::SeqCst) > looked,
+        )
+        .unwrap();
+        assert_eq!(images.stopped.load(Ordering::SeqCst), 0);
+        assert!(!deleting.is_finished());
         images.gate(Gate::Open);
         deleting.join().unwrap()
     });
