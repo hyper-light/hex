@@ -12,6 +12,7 @@ mod family;
 pub mod gpu;
 mod gpu_pool;
 pub mod held;
+pub mod hosted;
 mod image;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
