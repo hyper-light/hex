@@ -1491,6 +1491,48 @@ fn a_destination_another_member_would_reach_too_refuses_the_boot() {
     assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
 }
 
+/// Joint plan step 15 (AC-T7.7.2; N4, D246): do start an image VM granting a provider to a harness its image doesn't
+/// declare, beside the image's own harness, which reaches nothing by name. Expect: the start refused Invalid naming
+/// the image (the run host's `Cause::Image`: it declares no such member), the run host having refused the boot before
+/// anything started, and the box ended; so no grant is kept for a member the image doesn't have.
+#[test]
+fn a_destination_for_a_member_its_image_doesnt_declare_refuses_the_boot() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
+    let images = ModelImages::new();
+    images.names(shards_api::image::MemberKind::Harness, "codex", &[]);
+    let (runtime, owner) = model_runtime(&images, waits());
+    let mut spec = spec("image-undeclared", None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Egress {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "ghost".to_owned(),
+            },
+            to: Destination::Name("api.openai.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }];
+    }
+    let id = runtime.create(spec).unwrap().id;
+    let refused = runtime.start(&id);
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { what: "shards image", why })
+            if why.starts_with("the image:") && why.contains("ghost") && why.contains("declares no such member")),
+        "{refused:?}"
+    );
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Unknown))
+    );
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
+}
+
 /// Joint plan step 15 (N6): do create, then start, an image VM whose run has a command of its own, granted a publish
 /// of its harness's port, first where its image gives that port to the harness (at the harness's own port 8443),
 /// then where it gives it no member, so it reaches the run's own command (D122). Expect: each created, its boot
