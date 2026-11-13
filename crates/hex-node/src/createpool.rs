@@ -404,7 +404,15 @@ impl CreatePool {
         // 2026-11-09), within the claim's own patience: its pid and pidfd are the park's.
         let began = Instant::now();
         let patience = CLAIMS.deadline();
-        match claim_round(socket.as_fd(), sync, &create, &fds, patience) {
+        match claim_round(
+            socket.as_fd(),
+            sync,
+            pidfd.as_fd(),
+            &create,
+            &fds,
+            patience,
+            || {},
+        ) {
             Ok(made) => {
                 CLAIMS.answered(began.elapsed());
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
@@ -1019,10 +1027,13 @@ static CLAIMS: hex_core::patience::Patience =
 fn claim_round(
     socket: BorrowedFd<'_>,
     sync: BorrowedFd<'_>,
+    _pidfd: BorrowedFd<'_>,
     create: &Create,
     fds: &[BorrowedFd<'_>],
     patience: Option<Duration>,
+    _past: impl FnOnce(),
 ) -> Result<MountNamespace, Trip> {
+    // Behavior kept here: past its patience the claim is taken for hung, its init's life not followed.
     rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
     match first_readable(
         [sync, socket],
@@ -1459,7 +1470,17 @@ mod tests {
                 ),
                 None => (None, Some(theirs)),
             };
-            let came = match claim_round(ours.as_fd(), sync_r.as_fd(), &create, &fds, patience) {
+            let alive = rustix::process::pidfd_open(rustix::process::getpid(), PidfdFlags::empty())
+                .unwrap();
+            let came = match claim_round(
+                ours.as_fd(),
+                sync_r.as_fd(),
+                alive.as_fd(),
+                &create,
+                &fds,
+                patience,
+                || {},
+            ) {
                 Ok(MountNamespace::Copy) => "taken",
                 Ok(_) => "taken another way",
                 Err(Trip::Refused(_)) => "refused",
@@ -1600,6 +1621,98 @@ mod tests {
             got.starts_with("broken") && got.contains("ended before it answered"),
             "the round trip past the bound ended other than at the seed's end: {got}"
         );
+    }
+
+    /// Decision 9 (original; the rootless "create: writing uid_map failed: Operation not permitted" of 2026-11-13): a
+    /// claim whose init said nothing within the claim's W* was taken for hung, its init killed, and its create cloned
+    /// afresh on the same sync pipe, where the word the killed init had written by then, its ask for its maps ("U"),
+    /// stood first: the handshake answered it with the new init's pid before that init had a user namespace of its
+    /// own, and the kernel refused the map. Do: claim a stand-in init, alive (its pidfd the test process's own), that
+    /// takes its claim and writes its ask for its maps only once the claim has passed its bound, a nanosecond, and told
+    /// its run-out. Expect: the claim taken at that word, the word still on the pipe for the handshake.
+    #[test]
+    fn original_a_claim_past_its_w_star_follows_its_init_to_its_word() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use hex_runtime::linux::oci::run::PrunedCreate;
+        use rustix::fs::{Mode, OFlags};
+        use rustix::pipe::{PipeFlags, pipe_with};
+        use std::sync::mpsc::channel;
+        let lab = tempfile::tempdir().unwrap();
+        let open = || {
+            rustix::fs::open(
+                lab.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = open();
+        let (sync_r, sync_w) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).unwrap();
+        let (ours, theirs) = rt_seed::socketpair().unwrap();
+        let req = CloneReq {
+            bundle: lab.path(),
+            dir: lab.path(),
+            cgroup: &cgroup,
+            network: None,
+            sync_w,
+            map_r: None,
+            config: config.as_fd(),
+            pruned: Some(PrunedCreate {
+                cgroup_dir: None,
+                container_dir: open(),
+                rootfs: open(),
+                mount_namespace: MountNamespace::Copy,
+                dev_mount: None,
+                ipc_uts: None,
+                proc_mount: None,
+                proc_sink: None,
+                masked_directory: None,
+                binds: Vec::new(),
+                path_joins: Vec::new(),
+            }),
+        };
+        let (create, fds) = message(&req);
+        let (told, heard) = channel::<()>();
+        // It takes its claim at once, and asks for its maps once told; a claim that never tells drops `told`, and the
+        // stand-in says nothing.
+        let stand_in = std::thread::spawn(move || {
+            let mut buf = vec![0u8; hex_core::seed::MAX_REQUEST];
+            let Ok(rt_seed::Received::Message { stdio, .. }) =
+                rt_seed::recv_request(theirs.as_fd(), &mut buf)
+            else {
+                panic!("the stand-in was sent no claim");
+            };
+            let sync = stdio.into_iter().next().unwrap();
+            if heard.recv().is_ok() {
+                rustix::io::write(&sync, b"U\n").unwrap();
+            }
+            theirs
+        });
+        let alive =
+            rustix::process::pidfd_open(rustix::process::getpid(), PidfdFlags::empty()).unwrap();
+        let got = claim_round(
+            ours.as_fd(),
+            sync_r.as_fd(),
+            alive.as_fd(),
+            &create,
+            &fds,
+            Some(Duration::from_nanos(1)),
+            move || {
+                let _ = told.send(());
+            },
+        );
+        let _theirs = stand_in.join().unwrap();
+        let came = match got {
+            Ok(_) => "taken",
+            Err(Trip::Refused(_)) => "refused",
+            Err(Trip::Broken(_)) => "broken",
+            Err(Trip::Hung(_)) => "hung",
+        };
+        assert_eq!(came, "taken", "a claim past its bound, its init alive");
+        let mut left = [0u8; 8];
+        let n = rustix::io::read(&sync_r, &mut left).unwrap_or(0);
+        assert_eq!(&left[..n], b"U\n", "the init's word left for the handshake");
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
