@@ -608,3 +608,82 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
     learner.window(&io, &vms, budget, start + WINDOW).unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
 }
+
+/// Joint plan step 14 (AC-T7.4.1), the learner's bounds (CLAUDE.md §2) on macOS and Windows, as Linux's ([`bounds`]):
+/// VMs, its machine's population; classes, as many, the least at which no VM's class is refused. Do run, on a machine
+/// of 20 milli-CPU (a population of two), two VMs each of a class of its own; then the first gone and a third of a third
+/// class; then a fourth beside those two. Expect the first two held; the third held, the gone VM's class forgotten for
+/// it; and the fourth refused, typed, naming the machine's population.
+#[test]
+fn w14_a_capping_learner_holds_its_machines_population_of_vms_of_as_many_classes() {
+    let io = Record::default();
+    // Each VM a class of its own: its receipt's profile is its number.
+    let own = |name: &str, n: u8| {
+        let mut record = vm(name, n);
+        if let Some(allocation) = record.spec.allocation.as_mut() {
+            allocation.cost.id = [n; 32];
+        }
+        io.set(name, 0, GIB);
+        record
+    };
+    let (one, two, three, four) = (
+        own("vm-1", 1),
+        own("vm-2", 2),
+        own("vm-3", 3),
+        own("vm-4", 4),
+    );
+    let machine = res(20, 64 * GIB);
+    let mut learner = Learner::new(WINDOW, machine).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, &[one, two.clone()], machine, start)
+        .unwrap();
+    learner
+        .window(&io, &[two.clone(), three.clone()], machine, start + WINDOW)
+        .unwrap();
+    assert_eq!(
+        learner.window(&io, &[two, three, four], machine, start + WINDOW * 2),
+        Err(Refusal::Exhausted {
+            what: "a node's VMs",
+            bound: 2
+        })
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's queues, bounded (CLAUDE.md §2) at the ends a last resort keeps: the ends a node
+/// before this one decided, due, at most one a VM met; the writes into VMs' records not yet made, one a VM lifetime, the
+/// oldest forgotten past the bound. Do meet three VMs whose records name intents, and keep an end for each of three
+/// VMs, on a last resort keeping two. Expect the third intent refused, typed, naming the bound, and the first VM's write
+/// forgotten.
+#[test]
+fn w14_the_last_resorts_queues_are_kept_to_its_bound() {
+    let end = |n: u8| LearnedEnd {
+        id: BoxId::new(&format!("vm-{n}")).unwrap(),
+        held: 2 * GIB,
+        budget: GIB,
+        band: 0,
+        fleet_held: 4 * GIB,
+        fleet_growth: GIB,
+        fleet_budget: 4 * GIB,
+        unmoved: Some(Upstream::LiveMove),
+    };
+    let mut last = LastResort::new(2);
+    last.met(Class::Shards, [1; 16], Some(end(1))).unwrap();
+    last.met(Class::Shards, [2; 16], Some(end(2))).unwrap();
+    assert_eq!(
+        last.met(Class::Shards, [3; 16], Some(end(3))),
+        Err(Refusal::Exhausted {
+            what: "the last resort's ends due",
+            bound: 2
+        })
+    );
+    for n in 1..=3 {
+        last.write(end(n).id, [n; 16], Some(end(n))).unwrap();
+    }
+    let kept: Vec<String> = last
+        .unrecorded()
+        .into_iter()
+        .map(|(id, _, _)| id.as_str().to_owned())
+        .collect();
+    assert_eq!(kept, ["vm-2", "vm-3"]);
+}
