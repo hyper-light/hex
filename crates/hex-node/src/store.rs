@@ -1852,6 +1852,31 @@ mod tests {
         assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
     }
 
+    /// T-T7.1.2 on every OS: a node of an earlier boot left the boot session marker. Do: take it. Expect: that
+    /// boot's session, and the marker's change made with its directory flushed: naming this boot where the host's
+    /// session is read, gone where it isn't (Windows'), so no later node takes a record of this boot for an earlier
+    /// one's. Windows refused the flush of the directory opened for reading alone: "Access is denied" (os error 5).
+    #[test]
+    fn t_t7_1_2_an_earlier_boots_marker_is_taken_and_its_change_flushed_on_every_os() {
+        let earlier = "00000000-0000-0000-0000-000000000000";
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let marker = dir.path().join("state").join(BOOT_MARKER);
+        fs::write(&marker, format!("{earlier}\n")).unwrap();
+        assert_eq!(
+            store.take_boot_marker(),
+            Ok(Some(BootSession::new(earlier).unwrap()))
+        );
+        match store.boot() {
+            Some(now) => assert_eq!(
+                fs::read_to_string(&marker).unwrap(),
+                format!("{}\n", now.as_str())
+            ),
+            None => assert!(!marker.exists(), "the marker outlived its taking"),
+        }
+        assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
+    }
+
     /// A Shards VM's record as its create begins it: the store introduces its lifetime's scope.
     fn vm_record(id: &str) -> BoxRecord {
         let mut record = record(id);
