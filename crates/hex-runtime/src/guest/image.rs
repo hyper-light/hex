@@ -315,6 +315,7 @@ fn usage_of(stats: &Stats, vcpus: u32) -> Result<Usage, Refusal> {
         io_read_bytes: read(stats.read_bytes, "read")?,
         io_write_bytes: read(stats.write_bytes, "write")?,
         guest: Some(GuestTime::PerVcpuNs(per_vcpu(stats, vcpus)?)),
+        started_from: None,
     })
 }
 

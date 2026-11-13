@@ -1895,6 +1895,30 @@ pub struct Usage {
     /// the wire means `None` (append-only, CLAUDE.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<GuestTime>,
+    /// How a Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started,
+    /// which the box's record keeps too: `None` for a box with no Shards image run. Added after `guest`, so absent on
+    /// the wire means `None` (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<StartedFrom>,
+}
+
+/// How a Shards image VM's microVM started (D253), as its run host says it as the run starts: Shards' own five
+/// (shards-api's `image::StartedFrom`), so Hex can say how a box came up. The node's wire tags each by its place here,
+/// so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartedFrom {
+    /// Booted, with no template to restore or save: a guest its node gave (`SHARDS_KERNEL`, `SHARDS_INIT`), or a host
+    /// whose hypervisor restores no snapshot.
+    Booted,
+    /// Booted, saving its image's template on the way, none being saved.
+    Saved,
+    /// Restored from its image's template.
+    Restored,
+    /// Booted, saving another, its image's template having failed to restore: that one removed.
+    Replaced,
+    /// A warm run host's, its microVM ready before its run asked (D253's pools).
+    Warm,
 }
 
 /// A microVM's guest time per vCPU, or what its backend awaits to read it.

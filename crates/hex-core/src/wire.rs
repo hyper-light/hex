@@ -1057,6 +1057,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             io_read_bytes: r.u64()?,
             io_write_bytes: r.u64()?,
             guest: r.option(guest_time)?,
+            started_from: None,
         }),
         kind::BOXES => Answer::Boxes {
             more: r.bool("more")?,

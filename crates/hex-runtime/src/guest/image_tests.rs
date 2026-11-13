@@ -1225,6 +1225,73 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
     ));
 }
 
+/// Joint plan step 12 (D253, image channel v19 and v21): a box says how its VM's microVM came up, as its run host said it
+/// as the run started, in its usage and in its record. Do boot an image VM whose run host says it restored its image's
+/// template, its start taking the boot's answer; then one whose run host says it was a warm host's, its start Pending
+/// (its boot held past its W*) and its answer taken by a later call. Expect before each boot no start in its record,
+/// then its usage saying it and its record keeping it, written as its boot's answer was taken, whichever call took it.
+#[test]
+fn w12_a_vms_usage_and_record_say_how_its_microvm_started() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let stats = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(64 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    // Its start takes its boot's answer.
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Restored;
+    *images.run.stats.lock().unwrap() = stats.clone();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-restored", None)).unwrap().id;
+    assert_eq!(record(&owner, &id).unwrap().started_from, None);
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        record(&owner, &id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Restored)
+    );
+    assert_eq!(
+        runtime.usage(&id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Restored)
+    );
+    // A later call takes it: the start Pending, its boot held before its run host's start past a 1 ns W*.
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Warm;
+    *images.run.stats.lock().unwrap() = stats;
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_held_warm",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(held));
+    let id = runtime.create(spec("image-warm", None)).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    assert_eq!(record(&owner, &id).unwrap().started_from, None);
+    images.gate(Gate::Open);
+    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
+    assert_eq!(
+        record(&owner, &id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Warm)
+    );
+    assert_eq!(
+        runtime.usage(&id).unwrap().started_from,
+        Some(hex_api::StartedFrom::Warm)
+    );
+}
+
 /// Joint plan step 14 (C7, C4, C1; AC-T7.4.1): a running image VM is told its room, held to its rate and read for its
 /// host cost through its runtime, the one call each of the node's charge learner and a caller's own runtime (goal 12's
 /// item B) make. Do tell a VM rooms of 32 MiB, -8 MiB (its budget short of what it holds) and none, hold it at 250

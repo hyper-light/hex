@@ -48,8 +48,8 @@ pub use runtime::{
     GpuEligibility, GuestTime, HostUse, ImageArch, ImageOs, ImagePlatform, IoKind, Learned,
     LearnedCeiling, LearnedEnd, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse,
     LifecycleCause, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Membership, Proc,
-    Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, Upstream, Usage,
-    VmSize,
+    Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, StartedFrom,
+    Upstream, Usage, VmSize,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, ImageMember,

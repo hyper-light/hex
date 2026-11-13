@@ -1354,6 +1354,58 @@ mod tests {
         assert!(store.read_lifecycle(&original.spec.id).unwrap().is_none());
     }
 
+    /// Joint plan step 12 (AC-T7.4.1): the VM adapters' lifecycle writes keep how a box's run ended, in its runtime's
+    /// words (D249, `BoxRecord::ended`), and how its microVM started (D253, `BoxRecord::started_from`), as they keep its
+    /// exit: a Shards image VM writes both through them. Do write a Ready record, then it with how its microVM started,
+    /// then with its exit and its run's words, then as a writer that read it before either; then other words, and
+    /// another start. Expect each fact kept as written, a stale writer's absence keeping it, and another value refused
+    /// as uncertain, the record as it was.
+    #[test]
+    fn w12_lifecycle_writes_keep_a_runs_words_and_how_its_vm_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut stale = record("image-words");
+        stale.phase = Phase::Creating;
+        store.put_lifecycle(&stale).unwrap();
+        stale.phase = Phase::Ready;
+        store.put_lifecycle(&stale).unwrap();
+        let started = BoxRecord {
+            started_from: Some(hex_api::StartedFrom::Restored),
+            ..stale.clone()
+        };
+        store.put_lifecycle(&started).unwrap();
+        let words = "its VM failed: the guest's kernel panicked";
+        let ended = BoxRecord {
+            exit: Some(hex_api::Exit::Unknown),
+            ended: Some(words.to_owned()),
+            ..started.clone()
+        };
+        store.put_lifecycle(&ended).unwrap();
+        let read = || store.read_lifecycle(&stale.spec.id).unwrap().unwrap();
+        let kept = read();
+        assert_eq!(
+            (kept.started_from, kept.exit, kept.ended.as_deref()),
+            (
+                Some(hex_api::StartedFrom::Restored),
+                Some(hex_api::Exit::Unknown),
+                Some(words)
+            )
+        );
+        store.put_lifecycle(&stale).unwrap();
+        assert_eq!(read(), kept, "a stale writer's absence keeps both");
+        let other_words = BoxRecord {
+            ended: Some("other words".to_owned()),
+            ..ended.clone()
+        };
+        assert!(store.put_lifecycle(&other_words).is_err());
+        let other_start = BoxRecord {
+            started_from: Some(hex_api::StartedFrom::Booted),
+            ..ended.clone()
+        };
+        assert!(store.put_lifecycle(&other_start).is_err());
+        assert_eq!(read(), kept);
+    }
+
     /// The names of the records in the runtime record directory `run`'s shards, sorted.
     fn sharded(run: &Path) -> Vec<String> {
         let mut out: Vec<String> = (0..=SHARD_MASK)
