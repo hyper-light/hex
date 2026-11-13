@@ -1211,7 +1211,14 @@ fn image_command_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> 
         let info = exit_of(rt, &id, patience())?;
         ensure(
             (info.state, info.exit) == (BoxState::Empty, Some(Exit::Code(3))),
-            || format!("a VM whose command exited 3: {info:?}"),
+            // Where its run failed, its runtime's words first (joint plan step 12).
+            || match &info.ended {
+                Some(words) => format!(
+                    "a VM whose command exited 3 ended {:?}, its runtime saying: {words}; {info:?}",
+                    info.exit
+                ),
+                None => format!("a VM whose command exited 3: {info:?}"),
+            },
         )
     })
 }

@@ -1345,6 +1345,7 @@ impl Runtime for FirecrackerRuntime {
                     exit: Some(exit(end.status)),
                     abandoned: record.abandoned,
                     last_resort: None,
+                    ended: None,
                 });
             }
             let mut info = self.client(record, transaction)?.inspect(id)?;

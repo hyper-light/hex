@@ -1295,6 +1295,7 @@ fn a_vm_create_slower_than_the_oci_creates_is_answered() {
                 abandoned: 0,
                 route: None,
                 last_resort: None,
+                ended: None,
             };
             let bytes = wire::answer(h.id, &Answer::Info(info), wire::MAX_MESSAGE).unwrap();
             let _ = rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL);

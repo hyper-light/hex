@@ -715,6 +715,42 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan step 12 (HEX-IMG-3 on KVM, ROOT 2026-11-13): do end a running VM's run as Shards' run host ends one whose
+/// own command never started (D249: `Failed`, in its VM's words). Expect: its run host reaped through its stop, and the
+/// box shown Empty with an unknown exit and those words, by inspect and by list, its record keeping both.
+#[test]
+fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-never-started", Some(command)))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let words =
+        "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    let listed = runtime.list().unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|info| info.id == id && info.ended.as_deref() == Some(words)),
+        "{listed:?}"
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
 /// Joint plan step 12, steps 11's boundary: do exec a member's program and send TERM to a running VM.
 /// Expect: Awaits(MemberExec) and Awaits(MemberSignal), no stop, and the VM still Running.
 #[test]
@@ -1040,7 +1076,8 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
 }
 
 /// Joint plan step 12: do start a VM whose image Shards refuses. Expect: the refusal typed (Invalid,
-/// naming the image), the box ended with an unknown exit and shown Empty, its record keeping both.
+/// naming the image), the box ended with an unknown exit and Shards' words for its refusal, and shown Empty,
+/// its record keeping them.
 #[test]
 fn a_refused_boot_ends_the_box_and_says_why() {
     let images = ModelImages::new();
@@ -1053,10 +1090,12 @@ fn a_refused_boot_ends_the_box_and_says_why() {
     ));
     let kept = record(&owner, &id).unwrap();
     assert_eq!((kept.phase, kept.exit), (Phase::Ready, Some(Exit::Unknown)));
+    let words = Some("the image: no such image");
+    assert_eq!(kept.ended.as_deref(), words);
     let info = runtime.inspect(&id).unwrap();
     assert_eq!(
-        (info.state, info.exit),
-        (BoxState::Empty, Some(Exit::Unknown))
+        (info.state, info.exit, info.ended.as_deref()),
+        (BoxState::Empty, Some(Exit::Unknown), words)
     );
     runtime.delete(&id).unwrap();
 }
