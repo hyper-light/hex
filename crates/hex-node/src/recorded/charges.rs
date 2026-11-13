@@ -79,6 +79,8 @@ pub(crate) trait Managed {
     fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, record: &BoxRecord) -> Result<HostUse, Refusal>;
+    /// The period a Shards image VM's rate holds over, its run's own (D247's `ImageGuest::rate_period`).
+    fn rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal>;
     /// Caps the VM at `rate` milli-CPU: a managed VM through its native owner, an image VM through its rate (D247).
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal>;
     /// Tells an image VM's guest its room, `room` bytes past what it holds (`Runtime::room`, D188).
@@ -186,6 +188,36 @@ pub(crate) fn sort(
         }
     }
     Ok(sorted)
+}
+
+/// What the learner's thread waited for between windows (C1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// It runs a window.
+    Look,
+    /// Its node has gone: it ends.
+    Gone,
+}
+
+/// Waits for the learner's next window (C1). Original (red): out its window, a message on `ended` ending it as its
+/// sender's drop does; with no window, refused, typed.
+pub(crate) fn wait(
+    ended: &hex_wait::mpsc::Receiver<()>,
+    window: Option<Duration>,
+) -> Result<Waited, Refusal> {
+    let Some(window) = window else {
+        return Err(Refusal::Awaits {
+            needs: Upstream::RatePeriod,
+        });
+    };
+    match ended.recv_timeout(window) {
+        Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => Ok(Waited::Look),
+        Ok(()) | Err(hex_wait::mpsc::RecvTimeoutError::Disconnected) => Ok(Waited::Gone),
+        Err(hex_wait::mpsc::RecvTimeoutError::Failed(why)) => Err(Refusal::os(
+            "waiting out the charge learner's window",
+            why,
+        )),
+    }
 }
 
 /// One reading of a VM (C1): its VMM's whole CPU so far, in nanoseconds, the memory it holds now, and each vCPU's guest
@@ -692,6 +724,11 @@ impl Learner {
     /// Which VMs it learns.
     pub(crate) fn learns(&self) -> Learns {
         self.learns
+    }
+
+    /// The window it reads over next (C1). Original (red): the one it was made with.
+    pub(crate) fn next_window(&self) -> Option<Duration> {
+        self.node.window()
     }
 
     /// One window (C1 to C5, C7) read at `now`: the VMs it learns `running` now (their records, [`sort`]), within the

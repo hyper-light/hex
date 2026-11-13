@@ -1323,6 +1323,15 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
+    /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own
+    /// (D191, D247's `ImageGuest::rate_period`). Original (red): refused, typed, while Hex reads none.
+    pub fn rate_period(&self, id: &BoxId) -> Result<std::time::Duration, Refusal> {
+        let _ = id;
+        Err(Refusal::Awaits {
+            needs: hex_api::Upstream::RatePeriod,
+        })
+    }
+
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
             return Err(Refusal::Broken(

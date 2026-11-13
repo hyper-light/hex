@@ -253,9 +253,6 @@ pub trait Recover: Runtime {
         })
     }
 
-    /// Joint plan step 14 (C1): the period a Shards image VM's rate holds over (Shards' D247, its hold D191's governor),
-    /// the window the charge learner caps image VMs through their rates over. Refused, typed, while Shards' API says
-    /// none (`Awaits(RatePeriod)`): the learner then books image VMs whole.
     /// Joint plan step 14 (ROOT, 2026-11-13): retires what its node recorded under a profile's census cost (each
     /// backing and VM box, its boxes kept retired), run once at its node's start after native initialization, before
     /// any preparation or recovery uses them; none where it keeps no such record.
@@ -263,7 +260,11 @@ pub trait Recover: Runtime {
         Ok(())
     }
 
-    fn image_rate_period(&self) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 14 (C1): the period Shards image VM `record`'s rate holds over (Shards' D247, its hold D191's
+    /// governor), the window the charge learner caps it through its rate over. Original (red): refused, typed, while
+    /// Shards' API says none (`Awaits(RatePeriod)`), so the learner books image VMs whole.
+    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        let _ = record;
         Err(Refusal::Awaits {
             needs: hex_api::Upstream::RatePeriod,
         })
@@ -2021,6 +2022,10 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         self.runtime.host_use(&record.spec.id)
     }
 
+    fn rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        self.runtime.image_rate_period(record)
+    }
+
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
         if charges::running_image(record) {
             return self
@@ -2062,7 +2067,10 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// typed, where it can take neither: the node runs on, its VMs booked whole, as before.
     pub fn start_charges(self: &Arc<Self>) -> Result<(std::time::Duration, Vec<Refusal>), Refusal> {
         let managed = self.runtime.charge_window();
-        let images = self.runtime.image_rate_period();
+        // Original (red): no run's period is read.
+        let images: Result<std::time::Duration, Refusal> = Err(Refusal::Awaits {
+            needs: hex_api::Upstream::RatePeriod,
+        });
         let window = match (&managed, &images) {
             (Ok(managed), Ok(images)) => (*managed).max(*images),
             (Ok(managed), Err(_)) => *managed,
@@ -2132,28 +2140,32 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
 
     /// One window of the charge learner (joint plan step 14): the running managed VMs in the node's records, within the
     /// machine less what its native boxes are capped at (C4: their bookings off the fleet's budget). Its failure is
-    /// kept for the capacity answers.
-    fn learn_window(&self) {
-        let Some((shared, _)) = self.books.charges.get() else {
-            return;
-        };
+    /// kept for the capacity answers. Answers the window it reads over next.
+    fn learn_window(&self) -> Option<std::time::Duration> {
+        let (shared, _) = self.books.charges.get()?;
         let read = self
             .books
             .store
             .all()
             .and_then(|records| Ok((records, self.machine()?)));
         let Ok(mut learner) = shared.lock() else {
-            return;
+            return None;
         };
         let (records, machine) = match read {
             Ok(read) => read,
-            Err(why) => return learner.failed(why),
+            Err(why) => {
+                learner.failed(why);
+                return learner.next_window();
+            }
         };
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
         let sorted = match charges::sort(records.into_values().flatten(), learner.learns()) {
             Ok(sorted) => sorted,
-            Err(why) => return learner.failed(why),
+            Err(why) => {
+                learner.failed(why);
+                return learner.next_window();
+            }
         };
         let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
             dim(&sorted.native).saturating_add(dim(&sorted.whole))
@@ -2170,6 +2182,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             store: &self.books.store,
         };
         let _ = learner.window(&io, &running, budget, std::time::Instant::now());
+        let next = learner.next_window();
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
         let ends = learner.unrecorded();
@@ -2181,6 +2194,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             learner.keep_unrecorded(left);
             learner.failed(why);
         }
+        next
     }
 }
 

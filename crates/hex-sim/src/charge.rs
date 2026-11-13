@@ -496,6 +496,18 @@ impl<K: Ord + Copy> Node<K> {
         self.budget = dims(budget);
     }
 
+    /// Original (joint plan step 14, red): a node reads over the window it was made with, and a new one is taken
+    /// nowhere.
+    pub fn set_window(&mut self, window: Option<Duration>) -> Result<(), ChargeError> {
+        let _ = window;
+        Ok(())
+    }
+
+    /// The window the node reads over (C1).
+    pub fn window(&self) -> Option<Duration> {
+        Some(self.window)
+    }
+
     pub fn budget(&self) -> Amounts {
         amounts(self.budget)
     }

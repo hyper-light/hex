@@ -265,6 +265,85 @@ fn w14_a_reading_is_charged_over_its_span_never_less_than_the_window() {
     assert_eq!(read(&mut n, WINDOW * 3, WINDOW), 3_000);
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C1's window as it changes (ROOT, 2026-11-13: a learner's window is the longest
+/// period of the caps it holds, an image VM's its run's own, re-read each window): do read a VM's whole window of CPU
+/// over half the window; then have the node read over twice the window and read twice the window of CPU over one; then
+/// over half the window and read a window of CPU over that. Expect each reading charged over at least the window the
+/// node reads over at its reading, so each is 1 CPU, 1 CPU and 2 CPUs.
+#[test]
+fn w14_a_reading_is_charged_over_at_least_the_window_its_node_reads_over_now() {
+    let mut n = node(res(16_000, 64 * GIB, 0));
+    n.admit(1, class_of(1, 16_000, 4 * GIB), 0, 16).unwrap();
+    let read = |n: &mut Node<u32>, cpu: Duration, span: Duration| {
+        n.observe(
+            1,
+            &Sample {
+                cpu: Cpu::Whole(cpu),
+                span,
+                mem_bytes: 0,
+                disk_bytes: Some(0),
+                cap_milli: None,
+            },
+        )
+        .unwrap();
+        n.vms[&1].held[0]
+    };
+    assert_eq!(read(&mut n, WINDOW, WINDOW / 2), 1_000);
+    n.set_window(Some(WINDOW * 2)).unwrap();
+    assert_eq!(n.window(), Some(WINDOW * 2));
+    assert_eq!(read(&mut n, WINDOW * 2, WINDOW), 1_000);
+    n.set_window(Some(WINDOW / 2)).unwrap();
+    assert_eq!(read(&mut n, WINDOW, WINDOW / 2), 2_000);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C1's window with none to read over: do have a node read over no window (a learner
+/// holding no cap yet) and read a VM; then have it read over a window of no time. Expect both refused, typed, and the
+/// node's window none.
+#[test]
+fn w14_a_node_reading_over_no_window_refuses_a_reading() {
+    let mut n = node(res(16_000, 64 * GIB, 0));
+    n.admit(1, class_of(1, 16_000, 4 * GIB), 0, 16).unwrap();
+    n.set_window(None).unwrap();
+    assert_eq!(n.window(), None);
+    assert!(matches!(
+        n.observe(1, &sample(1_000, GIB)),
+        Err(ChargeError::Invalid { .. })
+    ));
+    assert!(matches!(
+        n.set_window(Some(Duration::ZERO)),
+        Err(ChargeError::Invalid { .. })
+    ));
+    assert_eq!(n.window(), None);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's growth as C1's window changes: the fastest growth on record is a rate, kept
+/// with the window it was seen over and projected over the window the node reads over now. Do admit two VMs of 4 GiB
+/// allocations in an 8 GiB budget, each booked at 4 GiB, and grow them to 1 and 2 GiB in one window; then have the node
+/// read over twice the window, then over half of it. Expect the growth on record 3 GiB over the window, 6 GiB over
+/// twice it and 1.5 GiB over half of it; and the last resort holding over the window (3 GiB held and 3 GiB of growth
+/// within 8 GiB), past it over twice the window (3 GiB and 6 GiB), every VM within its own budget so none ended.
+#[test]
+fn w14_the_fastest_growth_is_projected_over_the_window_its_node_reads_over_now() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.admit(1, class_of(1, 1_000, 4 * GIB), 0, 1).unwrap();
+    n.admit(2, class_of(2, 1_000, 4 * GIB), 0, 1).unwrap();
+    window(&mut n, &[(1, 0, GIB), (2, 0, 2 * GIB)]);
+    assert_eq!(n.growth(), 3 * GIB);
+    assert_eq!(n.last_resort().unwrap(), Resort::Held);
+    n.set_window(Some(WINDOW * 2)).unwrap();
+    assert_eq!(n.growth(), 6 * GIB);
+    assert_eq!(
+        n.last_resort().unwrap(),
+        Resort::Within(Pressure {
+            held: 3 * GIB,
+            growth: 6 * GIB,
+            budget: 8 * GIB,
+        })
+    );
+    n.set_window(Some(WINDOW / 2)).unwrap();
+    assert_eq!(n.growth(), 3 * GIB / 2);
+}
+
 /// Joint plan step 14 (AC-T7.4.1), C1's sample: do ask a whole reading for its vCPUs; expect the typed upstream
 /// absence. Do read a split naming another vCPU count; expect it refused. Do read a split of two vCPUs and the
 /// VMM's own; expect the charge their sum.

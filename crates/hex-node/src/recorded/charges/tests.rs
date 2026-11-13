@@ -76,6 +76,8 @@ struct Record {
     usage: RefCell<BTreeMap<String, Usage>>,
     /// Each image VM's host use, as the test sets it, and each room it was told, in order.
     host: RefCell<BTreeMap<String, HostUse>>,
+    /// Each image VM's run's rate period, as the test sets it: refused for a VM it sets none for.
+    periods: RefCell<BTreeMap<String, Duration>>,
     rooms: RefCell<Vec<(String, i64)>>,
     rates: RefCell<Vec<(String, u64)>>,
     refuse_rates: std::cell::Cell<bool>,
@@ -101,6 +103,14 @@ impl Managed for Record {
             .get(record.spec.id.as_str())
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
+    }
+
+    fn rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+        self.periods
+            .borrow()
+            .get(record.spec.id.as_str())
+            .copied()
+            .ok_or_else(|| Refusal::Broken("no such run".into()))
     }
 
     fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
@@ -981,4 +991,234 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
+}
+
+/// Image VM `name`'s host use with nothing used yet, its 16 vCPUs' guest time none and `held` held.
+fn unused(io: &Record, name: &str, held: u64) {
+    io.host.borrow_mut().insert(
+        name.to_owned(),
+        HostUse {
+            cpu_ns: 0,
+            footprint_bytes: held,
+            resident_bytes: held,
+            guest_ns: vec![0; 16],
+        },
+    );
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a capping learner's window is the longest period of the caps it holds,
+/// its platform's for managed VMs and each image VM's its run's own (D247's `ImageGuest::rate_period`), re-read each
+/// window, never a number of its own. Do run a window of two image VMs whose runs say 100 ms and 500 ms, on a learner
+/// whose platform's window is 300 ms; then one after the 500 ms run has ended; then one after the other run says
+/// 700 ms (a period Shards derives later reaches Hex as it is). Expect its window after each the longest of those it
+/// then holds: 500 ms, the platform's 300 ms, then 700 ms.
+#[test]
+fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_read_each_window() {
+    let io = Record::default();
+    let short = image_vm("img-1", 1);
+    let long = image_vm("img-2", 2);
+    unused(&io, "img-1", GIB);
+    unused(&io, "img-2", GIB);
+    io.periods
+        .borrow_mut()
+        .insert("img-1".to_owned(), Duration::from_millis(100));
+    io.periods
+        .borrow_mut()
+        .insert("img-2".to_owned(), Duration::from_millis(500));
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, &[short.clone(), long], budget, start)
+        .unwrap();
+    assert_eq!(
+        learner.next_window(),
+        Some(Duration::from_millis(500)),
+        "the longest run's period"
+    );
+    learner
+        .window(
+            &io,
+            std::slice::from_ref(&short),
+            budget,
+            start + Duration::from_millis(500),
+        )
+        .unwrap();
+    assert_eq!(
+        learner.next_window(),
+        Some(WINDOW),
+        "the platform's, once the longer run has ended"
+    );
+    io.periods
+        .borrow_mut()
+        .insert("img-1".to_owned(), Duration::from_millis(700));
+    learner
+        .window(
+            &io,
+            std::slice::from_ref(&short),
+            budget,
+            start + Duration::from_millis(800),
+        )
+        .unwrap();
+    assert_eq!(
+        learner.next_window(),
+        Some(Duration::from_millis(700)),
+        "re-read each window"
+    );
+}
+
+/// Joint plan step 14 (C1): the learner's thread waits out its window whatever comes meanwhile, as the window's end
+/// reads every VM then held; with no window (a node with no platform window holding no image VM), until a box begins;
+/// and ends once its node has gone. Do wait out a 40 ms window with a box's beginning told before it; wait with no
+/// window, a box's beginning told; then wait, with no window and with one, once the node's end has dropped. Expect the
+/// first to look only once its window has passed, the second to look at once, and the last two gone.
+#[test]
+fn w14_the_learners_thread_waits_out_its_window_and_with_none_for_a_box_to_begin() {
+    let (begun, waits) = hex_wait::mpsc::sync_channel(1).unwrap();
+    begun.try_send(()).unwrap();
+    let window = Duration::from_millis(40);
+    let asked = Instant::now();
+    assert_eq!(wait(&waits, Some(window)).unwrap(), Waited::Look);
+    assert!(asked.elapsed() >= window, "a beginning doesn't cut a window short");
+    begun.try_send(()).unwrap();
+    assert_eq!(wait(&waits, None).unwrap(), Waited::Look);
+    drop(begun);
+    assert_eq!(wait(&waits, None).unwrap(), Waited::Gone);
+    assert_eq!(wait(&waits, Some(window)).unwrap(), Waited::Gone);
+}
+
+/// A native owner with no window of its own, as Windows' is (its job's hard cap holds per an undocumented interval),
+/// over the simulated runtime: its Shards image VMs' runs each say the period the test sets for its box, answer their
+/// rooms and rates as told and read as using nothing, and it counts the learner's reads of a period.
+#[derive(Default)]
+struct Imaging {
+    sim: hex_api::sim::SimRuntime,
+    periods: std::sync::Mutex<BTreeMap<String, Duration>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone, Default)]
+struct Images(std::sync::Arc<Imaging>);
+
+impl hex_api::Runtime for Images {
+    fn classes(&self) -> Vec<hex_api::Class> {
+        self.0.sim.classes()
+    }
+    fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        self.0.sim.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.sim.start(id)
+    }
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.sim.exec(id, program, stdio)
+    }
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.sim.run(spec, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
+        self.0.sim.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.0.sim.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        self.0.sim.usage(id)
+    }
+    fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        self.0.sim.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.sim.delete(id)
+    }
+    fn room(&self, _: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        Ok(room.and_then(|room| u64::try_from(room).ok()))
+    }
+    fn rate(
+        &self,
+        _: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        Ok(rate)
+    }
+    fn host_use(&self, _: &BoxId) -> Result<HostUse, Refusal> {
+        Ok(HostUse {
+            cpu_ns: 0,
+            footprint_bytes: GIB,
+            resident_bytes: GIB,
+            guest_ns: Vec::new(),
+        })
+    }
+}
+
+impl crate::recorded::Recover for Images {
+    fn trace(&self, _: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+    fn adopt(&self, _: &BoxSpec, _: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn end(&self, _: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+        self.0
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.0.periods.lock().unwrap().get(record.spec.id.as_str()) {
+            Some(period) => Ok(*period),
+            None => Err(Refusal::NotRunning(record.spec.id.try_clone()?, "rate_period")),
+        }
+    }
+}
+
+/// The learner's thread woken by an image VM's making: a fact no recorded operation makes, so it measures, for its
+/// fact alone (hex_testkit::waits).
+static WOKEN: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.charges_woken");
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a node whose platform holds no window of its own (Windows': its job's
+/// interval undocumented) still learns its Shards image VMs, each over its run's period. Do start the charge learner
+/// of such a node; run a window holding no VM; then make an image VM whose run says 70 ms. Expect the learner started,
+/// its window none while it holds no VM, the VM's making waking it to read the run's period, and its window then the
+/// run's 70 ms.
+#[test]
+fn w14_a_node_with_no_platform_window_learns_its_image_vms_over_their_runs_periods() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    let node = std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    node.start_charges().unwrap();
+    assert_eq!(node.learn_window(), None, "no window while it holds no VM");
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    let spec = BoxSpec {
+        id: BoxId::new("img-1").unwrap(),
+        bounds: hex_api::Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(hex_api::ShardsImage::new(hex_api::sim::SIM_IMAGE))),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    };
+    hex_api::Runtime::create(node.as_ref(), spec).unwrap();
+    hex_testkit::waits::until(&WOKEN, "the learner woken by an image VM's making", || {
+        images.0.reads.load(std::sync::atomic::Ordering::SeqCst) > 0
+    })
+    .unwrap();
+    assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
 }
