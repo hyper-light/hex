@@ -2676,6 +2676,12 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
     }
 }
 
+/// A cold helper's first stop response (joint plan step 14, 2c). Original (red): none is probed, so a cold helper's
+/// scopes wait on a natural hold for one.
+fn probe_response() -> Result<Option<Duration>, Refusal> {
+    Ok(None)
+}
+
 /// When every member of `order` read stopped (joint plan step 14, 2c): each read until it is, followed with no timer
 /// while it lives, as `macos_cpu_response` reads a stop; none where one ended or left meanwhile, so its hold is no
 /// sample.

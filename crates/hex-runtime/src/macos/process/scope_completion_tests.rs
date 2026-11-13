@@ -695,3 +695,45 @@ fn w14_a_learning_helpers_scope_reads_its_own_response_never_the_launchs() {
     .unwrap();
     assert_eq!(cold.cpu_burst(), Some(i128::from(cpu)));
 }
+
+/// Joint plan step 14 (2c; ROOT, 2026-11-13, cold start (a)): a cold helper probes its control's first stop response
+/// before the first scope it controls starts from it: a spinner of its own held once at Hex's least CPU bound. Do ask a
+/// new helper's start for a scope. Expect its slowest seen no longer none, a response of some time.
+#[test]
+fn w14_a_cold_helpers_first_scope_is_probed_for_its_response() {
+    let one = std::num::NonZeroU64::new(1).unwrap();
+    let shared = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
+    assert_eq!(shared.cpu_response().unwrap(), None);
+    let start = shared.cpu_start().unwrap();
+    assert_eq!(shared.cpu_response().unwrap(), Some(start));
+    assert!(start > hex_core::helper::managed::COLD_RESPONSE, "{start:?}");
+}
+
+/// Joint plan step 14 (2c; ROOT, 2026-11-13): a helper restarted with live scopes starts cold on purpose. Its slowest
+/// stop lived in the old helper's memory, so a re-attached scope's control starts from the new helper's own, probed
+/// before the scope is controlled, never the old helper's; and a first hold slower than that raises it, its overshoot
+/// charged whole (`cpu::tests::a_held_scopes_slower_stop_tops_up_its_hold`). Do learn a 2 s response on one helper;
+/// restart it (a new helper's shared state) and remake the live scope's control on it, as its re-attach does; then
+/// learn a hold 1 ms slower than the new start. Expect the new helper's start its own probe's, not 2 s; the scope's
+/// burst its maximum over that start, then over the hold's; and the new helper's slowest raised to the hold's.
+#[test]
+fn w14_a_restarted_helper_starts_its_live_scopes_cold_and_raises_on_their_first_hold() {
+    let record = pool();
+    let native = NativeRecord::Pool(&record);
+    let control = super::super::CpuControl::cold(record.cost.id);
+    let cpu = record.allocation.unwrap().resources.cpu_milli;
+    let one = std::num::NonZeroU64::new(1).unwrap();
+    let before = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
+    before.observe_cpu_response(Duration::from_secs(2)).unwrap();
+    let after = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
+    let start = after.cpu_start().unwrap();
+    assert!(start < Duration::from_secs(2), "the old helper's response carried: {start:?}");
+    let scope = Scope::new(native, Some((control, cpu)), Duration::ZERO, start).unwrap();
+    let nanos = |d: Duration| i128::try_from(d.as_nanos()).unwrap();
+    assert_eq!(scope.cpu_burst(), Some(i128::from(cpu) * nanos(start)));
+    let hold = start + Duration::from_millis(1);
+    scope.cpu_learn(native.owner(), hold).unwrap();
+    after.observe_cpu_response(hold).unwrap();
+    assert_eq!(scope.cpu_burst(), Some(i128::from(cpu) * nanos(hold)));
+    assert_eq!(after.cpu_response().unwrap(), Some(hold));
+}
