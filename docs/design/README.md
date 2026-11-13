@@ -77,8 +77,9 @@ working directory (step 7, D240); ring pins within a guest's room (D230, D188; `
 Shards' own links (D239); and agent control over hyper-transport, where its TLS ends still open (D238). Since
 `e82b9403`, Shards main has decided that its TLS ends at the host (plan step 10; D238 and PM M540 at `1b6e1203d`) and
 built the agent-control endpoint's connection, its microVM's pinned key and its members' stdio lanes (step 11; D238
-at `60c5dfbc6`), which `vendor/shards` does not hold yet. A guest's room through shards-api (`Awaits(GuestRoom)`) is
-not built. The joint plan's every decision and where it is recorded:
+at `60c5dfbc6`), and a guest's room told through shards-api with an image run's microVM cost, each vCPU's guest time
+among it, in its stats (D241 at `9bf25f367`, which `Awaits(GuestRoom)`, `Awaits(RingPinsWithinRoom)` and
+`Awaits(GuestCpuTimePerVcpu)` wait on), none of which `vendor/shards` holds yet. The joint plan's every decision and where it is recorded:
 Shards' `docs/research/s37-decision-inventory.md` (plan step 37).
 
 ## The gate's skips
