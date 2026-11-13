@@ -2417,6 +2417,11 @@ impl Node {
         self.nodes.remove(&run).is_some()
     }
 
+    /// The node VMs it books ([`Node::book_node`]), by their runs, in order.
+    pub fn booked_nodes(&self) -> impl Iterator<Item = hex_api::NodeRun> + '_ {
+        self.nodes.keys().copied()
+    }
+
     /// The boxes this node owns that wait for room, run, or have ended unforgotten.
     pub fn owned(&self) -> usize {
         self.owned.len()

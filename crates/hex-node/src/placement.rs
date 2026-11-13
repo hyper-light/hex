@@ -1058,6 +1058,34 @@ impl Driver {
     // The view's calls and rebook change only state under the core lock, never a runtime's: they don't take the
     // operation's, which refuses a call while another holds it, so a holder's word never waits on a placement.
 
+    /// Books each node VM in `booked` at its receipt, and releases each node VM it booked that `booked` no longer
+    /// names, with what it was said to hold (joint plan step 39; ROOT, 2026-11-13): `booked` is what its node's answers
+    /// say hold room, its Booting and Ready node VMs. A node VM booked again keeps one receipt, the later one. Like
+    /// rebook, it changes only state under the core lock, and the node's ledger is given the room left at once.
+    pub fn book_nodes(&self, booked: &BTreeMap<hex_api::NodeRun, Resources>) -> Result<(), Error> {
+        let mut state = self.lock()?;
+        let count = state.node.booked_nodes().count();
+        let mut gone = Vec::new();
+        gone.try_reserve_exact(count)
+            .map_err(|_| Refusal::Exhausted {
+                what: "node VMs to release",
+                bound: count,
+            })?;
+        gone.extend(
+            state
+                .node
+                .booked_nodes()
+                .filter(|run| !booked.contains_key(run)),
+        );
+        for run in gone {
+            state.node.release_node(run);
+        }
+        for (run, receipt) in booked {
+            state.node.book_node(*run, *receipt);
+        }
+        readmit(&mut state)
+    }
+
     /// What each microVM this node runs holds now, as the learned charge has it (joint plan step 14, C8):
     /// its learned booking, and the memory and disk it holds past it. The machine's capacity view counts
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,

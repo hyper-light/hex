@@ -3221,6 +3221,7 @@ mod single_use_tests {
                 backings: Vec::new(),
                 unavailable: Vec::new(),
                 learned: None,
+                node_vms: Vec::new(),
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {

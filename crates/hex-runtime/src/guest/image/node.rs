@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hex_api::{Allocation, Exit, HostUse, NodeRun, Refusal};
+use hex_api::{Allocation, Exit, HostUse, NodeRun, NodeVmPhase, Refusal};
 use hex_core::patience::Patience;
-use hex_core::record::{NodeVmPhase, NodeVmRecord, RECORD_VERSION};
+use hex_core::record::{NodeVmRecord, RECORD_VERSION};
 use shards_api::image::{
     BootStop, ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep,
     Narrowing, Ready, SocketGrant, StatsScope,
@@ -204,6 +204,29 @@ impl ImageClass {
                 "node VM {}: its stop answered, and its run hasn't ended",
                 run_name(&run)
             ))),
+        }
+    }
+
+    /// Whether node VM `run` still runs here: a run that ended on its own is reaped through its stop, its end kept in
+    /// its record; one booting, stopping or never run here doesn't.
+    pub fn node_runs(&self, run: NodeRun) -> Result<bool, Refusal> {
+        let image = self.image()?;
+        let guest = match image.runs.settle(run, image.waits.as_ref().ok())? {
+            Settled::Started(guest) | Settled::Running(guest) => guest,
+            Settled::Ends(end) => {
+                self.ended_node(self.authority()?.as_ref(), run, &end)?;
+                return Ok(false);
+            }
+            Settled::Booting | Settled::Stopping(..) | Settled::None => return Ok(false),
+        };
+        match guest.wait_for(Duration::ZERO) {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) | Err(ImageRefusal::Ended(_)) => {
+                drop(guest);
+                self.stop_node(run)?;
+                Ok(false)
+            }
+            Err(why) => Err(refused("reading a node VM's end", why)),
         }
     }
 

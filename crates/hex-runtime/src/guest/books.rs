@@ -721,6 +721,7 @@ mod tests {
                 backings: Vec::new(),
                 unavailable: Vec::new(),
                 learned: None,
+                node_vms: Vec::new(),
             })
         }
         fn with_transaction(

@@ -1518,10 +1518,12 @@ impl GuestRuntime {
         reservation.previous = Some(known);
         let terminal = booted
             .guest
+            .shards_for("observing selected guest lifetime")?
             .wait_for(Duration::ZERO)
             .map_err(|why| refusal("observing selected guest lifetime", &why))?;
         let scope = booted
             .guest
+            .shards_for("observing selected native scope")?
             .terminal_scope()
             .map_err(|why| refusal("observing selected native scope", &why))?;
         if terminal.is_some() || scope.is_some() {
@@ -1566,6 +1568,7 @@ impl GuestRuntime {
             self.selected_spec(&receipt)?;
             let identity = booted
                 .guest
+                .shards_for("validating selected route identity")?
                 .identity()
                 .map_err(|why| refusal("validating selected route identity", &why))?;
             managed::same_init(&record, &identity)?;

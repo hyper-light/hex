@@ -640,6 +640,7 @@ mod tests {
             cost: None,
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         }
     }
 

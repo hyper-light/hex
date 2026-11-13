@@ -2016,6 +2016,7 @@ impl Runtime for WinRuntime {
             },
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         native_route_offer(&mut report, class, initialized)?;
         report.check()?;
@@ -2351,6 +2352,7 @@ mod tests {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
         let route = report
@@ -2385,6 +2387,7 @@ mod tests {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
         report.check().unwrap();
@@ -2445,6 +2448,7 @@ mod tests {
             backings: Vec::new(),
             unavailable: Vec::new(),
             learned: None,
+            node_vms: Vec::new(),
         };
         native_route_offer(&mut unavailable, Class::Oci, false).unwrap();
         let (process, _) =

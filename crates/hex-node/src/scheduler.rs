@@ -874,6 +874,8 @@ impl Service {
         let mut local = local;
         // Joint plan step 14 (C2): what the node's learner carried, taken before the answers are applied.
         let learned = charges::learned(&snapshot.reports)?;
+        // Joint plan step 39: the node VMs its answers say hold room, booked before any admission is made.
+        let nodes = charges::node_vms(&snapshot.reports)?;
         capacity::apply(
             snapshot.reports,
             &facts,
@@ -914,6 +916,7 @@ impl Service {
             )
             .map_err(failed)?,
         );
+        driver.book_nodes(&nodes).map_err(failed)?;
         if let Some(measured) = measured {
             driver.refresh_node(measured).map_err(failed)?;
         }
@@ -1329,6 +1332,8 @@ impl Service {
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         // Joint plan step 14 (C2): what the node's learner carried, taken before the answers are applied.
         let learned = charges::learned(&snapshot.reports)?;
+        // Joint plan step 39: the node VMs its answers say hold room.
+        let nodes = charges::node_vms(&snapshot.reports)?;
         capacity::apply(
             snapshot.reports,
             &facts,
@@ -1346,6 +1351,9 @@ impl Service {
                 bound: 1,
             })?)
             .map_err(failed)?;
+        // Joint plan step 39: each node VM at its receipt while it is Booting or Ready, released once it is Ended or no
+        // answer names it, before the holdings, which hold a node VM only while it is booked.
+        self.driver.book_nodes(&nodes).map_err(failed)?;
         // Joint plan step 14 (C8): each VM at the holding its node's learner carried, booked against its key.
         let ids = self.driver.running_ids().map_err(failed)?;
         self.driver

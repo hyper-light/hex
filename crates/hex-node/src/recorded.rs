@@ -1718,8 +1718,14 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
         self.books.store.put_node_vm(record)
     }
+    fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
+        self.books.store.all_node_vms()
+    }
     fn remove_node_vm(&self, run: &hex_api::NodeRun) -> Result<(), Refusal> {
         self.books.store.remove_node_vm(run)
+    }
+    fn mint_node_run(&self) -> Result<hex_api::NodeRun, Refusal> {
+        self.books.store.mint_node_run()
     }
 }
 
@@ -2392,6 +2398,18 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
         self.runtime
             .guest()
             .bind_boot_session(self.books.store.boot().cloned())
+    }
+
+    /// The lanes its guest under shards-init admits at once, as this node fitted them with that guest's among its
+    /// descriptors (joint plan step 39): set once, before that guest boots.
+    pub fn set_guest_lanes(&self, lanes: u32) -> Result<(), Refusal> {
+        self.runtime.guest().set_lanes(lanes)
+    }
+
+    /// Boots its guest now, so no create pays a boot: a guest under shards-init, which no shared backing's grant
+    /// boots (joint plan step 39).
+    pub fn boot_guest(&self) -> Result<(), Refusal> {
+        self.runtime.guest().boot()
     }
 
     /// Publish only the configured shared backing after the complete retained-owner preflight.

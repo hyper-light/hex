@@ -582,8 +582,12 @@ impl GuestRuntime {
         Ok(())
     }
 
+    /// Whether its guest is a managed shared backing, booked and charged through the node's ledger as Hex's helper
+    /// runs it. Never the node's guest under shards-init: Shards' run host runs that one, a node VM booked as its run's
+    /// (ROOT, 2026-11-13: none of the managed shared-backing machinery applies), whose record owner it keeps.
     pub(super) fn managed_shared(&self) -> bool {
-        self.uses_books() || self.runtime_cost.is_some()
+        !matches!(self.config.boot, super::Boot::Image(_))
+            && (self.uses_books() || self.runtime_cost.is_some())
     }
 
     fn pool_path(&self) -> Result<&Path, Refusal> {
@@ -1331,10 +1335,12 @@ impl GuestRuntime {
     pub(super) fn pool_alive(&self, booted: &Booted, key: BackingKey) -> Result<(), Refusal> {
         let exited = booted
             .guest
+            .shards_for("observing shared controller")?
             .process_exited()
             .map_err(|why| refusal("observing shared controller", &why))?;
         let scope = booted
             .guest
+            .shards_for("observing shared native scope")?
             .terminal_scope()
             .map_err(|why| refusal("observing shared native scope", &why))?;
         if exited || scope.is_some() {
@@ -1476,6 +1482,7 @@ impl GuestRuntime {
             self.matches_pool(&booted, &record)?;
             let scope = booted
                 .guest
+                .shards_for("observing original shared parent scope")?
                 .terminal_scope()
                 .map_err(|why| refusal("observing original shared parent scope", &why))?;
             if scope == Some(shards_api::TerminalScope::Released) {
