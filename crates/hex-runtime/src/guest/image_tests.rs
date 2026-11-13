@@ -400,7 +400,7 @@ fn model_runtime(
         })),
         super::super::tests::config(),
     )
-    .with_images(Ok(Arc::clone(images) as Arc<dyn Images>), waits);
+    .with_images(Arc::clone(images) as Arc<dyn Images>, waits);
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     (runtime, owner)
@@ -708,22 +708,6 @@ fn a_boot_is_given_its_learned_patience_and_ends_the_box_past_it() {
     assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask what D231's run host awaits on each host OS. Expect: on macOS and on
-/// Windows its start holding only its stdio (RunHostStdioOnly), as Shards starts it through std's spawn, which hands
-/// it what another thread holds inheritable then: on macOS every descriptor not yet marked close-on-exec, on Windows
-/// every inheritable handle (no handle list), though Shards gives the Windows run host itself since 731b5e54; on
-/// Linux nothing.
-#[test]
-fn the_run_host_awaits_its_stdio_alone_on_macos_and_windows() {
-    for (os, awaits) in [
-        ("macos", Some(Upstream::RunHostStdioOnly)),
-        ("windows", Some(Upstream::RunHostStdioOnly)),
-        ("linux", None),
-    ] {
-        assert_eq!(run_host_awaits(os), awaits, "{os}");
-    }
-}
-
 /// Joint plan step 12, the owner's crash (ROOT, 2026-11-12): do give the runtime a Ready record with no
 /// exit and no run of this process, as a node restart leaves. Expect: every call and recovery's
 /// adoption refused Awaits(AttachAfterCrash), the record and its claim kept; then, the host's boot
@@ -814,36 +798,54 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 12: do create where the host has no image boot, as macOS's and Windows' are until D231's run
-/// host is started holding only its stdio. Expect: refused naming that, before any record.
+/// Joint plan step 12: do create on a node configured with no image boot. Expect: refused naming that, before
+/// any record.
 #[test]
-fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
+fn a_create_is_refused_before_any_record_on_a_node_without_an_image_boot() {
     let owner = Arc::new(Owner::default());
-    let refused = Refusal::Awaits {
-        needs: Upstream::RunHostStdioOnly,
-    };
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        super::super::tests::config(),
+    );
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    assert_eq!(
+        runtime.create(spec("image-no-host", None)).map(|_| ()),
+        Err(Refusal::Platform {
+            what: "Shards image VMs",
+            platform: std::env::consts::OS,
+            why: "this node configures no Shards image boot".to_owned(),
+        })
+    );
+    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+}
+
+/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too): do create an image
+/// VM on this host's own image boot, as `hex node` configures it. Expect: created and recorded on every host, Linux,
+/// macOS and Windows, its run host started holding only its stdio (vendor/patches/shards 0001: posix_spawn with
+/// POSIX_SPAWN_CLOEXEC_DEFAULT, CreateProcessW with a handle list), so nothing awaits it.
+#[test]
+fn this_hosts_image_boot_is_shards_on_every_host() {
+    let owner = Arc::new(Owner::default());
     let runtime = GuestRuntime::new(
         Arc::new(shards_api::sim::SimGuests::new(|_| {
             shards_api::End::PowerOff
         })),
         super::super::tests::config(),
     )
-    .with_images(Err(refused.clone()), waits());
+    .with_images(host_images(), waits());
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let id = BoxId::new("image-here").unwrap();
     assert_eq!(
-        runtime.create(spec("image-no-host", None)).map(|_| ()),
-        Err(refused)
+        runtime
+            .create(spec("image-here", None))
+            .map(|info| info.state),
+        Ok(BoxState::Created)
     );
-    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
-}
-
-/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too): do ask for this
-/// host's image boot. Expect: Shards' on every host, its run host started holding only its stdio
-/// (vendor/patches/shards 0001: posix_spawn with POSIX_SPAWN_CLOEXEC_DEFAULT, CreateProcessW with a handle list).
-#[test]
-fn this_hosts_image_boot_is_shards_on_every_host() {
-    assert_eq!(host_images().map(|_| ()), Ok(()));
+    assert!(record(&owner, &id).is_some());
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded

@@ -1866,13 +1866,10 @@ pub enum Upstream {
     /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
     /// shards-api's image boot (D231) has no call to send (joint plan step 14).
     GuestRoom,
-    /// The host of an image's run started holding only its stdio, as every program Hex starts is:
-    /// D231 starts `shards api-run` through std's `Command` (Shards 66113379), so it would inherit
-    /// what another thread holds inheritable at that moment (CVE-2024-21626's class). On macOS std's
-    /// spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and a descriptor is made before it is marked
-    /// close-on-exec. On Windows std's `CreateProcessW` inherits handles with no handle list, so
-    /// every handle then inheritable goes too: a member's stdio, which Hex marks inheritable for
-    /// that member's own handle list as it starts it.
+    /// The host of an image's run started holding only its stdio, as every program Hex starts is. Given since
+    /// Hex's vendor/patches/shards 0001 (offered upstream): shards-api starts `shards api-run` by posix_spawn with
+    /// `POSIX_SPAWN_CLOEXEC_DEFAULT` on macOS and by CreateProcessW with a handle list on Windows. No call awaits
+    /// it now; its place in [`Upstream::ALL`] stays, as the node's wire tags it.
     RunHostStdioOnly,
     /// The member a published port reaches, named by Shards' image boot (D231). Given since Shards 66113379
     /// (`Bound::to`), so no call awaits it now: a run is held to it as its boot returns (joint plan step 15,
@@ -1940,7 +1937,7 @@ impl std::fmt::Display for Upstream {
             }
             Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
             Self::RunHostStdioOnly => {
-                "Shards' host of an image's run started holding only its stdio (owed by D231)"
+                "Shards' host of an image's run started holding only its stdio (D231)"
             }
             Self::PublishReceiver => {
                 "Shards' image boot naming the member a published port reaches (given by D231's Bound::to)"

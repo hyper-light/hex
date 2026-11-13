@@ -71,11 +71,10 @@ impl ImageWaits {
     }
 }
 
-/// Shards' image boot as the guest runtime holds it: the booter or why this host has none, its waits or
-/// why it has none, this process's runs, and the host's boot session, which proves a run of an earlier
-/// boot ended.
+/// Shards' image boot as the guest runtime holds it: the booter, its waits or why it has none, this
+/// process's runs, and the host's boot session, which proves a run of an earlier boot ended.
 pub(super) struct ImageBoot {
-    images: Result<Arc<dyn Images>, Refusal>,
+    images: Arc<dyn Images>,
     waits: Result<ImageWaits, Refusal>,
     /// One for each box with a boot, run or stop of this process; at most a box's every own, so bounded
     /// by the node's boxes ([`crate::MAX_BOXES`]).
@@ -306,10 +305,6 @@ fn held() -> Refusal {
 }
 
 impl ImageBoot {
-    fn images(&self) -> Result<&Arc<dyn Images>, Refusal> {
-        self.images.as_ref().map_err(Clone::clone)
-    }
-
     fn waits(&self) -> Result<&ImageWaits, Refusal> {
         self.waits.as_ref().map_err(Clone::clone)
     }
@@ -369,36 +364,19 @@ impl ImageBoot {
     }
 }
 
-/// Shards' image boot (D231) as this host can run it, or why it can't (`run_host_awaits`;
-/// docs/design/shards-image-class.md §1).
-pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
-    match run_host_awaits(std::env::consts::OS) {
-        Some(needs) => Err(Refusal::Awaits { needs }),
-        None => Ok(Arc::new(shards_api::image::ImageShards::new())),
-    }
-}
-
-/// What D231's run host awaits on the OS `os` (as `std::env::consts::OS` names it) before this class boots
-/// image VMs there, or nothing. D231 starts it through std's `Command`, which hands it what another thread
-/// holds inheritable at that moment, where every program Hex starts holds only its stdio: on macOS std's
-/// spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT` while macOS's pipe, socket, socketpair and accept take no
-/// close-on-exec flag (`crate::macos::command` passes it); on Windows its `CreateProcessW` inherits with no
-/// handle list, so every handle then inheritable goes too, a member's stdio among them, which
-/// `crate::windows::sys::create` marks inheritable for that member's own handle list.
-fn run_host_awaits(os: &str) -> Option<Upstream> {
-    match os {
-        "macos" | "windows" => Some(Upstream::RunHostStdioOnly),
-        _ => None,
-    }
+/// Shards' image boot (D231): every host runs it, its run host started holding only its stdio
+/// (docs/design/shards-image-class.md §1; vendor/patches/shards 0001).
+pub fn host_images() -> Arc<dyn Images> {
+    Arc::new(shards_api::image::ImageShards::new())
 }
 
 impl GuestRuntime {
-    /// Shards' image boot (D231) or why this host has none ([`host_images`]), and the waits its calls
-    /// make or why there are none: a create is refused with either refusal, so no box exists that this
-    /// host couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6).
+    /// Shards' image boot (D231, [`host_images`]), and the waits its calls make or why there are none:
+    /// a create is refused with that refusal, so no box exists that a wait of its own couldn't bound
+    /// (docs/design/shards-image-class.md §6).
     pub fn with_images(
         mut self,
-        images: Result<Arc<dyn Images>, Refusal>,
+        images: Arc<dyn Images>,
         waits: Result<ImageWaits, Refusal>,
     ) -> Self {
         self.image = Some(ImageBoot {
@@ -593,9 +571,7 @@ impl GuestRuntime {
 
     pub(super) fn create_image(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
-        let image = self.image()?;
-        image.images()?;
-        image.waits()?;
+        self.image()?.waits()?;
         vm_size(&spec)?;
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
@@ -619,7 +595,7 @@ impl GuestRuntime {
     pub(super) fn start_image(&self, record: BoxRecord) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let image = self.image()?;
-        let images = Arc::clone(image.images()?);
+        let images = Arc::clone(&image.images);
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}
