@@ -112,29 +112,33 @@ impl Scope {
         baseline: Duration,
         response: Duration,
     ) -> Result<Self, Refusal> {
-        let allocation = record
-            .allocation()
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        let allocation = record.allocation().ok_or_else(|| {
+            record.uncertain("its record holds no allocation for its native scope")
+        })?;
         allocation.guest()?;
         if record.class()? != Class::Shards {
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(
+                record.uncertain("its record isn't a Shards VM's, which a native scope runs")
+            );
         }
-        let (control, maximum) =
-            control.ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        let (control, maximum) = control
+            .ok_or_else(|| record.uncertain("its node configures no managed CPU control"))?;
         if control.cost_id != allocation.cost.id {
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(record.uncertain("its CPU control was configured for another cost"));
         }
         control
             .check()
-            .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+            .map_err(|_| record.uncertain("its CPU control isn't valid"))?;
         let cpu = Some(Mutex::new(
             super::cpu::Control::new(allocation.resources.cpu_milli, maximum, response, baseline)
-                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+                .map_err(|_| {
+                record.uncertain("its CPU control couldn't be made for its allocation's rate")
+            })?,
         ));
         Ok(Self {
             scope: record
                 .scope()
-                .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?,
+                .ok_or_else(|| record.uncertain("its record names no native scope"))?,
             commitment: record.commitment()?,
             phase: Mutex::new(Phase::Prepared),
             preparation: Mutex::new(None),
@@ -145,7 +149,9 @@ impl Scope {
             vsock: std::sync::OnceLock::new(),
         })
     }
-    pub(super) fn refusal(&self, owner: OwnerRef<'_>) -> Refusal {
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
+    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    pub(super) fn uncertain(&self, owner: OwnerRef<'_>, why: &str) -> Refusal {
         match owner {
             OwnerRef::Box(id) => uncertain(id),
             OwnerRef::Pool(pool) => Refusal::Backing {
@@ -154,7 +160,7 @@ impl Scope {
                     generation: *self.scope.bytes(),
                 },
                 cause: LifecycleCause::Uncertain,
-                why: None,
+                why: Some(why.to_owned()),
             },
         }
     }
@@ -193,25 +199,37 @@ impl Scope {
         record.scope() == Some(self.scope) && commitment == self.commitment
     }
     pub(super) fn held(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
+        let mut phase = self.lock().map_err(|_| {
+            self.uncertain(id, "its native scope's phase is poisoned as it is held")
+        })?;
         if *phase != Phase::Prepared {
-            return Err(self.refusal(id));
+            return Err(self.uncertain(id, "its native scope isn't prepared as it is held"));
         }
         *phase = Phase::Held;
         Ok(())
     }
     pub(super) fn running(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
+        let mut phase = self
+            .lock()
+            .map_err(|_| self.uncertain(id, "its native scope's phase is poisoned as it runs"))?;
         if *phase != Phase::Held {
-            return Err(self.refusal(id));
+            return Err(self.uncertain(id, "its native scope isn't held as it starts running"));
         }
         *phase = Phase::Running;
         Ok(())
     }
     pub(super) fn not_submitted(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
+        let mut phase = self.lock().map_err(|_| {
+            self.uncertain(
+                id,
+                "its native scope's phase is poisoned as its submission is refused",
+            )
+        })?;
         if !matches!(*phase, Phase::Prepared | Phase::Held) {
-            return Err(self.refusal(id));
+            return Err(self.uncertain(
+                id,
+                "its native scope is past its hold as its submission is refused",
+            ));
         }
         *phase = Phase::NotSubmitted;
         Ok(())
@@ -219,12 +237,22 @@ impl Scope {
     pub(super) fn watchable(&self, id: OwnerRef<'_>) -> Result<bool, Refusal> {
         self.lock()
             .map(|phase| *phase == Phase::Running)
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| {
+                self.uncertain(
+                    id,
+                    "its native scope's phase is poisoned as its watcher reads it",
+                )
+            })
     }
     pub(super) fn no_submission(&self, id: OwnerRef<'_>) -> Result<bool, Refusal> {
         self.lock()
             .map(|phase| matches!(*phase, Phase::Prepared | Phase::NotSubmitted))
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| {
+                self.uncertain(
+                    id,
+                    "its native scope's phase is poisoned as its submission is asked",
+                )
+            })
     }
     pub(super) fn notify(&self) -> Result<(), ProcessFailure> {
         let mut channel = self
@@ -285,13 +313,20 @@ impl Scope {
         }
     }
     pub(super) fn start_cpu(&self, id: OwnerRef<'_>) -> Result<super::cpu::Decision, Refusal> {
-        let cpu = self.cpu.as_ref().ok_or_else(|| self.refusal(id))?;
+        let cpu = self
+            .cpu
+            .as_ref()
+            .ok_or_else(|| self.uncertain(id, "its native scope has no CPU control to start"))?;
         let observed =
             sys::managed_process_cpu().map_err(|error| Refusal::os("reading helper CPU", error))?;
         let now = Instant::now();
-        let mut cpu = cpu.lock().map_err(|_| self.refusal(id))?;
-        cpu.start(now, observed).map_err(|_| self.refusal(id))?;
-        cpu.observe(now, observed).map_err(|_| self.refusal(id))
+        let mut cpu = cpu
+            .lock()
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as it starts"))?;
+        cpu.start(now, observed)
+            .map_err(|_| self.uncertain(id, "its CPU control refused its start"))?;
+        cpu.observe(now, observed)
+            .map_err(|_| self.uncertain(id, "its CPU control refused its first observation"))
     }
     pub(super) fn cpu_decision(
         &self,
@@ -303,31 +338,35 @@ impl Scope {
         let observed =
             sys::managed_process_cpu().map_err(|error| Refusal::os("reading helper CPU", error))?;
         cpu.lock()
-            .map_err(|_| self.refusal(id))?
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as it decides"))?
             .observe(Instant::now(), observed)
             .map(Some)
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| self.uncertain(id, "its CPU control refused an observation"))
     }
     /// Joint plan step 14 (C4 on macOS): the scope's CPU rate becomes `rate`, its share as the node's learner water-fills
     /// it; what the helper used up to now is charged at the rate it had (`cpu::Control::set_rate`).
     pub(super) fn set_cpu_rate(&self, id: OwnerRef<'_>, rate: u64) -> Result<(), Refusal> {
-        let cpu = self.cpu.as_ref().ok_or_else(|| self.refusal(id))?;
+        let cpu = self.cpu.as_ref().ok_or_else(|| {
+            self.uncertain(id, "its native scope has no CPU control to set a rate on")
+        })?;
         let observed =
             sys::managed_process_cpu().map_err(|error| Refusal::os("reading helper CPU", error))?;
         cpu.lock()
-            .map_err(|_| self.refusal(id))?
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as its rate is set"))?
             .set_rate(Instant::now(), observed, rate)
             .map(drop)
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| self.uncertain(id, "its CPU control refused its new rate"))
     }
     pub(super) fn cpu_permit(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         self.cpu
             .as_ref()
-            .ok_or_else(|| self.refusal(id))?
+            .ok_or_else(|| {
+                self.uncertain(id, "its native scope has no CPU control to permit a run")
+            })?
             .lock()
-            .map_err(|_| self.refusal(id))?
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as a run is permitted"))?
             .permit()
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| self.uncertain(id, "its CPU control refused a run"))
     }
     /// When the scope's credit ran out, off its control's last observation (joint plan step 14, 2c): none where it has
     /// credit left or no control.
@@ -335,18 +374,21 @@ impl Scope {
         let Some(cpu) = &self.cpu else {
             return Ok(None);
         };
-        Ok(cpu.lock().map_err(|_| self.refusal(id))?.ran_out())
+        Ok(cpu
+            .lock()
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as its run-out is read"))?
+            .ran_out())
     }
     /// A hold's measured response, from its credit's running out to its members' stop (joint plan step 14, 2c): its
     /// control's slowest seen rises to it, its hold topped up (`cpu::Budget::learn`).
     pub(super) fn cpu_learn(&self, id: OwnerRef<'_>, response: Duration) -> Result<(), Refusal> {
         self.cpu
             .as_ref()
-            .ok_or_else(|| self.refusal(id))?
+            .ok_or_else(|| self.uncertain(id, "its native scope has no CPU control to learn on"))?
             .lock()
-            .map_err(|_| self.refusal(id))?
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as it learns"))?
             .learn(response)
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| self.uncertain(id, "its CPU control refused a learned response"))
     }
     /// Its control's burst, the most it runs past a stop, in milli-CPU nanoseconds (2c's tests).
     #[cfg(test)]
@@ -357,20 +399,25 @@ impl Scope {
         self.cpu_decision(id)?;
         self.cpu
             .as_ref()
-            .ok_or_else(|| self.refusal(id))?
+            .ok_or_else(|| self.uncertain(id, "its native scope has no CPU control to hold"))?
             .lock()
-            .map_err(|_| self.refusal(id))?
+            .map_err(|_| self.uncertain(id, "its CPU control is poisoned as it holds"))?
             .held()
-            .map_err(|_| self.refusal(id))
+            .map_err(|_| self.uncertain(id, "its CPU control refused its hold"))
     }
     pub(super) fn finalizing(&self, end: ManagedEnd, id: OwnerRef<'_>) -> Result<(), Refusal> {
         if end.scope != TerminalScope::Released {
-            return Err(self.refusal(id));
+            return Err(self.uncertain(id, "its scope's end isn't released as it is finalized"));
         }
-        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
+        let mut phase = self.lock().map_err(|_| {
+            self.uncertain(
+                id,
+                "its native scope's phase is poisoned as it is finalized",
+            )
+        })?;
         match &*phase {
             Phase::Finalizing(known) | Phase::Finalized(known) if *known != end => {
-                return Err(self.refusal(id));
+                return Err(self.uncertain(id, "its scope was finalized at another end"));
             }
             Phase::Finalized(_) => return Ok(()),
             _ => {}
@@ -379,14 +426,22 @@ impl Scope {
         Ok(())
     }
     fn finalized(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
+        let mut phase = self.lock().map_err(|_| {
+            self.uncertain(
+                id,
+                "its native scope's phase is poisoned as its finalization completes",
+            )
+        })?;
         match *phase {
             Phase::Finalizing(end) => {
                 *phase = Phase::Finalized(end);
                 Ok(())
             }
             Phase::Finalized(_) => Ok(()),
-            _ => Err(self.refusal(id)),
+            _ => Err(self.uncertain(
+                id,
+                "its native scope isn't finalizing as its finalization completes",
+            )),
         }
     }
     pub(super) fn is_finalized(&self) -> bool {
@@ -416,7 +471,10 @@ impl Scope {
         {
             *phase = Phase::Uncertain(NativeFailure::Control(failure));
         }
-        self.refusal(owner)
+        self.uncertain(
+            owner,
+            "a member's signal by its token failed, so its scope's control is uncertain",
+        )
     }
     pub(super) fn validate(
         &self,
@@ -424,8 +482,12 @@ impl Scope {
         started: Option<u64>,
         id: OwnerRef<'_>,
     ) -> Result<(), Refusal> {
-        self.validate_native(pgid, started)
-            .map_err(|_| self.refusal(id))
+        self.validate_native(pgid, started).map_err(|_| {
+            self.uncertain(
+                id,
+                "its native scope's group or controller start isn't its own",
+            )
+        })
     }
     pub(super) fn validate_native(
         &self,
@@ -474,16 +536,18 @@ pub(super) enum Controller {
 
 fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
     if record.class()? != Class::Shards {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(
+            record.uncertain("its record isn't a Shards VM's, which host bounds are made for")
+        );
     }
     let allocation = record
         .allocation()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its record holds no allocation to bound its host by"))?;
     allocation.guest()?;
     let bounds = Bounds {
         cpu_max_milli: Some(
             u32::try_from(allocation.resources.cpu_milli)
-                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+                .map_err(|_| record.uncertain("its allocation's CPU is past a host bound's"))?,
         ),
         memory_max: Some(allocation.resources.mem_bytes),
         ..Bounds::default()
@@ -503,7 +567,8 @@ fn bytes(value: &[u8], record: NativeRecord<'_>) -> Result<CString, Refusal> {
         .map_err(|_| native_allocation(count))?;
     copied.extend_from_slice(value);
     copied.push(0);
-    CString::from_vec_with_nul(copied).map_err(|_| record.refusal(LifecycleCause::Uncertain))
+    CString::from_vec_with_nul(copied)
+        .map_err(|_| record.uncertain("a launch argument holds a NUL byte"))
 }
 fn environment(
     name: &[u8],
@@ -524,7 +589,8 @@ fn environment(
     value.push(b'=');
     value.extend_from_slice(path);
     value.push(0);
-    CString::from_vec_with_nul(value).map_err(|_| record.refusal(LifecycleCause::Uncertain))
+    CString::from_vec_with_nul(value)
+        .map_err(|_| record.uncertain("a launch environment entry holds a NUL byte"))
 }
 fn spawn(
     runtime: &MacRuntime,
@@ -536,23 +602,23 @@ fn spawn(
 ) -> Result<sys::Spawn, Refusal> {
     launch
         .check()
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its prepared launch isn't valid"))?;
     if launch
         .report_scope
         .is_some_and(|scope| record.scope().map(|actual| *actual.bytes()) != Some(scope))
     {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its launch's report scope isn't its record's"));
     }
     let mut descriptors = descriptors.into_iter();
     let stdout = descriptors
         .next()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its launch carried no stdout descriptor"))?;
     let stderr = descriptors
         .next()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its launch carried no stderr descriptor"))?;
     let report = descriptors.next();
     if descriptors.next().is_some() || report.is_some() != launch.report_scope.is_some() {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its launch's descriptors aren't its report's"));
     }
     // SCM_RIGHTS can change the numeric descriptor. Duplicate only the receiver-owned end, with
     // CLOEXEC, then render from that FINAL copy. Never alter sender flags or rewrite base argv.
@@ -565,13 +631,13 @@ fn spawn(
     let report_words = match (launch.report_scope, report.as_ref()) {
         (Some(scope), Some(writer)) => Some(
             shards_api::physical::report_arguments(scope, writer)
-                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+                .map_err(|_| record.uncertain("its native report's arguments couldn't be made"))?,
         ),
         (None, None) => None,
-        _ => return Err(record.refusal(LifecycleCause::Uncertain)),
+        _ => return Err(record.uncertain("its launch's report descriptor and scope disagree")),
     };
     let lifeline_words = shards_api::physical::lifeline_arguments(&lifeline)
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its lifeline's arguments couldn't be made"))?;
     let count = launch
         .arguments
         .len()
@@ -612,7 +678,7 @@ fn spawn(
         .checked_add(pointers)
         .is_none_or(|size| size > runtime.exec_limit.block)
     {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its launch's arguments pass the native exec bound"));
     }
     let mut binaries = Vec::new();
     binaries
@@ -642,22 +708,22 @@ fn retain(
         Ok(at) => {
             let old = boxes
                 .get(at)
-                .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+                .ok_or_else(|| record.uncertain("its owner's slot vanished as it was retained"))?;
             let scope = old
                 .1
                 .scope()
-                .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+                .ok_or_else(|| record.uncertain("its owner's earlier slot has no native scope"))?;
             if !matches!(
-                *scope
-                    .lock()
-                    .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+                *scope.lock().map_err(
+                    |_| record.uncertain("its owner's earlier scope's phase is poisoned")
+                )?,
                 Phase::Finalized(_)
             ) {
-                return Err(record.refusal(LifecycleCause::Uncertain));
+                return Err(record.uncertain("its owner's earlier scope isn't finalized"));
             }
             let old = boxes
                 .get_mut(at)
-                .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+                .ok_or_else(|| record.uncertain("its owner's slot vanished as it was replaced"))?;
             let retired = std::mem::replace(old, (id, Arc::clone(boxed)));
             drop(boxes);
             drop(retired);
@@ -731,34 +797,39 @@ fn prepare_native(
     )?;
     boxed
         .scope()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
+        .ok_or_else(|| record.uncertain("its prepared box has no native scope for its vsock"))?
         .vsock
         .set(copy_path(&vsock)?)
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its native scope's vsock was set before"))?;
     *boxed
         .scope()
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
+        .ok_or_else(|| record.uncertain("its prepared box has no native scope for its lifeline"))?
         .lifeline
         .lock()
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))? = Some(lifeline_writer);
+        .map_err(|_| record.uncertain("its native scope's lifeline is poisoned"))? =
+        Some(lifeline_writer);
     retain(runtime, record, &boxed)?;
     if Instant::now() >= deadline {
         *boxed
             .scope()
-            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
+            .ok_or_else(|| {
+                record.uncertain("its prepared box has no native scope as its deadline passed")
+            })?
             .lock()
-            .map_err(|_| record.refusal(LifecycleCause::Uncertain))? = Phase::NotSubmitted;
-        return Err(record.refusal(LifecycleCause::Uncertain));
+            .map_err(|_| {
+                record.uncertain("its native scope's phase is poisoned as its deadline passed")
+            })? = Phase::NotSubmitted;
+        return Err(record.uncertain("its launch's deadline passed before it was submitted"));
     }
     let mut controller = boxed
         .controller
         .lock()
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its controller slot is poisoned"))?;
     let prepared = match std::mem::replace(&mut *controller, Controller::Unsubmitted) {
         Controller::Prepared(prepared) => prepared,
         other => {
             *controller = other;
-            return Err(record.refusal(LifecycleCause::Uncertain));
+            return Err(record.uncertain("its controller isn't prepared as it is launched"));
         }
     };
     let pid = match boxed.held_exec(&spawn) {
@@ -778,22 +849,23 @@ fn prepare_native(
     let observed = sys::rusage(pid)
         .map_err(|error| Refusal::os("reading the held VM controller birth", error))?
         .filter(|usage| usage.started != 0)
-        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        .ok_or_else(|| record.uncertain("its held VM controller's birth couldn't be read"))?;
     boxed.introduce_group(pid, observed.started)?;
     let identity = Identity {
-        pid: u32::try_from(pid).map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
+        pid: u32::try_from(pid)
+            .map_err(|_| record.uncertain("its controller's pid is past a u32"))?,
         started: observed.started,
         vsock,
     };
     boxed
         .identity
         .set(identity)
-        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
+        .map_err(|_| record.uncertain("its controller's identity was published before"))?;
     if let Controller::Held {
         failure: Some(_), ..
     } = &*controller
     {
-        return Err(record.refusal(LifecycleCause::Uncertain));
+        return Err(record.uncertain("its held controller failed before it was published"));
     }
     drop(controller);
     // Identity is returned while the exact controller is still held. The node alone performs its
@@ -855,18 +927,32 @@ fn finalize_native(boxed: &Arc<ProcessBox>) -> Result<(), Refusal> {
         .ok_or_else(|| configuration("native finalization has no owned scope"))?;
     let end = boxed
         .terminal()
-        .map_err(|_| scope.refusal(boxed.owner()))?
+        .map_err(|_| {
+            scope.uncertain(
+                boxed.owner(),
+                "its native scope's end couldn't be read as it is finalized",
+            )
+        })?
         .filter(|end| end.scope == TerminalScope::Released)
-        .ok_or_else(|| scope.refusal(boxed.owner()))?;
+        .ok_or_else(|| {
+            scope.uncertain(
+                boxed.owner(),
+                "its native scope isn't released as it is finalized",
+            )
+        })?;
     boxed.finalize_watcher(end)?;
-    if let Controller::Held { process, .. } = &mut *boxed
-        .controller
-        .lock()
-        .map_err(|_| scope.refusal(boxed.owner()))?
-    {
-        process
-            .finalize_retained()
-            .map_err(|_| scope.refusal(boxed.owner()))?;
+    if let Controller::Held { process, .. } = &mut *boxed.controller.lock().map_err(|_| {
+        scope.uncertain(
+            boxed.owner(),
+            "its controller slot is poisoned as it is finalized",
+        )
+    })? {
+        process.finalize_retained().map_err(|_| {
+            scope.uncertain(
+                boxed.owner(),
+                "its retained controller couldn't be reaped as it is finalized",
+            )
+        })?;
     }
     scope.finalized(boxed.owner())
 }
@@ -1073,7 +1159,7 @@ mod tests {
         let scope = scope();
         let pool = [9; 32];
         assert!(
-            matches!(scope.refusal(OwnerRef::Pool(&pool)), Refusal::Backing { key, .. }
+            matches!(scope.uncertain(OwnerRef::Pool(&pool), "a test's uncertain pool scope"), Refusal::Backing { key, .. }
             if key.pool == pool && key.generation == [1; 16])
         );
         assert!(scope.running(OwnerRef::Pool(&pool)).is_err());
