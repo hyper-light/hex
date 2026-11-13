@@ -505,6 +505,20 @@ window, which would under-count Hex here.
   changes nothing it proves.
 - ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
   `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), and HEX-CV-2H on two real machines.
+  The seam kiln's simulator drives is Hex's as it stands: `SimView` as the machine's Hex node, its links through
+  `CapacityView` (`hear`, `link_down`, `hints`) and its machine through `Host` (`set_room` for a measured room,
+  `set_local` for Hex's boxes starting and ending, `restart`). Each fault goes through them: a dropped link is the view's
+  `link_down` and the holder's own; a keeper crash between messages is `restart`; one after a write landed and before
+  its answer is `hear` with the answer dropped, then `restart`; one before its write is the message dropped, then
+  `restart`. A crash between the writes of one answer (a sync that releases and adopts several) is hex-sim's to strike,
+  its disk crashing at any write; were kiln's simulator to strike it as well, `SimView` would take a crash armed at its
+  n-th write, before or after the write lands, as hex-sim's disk does. Its checks are hex-sim's: the work running within
+  the room, each running run in the keeper's books (`SimView::held_by`), and once healed and quiet the books each side
+  keeps the same.
+- HEX-CV-2K (`capacity_view::two_hosts`, ROOT's): HEX-CV-2H with kiln's runner-shell holder in the stand-in's place,
+  enrolled by kiln's CA, which answers the scheduler's `hex node enroll` too; A's phases are 2H's, kiln's runner rejoins
+  by itself after each loss, and phase C compares the keeper's books (`HEX_CV_BOOKS`) with the held set the runner says
+  (`HEX_CV_HELD`, its `Holder::held()` as serde JSON in hex).
 
 ## Open items
 

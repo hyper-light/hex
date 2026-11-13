@@ -272,6 +272,26 @@ fn hex_cv_l1() {
 ///    there instead (capacity-view.md's run notes).
 /// 8. On A, `touch $HEX_CV_DIR/stop`, then kill the scheduler as in 6: A3 says `HEX_CV_BOOKS` and `HEX_CV_LEFT=none`.
 /// 9. `b4`, on B, with `HEX_CV_BOOKS`.
+///
+/// HEX-CV-2K, the same with kiln's runner as the holder in the stand-in's place (the step's done-when: kiln's real
+/// holder, on two real machines): A's phases are 2H's; the holder is kiln's runner-shell holder
+/// (`hex_api::capacity::Holder` over kiln's own link to `CAPACITY_PORT`: capacity-view.md, "What kiln's runner
+/// implements as a holder"); the CA is kiln's, which enrolled the runner by its own CSR. In order:
+/// 1. `a1`, on A: says `HEX_CV_REQUEST`, the request kept as `$HEX_CV_DIR/keeper/request.pem` too.
+/// 2. kiln's CA answers that request for `HEX_CV_KEEPER`, as it answers production's `hex node enroll`: its chain and
+///    roots kept in `$HEX_CV_DIR/keeper` as `chain.pem` and `roots.pem` (A3's scheduler reads them whole before it
+///    binds and refuses an answer for another key or name), or given to `a2` as `HEX_CV_CHAIN` and `HEX_CV_ROOTS`,
+///    each certificate's DER in hex, joined by commas.
+/// 3. `a3`, on A, in the background, as in 2H, `HEX_CV_HOLDER` the runner's holder name, its certificate's DNS name.
+/// 4. On B, kiln's runner holds through the lane, configured with the keeper's endpoint (`HEX_CV_ADDR`: A's
+///    `HEX_CV_BIND`, or the relay's) and name (`HEX_CV_KEEPER`, which it checks the scheduler's certificate for);
+///    its runs reserve as kiln places them there.
+/// 5. The losses, 2H's 6 and 7 on A, with nothing done on B: kiln's runner joins again once the keeper is back, and
+///    its sync agrees (its `Event::Synced { agree: true }`).
+/// 6. kiln's work on the runner drained (no reserve or release of its in flight): on A `touch $HEX_CV_DIR/stop` and
+///    kill the scheduler, and A3 says `HEX_CV_BOOKS`; kiln's runner says its held set as `HEX_CV_HELD` (its
+///    `Holder::held()`, the serde JSON of a `Vec<hex_api::capacity::Held>` in hex, as the stand-in says it).
+/// 7. `c`, on either host, with `HEX_CV_BOOKS` and `HEX_CV_HELD`: says `HEX_CV_BOOKS_AGREE`.
 mod two_hosts {
     use std::io::Write;
     use std::net::SocketAddr;
@@ -577,6 +597,25 @@ mod two_hosts {
             kiln.held(),
             "the keeper's books and the holder's differ"
         );
+        say(
+            "HEX_CV_BOOKS_AGREE",
+            format!("{} reservations", books.len()),
+        );
+    }
+
+    /// HEX-CV-2K C (and 2H's, from what its stand-in said), on either host, once A3 has said `HEX_CV_BOOKS` and the
+    /// holder its held set as `HEX_CV_HELD` (kiln's runner, or the stand-in's B2 or B3). Do: compare the keeper's books
+    /// of the holder, read from its records once its scheduler ended, with the holder's, each by id. Expect: the same.
+    #[test]
+    #[ignore = "HEX-CV-2K's phase C, on either host: the lead's two-host run"]
+    fn hex_cv_2h_c_the_keepers_books_are_what_the_holder_said() {
+        let by_id = |name: &str| {
+            let mut held: Vec<Held> = serde_json::from_slice(&from_hex(&var(name))).unwrap();
+            held.sort_by_key(|h| h.id);
+            held
+        };
+        let (books, held) = (by_id("HEX_CV_BOOKS"), by_id("HEX_CV_HELD"));
+        assert_eq!(books, held, "the keeper's books and the holder's differ");
         say(
             "HEX_CV_BOOKS_AGREE",
             format!("{} reservations", books.len()),
