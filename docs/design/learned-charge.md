@@ -36,12 +36,20 @@ contention rule and the predictors; they do not hold the step up.
   bound (`hex_api::MIN_CPU_MILLI`, the least the learner caps a VM at) on its host class's CPU-response row
   (`MacRuntime::charge_window`), so every VM's rate holds on average over one window. On Windows a job's hard cap holds
   per scheduling interval, which Windows doesn't document (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so no window
-  derives from it yet: the learner there is refused, typed, until ROOT measures the interval on the host. A charge and
-  the census's overhead are per the same window.
+  derives from it yet. A Shards image VM is capped instead through its rate (`Runtime::rate`, Shards' D247), held by
+  D191's governor over its period, on every OS; shards-api exposes that period neither as a call nor as a const, so a
+  learner takes it nowhere yet (`Recover::image_rate_period`, `Awaits(RatePeriod)`; ROOT asked g121 for
+  `ImageGuest::rate_period`, 2026-11-13). A learner's window is the longest period of the caps it holds; a kind of VM
+  whose cap's period it can't take it doesn't learn, booking each whole off the fleet's budget
+  (`recorded::charges::sort`), and with neither it is refused, typed (Windows today). A charge and the census's overhead
+  are per the same window.
 - **A window's sample** is the VMM's whole CPU over it, which KVM and HVF count with its guest's (guest_cost's
-  `Use`): every vCPU's guest time plus the VMM's own. The per-vCPU split is typed-absent
-  (`Awaits(GuestCpuTimePerVcpu)`) until Shards' p/guest-cpu-time-v1 and goal 12 put it in `Usage`; the charge
-  needs only the sum, and checks the split against it once it comes. Memory is the most the VMM held in the window
+  `Use`): every vCPU's guest time plus the VMM's own. A Shards image VM's run host reads both (D241's
+  `Stats::microvm`, `Runtime::host_use`): its VM process's CPU and each vCPU's guest time, read just before it, so the
+  learner takes the split (`Cpu::Split`, its VMM's own the whole less its vCPUs', never less than none), which the core
+  checks against the VM's vCPUs (two readings naming different vCPU counts are refused, typed, never paired); a
+  managed VM's split is typed-absent (`Awaits(GuestCpuTimePerVcpu)`). The charge
+  needs only the sum. Memory is the most the VMM held in the window
   as the census reads it (Linux `memory.stat` anon plus kernel; macOS its physical footprint), its guest's touched
   RAM included; disk is its folders' bytes.
 - **The charge**, each of CPU, memory and disk: the nearest-rank p99.9 of its last SEEDABLE windows (of CPU, and of
@@ -243,12 +251,14 @@ microVMs (D183, D188). Its budget is the combined view's room for Hex on that ma
 less kiln's reservations and less what neither books. So it follows fleet scale (a laptop's is what the person's
 own work and kiln's runs leave; a dedicated machine's is the machine's) and hardware (the machine's facts). Each
 VM's budget (C5) is its share; D188 turns it into its guest's room, and everything the VM holds comes out of it,
-its D230 ring pins included (pinned guest RAM, so in what it holds). Delivering the room to a Hex-booted guest
-waits on Shards: shards-api has no call that sends init's `ROOM` (D231 has `STATS` alone), so Hex refuses it typed
-(`Awaits(GuestRoom)`). The pinned share is Shards' own since ring-pins-v1 (D230, vendored at 66113379): an engine
-ring's slot is made only where the room init is told covers it past the room the run needs to go on (where it is told
-none, the guest's available memory), idle slots go back as a told room shrinks, and the relay that pins them is in the
-run's cgroup, so once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
+its D230 ring pins included (pinned guest RAM, so in what it holds). A Shards image VM's guest is told its room
+through its run (`Runtime::room`, D241's `ImageGuest::room`): its budget less what it holds, each window it moves,
+negative where its budget is short of what it holds. A Shards guest VM booted through the managed path has no such
+call (`ManagedGuest`), so its room is refused, typed (`Awaits(GuestRoom)`; ROOT asked g121 for it, 2026-11-13).
+The pinned share is Shards' own since ring-pins-v1 (D230, vendored at 66113379): an engine ring's slot is made only
+where the room init is told covers it past the room the run needs to go on (where it is told none, the guest's
+available memory), idle slots go back as a told room shrinks, and the relay that pins them is in the run's cgroup, so
+once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
 
 **Sources.** The plan's architecture ("Hex sets budgets per fleet, and Shards' D188 tells each guest its room.
 Everything a VM holds, ring pins included, comes out of that room"); D188 (f53 B); Borg admits quota by the limit and
@@ -280,9 +290,11 @@ reaches the view settled with goal 13 the same day:
 - `hex_api::Allocation::booked` is what a receipt booked; `Allocation::booking()` is what the ledger holds, and
   `RuntimeCost::allocate` books it whole. The node socket's wire carries it after the cost, and the peers' text
   receipt as `a2:` (an unbooked one stays `a1:`, so records written before still read).
-- `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers. The placement index books a
-  new VM's receipt at its node's prior (`model::booked_at`); a receiver admits an owner's receipt as it was booked,
-  comparing charges with the booking aside (`model::same_charge`), so a stale view is never refused for it.
+- `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers: its profile, its ceiling and
+  what a new VM of them is booked at. The placement index books a new VM's receipt at its node's prior where the
+  receipt is of the prior's class, its profile and its ceiling (`model::booked_at`), so a VM of a size none has warmed
+  for is booked whole (C2); a receiver admits an owner's receipt as it was booked, comparing charges with the booking
+  aside (`model::same_charge`), so a stale view is never refused for it.
 - The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
   cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
@@ -296,26 +308,32 @@ reaches the view settled with goal 13 the same day:
   right after applying the answers, maps the holdings' box ids to its keys (`Driver::running_ids`) and books each
   VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
 - On macOS and Windows the learner is `hex_node::recorded::charges`, started by `Recorded::start_charges` (hex-cli
-  on both): a thread that waits on the node's end beside the window, and once a window reads each running managed
-  VM's usage through its native owner (`Recover::managed_usage`), learns as Linux's does, and caps each VM at its
-  water-filled share (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's
-  whole key and its rate) sets its control's rate, its debt kept and what came before charged at the old rate; on
-  Windows the job's hard cap, at least the machine's least. Its capacity answers carry what it learned
-  (`recorded::charges::learned`, shared with Linux's). Neither platform holds a VM's memory at a budget below its
-  ceiling (macOS ends past a footprint limit, Windows refuses past a commit limit, neither throttles at a level), so
-  each VM's memory budget is refused, typed (`Platform`, `memory_high`), which the node says as it starts. On Windows
-  the learner is refused, typed, until its window is measured (C1). Their last resort is Linux's, in the state every
-  learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers and the
-  box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS the native
-  helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the node holds, as
-  its receipt's stop terminates it. Why goes into the VM's record before its end (intent first, C5), its end is then
-  observed as any other, and its inspect says it (`Books::counted`), as Linux's does.
+  on both): a thread that waits on the node's end beside the window, and once a window reads each running VM it learns
+  (`recorded::charges::Learns`: a kind whose cap's period it takes), learns as Linux's does, and caps each VM at its
+  water-filled share. A managed VM is read through its native owner (`Recover::managed_usage`) and capped there
+  (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's whole key and its
+  rate) sets its control's rate, its debt kept and what came before charged at the old rate; on Windows the job's hard
+  cap, at least the machine's least. A Shards image VM, its lifetime its place in its node's start order
+  (`recorded::charges::Scope::Started`), is read through its run host (`Runtime::host_use`), capped through its rate
+  (`Runtime::rate`) and its guest told its room (`Runtime::room`); every VM of a kind it doesn't learn, and every
+  native box, is booked off the fleet's budget, whole or at its caps (`recorded::charges::sort`). Its capacity
+  answers carry what it learned (`recorded::charges::learned`, shared with Linux's). Neither platform holds a managed
+  VM's memory at a budget below its ceiling (macOS ends past a footprint limit, Windows refuses past a commit limit,
+  neither throttles at a level), so each managed VM's memory budget is refused, typed (`Platform`, `memory_high`),
+  which the node says as it starts; an image VM's is its guest's room (C7). On Windows the learner is refused, typed,
+  until its window is measured or an image VM's rate's period comes (C1). Their last resort is Linux's, in the state
+  every learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers
+  and the box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS
+  the native helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the
+  node holds, as its receipt's stop terminates it; an image VM through its run, killed (`Runtime::signal`). Why goes
+  into the VM's record before its end (intent first, C5), its end is then observed as any other, and its inspect says
+  it (`Books::counted`), as Linux's does.
 
 ## Every number
 
 | Number | Value | Kind | Derivation | Pinned by |
 |---|---|---|---|---|
-| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes) |
+| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; an image VM's rate's period (awaited from shards-api); Windows' job none until measured; the longest of a learner's kinds | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests`, `node::charges::tests` (the period of the `cpu.max` the node writes) |
 | A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
@@ -352,8 +370,10 @@ reaches the view settled with goal 13 the same day:
 
 | What | Waits on | Hex meanwhile |
 |---|---|---|
-| per-vCPU guest time | Shards p/guest-cpu-time-v1, goal 12's `Usage` | charges the VMM's whole CPU; `Awaits(GuestCpuTimePerVcpu)` |
-| a Hex-booted guest told its room | a shards-api call for init's `ROOM` | Linux holds the VMM at `memory.high`; `Awaits(GuestRoom)` |
+| per-vCPU guest time of a managed VM | a split in `ManagedGuest`'s use | charges the VMM's whole CPU; `Awaits(GuestCpuTimePerVcpu)` (an image VM's is D241's, taken) |
+| a managed Shards guest told its room | a room call on `ManagedGuest` (asked of g121) | Linux holds the VMM at `memory.high`; `Awaits(GuestRoom)` (an image VM's is D241's, told) |
+| the period an image VM's rate holds over | `ImageGuest::rate_period` or a const in shards-api (asked of g121) | image VMs booked whole off the fleet's budget; `Awaits(RatePeriod)` |
+| a Linux image VM read and placed | its run host in a cgroup of its own (shards-image-class.md §4) | booked at its receipt whole by the ledger, outside the fleet's cgroup |
 | moving an over VM instead of ending it | Shards D176 in shards-api's image run (66113379 has none; D235 plugs directories) | ends it, last; `Awaits(LiveMove)` |
 | class priors across the fleet | step 13's view, hyper-swim's gossip (f67 A) | each node's own record |
 
