@@ -74,6 +74,51 @@ fn a_party_standing_still_a_whole_window_past_w_star_fails_the_wait() {
     assert_eq!(wait.slowest(), Some(window), "no sample");
 }
 
+/// Decision 9 (the person's ruling of 2026-11-13, and ROOT's of the same day: a stall judged over W*, or at the slowest
+/// gap seen, refuses healthy parties, so past W* a test's wait follows its party's life alone, the run-out told): a
+/// thread advancing in slices longer than the wait's window was refused, stalled (copy::tests on the Mac Studio: its
+/// thread's CPU time stood still for 44 µs against a 42.9 µs window). Do: a wait whose W* is 1 ms; a thread that makes
+/// the fact true at its third step, each step after a hundred windows of W* asleep; follow the thread. Expect: the
+/// fact, never refused while the thread lives; its answer the sample W* rises to, bounding again.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_thread_advancing_in_slices_longer_than_its_window_is_never_refused() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, mpsc};
+    let window = Duration::from_millis(1);
+    let wait = learned("test.testkit.follow.slices", window);
+    let steps = Arc::new(AtomicU32::new(0));
+    let (named, name) = mpsc::sync_channel(1);
+    let worker = {
+        let steps = Arc::clone(&steps);
+        std::thread::spawn(move || {
+            named.send(Thread::current().unwrap()).unwrap();
+            for _ in 0..3 {
+                let slept = Instant::now();
+                while slept.elapsed() < window * 100 {
+                    std::thread::park_timeout(window * 100);
+                }
+                steps.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let thread = name.recv().unwrap();
+    let got = until(
+        &wait,
+        "the worker's third step",
+        || thread.party(),
+        || steps.load(Ordering::SeqCst) == 3,
+    );
+    worker.join().unwrap();
+    assert!(got.is_ok(), "refused while its party lived: {got:?}");
+    assert!(wait.slowest().is_some_and(|slowest| slowest > window));
+    assert_eq!(
+        wait.deadline(),
+        wait.slowest(),
+        "W* bounds again after the answer"
+    );
+}
+
 /// A party that ends fails the wait at once, within W* or past it, once a last look hasn't found the fact. Do: a
 /// measuring wait whose party ends at its third look, the fact never coming; then one whose fact comes as its party
 /// ends. Expect: the first unmet, its party ended; the second answered.
