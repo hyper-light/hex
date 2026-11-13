@@ -2672,6 +2672,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
             })
         })?,
         credentials: Vec::new(),
+        sign_ins: Vec::new(),
     };
     image.credentials = credentials(r, &image.grants)?;
     Ok(image)

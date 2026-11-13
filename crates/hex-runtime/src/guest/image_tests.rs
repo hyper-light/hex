@@ -3102,3 +3102,61 @@ fn w33_a_credential_no_one_here_can_lease_or_beyond_its_egress_is_refused_before
     assert!(record(&owner, &id).is_none());
     assert!(images.asked.lock().unwrap().is_empty());
 }
+
+/// Joint plan step 33's sign-ins (Shards' D242, step 8; docs/design/credential-grants.md C8), red first: do create and
+/// start a harness VM whose CLI signs in, on a node whose orchestrator gave it lessors. Expect the boot asked exactly the
+/// box's sign-in, run-wide as Shards keeps it (its name, its CLI, its hosts, an earlier capture's placeholders), beside a
+/// lessor that answers it; and the record and inspect keeping the grant.
+#[test]
+fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
+    use hex_api::lease::sim::SimLessors;
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let runtime = runtime.with_lessors(Arc::new(SimLessors::new()));
+    let (mut spec, _) = credentialed(&images, "image-sign-in");
+    let captured = hex_api::Captured {
+        access: "kiln/sign-ins/claude/access".to_owned(),
+        access_placeholder: "kiln-placeholder-61636365737321".to_owned(),
+        refresh_placeholder: Some("kiln-placeholder-7265667265736821".to_owned()),
+    };
+    let sign_in = hex_api::SignInGrant {
+        member: hex_api::Member {
+            kind: hex_api::MemberKind::Harness,
+            name: "claude".to_owned(),
+        },
+        sign_in: "claude/ada".to_owned(),
+        cli: hex_api::SignInCli::ClaudeCode,
+        toward: vec!["api.anthropic.com".to_owned()],
+        captured: Some(captured),
+    };
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.credentials.clear();
+        image.sign_ins = vec![sign_in.clone()];
+    }
+    let id = runtime.create(spec).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].sign_ins,
+        vec![shards_api::image::SignInGrant {
+            sign_in: "claude/ada".to_owned(),
+            cli: shards_api::image::Cli::ClaudeCode,
+            toward: vec!["api.anthropic.com".to_owned()],
+            captured: Some(shards_api::image::Captured {
+                access: "kiln/sign-ins/claude/access".to_owned(),
+                access_placeholder: "kiln-placeholder-61636365737321".to_owned(),
+                refresh_placeholder: Some("kiln-placeholder-7265667265736821".to_owned()),
+            }),
+        }]
+    );
+    assert!(
+        asked[0].lessor.is_some(),
+        "a run with a sign-in has a lessor"
+    );
+    match &record(&owner, &id).unwrap().spec.class {
+        ClassSpec::ShardsImage(image) => assert_eq!(image.sign_ins, vec![sign_in]),
+        other => panic!("a Shards image VM recorded as {other:?}"),
+    }
+    runtime.delete(&id).unwrap();
+}
