@@ -1369,7 +1369,7 @@ impl GuestRuntime {
     pub fn rate_period(&self, id: &BoxId) -> Result<std::time::Duration, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
-            books::Routed::Image(record) => self.rate_period_image(record),
+            books::Routed::Image(record) => self.images.rate_period_image(record),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
                 what: "rate_period",
