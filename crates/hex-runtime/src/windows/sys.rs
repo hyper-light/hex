@@ -1167,6 +1167,21 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
     }
 }
 
+/// The host's boot sequence: `KUSER_SHARED_DATA`'s `BootId`, "Boot sequence, incremented for each boot attempt by the
+/// OS loader" (ntddk.h; learn.microsoft.com/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data), so no two
+/// boots of a host share one. Read where the kernel maps that structure read-only into every process, ntddk.h's
+/// `MM_SHARED_USER_DATA_VA` (0x7FFE0000): `BootId` is at 0x2C4 in the header's layout, after `ProcessorFeatures`' 64
+/// bytes from 0x274 and the four 32-bit members `Reserved1`, `Reserved3`, `TimeSlip` and `AlternativeArchitecture`.
+/// No call is made and no handle opened, so no program another thread starts can inherit one.
+pub fn boot_id() -> u32 {
+    /// `MM_SHARED_USER_DATA_VA` and `BootId`'s offset in `KUSER_SHARED_DATA`, 0x7FFE0000 + 0x2C4.
+    const BOOT_ID: usize = 0x7FFE_02C4;
+    // SAFETY: the kernel maps KUSER_SHARED_DATA read-only at MM_SHARED_USER_DATA_VA into every user-mode process, on
+    // every architecture Windows runs, for the process's whole life and before any of its code runs. BootId is a
+    // ULONG at a 4-aligned offset inside that page, initialized at boot; this process never writes it.
+    unsafe { std::ptr::with_exposed_provenance::<u32>(BOOT_ID).read_volatile() }
+}
+
 /// Flushes directory `dir` (FlushFileBuffers on its handle), so a rename or removal in it outlives a host crash.
 /// CreateFileW opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and FlushFileBuffers needs a handle with
 /// `GENERIC_WRITE` (both in their Win32 reference pages), so it is opened for writing: std's `File::open` opens it

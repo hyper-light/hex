@@ -83,8 +83,9 @@ const BOOT_MARKER: &str = "@boot";
 const BOOT_MARKER_TEMP: &str = ".@boot.tmp";
 
 /// The host's boot session as its kernel names it, read once a process, as no process outlives its boot:
-/// Linux's `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`. `Err` says why it couldn't
-/// be read. Windows' is not read yet: `None`, so its records keep recovery's other rules.
+/// Linux's `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`, Windows' boot sequence
+/// (`KUSER_SHARED_DATA`'s `BootId`). `Err` says why it couldn't be read; `None` where the OS names none, so its
+/// records keep recovery's other rules.
 pub(crate) fn host_boot() -> &'static Result<Option<BootSession>, String> {
     static HOST_BOOT: OnceLock<Result<Option<BootSession>, String>> = OnceLock::new();
     HOST_BOOT.get_or_init(read_host_boot)
@@ -109,7 +110,20 @@ fn read_host_boot() -> Result<Option<BootSession>, String> {
         .map_err(|e| format!("kern.bootsessionuuid: {e}"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows' boot sequence, in decimal ([`hex_runtime::windows::sys::boot_id`]), read from the page the kernel maps into
+/// every process: no program runs and no handle opens. A 0 is taken for none read, the reading that removes nothing:
+/// records then carry no session and keep recovery's other rules.
+#[cfg(windows)]
+fn read_host_boot() -> Result<Option<BootSession>, String> {
+    match hex_runtime::windows::sys::boot_id() {
+        0 => Err("KUSER_SHARED_DATA's BootId reads 0, no boot sequence".to_owned()),
+        id => BootSession::new(&id.to_string())
+            .map(Some)
+            .map_err(|e| format!("KUSER_SHARED_DATA's BootId: {e}")),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_host_boot() -> Result<Option<BootSession>, String> {
     Ok(None)
 }
