@@ -30,11 +30,12 @@ fn invalid(message: &'static str) -> Refusal {
         why,
     }
 }
-fn refused(key: BackingKey) -> Refusal {
+/// Backing `key` refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)).
+fn refused(key: BackingKey, why: &str) -> Refusal {
     Refusal::Backing {
         key,
         cause: LifecycleCause::Uncertain,
-        why: None,
+        why: Some(why.to_owned()),
     }
 }
 
@@ -115,7 +116,7 @@ fn read_pool_file(file: File, pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
     let bytes = super::read_record_bytes(file)?;
     let record = PoolRecord::decode(&bytes)?;
     if record.key.pool != *pool {
-        return Err(refused(record.key));
+        return Err(refused(record.key, "its pool file names another pool"));
     }
     Ok(record)
 }
@@ -210,7 +211,10 @@ impl Store {
             .find(|row| row.key.pool == expected.map_or(pool, |row| row.key.pool));
         if actual != expected {
             return Err(match expected.or(actual) {
-                Some(row) => refused(row.key),
+                Some(row) => refused(
+                    row.key,
+                    "its prepared row isn't the one its caller expected",
+                ),
                 None => invalid("backing preparation lost its expected current row"),
             });
         }
@@ -218,24 +222,41 @@ impl Store {
             && expected.key.pool != pool
             && let Some(conflicting) = pools.iter().find(|row| row.key.pool == pool)
         {
-            return Err(refused(conflicting.key));
+            return Err(refused(
+                conflicting.key,
+                "another generation of its pool is on disk",
+            ));
         }
         validate(&records, &pools)?;
         if let Some(expected) = expected {
             let at = pools
                 .binary_search_by_key(&expected.key, |row| row.key)
-                .map_err(|_| refused(expected.key))?;
+                .map_err(|_| {
+                    refused(
+                        expected.key,
+                        "its expected row vanished from the sorted snapshot",
+                    )
+                })?;
             if at >= pools.len() {
-                return Err(refused(expected.key));
+                return Err(refused(
+                    expected.key,
+                    "its expected row's place is past the snapshot",
+                ));
             }
             // Move this exact canonical row out of the temporary snapshot. No deep clone.
             let mut current = pools.remove(at);
             if current.execution != execution || current.cost != cost {
-                return Err(refused(current.key));
+                return Err(refused(
+                    current.key,
+                    "its current row's execution or cost isn't the preparation's",
+                ));
             }
             if current.key.pool == pool {
                 if current.devices != devices {
-                    return Err(refused(current.key));
+                    return Err(refused(
+                        current.key,
+                        "its current row's devices aren't the preparation's",
+                    ));
                 }
                 return Ok(current);
             }
@@ -261,7 +282,7 @@ impl Store {
             return Ok(current);
         }
         if let Some(source) = Self::pool_reference(&records, &pool)? {
-            return Err(refused(source));
+            return Err(refused(source, "a box still names its pool as its source"));
         }
         if pools.len() >= TURNS {
             return Err(allocation(TURNS));
@@ -281,18 +302,20 @@ impl Store {
     ) -> Result<PoolRecord, Refusal> {
         if let Some(record) = self.read_pool(&pool)? {
             if record.execution != execution || record.cost != cost || record.devices != devices {
-                return Err(refused(record.key));
+                return Err(refused(
+                    record.key,
+                    "its prepared row's execution, cost or devices aren't the preparation's",
+                ));
             }
             return Ok(record);
         }
         // A missing old Pool row is not permission to rearm a configuration still named by a Box.
         // Keep that immutable reference for whole-owner recovery; generate no replacement scope.
         if let Some(source) = self.referenced_pool(&pool)? {
-            return Err(Refusal::Backing {
-                key: source,
-                cause: LifecycleCause::Uncertain,
-                why: None,
-            });
+            return Err(refused(
+                source,
+                "a box names its pool as its source, though its pool file is gone",
+            ));
         }
         // Configured native owners share their existing MAX_BOXES slot bound. Scans and source
         // preparation are bounded here too; a grant is still admitted by the sole Index pool.
@@ -383,7 +406,7 @@ impl Store {
         };
         let pool = self
             .read_pool(&source.pool)?
-            .ok_or_else(|| refused(source))?;
+            .ok_or_else(|| refused(source, "a box's source backing has no pool file"))?;
         crate::recorded::check_backing_reference(record, &pool)?;
         if route.key.execution != Execution::ShardsShared {
             if pool.phase == BackingPhase::Draining
@@ -414,7 +437,7 @@ impl Store {
         let _turn = self.turns.take_pool(&grant.key)?;
         let mut record = self
             .read_pool(&grant.key.pool)?
-            .ok_or_else(|| refused(grant.key))?;
+            .ok_or_else(|| refused(grant.key, "its pool file is gone before its grant"))?;
         record.accept_grant(grant)?;
         self.write_pool(&record)?;
         Ok(record)
@@ -423,9 +446,12 @@ impl Store {
     pub(crate) fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
         let _metadata = self.changing_metadata()?;
         let _turn = self.turns.take_pool(&record.key)?;
-        let current = self
-            .read_pool(&record.key.pool)?
-            .ok_or_else(|| refused(record.key))?;
+        let current = self.read_pool(&record.key.pool)?.ok_or_else(|| {
+            refused(
+                record.key,
+                "its pool file is gone before its next record was written",
+            )
+        })?;
         current.accepts(record)?;
         self.write_pool(record)
     }
@@ -483,7 +509,10 @@ impl Store {
             return Ok(());
         };
         if record.key != *key || record.phase != BackingPhase::Released {
-            return Err(refused(*key));
+            return Err(refused(
+                *key,
+                "it isn't released, or is another generation, as its pool file is removed",
+            ));
         }
         // Hold the SAME source metadata turn through the strict scan and unlink. Every reference
         // publication takes it before its Box turn; a new reference cannot appear after this scan.
@@ -631,6 +660,30 @@ mod tests {
     }
 
     /// AC-T7.4.1: prepared scope is durable before grant and retry cannot generate a new lifetime.
+    /// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): the node's
+    /// store refuses a backing Uncertain in its site's own words. Do prepare a shared pool, then remove it before it was
+    /// released. Expect it refused Uncertain with its key and its reason, and its pool file kept.
+    #[test]
+    fn w14_b_a_pool_removed_before_its_release_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("disk"), &dir.path().join("run")).unwrap();
+        let record = prepared(&store, [2; 16]);
+        let refused = store.remove_pool(&record.key).unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                Refusal::Backing {
+                    key,
+                    cause: LifecycleCause::Uncertain,
+                    why: Some(why),
+                } if *key == record.key
+                    && why == "it isn't released, or is another generation, as its pool file is removed"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(store.read_pool(&[1; 32]).unwrap(), Some(record));
+    }
+
     #[test]
     fn preparation_retry_keeps_the_original_durable_scope() {
         let dir = tempfile::tempdir().unwrap();
