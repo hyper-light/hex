@@ -718,6 +718,8 @@ impl GuestRuntime {
                     boxed.phase = hex_core::record::Phase::Ready;
                     boxed.exit.get_or_insert(hex_api::Exit::Unknown);
                     boxed.retired = true;
+                    // Its end in words its inspect shows (goal 12's `BoxInfo::ended`): the cause's own.
+                    boxed.ended = Some(LifecycleCause::Retired.to_string());
                     transaction.put(&boxed)?;
                 }
                 if record.phase != BackingPhase::Released {
@@ -727,6 +729,30 @@ impl GuestRuntime {
             })?;
         }
         Ok(())
+    }
+
+    /// What a retired box's inspect shows (joint plan step 14): its record's, nothing running, its end unknown and why
+    /// in its `ended`, with no backing left to ask.
+    pub(super) fn retired_info(
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<hex_api::BoxInfo, Refusal> {
+        let spec = &record.spec;
+        Ok(hex_api::BoxInfo {
+            id: spec.id.try_clone()?,
+            class: spec.class.class(),
+            state: hex_api::BoxState::Empty,
+            bounds: spec.bounds.clone(),
+            allocation: spec.allocation,
+            adopted: false,
+            membership: None,
+            exit: record.exit,
+            abandoned: record.abandoned,
+            route: spec.route,
+            grants: Vec::new(),
+            published: Vec::new(),
+            last_resort: None,
+            ended: record.ended.clone(),
+        })
     }
 
     pub(super) fn pool_record(&self, key: BackingKey) -> Result<PoolRecord, Refusal> {

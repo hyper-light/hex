@@ -1229,6 +1229,8 @@ impl Runtime for GuestRuntime {
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match self.routed(id)? {
             books::Routed::Image(record) => self.inspect_image(record),
+            // A box whose backing was retired says why from its record, with no backing to ask (joint plan step 14).
+            books::Routed::Other(Some(record)) if record.retired => Self::retired_info(&record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, false, || {
