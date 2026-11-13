@@ -444,7 +444,7 @@ impl Learner {
             self.node
                 .track(
                     lifetime,
-                    ClassKey::new(class, allocation.cost.id, allocation.resources),
+                    ClassKey::of(class, allocation)?,
                     band,
                     vcpus(allocation)?,
                     receipt,

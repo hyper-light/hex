@@ -2,12 +2,12 @@
 //! of the learned charge on a real node, ROOT's run. A real `hex node` runs a fleet of harness VMs, each replaying a
 //! recorded agent trace (its busy threads and the memory it holds over time, played by a shell in the guest), one of
 //! them the riser, beside a process box under contention. The driver admits VMs as the scheduler's ledger books them,
-//! each at its class's learned prior where the node's capacity answer carries one, else its whole receipt (C2, C6),
-//! whenever the node's room has changed since it last refused one; every window (the node's learner's as the node says
-//! it, each read at least that long after the last), it reads each VM's CPU given (its usage), asked (its trace's over
-//! the same span) and booked (its holding on the capacity answer), and reckons the run as hex-sim reckons its own
-//! (`hex_sim::charge::trial`). A VM whose trace has played is deleted, freeing its room. It prints `HEX-CHARGE-FLEET`
-//! lines and keeps every reading in `HEX_CHARGE_OUT/windows.tsv`.
+//! each at its class's learned prior where the node's capacity answer carries one (a cold class's its admission), else
+//! its whole receipt (C2, C6), whenever the node's room has changed since it last refused one; every window (the node's
+//! learner's as the node says it, each read at least that long after the last), it reads each VM's CPU given (its
+//! usage), asked (its trace's over the same span) and booked (its holding on the capacity answer), and reckons the run
+//! as hex-sim reckons its own (`hex_sim::charge::trial`). A VM whose trace has played is deleted, freeing its room. It
+//! prints `HEX-CHARGE-FLEET` lines and keeps every reading in `HEX_CHARGE_OUT/windows.tsv`.
 //!
 //! What it measures, each from the run's own windows: the most VMs admitted at once against what envelope charging
 //! admits; each VM-window's given over min(asked, booked), the guarantee's misses and Jain's index of the contended
