@@ -199,7 +199,7 @@ impl JobBox {
     pub fn id(&self) -> Result<&BoxId, Refusal> {
         match &self.state.id {
             OwnerKey::Box(id) => Ok(id),
-            OwnerKey::Pool(_) => Err(self.uncertain()),
+            OwnerKey::Pool(_) => Err(self.uncertain("a pool's job box has no box id")),
         }
     }
 
@@ -273,7 +273,7 @@ impl JobBox {
     /// non-submission; it is never inferred from an absent process or textual job name.
     pub(super) fn bind_vm(&self, name: Option<&str>) -> Result<(), Refusal> {
         if !self.is_vm() || self.state.job.get().is_some() {
-            return Err(self.uncertain());
+            return Err(self.uncertain("it isn't a VM's job box, or its job was bound before"));
         }
         let result = (|| {
             let job = match name {
@@ -290,12 +290,12 @@ impl JobBox {
                 .state
                 .job
                 .set(NativeScope::Bound(job))
-                .map_err(|_| self.uncertain()),
+                .map_err(|_| self.uncertain("its job was bound before")),
             Err(error) => {
                 self.state
                     .job
                     .set(NativeScope::NotSubmitted)
-                    .map_err(|_| self.uncertain())?;
+                    .map_err(|_| self.uncertain("its job was marked unsubmitted before"))?;
                 Err(error)
             }
         }
@@ -303,12 +303,12 @@ impl JobBox {
 
     pub(super) fn not_submitted(&self) -> Result<(), Refusal> {
         if !self.is_vm() {
-            return Err(self.uncertain());
+            return Err(self.uncertain("it isn't a VM's job box as its submission is refused"));
         }
         self.state
             .job
             .set(NativeScope::NotSubmitted)
-            .map_err(|_| self.uncertain())
+            .map_err(|_| self.uncertain("its job was bound before its submission was refused"))
     }
 
     pub(super) fn is_vm(&self) -> bool {
@@ -317,12 +317,13 @@ impl JobBox {
 
     pub(super) fn adopt_vm(&self, job: Job) -> Result<(), Refusal> {
         if !self.is_vm() || self.state.job.get().is_some() {
-            return Err(self.uncertain());
+            return Err(self
+                .uncertain("it isn't a VM's job box, or its job was bound before it was adopted"));
         }
         self.state
             .job
             .set(NativeScope::Adopted(job))
-            .map_err(|_| self.uncertain())
+            .map_err(|_| self.uncertain("its job was bound before it was adopted"))
     }
 
     pub(super) fn recovered(&self) -> bool {
@@ -358,26 +359,28 @@ impl JobBox {
 
     pub(super) fn release_scope(&self) -> Result<(), Refusal> {
         let Purpose::Vm { owner, .. } = &self.purpose else {
-            return Err(self.uncertain());
+            return Err(self.uncertain("it isn't a VM's job box as its scope is released"));
         };
         if self.released() {
             return Ok(());
         }
         owner
             .upgrade()
-            .ok_or_else(|| self.uncertain())?
+            .ok_or_else(|| self.uncertain("its VM's owner is gone as its scope is released"))?
             .release_vm(self)
     }
 
     pub(super) fn mark_released(&self) -> Result<(), Refusal> {
         let Purpose::Vm { released, .. } = &self.purpose else {
-            return Err(self.uncertain());
+            return Err(self.uncertain("it isn't a VM's job box as it is marked released"));
         };
         let _ = released.set(());
         Ok(())
     }
 
-    fn uncertain(&self) -> Refusal {
+    /// Its owner refused Uncertain, and `why` in the refusing site's own words (joint plan step 14, (B)): a pool's
+    /// backing refusal carries them; a box's Lifecycle refusal takes them once goal 12 gives it the field.
+    fn uncertain(&self, why: &str) -> Refusal {
         match self.owner() {
             OwnerRef::Box(id) => match id.try_clone() {
                 Ok(id) => Refusal::Lifecycle {
@@ -393,7 +396,7 @@ impl JobBox {
                         generation: *scope.bytes(),
                     },
                     cause: hex_api::LifecycleCause::Uncertain,
-                    why: None,
+                    why: Some(why.to_owned()),
                 },
                 None => super::inconsistent_slots(),
             },
@@ -403,7 +406,7 @@ impl JobBox {
     fn native_job(&self) -> Result<&Job, Refusal> {
         match self.state.job.get() {
             Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => Ok(job),
-            _ => Err(self.uncertain()),
+            _ => Err(self.uncertain("its job isn't bound or adopted")),
         }
     }
 
@@ -427,7 +430,9 @@ impl JobBox {
         report: Option<&sys::InheritedHandle>,
     ) -> Result<Started, Refusal> {
         if self.state.stopping.load(Ordering::SeqCst) || !self.is_vm() {
-            return Err(self.uncertain());
+            return Err(self.uncertain(
+                "it is stopping, or isn't a VM's job box, as its controller is created",
+            ));
         }
         sys::create_with_report(spawn, &[self.native_job()?.raw()], report)
             .map_err(|error| Refusal::os("creating a suspended bound VM controller", error))
@@ -441,12 +446,12 @@ impl JobBox {
         processors: std::num::NonZeroU32,
     ) -> Result<(), Refusal> {
         if !self.is_vm() {
-            return Err(self.uncertain());
+            return Err(self.uncertain("it isn't a VM's job box as its CPU cap is set"));
         }
         let least = u64::from(processors.get())
             .checked_mul(1000)
             .map(|n| n.div_ceil(u64::from(job::RATE_SCALE)))
-            .ok_or_else(|| self.uncertain())?;
+            .ok_or_else(|| self.uncertain("its CPU cap's least rate overflowed"))?;
         let milli = u32::try_from(milli.max(least)).map_err(|_| Refusal::Invalid {
             what: "a VM's CPU rate",
             why: "it passes a u32 of thousandths of a CPU".to_owned(),
@@ -628,7 +633,7 @@ impl JobBox {
             }
         }
         if self.live_processes()? != 0 {
-            return Err(self.uncertain());
+            return Err(self.uncertain("its job still holds live processes as it is deleted"));
         }
         self.state.counts()?.deletion = Deletion::Released;
         Ok(())
