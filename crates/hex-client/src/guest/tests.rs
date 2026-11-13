@@ -1212,6 +1212,29 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
     {
         assert!(stdin.socket().is_some());
         assert!(stdout.socket().is_some());
+        // AC-T7.4.1: no handle of these connections passes to a process this one starts with every inheritable
+        // handle (std's `Command`): the caller's ends, nor the control connection's handles the stream holds.
+        let write = transport.write.lock().unwrap();
+        let read = transport.read.lock().unwrap();
+        for (what, socket) in [
+            ("the caller's stdin end", stdin.socket().unwrap()),
+            ("the caller's stdout end", stdout.socket().unwrap()),
+            ("the control connection's writing handle", write.handle()),
+            (
+                "the control connection's waiting handle",
+                transport.handle(),
+            ),
+            (
+                "the control connection's reading handle",
+                read.as_ref().unwrap().handle(),
+            ),
+        ] {
+            assert!(
+                !hex_afunix::inheritable(socket).unwrap(),
+                "{what} passes to processes this one starts"
+            );
+        }
+        drop((write, read));
         // A retained transfer copy closing must not shut down the caller's socket stream.
         let retained: hex_api::End = stdin.socket().unwrap().try_clone_to_owned().unwrap().into();
         drop(retained);
@@ -1226,6 +1249,29 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
         .read_to_string(&mut output)
         .unwrap();
     assert_eq!(output, "round trip\n");
+}
+
+/// AC-T7.4.1: do hand a guest stdio connection's end to its caller and take a connection's handle as the guest stream
+/// holds its control's, over TCP; expect neither to pass to a process this one starts with every inheritable handle
+/// (std's `Command`). A socket duplicated for this process comes back inheritable (std's `try_clone` and
+/// `try_clone_to_owned`, by `WSADuplicateSocketW`; jupiter, Rust 1.99.1), so a process another thread started held the
+/// connection past its owner and reset it as it ended: the budget tests' `10054`, beside a test that starts one.
+#[cfg(windows)]
+#[test]
+fn a_tcp_connections_duplicates_pass_to_no_process_this_one_starts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let conn = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_peer, _) = listener.accept().unwrap();
+    let end = caller_end(&conn).unwrap();
+    let held = Duplex::try_clone(&conn).unwrap();
+    assert!(
+        !hex_afunix::inheritable(end.socket().unwrap()).unwrap(),
+        "the caller's end passes to processes this one starts"
+    );
+    assert!(
+        !hex_afunix::inheritable(held.handle()).unwrap(),
+        "a connection's held handle passes to processes this one starts"
+    );
 }
 
 /// Native plan step 8 (1), CLAUDE.md §2: the event form's writes queue behind a backlog bounded in bytes.
