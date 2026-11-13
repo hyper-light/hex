@@ -1675,6 +1675,12 @@ impl ImageClass {
         }
     }
 
+    /// The period running image box `record`'s VM's governor holds its rate over (`GuestRuntime::rate_period`; D191,
+    /// D247), as its run host said it as the run started.
+    pub(super) fn rate_period_image(&self, record: BoxRecord) -> Result<Duration, Refusal> {
+        Ok(self.image_guest(&record, "rate_period")?.rate_period())
+    }
+
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
         let id = &record.spec.id;

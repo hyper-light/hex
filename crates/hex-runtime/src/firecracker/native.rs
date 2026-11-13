@@ -3210,6 +3210,7 @@ mod single_use_tests {
                 disk_bytes: 1 << 40,
             };
             Ok(hex_api::Capacity {
+                own: Default::default(),
                 id: "node:stand-in".into(),
                 total: room,
                 free: room,
