@@ -342,8 +342,9 @@ impl ImageMember {
     }
 
     /// Whether Shards can be asked to start it: its name as a grant's member's is checked, its variables as
-    /// an exec's (no empty key, no `=` in a key, no NUL), and its working directory absolute and plain (no
-    /// empty, `.` or `..` component, no NUL), as D231's `MemberSpec::workdir` takes one.
+    /// an exec's (no empty key, no `=` in a key, no NUL), its working directory absolute and plain (no
+    /// empty, `.` or `..` component, no NUL), as D231's `MemberSpec::workdir` takes one, and no run-time
+    /// argument holding a NUL, which no command line exec'd holds (D256), told by its place, never its bytes.
     fn check(&self, at: usize) -> Result<(), Refusal> {
         self.member
             .check_named(&format!("members[{at}].member"))
@@ -371,6 +372,11 @@ impl ImageMember {
                     "members[{at}].workdir {dir:?} isn't absolute and plain"
                 )));
             }
+        }
+        if let Some(i) = self.args.iter().position(|a| a.contains('\0')) {
+            return Err(invalid_image(format!(
+                "members[{at}].args[{i}] holds a NUL, which no command line holds"
+            )));
         }
         Ok(())
     }

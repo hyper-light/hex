@@ -2310,8 +2310,8 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
-/// its variables and an option of its working directory (joint plan step 17). Fields a later step adds go after
-/// the members (append-only).
+/// its variables, an option of its working directory (joint plan step 17) and its run-time arguments (D256, after
+/// the working directory). Fields a later step adds go after the members (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
@@ -2324,7 +2324,8 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
             w.string(k)?;
             w.string(v)
         })?;
-        w.option_with(m.workdir.as_deref(), Writer::string)
+        w.option_with(m.workdir.as_deref(), Writer::string)?;
+        w.list(&m.args, |w, arg| w.string(arg))
     })
 }
 
@@ -2338,7 +2339,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 member: member(r)?,
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
-                args: Vec::new(),
+                args: r.list(|r| r.string("member argument"))?,
             })
         })?,
     })

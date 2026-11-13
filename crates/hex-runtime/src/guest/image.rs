@@ -419,8 +419,9 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
 }
 
 /// What Shards' image boot gives a member its caller drives (joint plan step 17): its stdin a pipe the caller
-/// writes (`MemberSpec::stdin`), its variables and working directory as the box's spec says them, no file and no
-/// terminal. Its stdout and stderr are D231's pipes for every member that runs.
+/// writes (`MemberSpec::stdin`), its variables, working directory and run-time arguments as the box's spec says them
+/// (the arguments after its image's command, D256), no file and no terminal. Its stdout and stderr are D231's pipes
+/// for every member that runs.
 fn member_spec(m: &ImageMember) -> MemberSpec {
     MemberSpec {
         member: member_name(&m.member),
@@ -433,8 +434,7 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
         workdir: m.workdir.clone(),
         stdin: true,
         terminal: false,
-        // No run-time argument (D256): its image's command alone.
-        args: Vec::new(),
+        args: m.args.clone(),
     }
 }
 
