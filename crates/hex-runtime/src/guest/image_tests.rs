@@ -1456,8 +1456,10 @@ fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
         (last.cpu_ns, last.footprint_bytes, last.guest_ns.len()),
         (9_000_000, 1 << 20, usize::try_from(vcpus).unwrap())
     );
+    // A delete retried once the VM is gone, as kiln's runtime of the class alone answers it (hex-node's ImageRuntime):
+    // NoSuchBox, never a use made up. A node's guest runtime takes an id it has no record of as its guest's own.
     assert!(matches!(
-        runtime.delete_with_host_use(&id),
+        hex_api::Runtime::delete_with_host_use(&runtime.images, &id),
         Err(Refusal::NoSuchBox(_))
     ));
     let images = ModelImages::new();
