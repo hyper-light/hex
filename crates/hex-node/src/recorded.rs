@@ -2443,6 +2443,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.usage(id)
     }
 
+    fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.member(id, member)
+    }
+
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         self.runtime
             .list()?
@@ -3081,6 +3085,9 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         forward_guest(self.guest(), call, stdio, reply, ended)
     }
 
+    /// A box its guest runtime holds goes to that guest's node, but a Shards image VM, whose guest runs no node of
+    /// Hex's: the guest runtime here answers it, as the Linux node runs an image VM's exec here (`guest_node_class`;
+    /// joint plan step 12, docs/design/shards-image-class.md §2).
     fn forward_for(
         &self,
         spec: &BoxSpec,
@@ -3090,6 +3097,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         ended: serve::Ended,
     ) -> Forward {
         match self.route_for(spec) {
+            Ok(hex_runtime::guest::Side::Guest)
+                if matches!(spec.class, hex_api::ClassSpec::ShardsImage(_)) =>
+            {
+                Forward::Back(Box::new((call, stdio)))
+            }
             Ok(hex_runtime::guest::Side::Guest) => {
                 forward_guest(self.guest(), call, stdio, reply, ended)
             }

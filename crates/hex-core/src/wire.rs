@@ -47,11 +47,11 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
     DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
-    ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedEnd, LearnedHolding, LearnedPrior,
-    LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
-    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
-    PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
-    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
+    ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedEnd, LearnedHolding,
+    LearnedPrior, LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
+    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs,
+    RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
     check_grants, check_published,
 };
 
@@ -2180,14 +2180,23 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 }
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
-/// step 12), then its network grants (joint plan step 15). Fields a later step adds go after the grants
-/// (append-only).
+/// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
+/// its variables and an option of its working directory (joint plan step 17). Fields a later step adds go after
+/// the members (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
         w.list(command, |w, arg| w.string(arg))
     })?;
-    put_grants(w, &image.grants)
+    put_grants(w, &image.grants)?;
+    w.list(&image.members, |w, m| {
+        put_member(w, &m.member)?;
+        w.list(&m.env, |w, (k, v)| {
+            w.string(k)?;
+            w.string(v)
+        })?;
+        w.option_with(m.workdir.as_deref(), Writer::string)
+    })
 }
 
 fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
@@ -2195,6 +2204,13 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
         image: r.string("shards image")?,
         command: r.option(|r| r.list(|r| r.string("shards image command")))?,
         grants: grants(r)?,
+        members: r.list(|r| {
+            Ok(ImageMember {
+                member: member(r)?,
+                env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
+                workdir: r.option(|r| r.string("member workdir"))?,
+            })
+        })?,
     })
 }
 

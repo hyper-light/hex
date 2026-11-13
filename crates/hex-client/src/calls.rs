@@ -2920,6 +2920,18 @@ impl<T: Transport> Runtime for Core<T> {
         self.info(Call::Inspect(id.clone()), "inspect")
     }
 
+    /// A member's streams are taken in the process that holds its image box's run (joint plan step 17): the node's
+    /// wire carries no member call yet, so a caller over it is refused, typed, rather than told the box has none.
+    fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "{member} of box {id}: the node's wire carries no member call yet; a member's streams are taken \
+                 in the node's own process"
+            ),
+        })
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         match self.plain(Call::Usage(id.clone()))? {
             Answer::Usage(usage) => Ok(usage),

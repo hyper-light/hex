@@ -2028,6 +2028,21 @@ impl Runtime for Node {
         self.info(&record, false)
     }
 
+    fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.member(id, member);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members its caller drives"
+            ),
+        })
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         if let Some(backend) = self.backend_record(id)? {
             return backend.usage(id);

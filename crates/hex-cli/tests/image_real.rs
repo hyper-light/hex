@@ -1,7 +1,8 @@
 //! Joint plan step 12, AC-T7.4.1: the Shards class on Agentfile images (every case of `hex_api::conformance::
-//! IMAGE_CASES`, HEX-IMG-1 on) through a real `hex node` on Linux KVM, each box a microVM Shards' D231 boots from a pinned image
-//! under shards-init (docs/design/shards-image-class.md), and the run that takes the class's first wait records:
-//! `image_boot`, `image_stats` and `image_stop` (bench/native/guest/records.tsv).
+//! IMAGE_CASES`, HEX-IMG-1 on) through a real `hex node` on Linux KVM, macOS HVF or Windows WHP, each box a microVM
+//! Shards' D231 boots from a pinned image under shards-init (docs/design/shards-image-class.md), and the run that
+//! takes the class's first wait records: `image_boot`, `image_stats` and `image_stop`
+//! (bench/native/guest/records.tsv).
 //!
 //! The node runs in the waits census (`HEX_WAITS_CENSUS`, `hex_node::census`), which arms no wait: there the image
 //! waits measure while no record holds them (`hex_runtime::guest::ImageWaits::recorded`), and the census file keeps
@@ -9,12 +10,13 @@
 //! its count, fastest and slowest (`IMAGE-RECORD`); and, as it goes, every answer the client's own waits record
 //! (`IMAGE-STEP`, each call's answer as the client saw it) and each case's verdict and time (`IMAGE-CASE`).
 //!
-//! HEX-IMG-4 awaits Shards' guest time per vCPU (`Upstream::GuestCpuTimePerVcpu`), which no Shards revision gives
-//! yet: it must fail naming that, and every other case pass. Once Shards gives it, HEX-IMG-4 passes and this test
-//! says so, failing until its expectation goes.
+//! HEX-IMG-4 awaits Shards' guest time per vCPU (`Upstream::GuestCpuTimePerVcpu`), which D231's image boot says
+//! nothing of in its stats yet (Shards e82b9403): it must fail naming that, and every other case pass. Once Shards
+//! gives it, HEX-IMG-4 passes and this test says so, failing until its expectation goes.
 //!
-//! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`, inside a
-//! cgroup delegated to this binary (`HEX_DELEGATED`), as native_firecracker_smoke is:
+//! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`; on Linux
+//! inside a cgroup delegated to this binary (`HEX_DELEGATED`), as native_firecracker_smoke is, where the node holds
+//! its boxes; on macOS and Windows as it is, where the node holds them as `hex node` there does:
 //! - the image, with a `/bin/sh` (HEX-IMG-3's command), in the node's Shards home before the node starts: either
 //!   `HEX_IMAGE_CONTEXT`, an Agentfile image's build context (a harness image, which no registry need serve), built
 //!   there and pinned by the manifest digest its build says, as Shards' store finds a pinned image by content
@@ -31,8 +33,13 @@
 //! - `HEX_IMAGE_WORK`: a directory of this run's own, made here; `HEX_IMAGE_WAIT_MS`: the run's explicit deadline,
 //!   for the node's start and the whole suite; `HEX_WAITS_CENSUS_MAX`: the census's most lines.
 //!
-//! Run: `cargo test --release --locked -p hex-cli --test image_real -- --ignored --nocapture` with those set.
-#![cfg(target_os = "linux")]
+//! Run on Linux: build it with `cargo test --release --locked -p hex-cli --test image_real --no-run`, which names the
+//! test binary it built (`target/release/deps/image_real-<hash>`), then start that binary alone in the delegated
+//! scope, with those set: `systemd-run --user --scope -p Delegate=yes --quiet -- env HEX_DELEGATED=1 <inputs>
+//! <binary> --ignored --nocapture`. Never cargo inside the scope: cargo stays in the scope's own cgroup, and the node
+//! can't hand its box root controllers from a cgroup holding processes of its own (`cgroup.subtree_control`,
+//! EBUSY). On macOS and Windows: `cargo test --release --locked -p hex-cli --test image_real -- --ignored
+//! --nocapture` with those set.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -55,7 +62,9 @@ use hex_client::Client;
 
 #[path = "image_node/mod.rs"]
 mod image_node;
-use image_node::{Node, allocation, built, input, number, own_cgroup, pull, records, step};
+#[cfg(target_os = "linux")]
+use image_node::own_cgroup;
+use image_node::{Node, allocation, built, input, number, pull, records, step};
 
 /// The name an image built from `HEX_IMAGE_CONTEXT` is tagged with in the node's Shards home; the cases pin it by
 /// its digest.
@@ -127,8 +136,9 @@ impl Fixture for ImageBoxes {
 }
 
 #[test]
-#[ignore = "native: KVM, a delegated cgroup, a Shards guest configuration and a pinned image (HEX_IMAGE)"]
+#[ignore = "native: KVM, HVF or WHP, a Shards guest configuration and an image (on Linux a delegated cgroup)"]
 fn the_shards_image_class_holds_its_contract_through_a_real_node() {
+    #[cfg(target_os = "linux")]
     assert!(
         std::env::var_os("HEX_DELEGATED").is_some(),
         "run inside a cgroup delegated to this binary (HEX_DELEGATED)"
@@ -161,7 +171,12 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     // Admitted as the node's own cost sizes a VM, from the same configuration the node reads.
     let allocation = allocation();
     eprintln!("IMAGE each VM {:?}", allocation.vm_size().unwrap());
-    let own = own_cgroup("hex-image-real");
+    // Linux's node holds its boxes in a child of this binary's own delegated cgroup; macOS's and Windows' where
+    // their `hex node` does.
+    #[cfg(target_os = "linux")]
+    let boxes = Some(own_cgroup("hex-image-real").join("hex-image-node"));
+    #[cfg(not(target_os = "linux"))]
+    let boxes: Option<PathBuf> = None;
     let image = match source {
         Source::Context(context) => built(&shards, &context, &work, BUILT),
         Source::Pinned(image) => {
@@ -170,7 +185,7 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         }
     };
     ShardsImage::new(&image).check().unwrap();
-    let node = Node::start(&work, Some(&own.join("hex-image-node")), wait);
+    let node = Node::start(&work, boxes.as_deref(), wait);
     let socket = node.socket.clone();
     let (done, verdicts) = mpsc::channel();
     std::thread::spawn(move || {
