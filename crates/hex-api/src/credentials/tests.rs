@@ -366,3 +366,92 @@ fn w33_a_credential_grants_debug_shows_its_placeholders_length_alone() {
         "{shown}"
     );
 }
+
+/// Claude Code's own sign-in as kiln would grant it (docs/design/credential-grants.md C8): toward its provider, with an
+/// earlier capture's placeholders.
+fn sign_in(name: &str, cli: SignInCli) -> SignInGrant {
+    SignInGrant {
+        member: claude(),
+        sign_in: name.to_owned(),
+        cli,
+        toward: vec!["api.anthropic.com".to_owned()],
+        captured: Some(Captured {
+            access: format!("{name}/access"),
+            access_placeholder: placeholder(&format!("{name}/access")),
+            refresh_placeholder: Some(placeholder(&format!("{name}/refresh"))),
+        }),
+    }
+}
+
+fn sign_in_refused(sign_ins: &[SignInGrant]) -> String {
+    let (grants, credentials) = harness();
+    match check_sign_ins(sign_ins, &credentials, &grants) {
+        Err(Refusal::Invalid {
+            what: "sign_ins",
+            why,
+        }) => why,
+        other => panic!("{sign_ins:?} gave {other:?}"),
+    }
+}
+
+/// C8: do check a harness's sign-in beside its credential, then each field broken in turn. Expect the sign-in taken, and
+/// each broken one refused by its field: a name no store holds, a second sign-in of its name or its CLI, no host, a host
+/// named twice or its member's egress doesn't reach, a captured reference no store holds, a placeholder no request
+/// carries, and a placeholder that stands for two tokens (its own two, or a credential's).
+#[test]
+fn s33_a_sign_in_is_checked_by_its_fields_beside_the_runs_credentials() {
+    let (grants, credentials) = harness();
+    let claude_code = sign_in("claude/ada", SignInCli::ClaudeCode);
+    check_sign_ins(std::slice::from_ref(&claude_code), &credentials, &grants).unwrap();
+    let broken = |change: &dyn Fn(&mut SignInGrant)| {
+        let mut grant = claude_code.clone();
+        change(&mut grant);
+        sign_in_refused(&[grant])
+    };
+    assert!(broken(&|g| g.sign_in = "claude ada".to_owned()).contains("sign_ins[0].sign_in"));
+    assert!(broken(&|g| g.toward.clear()).contains("toward no host"));
+    assert!(broken(&|g| g.toward.push("api.anthropic.com".to_owned())).contains("twice"));
+    assert!(
+        broken(&|g| g.toward = vec!["evil.example".to_owned()]).contains("reaches by name, by TCP")
+    );
+    assert!(
+        broken(&|g| g.captured.as_mut().unwrap().access = String::new())
+            .contains("captured.access")
+    );
+    assert!(
+        broken(&|g| g.captured.as_mut().unwrap().access_placeholder = "not a token".to_owned())
+            .contains("captured.access_placeholder")
+    );
+    assert!(
+        broken(&|g| {
+            let captured = g.captured.as_mut().unwrap();
+            captured.refresh_placeholder = Some(captured.access_placeholder.clone());
+        })
+        .contains("stands for one token alone")
+    );
+    assert!(
+        broken(&|g| g.captured.as_mut().unwrap().access_placeholder = placeholder("anthropic/ada"))
+            .contains("credentials[0].placeholder")
+    );
+    let codex = SignInGrant {
+        cli: SignInCli::Codex,
+        ..sign_in("openai/ada", SignInCli::Codex)
+    };
+    check_sign_ins(&[claude_code.clone(), codex], &credentials, &grants).unwrap();
+    assert!(
+        sign_in_refused(&[
+            claude_code.clone(),
+            sign_in("claude/bo", SignInCli::ClaudeCode)
+        ])
+        .contains("signs ClaudeCode in again")
+    );
+    assert!(
+        sign_in_refused(&[claude_code.clone(), claude_code])
+            .contains("names sign-in claude/ada twice")
+    );
+    let printed = format!("{:?}", sign_in("claude/ada", SignInCli::ClaudeCode));
+    assert!(
+        !printed.contains(&placeholder("claude/ada/access")),
+        "a placeholder printed: {printed}"
+    );
+}

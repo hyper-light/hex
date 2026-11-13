@@ -1420,6 +1420,12 @@ impl<O: Os> Shared<O> {
             Ok((h, Request::Leased { run, answer })) => {
                 self.lease_reply(conn, h.id, leases::Reply::Leased(answer), Some(run))
             }
+            Ok((h, Request::Captured { run, answer })) => {
+                self.lease_reply(conn, h.id, leases::Reply::Captured(answer), Some(run))
+            }
+            Ok((h, Request::Refreshed { run, answer })) => {
+                self.lease_reply(conn, h.id, leases::Reply::Refreshed(answer), Some(run))
+            }
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;
@@ -1555,6 +1561,12 @@ impl<O: Os> Shared<O> {
             match self.os.send(&conn.sock, &bytes, &fds) {
                 Sent::Sent => {
                     out.sent(fds, given);
+                    // A sign-in's tokens cross in their message alone: its bytes here are wiped once it has gone
+                    // (docs/design/credential-grants.md C8).
+                    if wire::carries_secret(&bytes) {
+                        let mut bytes = bytes;
+                        hex_api::lease::wipe(&mut bytes);
+                    }
                     return Ok(());
                 }
                 // Its client is gone, and the I/O thread sees the hang-up and closes it.
@@ -1625,8 +1637,11 @@ impl<O: Os> Shared<O> {
         while let Some((front, fds, _)) = out.backlog.front() {
             match self.os.send(&conn.sock, front, fds) {
                 Sent::Sent => {
-                    if let Some((_, fds, given)) = out.backlog.pop_front() {
+                    if let Some((mut bytes, fds, given)) = out.backlog.pop_front() {
                         out.sent(fds, given);
+                        if wire::carries_secret(&bytes) {
+                            hex_api::lease::wipe(&mut bytes);
+                        }
                     }
                 }
                 Sent::WouldBlock => return Ok(()),
@@ -1663,7 +1678,12 @@ impl<O: Os> Shared<O> {
             if out.places() == 0 {
                 self.idle_programs.fetch_sub(1, Ordering::AcqRel);
             }
-            out.backlog.clear();
+            // What waited to go goes nowhere now: any that carried a sign-in's tokens wiped.
+            for (mut bytes, ..) in std::mem::take(&mut out.backlog) {
+                if wire::carries_secret(&bytes) {
+                    hex_api::lease::wipe(&mut bytes);
+                }
+            }
             // Its lease asks hear its end, and its boxes' runs lease from no one here from now.
             for slot in std::mem::take(&mut out.asks).into_values() {
                 slot.fill(leases::Reply::Ended);
@@ -2904,9 +2924,11 @@ fn line_ended() -> Refusal {
     }
 }
 
-/// Whether `spec` grants a credential: a Shards image VM's, whose runs lease (joint plan step 33).
+/// Whether `spec` grants a credential or a sign-in: a Shards image VM's, whose runs ask their orchestrator (joint plan
+/// step 33; docs/design/credential-grants.md C7, C8).
 fn grants_credentials(spec: &BoxSpec) -> bool {
-    matches!(&spec.class, hex_api::ClassSpec::ShardsImage(image) if !image.credentials.is_empty())
+    matches!(&spec.class, hex_api::ClassSpec::ShardsImage(image)
+        if !image.credentials.is_empty() || !image.sign_ins.is_empty())
 }
 
 impl<O: Os> Shared<O> {
@@ -2947,7 +2969,8 @@ impl<O: Os> Shared<O> {
             return Err(Refusal::Unconfigured {
                 what: "lessors for its image VMs' credentials",
                 why: format!(
-                    "box {} grants a credential, and the connection that creates it gave no lessors (Lessors): a node \
+                    "box {} grants a credential or a sign-in, and the connection that creates it gave no lessors \
+                     (Lessors): a node \
                      never leases for a box whose creator gave none",
                     spec.id
                 ),

@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use hex_api::lease::{LeaseRefused, Lessor, Lessors};
+use hex_api::lease::{LeaseRefused, Lessor, Lessors, SignInRefused, SignInTokens};
 use hex_api::{BoxId, Refusal};
 use hex_core::wire::{Answer, Request};
 
@@ -84,6 +84,26 @@ impl Leasing {
                 }),
                 Answer::LeaseGiven(lease) => self.given_back(id, &lease),
                 Answer::LessorEnded => self.run_ended(id),
+                Answer::CaptureAsk {
+                    run,
+                    sign_in,
+                    tokens,
+                    key,
+                } => self.answering(shared, move |leasing, shared| {
+                    leasing.capture_asked(shared, id, run, &sign_in, tokens, key);
+                }),
+                Answer::RefreshAsk { run, sign_in, key } => {
+                    self.answering(shared, move |leasing, shared| {
+                        leasing.refresh_asked(shared, id, run, &sign_in, key);
+                    });
+                }
+                Answer::SignInRevoked { run, sign_in, key } => {
+                    self.answering(shared, move |leasing, _| {
+                        if let Some(lessor) = leasing.lessor_of(run) {
+                            lessor.revoked(&sign_in, key);
+                        }
+                    });
+                }
                 _ => {}
             }
         }
@@ -203,6 +223,48 @@ impl Leasing {
         }
     }
 
+    /// Run `run`'s lessor, while the connection holds it.
+    fn lessor_of(&self, run: u64) -> Option<Arc<dyn Lessor>> {
+        self.held
+            .lock()
+            .ok()
+            .and_then(|held| held.runs.get(&run).map(|r| Arc::clone(&r.lessor)))
+    }
+
+    /// Run `run`'s capture of sign-in `sign_in` (ask `ask`; docs/design/credential-grants.md C8): its tokens handed whole
+    /// to the run's lessor, and its placeholders or its refusal answered.
+    fn capture_asked<T: Transport>(
+        &self,
+        shared: &SharedOwner<T>,
+        ask: u64,
+        run: u64,
+        sign_in: &str,
+        tokens: SignInTokens,
+        key: Option<[u8; 32]>,
+    ) {
+        let answer = match self.lessor_of(run) {
+            Some(lessor) => lessor.capture(sign_in, tokens, key),
+            None => Err(no_lessor(run)),
+        };
+        let _ = shared.owe_word(ask, &Request::Captured { run, answer });
+    }
+
+    /// Run `run`'s refresh of sign-in `sign_in` (ask `ask`; C8): its lessor's token response, or its refusal, answered.
+    fn refresh_asked<T: Transport>(
+        &self,
+        shared: &SharedOwner<T>,
+        ask: u64,
+        run: u64,
+        sign_in: &str,
+        key: Option<[u8; 32]>,
+    ) {
+        let answer = match self.lessor_of(run) {
+            Some(lessor) => lessor.refresh(sign_in, key),
+            None => Err(no_lessor(run)),
+        };
+        let _ = shared.owe_word(ask, &Request::Refreshed { run, answer });
+    }
+
     /// The node gave back run `run`'s lease `lease`: given back to the run's lessor, once.
     fn given_back(&self, run: u64, lease: &str) {
         let lessor = self.held.lock().ok().and_then(|mut held| {
@@ -241,4 +303,9 @@ impl Leasing {
             }
         }
     }
+}
+
+/// No lessor of run `run` is held on this connection: its sign-in can't be answered here.
+fn no_lessor(run: u64) -> SignInRefused {
+    SignInRefused::Unavailable(format!("no lessor of run {run} is held on this connection"))
 }
