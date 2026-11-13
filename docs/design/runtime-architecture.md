@@ -2514,8 +2514,8 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 
 | Wait | Was | Now | Evidence (its seed until 2026-11-13) |
 | --- | --- | --- | --- |
-| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | the slowest answer seen, following the seed before the first and after a hang (it was 2 × max(record, seen) until 2026-11-13) | the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
-| a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | the slowest answer seen; past it the run-out told and the seed followed by its life, its pidfd, to its answer or its end, never killed as hung; before the first answer, and from a run-out to the next, followed from the start (it was 2 × max(record, seen) until 2026-11-13) | the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
+| a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same; past it the busy seeds followed by their life, a create refused only when no seed can come | the same record: a create in line waits for a busy seed's answer |
 | a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned; past it, the holder followed to its let-go (2026-11-13: a refusal there failed HEX-SOCK-6's concurrent changes) | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take; past it, the holder followed to its let-go | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
@@ -2530,9 +2530,10 @@ timing points (`hex_node::census`): a release build's the largest max of the rel
 the record host in fedora's place), a debug build's run 5's largest answer of the debug-build arms, the debug arm and
 the suites (adacachy2). Until 2026-11-13 each seeded its wait; now they are the evidence the rule is held to: the
 census's run-outs (`name >nanos`) and answers say where a node's bound at the slowest it has seen would have run out
-and how often, which the falsifier below reads. A seed past its hang bound tells the census nothing, a hung seed
-saying nothing of an answer's time, but makes the next seed's wait follow it (`Patience::expired`). The exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is seeded from the clone record
-as the create seeds' are; and a create no seed came free for (line full, wait ended) is
+and how often, which the falsifier below reads. A seed past its hang bound tells the census its run-out and is waited
+for by its life, its answer the sample the bound rises to, the next seed's wait following it until then. The exec
+seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is learned as the create seeds' line is, past it following the
+busy seeds by their life; and a create no seed came free for (line full, or none able to come) is
 refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
 seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one implementation per job (the lead's
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
@@ -2542,8 +2543,8 @@ A parked init that refuses its claim, ends, or says nothing within the claim's p
 the claim borrows the request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node running out more often than the answers it has seen allow (each answer
-outrunning the slowest of `n` with chance at most `1 / (n + 1)`), retiring seeds as hung or refusing calls and record
-writes that would have come: then its answers aren't exchangeable with those before them, and the evidence is the
+outrunning the slowest of `n` with chance at most `1 / (n + 1)`), refusing calls and record writes that would have
+come: then its answers aren't exchangeable with those before them, and the evidence is the
 answer times around the refusals and the census's run-outs. A following wait refused as stalled while its party went
 on to answer: then the party's progress count misses work it does, and the shell reads the wrong count. A following
 wait held by a party alive and advancing but never answering: then the census's never-answers (`p > 0`, a count it

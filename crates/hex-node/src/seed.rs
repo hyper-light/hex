@@ -21,10 +21,10 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hex_api::Refusal;
-use hex_core::patience::{Follow, Party, Patience};
+use hex_core::patience::Patience;
 use hex_core::seed::{Answer, Failed, Request};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::seed as rt_seed;
@@ -46,9 +46,8 @@ pub struct SeedPool {
     inner: Mutex<Inner>,
     free: Condvar,
     /// How long an exec waits for a busy seed to free, W*: the slowest an exec has held a seed on this node, a bound
-    /// only while seeds free within it (decision 9). Past it the wait follows the busy seeds by the seeds freed
-    /// ([`Inner::freed`]); before the first hold, and from a run-out to the next hold, from its start
-    /// ([`SeedPool::acquire`]).
+    /// only while seeds free within it (decision 9). Past it the wait follows the busy seeds by their life alone;
+    /// before the first hold, and from a run-out to the next hold, from its start ([`SeedPool::acquire`]).
     answers: Patience,
 }
 
@@ -58,9 +57,6 @@ struct Inner {
     /// Seeds that exist (idle plus in use plus reserved while one is starting).
     total: usize,
     waiting: usize,
-    /// Seeds freed, counted: one each time an exec gives its seed back or a seed's slot is let go. A count that rises
-    /// while the busy seeds serve, the progress a waiting exec follows past W* (decision 9).
-    freed: u64,
 }
 
 /// One seed process: the agent's end of its socket, and the pidfd by which the agent ends and reaps
@@ -140,20 +136,14 @@ impl SeedPool {
     /// An idle seed, a freshly started one if the pool may grow, or a wait for one freed; refused if too many already
     /// wait. The wait, as decision 9 waits (the person's ruling of 2026-11-13):
     /// - **within W***, the slowest hold seen, a seed freed ends it;
-    /// - **past W*** its run-out is told to the census, once and with no sample, and it follows the busy seeds by the
-    ///   seeds freed: it goes on while one frees within each window of W*, and is refused only once a whole window
-    ///   passes with none;
-    /// - **with no W*** (before the first hold, and from a run-out to the next hold) it follows them from its start
-    ///   ([`Patience::follow`]).
+    /// - **past W*** its run-out is told to the census, once and with no sample, and it follows the busy seeds by their
+    ///   life alone for now (the seeds freed are too coarse a progress to judge a stall at W*'s scale): a seed freed,
+    ///   or a slot let go by a seed's end ([`SeedPool::discard`]), ends it, however long that takes;
+    /// - **with no W*** (before the first hold, and from a run-out to the next hold) it follows them from its start.
     fn acquire(&self) -> Result<Seed, Refusal> {
         let mut inner = self.lock()?;
         let began = Instant::now();
-        let bound = self.answers.deadline();
-        let mut following = bound.is_none().then(|| {
-            self.answers
-                .follow()
-                .starting_at(inner.freed, Duration::ZERO)
-        });
+        let mut bound = self.answers.deadline();
         loop {
             if let Some(mut seed) = inner.idle.pop() {
                 seed.since = Instant::now();
@@ -179,58 +169,44 @@ impl SeedPool {
                 });
             }
             let now = began.elapsed();
-            if following.is_none()
-                && let Some(bound) = bound
-                && now >= bound
+            if let Some(within) = bound
+                && now >= within
             {
                 // Past W*: no sample (Karn's point), but the census is told, once, and the exec waits on.
-                self.answers.ran_out(bound);
-                following = Some(Follow::past(bound).starting_at(inner.freed, now));
+                self.answers.ran_out(within);
+                bound = None;
             }
-            let until = match following.as_mut() {
-                Some(follow) => {
-                    let party = Party::Alive {
-                        progress: inner.freed,
-                    };
-                    if follow.look(party, now).is_err() {
-                        // No seed freed over a whole window: no sample, and nothing more for the census.
-                        return Err(Refusal::Exhausted {
-                            what: "exec seeds",
-                            bound: self.budget,
-                        });
-                    }
-                    follow.stalls_after()
-                }
-                None => bound,
-            };
+            fn poisoned<T>(_: T) -> Refusal {
+                Refusal::Broken("the seed pool's lock was poisoned".to_owned())
+            }
             inner.waiting = inner.waiting.saturating_add(1);
-            let left = until.map_or(Duration::MAX, |until| until.saturating_sub(now));
-            inner = self
-                .free
-                .wait_timeout(inner, left)
-                .map_err(|_| Refusal::Broken("the seed pool's lock was poisoned".to_owned()))?
-                .0;
+            inner = match bound {
+                Some(within) => {
+                    self.free
+                        .wait_timeout(inner, within.saturating_sub(now))
+                        .map_err(poisoned)?
+                        .0
+                }
+                None => self.free.wait(inner).map_err(poisoned)?,
+            };
             inner.waiting = inner.waiting.saturating_sub(1);
         }
     }
 
-    /// Returns a healthy seed to the pool, a seed freed, and wakes one waiter.
+    /// Returns a healthy seed to the pool and wakes one waiter.
     fn release(&self, seed: Seed) {
         self.answers.answered(seed.since.elapsed());
         if let Ok(mut inner) = self.lock() {
             inner.idle.push(seed);
-            inner.freed = inner.freed.saturating_add(1);
             self.free.notify_one();
         }
     }
 
-    /// Ends and reaps an unusable seed, frees its slot, a seed freed, and wakes a waiter (which may start a fresh
-    /// one).
+    /// Ends and reaps an unusable seed, frees its slot, and wakes a waiter (which may start a fresh one).
     fn discard(&self, seed: Seed) {
         end_seed(&seed);
         if let Ok(mut inner) = self.lock() {
             inner.total = inner.total.saturating_sub(1);
-            inner.freed = inner.freed.saturating_add(1);
             self.free.notify_one();
         }
     }
@@ -357,6 +333,7 @@ mod tests {
     use super::*;
 
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// Longest a test waits for a fact it needs: a bound, so a pool that never makes it true fails the test instead
     /// of hanging it.
@@ -384,9 +361,7 @@ mod tests {
     /// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it): an
     /// exec waiting for a busy seed was refused at W*, the slowest hold seen, though its seed was still serving. Do: a
     /// pool of one seed out with an exec, W* 1 s; an exec waits, and once its wait has run out (told) or it was
-    /// refused, the seed is freed. Expect: the exec handed the seed. The seed is to be freed within a window of W* of
-    /// the run-out, so W* is long against a loaded host's late wake-ups (a 200 ms timed wait woke 130 ms late on
-    /// adacachy2 under load, run r362).
+    /// refused, the seed is freed. Expect: the exec handed the seed.
     #[test]
     fn original_an_exec_waiting_past_the_exec_seeds_w_star_waits_on_for_a_seed_freed() {
         let pool = busy_pool(Duration::from_secs(1));
@@ -444,34 +419,6 @@ mod tests {
         assert!(
             got.is_ok(),
             "the exec was refused with a seed freed: {got:?}"
-        );
-    }
-
-    /// Decision 9 (the person's ruling of 2026-11-13): past W* an exec follows the busy seeds by the seeds freed, and
-    /// one that sees none freed over a whole window is refused. Do: a pool of one seed out with an exec, W* 200 ms, no
-    /// seed freed. Expect: refused by type, the run-out told, never before a whole window past W* (400 ms after the
-    /// ask). W* is long enough that a loaded host's late wake-up doesn't carry a refusal at W* past twice W*.
-    #[test]
-    fn an_exec_that_sees_no_seed_freed_over_a_whole_window_past_w_star_is_refused() {
-        let learned = Duration::from_millis(200);
-        let pool = busy_pool(learned);
-        let asked = Instant::now();
-        let got = pool.acquire().map(drop);
-        let waited = asked.elapsed();
-        assert!(
-            matches!(
-                got,
-                Err(Refusal::Exhausted {
-                    what: "exec seeds",
-                    ..
-                })
-            ),
-            "{got:?}"
-        );
-        assert_eq!(pool.answers.deadline(), None, "the run-out wasn't told");
-        assert!(
-            waited >= learned.saturating_mul(2),
-            "refused {waited:?} after the ask, before a whole window past W* ({learned:?})"
         );
     }
 
