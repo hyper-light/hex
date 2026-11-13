@@ -81,8 +81,10 @@ struct Fixture {
 fn guest_node(root: &Path) -> (Arc<Recorded<WithGuest<SimRuntime>>>, Arc<AtomicUsize>) {
     let config = GuestConfig {
         binary: root.join("model-shards"),
-        kernel: root.join("model-kernel"),
-        initrd: root.join("model-initrd"),
+        boot: hex_runtime::guest::Boot::Kernel {
+            kernel: root.join("model-kernel"),
+            initrd: root.join("model-initrd"),
+        },
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         gpu: false,
@@ -131,6 +133,7 @@ fn guest_node(root: &Path) -> (Arc<Recorded<WithGuest<SimRuntime>>>, Arc<AtomicU
     .with_images(
         hex_runtime::guest::host_images(),
         Ok(hex_runtime::guest::ImageWaits::new()),
+        root.join("image-diagnostics"),
     )
     .with_runtime_cost(cost)
     .unwrap();

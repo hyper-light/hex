@@ -5,7 +5,9 @@
 //! type and never panic.
 
 use super::*;
-use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
+use hex_api::{
+    Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, StartedFrom, User,
+};
 use proptest::prelude::*;
 
 fn device_claims() -> Vec<DeviceId> {
@@ -642,6 +644,7 @@ fn info() -> BoxInfo {
         abandoned: 2,
         last_resort: None,
         ended: None,
+        credentials: Vec::new(),
     }
 }
 
@@ -888,6 +891,11 @@ fn refusals() -> Vec<Refusal> {
                 "its command never started (status 128): exec: \"/bin/sh\": operation not permitted"
                     .to_owned(),
         },
+        // Joint plan step 33: what a node isn't configured to serve.
+        Refusal::Unconfigured {
+            what: "lessors for its image VMs' credentials",
+            why: "this node was given none to lease from".to_owned(),
+        },
     ];
     out.extend(connect_refusals());
     out
@@ -1011,6 +1019,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 io_read_bytes: 7,
                 io_write_bytes: u64::MAX,
                 guest: Some(GuestTime::PerVcpuNs(vec![0, 1, u64::MAX])),
+                started_from: Some(StartedFrom::Warm),
             }),
         ),
         (
@@ -1033,6 +1042,7 @@ fn answers() -> Vec<(u64, Answer)> {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        credentials: Vec::new(),
                     },
                 ],
                 more: true,
@@ -1631,6 +1641,7 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         "../../hex-api/src/devices.rs",
         "../../hex-api/src/runtime.rs",
         "../../hex-api/src/grants.rs",
+        "../../hex-api/src/credentials.rs",
     ];
     let mut sources: Vec<Vec<u8>> = paths
         .iter()
@@ -1998,8 +2009,9 @@ fn hostile_values_are_refused_by_name() {
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
-    // empty grant and published lists' counts and the last resort's and the run's words' none tags end the info.
-    let adopted = info.len() - NO_GRANTS - NO_END - NO_WORDS - 2 - 8 - 6 - 1;
+    // empty grant and published lists' counts, the last resort's and the run's words' none tags and the empty
+    // credential list's count end the info.
+    let adopted = info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -2215,6 +2227,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 abandoned,
                 last_resort: None,
                 ended: None,
+                credentials: Vec::new(),
             },
         )
 }
@@ -2272,6 +2285,8 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
         proptest::sample::select(Upstream::ALL.to_vec())
             .prop_map(|needs| Refusal::Awaits { needs }),
         (any_id(), any_text()).prop_map(|(id, why)| Refusal::Failed { id, why }),
+        (proptest::sample::select(&SOME_NAMES[..]), any_text())
+            .prop_map(|(what, why)| Refusal::Unconfigured { what, why }),
     ]
 }
 
@@ -2727,11 +2742,12 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
         io_read_bytes: 17,
         io_write_bytes: 19,
         guest: None,
+        started_from: None,
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    // The counters, then guest time's option byte, appended (joint plan step 12): none here.
-    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 1);
+    // The counters, then guest time's option byte and the microVM's start's, appended (joint plan step 12): none here.
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 2);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
@@ -3333,9 +3349,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
         valid_info
     );
-    // The info's route comes before its empty grant and published lists' counts and its last resort's and its run's
-    // words' none tags.
-    let route_at = bad.len() - NO_GRANTS - NO_END - NO_WORDS - route_bytes;
+    // The info's route comes before its empty grant and published lists' counts, its last resort's and its run's
+    // words' none tags, and its empty credential list's count.
+    let route_at = bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -4251,14 +4267,15 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     let per_vcpu = usage(Some(GuestTime::PerVcpuNs(vec![5, 7])));
     let bytes = answer(4, &per_vcpu, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[counters..counters + 6], &[1, 0, 2, 0, 0, 0]);
-    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>());
+    // Then the microVM's start's option byte (D253): none here.
+    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>() + 1);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         per_vcpu
     );
     let awaits = usage(Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)));
     let bytes = answer(4, &awaits, MAX_MESSAGE).unwrap();
-    assert_eq!(&bytes[counters..], &[1, 1, 0]);
+    assert_eq!(&bytes[counters..], &[1, 1, 0, 0]);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         awaits
@@ -4290,11 +4307,12 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     )
     .unwrap();
     let count = u32::try_from(GuestTime::MAX_VCPUS + 1).unwrap();
-    read_past.truncate(read_past.len() - size_of::<u32>());
+    // Its count and the start's option byte after it, written again with a count past the index space.
+    read_past.truncate(read_past.len() - size_of::<u32>() - 1);
     read_past.extend_from_slice(&count.to_le_bytes());
     read_past.extend(std::iter::repeat_n(
         0,
-        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>(),
+        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>() + 1,
     ));
     assert!(matches!(
         read_answer(&received(&read_past, 0), MAX_MESSAGE),
@@ -4570,6 +4588,9 @@ const NO_GRANTS: usize = 2 * size_of::<u32>();
 const NO_END: usize = 1;
 /// What ends an info whose run didn't fail (joint plan step 12): its words' none tag, after the last resort's.
 const NO_WORDS: usize = 1;
+/// What ends an info granting no credential (joint plan step 33): its empty credential list's u32 count, after its
+/// words' tag.
+const NO_CREDENTIALS: usize = size_of::<u32>();
 
 /// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire after its info's grants. Do:
 /// encode an info with an end and one with none, cut the second before its end's none tag, and read and write both as
@@ -4588,8 +4609,12 @@ fn w14_an_infos_last_resort_crosses_the_wire_after_its_grants() {
     );
     let plain = info();
     let mut cut = answer(3, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
-    assert_eq!(cut[cut.len() - NO_WORDS - NO_END], 0, "no end's tag");
-    cut.truncate(cut.len() - NO_WORDS - NO_END);
+    assert_eq!(
+        cut[cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END],
+        0,
+        "no end's tag"
+    );
+    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -4620,9 +4645,9 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         Answer::Info(failed.clone())
     );
-    assert!(bytes.ends_with(words.as_bytes()));
+    assert!(bytes[..bytes.len() - NO_CREDENTIALS].ends_with(words.as_bytes()));
     let mut garbled = bytes.clone();
-    let last = garbled.len() - 1;
+    let last = garbled.len() - NO_CREDENTIALS - 1;
     garbled[last] = 0xff;
     assert!(matches!(
         read_answer(&received(&garbled, 0), MAX_MESSAGE),
@@ -4630,8 +4655,12 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     ));
     let plain = info();
     let mut cut = answer(5, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
-    assert_eq!(cut.last(), Some(&0), "no words' tag ends it");
-    cut.truncate(cut.len() - NO_WORDS);
+    assert_eq!(
+        cut[cut.len() - NO_CREDENTIALS - 1],
+        0,
+        "no words' tag ends it, but for its credentials"
+    );
+    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -4641,6 +4670,66 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     let older = serde_json::to_value(&plain).unwrap();
     assert!(older.get("ended").is_none(), "skipped when none");
     assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
+}
+
+/// Joint plan step 12 (D253; AC-T7.4.1): a usage answer says how a Shards image VM's microVM started, after its guest
+/// time, as an option: tag 1 and its place in `StartedFrom` (Booted 0, Saved 1, Restored 2, Replaced 3, Warm 4); a box
+/// with no Shards image run says none, a byte 0. Do answer each, then one whose tag is 5, then each as JSON. Expect each
+/// read back as written, its tag its last byte; none a 0 last; tag 5 refused as "started from"; the JSON named in
+/// kebab-case and left out where none.
+#[test]
+fn w12_a_usages_microvm_start_crosses_the_wire_last() {
+    let usage = |started_from| {
+        Answer::Usage(Usage {
+            pids: 1,
+            started_from,
+            ..Usage::default()
+        })
+    };
+    for (tag, from) in [
+        (0u8, StartedFrom::Booted),
+        (1, StartedFrom::Saved),
+        (2, StartedFrom::Restored),
+        (3, StartedFrom::Replaced),
+        (4, StartedFrom::Warm),
+    ] {
+        let said = usage(Some(from));
+        let bytes = answer(4, &said, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[bytes.len() - 2..], &[1, tag], "{from:?}");
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            said
+        );
+    }
+    let none = answer(4, &usage(None), MAX_MESSAGE).unwrap();
+    assert_eq!(&none[none.len() - 2..], &[0, 0], "no guest time, no start");
+    assert_eq!(
+        read_answer(&received(&none, 0), MAX_MESSAGE).unwrap().1,
+        usage(None)
+    );
+    let mut hostile = answer(4, &usage(Some(StartedFrom::Warm)), MAX_MESSAGE).unwrap();
+    let last = hostile.len() - 1;
+    hostile[last] = 5;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "started from",
+            ..
+        })
+    ));
+    let warm = Usage {
+        started_from: Some(StartedFrom::Warm),
+        ..Usage::default()
+    };
+    let json = serde_json::to_value(&warm).unwrap();
+    assert_eq!(json["started_from"], "warm");
+    assert_eq!(serde_json::from_value::<Usage>(json).unwrap(), warm);
+    let older = serde_json::to_value(Usage::default()).unwrap();
+    assert!(older.get("started_from").is_none(), "skipped when none");
+    assert_eq!(
+        serde_json::from_value::<Usage>(older).unwrap(),
+        Usage::default()
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5: a box's priority band reaches its node. Do send a create of a spec in band 3
@@ -4837,8 +4926,9 @@ fn unknown_grant_tags_are_refused_by_name() {
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create a Shards image VM whose spec names the members its caller drives, one
-/// with variables and a working directory and one with neither; expect it read back whole, its members after its
-/// grants.
+/// with variables, a working directory and run-time arguments (D256, kiln's step 17; an empty one among them) and one
+/// with none of them; expect it read back whole, its members after its grants, each member's arguments after its
+/// working directory.
 #[test]
 fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
     let members = vec![
@@ -4849,6 +4939,13 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
             },
             env: vec![("LANG".to_owned(), "C.UTF-8".to_owned())],
             workdir: Some("/home/me/project".to_owned()),
+            args: vec![
+                "--resume".to_owned(),
+                "s-1".to_owned(),
+                String::new(),
+                "--model".to_owned(),
+                "claude-opus-4".to_owned(),
+            ],
         },
         hex_api::ImageMember::new(Member {
             kind: MemberKind::Agent,
@@ -4869,6 +4966,46 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
         band: 0,
     })));
     let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+}
+
+/// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): do create a Shards image VM sharing two host directories, one
+/// read-write and one read-only, beside a member its caller drives. Expect it read back whole, its shares after its
+/// members, each its host directory, where its guest sees it and whether read-only.
+#[test]
+fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-shares"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            members: vec![hex_api::ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            })],
+            shares: vec![
+                Mount {
+                    source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+                    destination: "/home/agent/.claude".to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    source: PathBuf::from("/srv/projects/hex"),
+                    destination: "/work/hex".to_owned(),
+                    read_only: true,
+                },
+            ],
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    })));
+    let bytes = request(94, &create, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         create
@@ -4963,7 +5100,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend(49152u16.to_le_bytes());
     tail.push(1);
     tail.extend(1455u16.to_le_bytes());
-    tail.extend([0; NO_END + NO_WORDS]);
+    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS]);
     assert!(bytes.ends_with(&tail));
     let declared = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -4979,7 +5116,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         read_answer(&received(&older, 0), MAX_MESSAGE).unwrap().1,
         declared
     );
-    assert!(older.ends_with(&[&[0][..], &[0; NO_END + NO_WORDS][..]].concat()));
+    assert!(older.ends_with(&[&[0][..], &[0; NO_END + NO_WORDS + NO_CREDENTIALS][..]].concat()));
     let wrong = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: each_way(),
@@ -4997,7 +5134,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS;
+    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS;
     hostile[receiver] = 2;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
@@ -5083,4 +5220,121 @@ proptest! {
     fn any_bytes_are_grants_or_refused(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
         let _ = grants(&mut Reader::new(&bytes));
     }
+}
+
+/// Joint plan step 33's credential grants: one toward the provider `each_way` grants its harness by name, by TCP.
+fn openai_credential(toward: &str) -> Vec<CredentialGrant> {
+    vec![CredentialGrant {
+        member: harness(),
+        reference: "openai/ada".to_owned(),
+        toward: vec![toward.to_owned()],
+    }]
+}
+
+/// Credential grants as a peer that skipped the check would write them.
+fn unchecked_credentials(list: &[CredentialGrant]) -> Vec<u8> {
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.list(list, |w, grant| {
+        put_member(w, &grant.member)?;
+        w.string(&grant.reference)?;
+        w.list(&grant.toward, |w, host| w.string(host))
+    })
+    .unwrap();
+    w.done().unwrap()
+}
+
+/// Joint plan step 33 (every credential grant in Hex's record of the VM; Shards' D242): do create a Shards image VM
+/// granting its harness a credential toward its provider, beside a share. Expect it read back whole, its credentials
+/// written right after the share, last of the image. Do write one whose credential its harness's egress doesn't reach,
+/// and read it as a peer that skipped the check would send it. Expect both refused as invalid credentials.
+#[test]
+fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
+    let spec = |credentials: Vec<CredentialGrant>| BoxSpec {
+        id: id("image-credentials"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            grants: each_way(),
+            shares: vec![Mount {
+                source: PathBuf::from("/srv/projects/hex"),
+                destination: "/work/hex".to_owned(),
+                read_only: true,
+            }],
+            credentials,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    };
+    let granted = openai_credential("api.openai.com");
+    let create = Request::Call(Call::Create(Box::new(spec(granted.clone()))));
+    let bytes = request(95, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+    let mut listed = Writer::new(MAX_MESSAGE);
+    put_credentials(&mut listed, &granted, &each_way()).unwrap();
+    let listed = listed.done().unwrap();
+    let share = b"/work/hex";
+    // After the share's guest path, its read-only flag, then the credentials.
+    let at = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len() + 1;
+    assert_eq!(bytes[at - 1], 1);
+    assert_eq!(&bytes[at..at + listed.len()], listed.as_slice());
+    let unreached = openai_credential("evil.example");
+    let refused = Request::Call(Call::Create(Box::new(spec(unreached.clone()))));
+    assert!(matches!(
+        request(96, &refused, MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "credentials",
+            ..
+        })
+    ));
+    let mut spliced = bytes[..at].to_vec();
+    spliced.extend(unchecked_credentials(&unreached));
+    spliced.extend_from_slice(&bytes[at + listed.len()..]);
+    assert!(matches!(
+        read_request(&received(&spliced, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value {
+            what: "credentials",
+            ..
+        })
+    ));
+}
+
+/// Joint plan step 33 (C4): do answer an inspect of a Shards image VM with its grants and its credential grants. Expect
+/// it read back whole, its credentials its last bytes. Do answer one whose credential its grants don't reach. Expect it
+/// refused as "credentials" written.
+#[test]
+fn w33_an_inspect_carries_its_credential_grants_last() {
+    let credentials = openai_credential("api.openai.com");
+    let shown = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: each_way(),
+        credentials: credentials.clone(),
+        ..info()
+    });
+    let bytes = answer(97, &shown, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        shown
+    );
+    let mut listed = Writer::new(MAX_MESSAGE);
+    put_credentials(&mut listed, &credentials, &each_way()).unwrap();
+    assert!(bytes.ends_with(&listed.done().unwrap()));
+    let unreached = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: Vec::new(),
+        credentials,
+        ..info()
+    });
+    assert!(matches!(
+        answer(98, &unreached, MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "credentials",
+            ..
+        })
+    ));
 }

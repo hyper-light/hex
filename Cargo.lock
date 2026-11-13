@@ -518,6 +518,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -576,6 +577,7 @@ dependencies = [
  "sha2 0.10.9",
  "shards-afunix",
  "shards-api",
+ "shards-remote",
  "shards-testdir",
  "tar",
  "tempfile",
@@ -1254,6 +1256,7 @@ dependencies = [
  "triomphe",
  "unsize",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

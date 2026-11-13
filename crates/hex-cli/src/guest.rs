@@ -108,6 +108,13 @@ fn parse(args: &[String]) -> Result<Args, String> {
     })
 }
 
+/// The socket in `dir` the relay listens on for `port` ([`stream::socket_name`]).
+fn socket(dir: &Path, port: u32) -> Result<PathBuf, (u8, String)> {
+    stream::socket_name(port)
+        .map(|name| dir.join(name))
+        .ok_or_else(|| (1, format!("the relay names no socket for port {port:#x}")))
+}
+
 fn relay(args: &[String]) -> Result<(), (u8, String)> {
     let Args { node, on, staged } = parse(args).map_err(|why| (2, why))?;
     std::fs::create_dir_all(&staged)
@@ -120,14 +127,14 @@ fn relay(args: &[String]) -> Result<(), (u8, String)> {
             Box::new(vsock(stream::files::FILES_PORT).map_err(|e| (1, e))?),
         ),
         On::Unix(dir) => (
-            Box::new(unix(&dir.join("control.sock")).map_err(|e| (1, e))?),
-            Box::new(unix(&dir.join("stdio.sock")).map_err(|e| (1, e))?),
-            Box::new(unix(&dir.join("files.sock")).map_err(|e| (1, e))?),
+            Box::new(unix(&socket(dir, stream::CONTROL_PORT)?).map_err(|e| (1, e))?),
+            Box::new(unix(&socket(dir, stream::STDIO_PORT)?).map_err(|e| (1, e))?),
+            Box::new(unix(&socket(dir, stream::files::FILES_PORT)?).map_err(|e| (1, e))?),
         ),
     };
     let stamps: Box<dyn Listen> = match &on {
         On::Vsock => Box::new(vsock(stream::STAMPS_PORT).map_err(|e| (1, e))?),
-        On::Unix(dir) => Box::new(unix(&dir.join("stamps.sock")).map_err(|e| (1, e))?),
+        On::Unix(dir) => Box::new(unix(&socket(dir, stream::STAMPS_PORT)?).map_err(|e| (1, e))?),
     };
     let line = stamps_line(std::env::var(BOOT_STAMPS).ok().as_deref(), boottime_ns());
     std::thread::Builder::new()

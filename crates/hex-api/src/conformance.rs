@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use crate::patience::{Party, Patience};
 use crate::{
-    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Destination, DeviceId,
-    DeviceKind, Exit, Grant, GuestTime, Member, MemberKind, Mount, Network, OciSpec, Ports,
-    Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
+    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, CredentialGrant, Destination,
+    DeviceId, DeviceKind, Exit, Grant, GuestTime, Member, MemberKind, Mount, Network, OciSpec,
+    Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
 };
 
 /// What a fixture's program does.
@@ -266,6 +266,11 @@ pub const IMAGE_CASES: &[Case] = &[
         id: "HEX-IMG-7",
         says: "create of a VM granted egress by UDP to a name is refused Awaits(MemberGrantsByName), to an IPv6 address Awaits(MemberGrantsByAddress), its host's service by UDP Awaits(MemberHostService); egress to host.docker.internal, its host's Shards name, or a malformed grant Invalid naming grants; each making nothing. A VM granted egress by TCP to a name or an IPv4 address, its host's service by TCP, or a publish of its member's port at the host's loopback, of its members alone and with a command of its own, is made, and inspect shows its every grant",
         run: image_grants,
+    },
+    Case {
+        id: "HEX-IMG-8",
+        says: "create of a VM granting its member a credential toward a host no egress grant of its own reaches by name over TCP, toward no host, by a reference no store names, twice, a second credential toward one host, or toward a host another member reaches ungranted, is refused Invalid naming credentials, making nothing; a VM granting a credential toward its member's own egress hosts is made, and inspect shows its every credential grant, or, where its node leases no credentials, it is refused Unconfigured, making nothing",
+        run: image_credentials,
     },
 ];
 
@@ -1406,6 +1411,125 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// HEX-IMG-8 (joint plan step 33, AC-T7.7.2; Shards' D242; docs/design/credential-grants.md C2, C4): a credential grant
+/// grants no egress and names exactly whose flows its value is filled into, so one that could never be filled in as it
+/// says is refused, naming credentials, before anything is made. One that can is made where its node leases credentials,
+/// and inspect shows it as the record holds it, or refused as its node's configuration where it leases none.
+fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("image-credentials")?;
+    let _ = rt.delete(&id);
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let helper = Member {
+        kind: MemberKind::Agent,
+        name: "helper".to_owned(),
+    };
+    let egress = |member: &Member, host: &str| Grant::Egress {
+        member: member.clone(),
+        to: Destination::Name(host.to_owned()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 443,
+            last: 443,
+        },
+    };
+    let credential = |member: &Member, reference: &str, toward: &[&str]| CredentialGrant {
+        member: member.clone(),
+        reference: reference.to_owned(),
+        toward: toward.iter().map(|h| (*h).to_owned()).collect(),
+    };
+    let granted =
+        |grants: Vec<Grant>, credentials: Vec<CredentialGrant>| -> Result<BoxSpec, String> {
+            let mut spec = fx.spec(id.clone(), Bounds::default());
+            let ClassSpec::ShardsImage(image) = &mut spec.class else {
+                return Err("the fixture's spec isn't a Shards image VM".to_owned());
+            };
+            image.grants = grants;
+            image.credentials = credentials;
+            Ok(spec)
+        };
+    let providers = || {
+        vec![
+            egress(&claude, "api.anthropic.com"),
+            egress(&claude, "platform.claude.com"),
+        ]
+    };
+    let never = [
+        (
+            Vec::new(),
+            vec![credential(&claude, "anthropic/ada", &["api.anthropic.com"])],
+        ),
+        (providers(), vec![credential(&claude, "anthropic/ada", &[])]),
+        (
+            providers(),
+            vec![credential(&claude, "anthropic ada", &["api.anthropic.com"])],
+        ),
+        (
+            providers(),
+            vec![
+                credential(&claude, "anthropic/ada", &["api.anthropic.com"]),
+                credential(&claude, "anthropic/ada", &["platform.claude.com"]),
+            ],
+        ),
+        (
+            providers(),
+            vec![
+                credential(&claude, "anthropic/ada", &["api.anthropic.com"]),
+                credential(&claude, "anthropic/team", &["api.anthropic.com"]),
+            ],
+        ),
+        (
+            [providers(), vec![egress(&helper, "api.anthropic.com")]].concat(),
+            vec![credential(&claude, "anthropic/ada", &["api.anthropic.com"])],
+        ),
+    ];
+    for (grants, credentials) in never {
+        let got = rt.create(granted(grants, credentials.clone())?);
+        // Refused naming the credentials: by the class, or before it by a client, whose wire writes no request whose
+        // credentials its check refuses (hex-core's wire).
+        let named = match &got {
+            Err(Refusal::Invalid {
+                what: "credentials",
+                ..
+            }) => true,
+            Err(Refusal::Invalid {
+                what: "message",
+                why,
+            }) => why.starts_with("credentials isn't valid"),
+            _ => false,
+        };
+        ensure(named, || format!("create granted {credentials:?}: {got:?}"))?;
+        let left = rt.inspect(&id);
+        ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+            format!("a refused create ({credentials:?}) made {left:?}")
+        })?;
+    }
+    let credentials = vec![credential(
+        &claude,
+        "anthropic/ada",
+        &["api.anthropic.com", "platform.claude.com"],
+    )];
+    match rt.create(granted(providers(), credentials.clone())?) {
+        Ok(_) => {
+            let shown = rt.inspect(&id).map_err(|e| format!("inspect: {e}"));
+            rt.delete(&id).map_err(|e| format!("delete: {e}"))?;
+            let shown = shown?.credentials;
+            ensure(shown == credentials, || {
+                format!("inspect showed the credential grants {shown:?}")
+            })
+        }
+        Err(Refusal::Unconfigured { .. }) => {
+            let left = rt.inspect(&id);
+            ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+                format!("a create its node can't lease made {left:?}")
+            })
+        }
+        Err(e) => Err(format!("create granting {credentials:?}: {e}")),
+    }
 }
 
 #[cfg(test)]

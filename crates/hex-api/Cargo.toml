@@ -13,6 +13,8 @@ publish.workspace = true
 hex-wait.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# A credential's value wiped as it drops (lease::Value; docs/design/credential-grants.md C3).
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 hex-afunix.workspace = true

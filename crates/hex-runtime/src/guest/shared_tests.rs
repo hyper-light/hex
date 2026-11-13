@@ -350,8 +350,10 @@ fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {
 fn configured_for(path: &Path, owner: &Arc<Owner>) -> GuestRuntime {
     let mut config = super::super::tests::config();
     config.binary = path.join("shards");
-    config.kernel = path.join("kernel");
-    config.initrd = path.join("initrd");
+    config.boot = crate::guest::Boot::Kernel {
+        kernel: path.join("kernel"),
+        initrd: path.join("initrd"),
+    };
     config.shares.clear();
     let floor = selected::resources(&config).unwrap();
     let cost = hex_api::RuntimeCost {

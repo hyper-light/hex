@@ -710,11 +710,8 @@ impl GuestRuntime {
                 part(&value.to_be_bytes())?;
             }
         }
-        for path in [
-            &self.config.binary,
-            &self.config.kernel,
-            &self.config.initrd,
-        ] {
+        let (kernel, initrd) = self.config.direct()?;
+        for path in [self.config.binary.as_path(), kernel, initrd] {
             part(path.as_os_str().as_encoded_bytes())?;
         }
         part(paths.cache().as_os_str().as_encoded_bytes())?;
@@ -777,7 +774,7 @@ impl GuestRuntime {
                 continue;
             }
             if matches!(record.spec.class, hex_api::ClassSpec::ShardsImage(_)) {
-                self.retire_image(record)?;
+                self.images.retire_image(record)?;
                 continue;
             }
             let keys = self.turn_keys(&record.spec.devices)?;
@@ -1111,7 +1108,7 @@ impl GuestRuntime {
         {
             return Err(refused(receipt.original.key, LifecycleCause::Uncertain));
         }
-        let mut spec = self.cpu_spec();
+        let mut spec = self.cpu_spec()?;
         spec.vcpus = u32::try_from(
             guest
                 .cpu_milli
