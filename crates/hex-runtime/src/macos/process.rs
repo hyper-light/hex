@@ -2798,28 +2798,34 @@ mod hold_response_tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
-    /// Joint plan step 14 (2c): a hold's stop is followed until every member it holds reads stopped, and a member that
-    /// ended or left meanwhile makes the hold no sample. Do read members 11 and 12, the second live for two reads before
-    /// it stops; then 11 and 13, the second gone. Expect an instant after both stopped, 12 read three times; then none.
+    /// Joint plan step 14 (2c; ROOT, 2026-11-13): a hold's stop is read once a member, after the stop is sent, and never
+    /// followed: XNU marks a process stopped (SSTOP) inside the kill that stops it, so a member that reads anything else
+    /// there didn't take its stop, and a wait for it to read stopped can last as long as the member does. On the Studio
+    /// (r214) a member read live 76 µs after its stop was sent and for the 5 s after, while the watcher spun on it and
+    /// never acted on the release's stop (macos_pool_restart, refused Uncertain). Do read members 11 and 12 after their
+    /// stops, 12 live at its first read and stopped at any later one; then 11 and 13, 13 gone; then 11 and 14, both
+    /// stopped. Expect no sample with 12 read once; none; then an instant after both read stopped, each read once.
     #[test]
-    fn w14_a_holds_stop_is_followed_until_every_member_reads_stopped() {
+    fn w14_a_holds_stop_is_read_once_and_a_member_it_didnt_stop_is_no_sample() {
         let reads = RefCell::new(BTreeMap::<i32, u32>::new());
         let read = |pid: i32| {
             let mut reads = reads.borrow_mut();
             let n = reads.entry(pid).or_insert(0);
             *n += 1;
             Ok(match (pid, *n) {
-                (11, _) => Some(sys::Run::Stopped),
-                (12, 1 | 2) => Some(sys::Run::Live),
+                (11 | 14, _) => Some(sys::Run::Stopped),
+                (12, 1) => Some(sys::Run::Live),
                 (12, _) => Some(sys::Run::Stopped),
                 _ => None,
             })
         };
-        let before = Instant::now();
-        let stopped = stopped_after(&[11, 12], read).unwrap();
-        assert!(stopped >= before);
-        assert_eq!(reads.borrow().get(&12), Some(&3));
+        assert_eq!(stopped_after(&[11, 12], read), None);
+        assert_eq!(reads.borrow().get(&12), Some(&1), "read once, never followed");
         assert_eq!(stopped_after(&[11, 13], read), None);
+        let before = Instant::now();
+        let stopped = stopped_after(&[11, 14], read).unwrap();
+        assert!(stopped >= before);
+        assert_eq!(reads.borrow().get(&14), Some(&1));
     }
 
     /// Joint plan step 14 (2c; ROOT, 2026-11-13: a hold's measurement that fails is no sample, never the scope's
