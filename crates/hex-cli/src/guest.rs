@@ -1155,11 +1155,16 @@ fn mount_each(mounts: &[Mount]) -> Result<(), String> {
     Ok(())
 }
 
-/// The command init starts `exe` by: init's own deadline ([`BOOT_READY_BY`]) removed, which [`start`] gives a child
-/// itself.
+/// The command init starts `exe` by, none of the words init's host gave init alone in its environment
+/// (sd_notify(3)'s `unset_environment`; ROOT's rule from Shards' D234 of 2026-11-13): a service manager's socket
+/// ([`NOTIFY_SOCKET`]), which runc would take as its own supervisor's and then wait on its box's READY=1 forever, and
+/// its deadline ([`SHARDS_READY_BY`]); and init's own deadline ([`BOOT_READY_BY`]), which [`start`] gives a child itself.
+/// Init keeps what it read of them (its [`Host`]), and says READY=1 itself.
 fn child(exe: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(exe);
-    command.env_remove(BOOT_READY_BY);
+    for word in [NOTIFY_SOCKET, SHARDS_READY_BY, BOOT_READY_BY] {
+        command.env_remove(word);
+    }
     command
 }
 
