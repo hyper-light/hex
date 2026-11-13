@@ -985,6 +985,117 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
     );
 }
 
+/// A stand-in VM process for an offer to name: a `cat` waiting on its stdin, and its start time as proc(5) gives it
+/// (starttime, field 22, the 20th after the command's closing parenthesis).
+#[cfg(target_os = "linux")]
+fn offered_vm() -> (std::process::Child, u64) {
+    use std::process::{Command, Stdio};
+    let vm = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stat = std::fs::read(format!("/proc/{}/stat", vm.id())).unwrap();
+    let after = stat.iter().rposition(|b| *b == b')').unwrap() + 1;
+    let started: u64 = std::str::from_utf8(&stat[after..])
+        .unwrap()
+        .split_ascii_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    (vm, started)
+}
+
+/// An offer of stdin and stdout of exec 9 in the stand-in VM `vm` started at `started`, at `vsock`, its link's setup
+/// bound `setup`.
+#[cfg(target_os = "linux")]
+fn offered(
+    vm: &std::process::Child,
+    started: u64,
+    vsock: std::path::PathBuf,
+    setup: Option<Duration>,
+) -> wire::StreamOffer {
+    wire::StreamOffer {
+        pid: vm.id(),
+        started,
+        vsock,
+        token: TOKEN,
+        exec: 9,
+        streams: wire::Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+        setup,
+    }
+}
+
+/// What a muxer hears of an offered stream opened and named for exec 9: its CONNECT line, then its name.
+#[cfg(target_os = "linux")]
+fn offered_named(stream: stream::Stdio) -> Vec<u8> {
+    let mut line = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+    line.extend_from_slice(&stream::name(Named {
+        exec: Exec { conn: TOKEN, id: 9 },
+        stream,
+    }));
+    line
+}
+
+/// What a stand-in muxer did with a connection: answered its CONNECT and read the name that followed (the line and
+/// the name), or never answered it, the client giving it up and closing it (the line).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Muxed {
+    Named(Vec<u8>),
+    GivenUp(Vec<u8>),
+}
+
+/// A stand-in vsock muxer for an offer's CONNECTs, its connections taken one at a time, `nth` called with each one's
+/// count once its CONNECT line is read: with `silent` of that count, no answer until the client gives it up and closes
+/// it; else OK at once and the stream's name read. A `STOP` line, the test's own, ends it: what it did with each, and
+/// the named ones, held open.
+#[cfg(target_os = "linux")]
+fn offered_muxer(
+    listener: std::os::unix::net::UnixListener,
+    silent: fn(usize) -> bool,
+    mut nth: impl FnMut(usize) + Send + 'static,
+) -> std::thread::JoinHandle<(Vec<Muxed>, Vec<std::os::unix::net::UnixStream>)> {
+    std::thread::spawn(move || {
+        let (mut did, mut held) = (Vec::new(), Vec::new());
+        for n in 0.. {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = Vec::new();
+            while line.last() != Some(&b'\n') {
+                let mut byte = [0u8; 1];
+                conn.read_exact(&mut byte).unwrap();
+                line.push(byte[0]);
+            }
+            if line == b"STOP\n" {
+                break;
+            }
+            nth(n);
+            if silent(n) {
+                // Held until the client gives it up and closes.
+                let _ = conn.read(&mut [0u8; 1]);
+                did.push(Muxed::GivenUp(line));
+                continue;
+            }
+            conn.write_all(b"OK 1\n").unwrap();
+            let mut name = [0u8; stream::NAME_BYTES];
+            match conn.read_exact(&mut name) {
+                Ok(()) => {
+                    line.extend_from_slice(&name);
+                    did.push(Muxed::Named(line));
+                    held.push(conn);
+                }
+                Err(_) => did.push(Muxed::GivenUp(line)),
+            }
+        }
+        (did, held)
+    })
+}
+
 /// HEX-RT-17, AC-T7.4.1 (CLAUDE.md §2): open an offered guest exec's stdin and stdout as a Windows caller does,
 /// through Shards' borrowed connector, against a stand-in VM process and its vsock muxer. One muxer answers each
 /// CONNECT with OK a moment after reading it, under a deadline the test never reaches; another never answers, under
@@ -994,7 +1105,6 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
 #[test]
 fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::process::{Command, Stdio};
 
     // Each connection's CONNECT line and, once it is answered, its name; the answered ones, held open.
     fn muxer(
@@ -1050,33 +1160,8 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vm = Command::new("cat")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    // proc(5): starttime is field 22, the 20th after the command's closing parenthesis.
-    let stat = std::fs::read(format!("/proc/{}/stat", vm.id())).unwrap();
-    let after = stat.iter().rposition(|b| *b == b')').unwrap() + 1;
-    let started: u64 = std::str::from_utf8(&stat[after..])
-        .unwrap()
-        .split_ascii_whitespace()
-        .nth(19)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let offer = |vsock: std::path::PathBuf| wire::StreamOffer {
-        pid: vm.id(),
-        started,
-        vsock,
-        token: TOKEN,
-        exec: 9,
-        streams: wire::Streams {
-            stdin: true,
-            stdout: true,
-            stderr: false,
-        },
-    };
+    let (mut vm, started) = offered_vm();
+    let offer = |vsock: std::path::PathBuf| offered(&vm, started, vsock, None);
     let answering = dir.path().join("a");
     let answered = muxer(UnixListener::bind(&answering).unwrap(), Some(CONNECT_CAP));
     let far = ReplyDeadline::caller_before(Instant::now() + Duration::from_secs(30)).unwrap();
@@ -1089,14 +1174,6 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     let (unanswered, _) = silent.join().unwrap();
     drop(vm.stdin.take());
     let reaped = vm.wait();
-    let named = |stream| {
-        let mut line = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
-        line.extend_from_slice(&stream::name(Named {
-            exec: Exec { conn: TOKEN, id: 9 },
-            stream,
-        }));
-        line
-    };
     let blocking = |end: &Option<hex_api::End>| {
         end.as_ref().is_some_and(|end| {
             !rustix::fs::fcntl_getfl(end)
@@ -1111,7 +1188,13 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     );
     let given = opened.expect("an answered offer's streams, opened");
     assert!(blocking(&given.stdin) && blocking(&given.stdout) && given.stderr.is_none());
-    assert_eq!(heard, [named(stream::Stdio::In), named(stream::Stdio::Out)]);
+    assert_eq!(
+        heard,
+        [
+            offered_named(stream::Stdio::In),
+            offered_named(stream::Stdio::Out)
+        ]
+    );
     assert!(
         matches!(
             refused,
@@ -1132,6 +1215,98 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
         [format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes()]
     );
     drop(held);
+}
+
+/// HEX-RT-17, decision 9 (AC-T7.4.1): open an offered guest exec's stdin and stdout as a Windows caller does for an
+/// exec with no deadline of its own (a plain exec, which HEX-RT-17 holds), the offer carrying its guest link's setup
+/// bound, as a node's does. The muxer never answers the first CONNECT and answers each after it at once. Expect the
+/// streams opened: the first CONNECT given up at its deadline and made again, the wait following the VM past it, never
+/// refused there; then each stream named for the exec in its turn.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut vm, started) = offered_vm();
+    let path = dir.path().join("m");
+    let muxer = offered_muxer(UnixListener::bind(&path).unwrap(), |n| n == 0, drop);
+    let opened = open_offered(
+        &offered(&vm, started, path.clone(), Some(CONNECT_CAP)),
+        None,
+    );
+    eprintln!("hex_rt_17_offered_following opened={opened:?}");
+    let given = opened.expect("an offer's streams, opened past its first CONNECT's deadline");
+    UnixStream::connect(&path)
+        .unwrap()
+        .write_all(b"STOP\n")
+        .unwrap();
+    let (did, held) = muxer.join().unwrap();
+    drop(vm.stdin.take());
+    let reaped = vm.wait();
+    eprintln!("hex_rt_17_offered_following did={did:?} reaped={reaped:?}");
+    assert!(given.stdin.is_some() && given.stdout.is_some() && given.stderr.is_none());
+    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+    assert_eq!(
+        did,
+        [
+            Muxed::GivenUp(connect),
+            Muxed::Named(offered_named(stream::Stdio::In)),
+            Muxed::Named(offered_named(stream::Stdio::Out)),
+        ]
+    );
+    drop(held);
+}
+
+/// HEX-RT-17, decision 9 (AC-T7.4.1): an offered stream's CONNECT for an exec with no deadline, its muxer never
+/// answering, the VM killed as its second CONNECT comes: the first was given up at its deadline and made again while
+/// the VM lived. Expect the open refused by type at the VM's end (its process, never a CONNECT's deadline), once the
+/// CONNECT under way is given up, and no CONNECT made after it.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (vm, started) = offered_vm();
+    let path = dir.path().join("m");
+    let offer = offered(&vm, started, path.clone(), Some(CONNECT_CAP));
+    let vm = Arc::new(Mutex::new(vm));
+    let killed = Arc::clone(&vm);
+    let muxer = offered_muxer(
+        UnixListener::bind(&path).unwrap(),
+        |_| true,
+        move |n| {
+            if n == 1 {
+                killed.lock().unwrap().kill().unwrap();
+            }
+        },
+    );
+    let refused = open_offered(&offer, None);
+    eprintln!("hex_rt_17_offered_vm_end refused={refused:?}");
+    assert!(
+        matches!(
+            &refused,
+            Err(Refusal::Os {
+                op: "opening an offered guest stream",
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    UnixStream::connect(&path)
+        .unwrap()
+        .write_all(b"STOP\n")
+        .unwrap();
+    let (did, _) = muxer.join().unwrap();
+    let reaped = vm.lock().unwrap().wait();
+    eprintln!("hex_rt_17_offered_vm_end did={did:?} reaped={reaped:?}");
+    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+    assert_eq!(
+        did,
+        [Muxed::GivenUp(connect.clone()), Muxed::GivenUp(connect)]
+    );
 }
 
 /// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
