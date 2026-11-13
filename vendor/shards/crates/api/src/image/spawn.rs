@@ -148,14 +148,26 @@ mod tests {
 
     use super::*;
 
-    /// A program that reads its stdin to its end, saying each line with its argument in it.
+    /// The variable under which the leak check runs, in a test process of its own.
+    #[cfg(any(target_os = "macos", windows))]
+    const ALONE: &str = "SHARDS_API_SPAWN_ALONE";
+
+    /// A program that reads its stdin to its end, saying each line with its argument in it, by its
+    /// path: findstr on Windows, grep on macOS.
+    #[cfg(any(target_os = "macos", windows))]
     fn reader() -> PathBuf {
-        PathBuf::from(if cfg!(windows) { "findstr" } else { "grep" })
+        if cfg!(windows) {
+            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            PathBuf::from(root).join("System32").join("findstr.exe")
+        } else {
+            PathBuf::from("/usr/bin/grep")
+        }
     }
 
     /// Leaves `write` inheritable: as a descriptor another thread has made and not yet marked
-    /// close-on-exec is on macOS, or a handle another part of this process made inheritable
-    /// for a child of its own is on Windows.
+    /// close-on-exec is on macOS, or a handle another part of this process made inheritable for a
+    /// child of its own is on Windows.
+    #[cfg(any(target_os = "macos", windows))]
     fn inheritable(write: &io::PipeWriter) {
         #[cfg(unix)]
         {
@@ -175,8 +187,9 @@ mod tests {
         }
     }
 
-    /// Whether every write end of `read`'s pipe is gone, every process's: a read that would
-    /// wait finds its end (Unix), or a look at it finds it broken (Windows), at once.
+    /// Whether every write end of `read`'s pipe is gone, every process's: a read that would wait
+    /// finds its end (Unix), or a look at it finds it broken (Windows), at once.
+    #[cfg(any(target_os = "macos", windows))]
     fn writers_gone(read: &io::PipeReader) -> bool {
         #[cfg(unix)]
         {
@@ -214,31 +227,52 @@ mod tests {
         }
     }
 
-    /// D231's run host holds its three standard streams alone, as every program its
-    /// orchestrator starts does: do leave a pipe's write end inheritable in this process, then
-    /// start a run host and let go of that end. Expect: the pipe's read end finds it gone
-    /// everywhere, the run host holding none of it. Linux makes every descriptor close-on-exec
-    /// as it makes it (pipe2, SOCK_CLOEXEC, accept4, O_CLOEXEC), so none waits unmarked there.
+    /// D231's run host holds its three standard streams alone, as every program its orchestrator
+    /// starts does: do leave a pipe's write end inheritable in this process, then start a run host
+    /// and let go of that end. Expect: the pipe's read end finds every writer gone, the run host
+    /// holding none of it. It runs in a test process of its own, so no other test's spawn holds that
+    /// end for its moment: one in flight beside it holds every descriptor of this process until its
+    /// exec closes them, and std's on Windows inherits it. Linux makes every descriptor
+    /// close-on-exec as it makes it (pipe2, SOCK_CLOEXEC, accept4, O_CLOEXEC), so none waits
+    /// unmarked there.
     #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn a_run_host_holds_no_end_it_was_not_given() {
-        let (read, write) = io::pipe().unwrap();
-        inheritable(&write);
-        let started = start(&reader(), &["api-run"], &[]).unwrap();
-        drop(write);
-        let gone = writers_gone(&read);
-        drop(started.stdin);
-        started.process.awaited().unwrap();
-        started.process.reap().unwrap();
+        if std::env::var_os(ALONE).is_some() {
+            let (read, write) = io::pipe().unwrap();
+            inheritable(&write);
+            let started = start(&reader(), &["api-run"], &[]).unwrap();
+            drop(write);
+            let gone = writers_gone(&read);
+            drop(started.stdin);
+            started.process.awaited().unwrap();
+            started.process.reap().unwrap();
+            assert!(
+                gone,
+                "the run host holds the write end of a pipe it was never given"
+            );
+            return;
+        }
+        let alone = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "image::spawn::tests::a_run_host_holds_no_end_it_was_not_given",
+                "--test-threads=1",
+            ])
+            .env(ALONE, "1")
+            .output()
+            .unwrap();
         assert!(
-            gone,
-            "the run host holds the write end of a pipe it was never given"
+            alone.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&alone.stdout),
+            String::from_utf8_lossy(&alone.stderr)
         );
     }
 
-    /// Do start a run host with a variable over this process's environment, write it lines and
-    /// end its stdin. Expect: its stdout says the variable and the line it was asked for, its
-    /// stderr nothing, and it ends.
+    /// Do start a run host with a variable over this process's environment, write it lines and end
+    /// its stdin. Expect: its stdout says the variable and the line it was asked for, its stderr
+    /// nothing, and it ends.
     #[test]
     fn a_run_host_takes_its_environment_and_speaks_on_its_streams() {
         let env = [("SHARDS_API_SPAWN_TEST".into(), "said".into())];
