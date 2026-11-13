@@ -262,15 +262,21 @@ fn exercise(host: Arc<dyn Host>) {
             serves: Vec::new(),
             shape: Shape {
                 connections: 1,
-                lanes: hex_quic::limits::client_lanes(),
+                lanes: hex_quic::limits::client_lanes(limits.in_flight, staging),
             },
         })
         .unwrap(),
     );
     // No deadline of the test's own: the dial until the driver tells it, the hello on its kind's learned wait
     // (`client.quic.answer.hello`, measuring until a census over QUIC records it).
-    let (client, peer) =
-        hex_quic::link::connect(Arc::clone(&client_end), "node.quic.test", address, None).unwrap();
+    let (client, peer) = hex_quic::link::connect(
+        Arc::clone(&client_end),
+        "node.quic.test",
+        address,
+        staging,
+        None,
+    )
+    .unwrap();
     let aes = hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384;
     assert_eq!(client_end.negotiated(peer).unwrap().unwrap().0, aes);
     assert_eq!(
@@ -358,21 +364,27 @@ fn hex_quic_26_a_client_holds_itself_to_the_lanes_its_node_grants() {
             serves: Vec::new(),
             shape: Shape {
                 connections: 1,
-                lanes: hex_quic::limits::client_lanes(),
+                lanes: hex_quic::limits::client_lanes(limits.in_flight, false),
             },
         })
         .unwrap(),
     );
-    let (client, peer) =
-        hex_quic::link::connect(Arc::clone(&client_end), "node.lanes.test", node.local_addr(), None)
-            .unwrap();
+    assert_eq!(
+        hex_quic::limits::client_lanes(limits.in_flight, false),
+        grant,
+        "the lanes the client asks are its node's grant: one derivation"
+    );
+    let (client, peer) = hex_quic::link::connect(
+        Arc::clone(&client_end),
+        "node.lanes.test",
+        node.local_addr(),
+        false,
+        None,
+    )
+    .unwrap();
     // Its control connection holds one of the grant's lanes.
     let held: Vec<_> = (1..grant)
-        .map(|_| {
-            client_end
-                .open(peer, hex_core::stream::STDIO_PORT)
-                .unwrap()
-        })
+        .map(|_| client_end.open(peer, hex_core::stream::STDIO_PORT).unwrap())
         .collect();
     let past = client_end.open(peer, hex_core::stream::STDIO_PORT);
     assert!(
@@ -389,6 +401,32 @@ fn hex_quic_26_a_client_holds_itself_to_the_lanes_its_node_grants() {
     assert!(listed.is_ok(), "a call after the refused open: {listed:?}");
     drop(client);
     drop(server);
+}
+
+/// The calls in flight the node named `name` at `address` runs at once, as its hello says (its budget): how a client that
+/// doesn't know its node learns it before it shapes its own endpoint (`hex_quic::limits::client_lanes`), over an
+/// endpoint of `credentials` bound at `bind`, shaped for that hello alone (its control connection's one lane).
+fn node_in_flight(
+    credentials: hex_quic::tls::Credentials,
+    bind: SocketAddr,
+    name: &str,
+    address: SocketAddr,
+) -> usize {
+    let probe = Arc::new(
+        Endpoint::start(Config {
+            credentials,
+            bind,
+            listen: false,
+            serves: Vec::new(),
+            shape: Shape {
+                connections: 1,
+                lanes: hex_quic::limits::client_lanes(0, false),
+            },
+        })
+        .unwrap(),
+    );
+    let (client, _) = hex_quic::link::connect(probe, name, address, false, None).unwrap();
+    client.budgets().in_flight
 }
 
 /// The `hex` binary of this build.
@@ -613,6 +651,14 @@ fn configured(box_root: Option<&Path>) {
         udp_sockets(node.child.id()) >= 1,
         "a configured hex node holds no UDP socket"
     );
+    // This node stages nothing (no --staged), and says its calls in flight to a client's hello.
+    ca.admit("probe.cli.test", b"probe");
+    let in_flight = node_in_flight(
+        enroll::enroll(&ca, "probe.cli.test", b"probe".to_vec()).unwrap(),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        "node.cli.test",
+        address,
+    );
     ca.admit("client.cli.test", b"client");
     let client_end = Arc::new(
         Endpoint::start(Config {
@@ -622,14 +668,20 @@ fn configured(box_root: Option<&Path>) {
             serves: Vec::new(),
             shape: Shape {
                 connections: 1,
-                lanes: hex_quic::limits::client_lanes(),
+                lanes: hex_quic::limits::client_lanes(in_flight, false),
             },
         })
         .unwrap(),
     );
     // As HEX-QUIC-20's: the dial and the hello each on their own wait.
-    let (client, peer) =
-        hex_quic::link::connect(Arc::clone(&client_end), "node.cli.test", address, None).unwrap();
+    let (client, peer) = hex_quic::link::connect(
+        Arc::clone(&client_end),
+        "node.cli.test",
+        address,
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         client_end.negotiated(peer).unwrap().unwrap().0,
         hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384
@@ -867,35 +919,48 @@ mod two_hosts {
         var("HEX_2H_ADDR").parse().unwrap()
     }
 
-    /// An endpoint of the client B1 enrolled, bound on any address of `to`'s family.
-    fn client_end(to: SocketAddr) -> Arc<Endpoint> {
+    /// Any address of `to`'s family, for the client's endpoint.
+    fn any_of(to: SocketAddr) -> SocketAddr {
         let any: IpAddr = if to.is_ipv4() {
             Ipv4Addr::UNSPECIFIED.into()
         } else {
             Ipv6Addr::UNSPECIFIED.into()
         };
+        SocketAddr::new(any, 0)
+    }
+
+    /// An endpoint of the client B1 enrolled, bound on any address of `to`'s family, shaped for a node of `in_flight`
+    /// calls at once that stages nothing (`hex node` without --staged).
+    fn client_end(to: SocketAddr, in_flight: usize) -> Arc<Endpoint> {
         Arc::new(
             Endpoint::start(Config {
                 credentials: store::load(&dir().join("client")).unwrap(),
-                bind: SocketAddr::new(any, 0),
+                bind: any_of(to),
                 listen: false,
                 serves: Vec::new(),
                 shape: Shape {
                     connections: 1,
-                    lanes: hex_quic::limits::client_lanes(),
+                    lanes: hex_quic::limits::client_lanes(in_flight, false),
                 },
             })
             .unwrap(),
         )
     }
 
-    /// The client connected to the node across the hosts, its end of the link at TLS13_AES_256_GCM_SHA384, the dial
-    /// and the hello on their own waits (no deadline of the test's).
+    /// The client connected to the node across the hosts, its end of the link at TLS13_AES_256_GCM_SHA384, shaped for
+    /// the calls in flight the node's hello says, the dial and the hello on their own waits (no deadline of the test's).
     fn connected() -> hex_quic::link::Client {
         let to = node_addr();
-        let end = client_end(to);
+        let in_flight = super::node_in_flight(
+            store::load(&dir().join("client")).unwrap(),
+            any_of(to),
+            &var("HEX_2H_NODE"),
+            to,
+        );
+        let end = client_end(to, in_flight);
         let (client, peer) =
-            hex_quic::link::connect(Arc::clone(&end), &var("HEX_2H_NODE"), to, None).unwrap();
+            hex_quic::link::connect(Arc::clone(&end), &var("HEX_2H_NODE"), to, false, None)
+                .unwrap();
         assert_eq!(
             end.negotiated(peer).unwrap().unwrap().0,
             CipherSuite::TLS13_AES_256_GCM_SHA384
@@ -1086,7 +1151,8 @@ mod two_hosts {
         );
         if loss == Loss::Partition {
             let to = node_addr();
-            match hex_quic::link::connect(client_end(to), &var("HEX_2H_NODE"), to, None) {
+            // Any shape: no hello comes while the node's port is dropped.
+            match hex_quic::link::connect(client_end(to, 0), &var("HEX_2H_NODE"), to, false, None) {
                 Ok(_) => panic!("a dial while the node's port is dropped connected"),
                 Err(refused) => assert!(
                     matches!(
