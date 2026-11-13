@@ -1063,7 +1063,7 @@ impl Driver {
         let mut state = self.lock()?;
         let kept = state.node.rebook(holds.iter().map(|(key, holding)| {
             (
-                *key,
+                hex_sim::peer::Holder::Box(*key),
                 Resources {
                     cpu_milli: holding.cpu_milli,
                     mem_bytes: holding.mem_bytes,
