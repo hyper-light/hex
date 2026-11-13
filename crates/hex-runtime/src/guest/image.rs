@@ -364,6 +364,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
             _ => Vec::new(),
         },
         last_resort: None,
+        ended: None,
     })
 }
 

@@ -1629,6 +1629,7 @@ mod projection_tests {
             allocation: None,
             route: None,
             last_resort: None,
+            ended: None,
         }
     }
 

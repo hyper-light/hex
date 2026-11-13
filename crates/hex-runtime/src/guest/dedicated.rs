@@ -302,6 +302,7 @@ mod tests {
             exit: None,
             abandoned: 0,
             last_resort: None,
+            ended: None,
         }
     }
 

@@ -2553,7 +2553,9 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         Ok(())
     })?;
     // Joint plan step 14 (C5): why its node's last resort ended it, after every older field.
-    w.option_with(info.last_resort.as_ref(), put_learned_end)
+    w.option_with(info.last_resort.as_ref(), put_learned_end)?;
+    // Joint plan step 12: why its run ended where it failed, in its runtime's words, after every older field.
+    w.option_with(info.ended.as_ref(), |w, words| w.string(words))
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -2596,6 +2598,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             })
         })?,
         last_resort: r.option(learned_end)?,
+        ended: r.option(|r| r.string("ended"))?,
     };
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)

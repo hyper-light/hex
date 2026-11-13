@@ -1013,6 +1013,7 @@ impl Node {
                 .abandoned
                 .saturating_add(self.abandoned.unrecorded(id)?),
             last_resort: None,
+            ended: None,
         })
     }
 
@@ -1512,6 +1513,7 @@ impl Node {
             exit: None,
             abandoned: 0,
             last_resort: None,
+            ended: None,
         })
     }
 
@@ -2135,6 +2137,7 @@ impl Runtime for Node {
                         exit: None,
                         abandoned: 0,
                         last_resort: None,
+                        ended: None,
                     }),
                     Err(why) => return Err(why),
                 }
@@ -2155,6 +2158,7 @@ impl Runtime for Node {
                     exit: None,
                     abandoned: 0,
                     last_resort: None,
+                    ended: None,
                 });
             }
         }

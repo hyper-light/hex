@@ -504,6 +504,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             grants: Vec::new(),
             published: Vec::new(),
             last_resort: None,
+            ended: None,
         })
         .unwrap();
     assert_eq!(info.last_resort, Some(end));

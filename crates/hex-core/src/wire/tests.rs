@@ -641,6 +641,7 @@ fn info() -> BoxInfo {
         exit: Some(Exit::Signal(9)),
         abandoned: 2,
         last_resort: None,
+        ended: None,
     }
 }
 
@@ -1023,6 +1024,7 @@ fn answers() -> Vec<(u64, Answer)> {
                         exit: None,
                         abandoned: 0,
                         last_resort: None,
+                        ended: None,
                     },
                 ],
                 more: true,
@@ -1918,8 +1920,8 @@ fn hostile_values_are_refused_by_name() {
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
-    // empty grant and published lists' counts and the last resort's none tag end the info.
-    let adopted = info.len() - NO_GRANTS - NO_END - 2 - 8 - 6 - 1;
+    // empty grant and published lists' counts and the last resort's and the run's words' none tags end the info.
+    let adopted = info.len() - NO_GRANTS - NO_END - NO_WORDS - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -2134,6 +2136,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 exit,
                 abandoned,
                 last_resort: None,
+                ended: None,
             },
         )
 }
@@ -3226,8 +3229,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
         valid_info
     );
-    // The info's route comes before its empty grant and published lists' counts and its last resort's none tag.
-    let route_at = bad.len() - NO_GRANTS - NO_END - route_bytes;
+    // The info's route comes before its empty grant and published lists' counts and its last resort's and its run's
+    // words' none tags.
+    let route_at = bad.len() - NO_GRANTS - NO_END - NO_WORDS - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -4411,15 +4415,17 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
 /// What ends an info without grants on the wire (joint plan step 15): its empty grant list's u32 count, then its
 /// empty list of published ports'.
 const NO_GRANTS: usize = 2 * size_of::<u32>();
-/// What ends an info its node's last resort didn't end (joint plan step 14): its end's none tag, after the grants.
+/// What follows an info's grants where its node's last resort didn't end it (joint plan step 14): its end's none tag.
 const NO_END: usize = 1;
+/// What ends an info whose run didn't fail (joint plan step 12): its words' none tag, after the last resort's.
+const NO_WORDS: usize = 1;
 
-/// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire last on its info. Do:
-/// encode an info with an end and one with none, cut the second before its last byte, and read and write both as
-/// JSON. Expect both back exactly, the second ending with its none tag and refused once cut, as every truncation is,
-/// and JSON without the field reading as none.
+/// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire after its info's grants. Do:
+/// encode an info with an end and one with none, cut the second before its end's none tag, and read and write both as
+/// JSON. Expect both back exactly, the second's end a none tag and refused once cut, as every truncation is, and JSON
+/// without the field reading as none.
 #[test]
-fn w14_an_infos_last_resort_crosses_the_wire_last() {
+fn w14_an_infos_last_resort_crosses_the_wire_after_its_grants() {
     let ended = BoxInfo {
         last_resort: Some(learned_end("b-1", 5)),
         ..info()
@@ -4431,8 +4437,8 @@ fn w14_an_infos_last_resort_crosses_the_wire_last() {
     );
     let plain = info();
     let mut cut = answer(3, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
-    assert_eq!(cut.last(), Some(&0), "no end's tag ends it");
-    cut.truncate(cut.len() - NO_END);
+    assert_eq!(cut[cut.len() - NO_WORDS - NO_END], 0, "no end's tag");
+    cut.truncate(cut.len() - NO_WORDS - NO_END);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -4441,6 +4447,48 @@ fn w14_an_infos_last_resort_crosses_the_wire_last() {
     assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), ended);
     let older = serde_json::to_value(&plain).unwrap();
     assert!(older.get("last_resort").is_none(), "skipped when none");
+    assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
+}
+
+/// Joint plan step 12 (AC-T7.4.1; HEX-IMG-3): why a box's run ended where it failed, in its runtime's words, crosses the
+/// wire last on its info. Do: encode an info with words and one with none, cut the second before its last byte, and read
+/// and write both as JSON. Expect both back exactly, the second ending with its none tag and refused once cut, as every
+/// truncation is, words that aren't UTF-8 refused by name, and JSON without the field reading as none.
+#[test]
+fn w12_an_infos_run_words_cross_the_wire_last() {
+    let words =
+        "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+    let failed = BoxInfo {
+        class: Class::Shards,
+        exit: Some(Exit::Unknown),
+        ended: Some(words.to_owned()),
+        ..info()
+    };
+    let bytes = answer(5, &Answer::Info(failed.clone()), MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        Answer::Info(failed.clone())
+    );
+    assert!(bytes.ends_with(words.as_bytes()));
+    let mut garbled = bytes.clone();
+    let last = garbled.len() - 1;
+    garbled[last] = 0xff;
+    assert!(matches!(
+        read_answer(&received(&garbled, 0), MAX_MESSAGE),
+        Err(Fault::Value { what: "ended", .. })
+    ));
+    let plain = info();
+    let mut cut = answer(5, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
+    assert_eq!(cut.last(), Some(&0), "no words' tag ends it");
+    cut.truncate(cut.len() - NO_WORDS);
+    assert!(matches!(
+        read_answer(&received(&cut, 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let json = serde_json::to_value(&failed).unwrap();
+    assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), failed);
+    let older = serde_json::to_value(&plain).unwrap();
+    assert!(older.get("ended").is_none(), "skipped when none");
     assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
 }
 
@@ -4764,7 +4812,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend(49152u16.to_le_bytes());
     tail.push(1);
     tail.extend(1455u16.to_le_bytes());
-    tail.extend([0; NO_END]);
+    tail.extend([0; NO_END + NO_WORDS]);
     assert!(bytes.ends_with(&tail));
     let declared = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -4780,7 +4828,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         read_answer(&received(&older, 0), MAX_MESSAGE).unwrap().1,
         declared
     );
-    assert!(older.ends_with(&[&[0][..], &[0; NO_END][..]].concat()));
+    assert!(older.ends_with(&[&[0][..], &[0; NO_END + NO_WORDS][..]].concat()));
     let wrong = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: each_way(),
@@ -4798,7 +4846,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END;
+    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS;
     hostile[receiver] = 2;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),

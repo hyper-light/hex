@@ -244,6 +244,7 @@ impl SimRuntime {
             // A simulated program has no caller to lose: only the node agent's socket abandons one.
             abandoned: 0,
             last_resort: None,
+            ended: None,
         })
     }
 }
