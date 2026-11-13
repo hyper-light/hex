@@ -1250,6 +1250,7 @@ pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
         abandoned: 0,
         allocation: None,
         last_resort: None,
+        ended: None,
     })
 }
 
