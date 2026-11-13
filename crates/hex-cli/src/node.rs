@@ -433,12 +433,8 @@ fn tell_the_service_manager() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
-/// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, and why the host's
-/// boot session couldn't be read, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
-/// Starts the node's charge learner (joint plan step 14) and says what of the rule its platform can't hold, or says
-/// why it doesn't run: a platform whose window nothing derives yet refuses it, typed, and the node runs on with its
-/// VMs booked whole.
+/// Starts the node's charge learner (joint plan step 14) and says its platform's window and what of the rule its
+/// platform can't hold, or says why it doesn't run, the node running on with its VMs booked whole.
 #[cfg(any(target_os = "macos", windows))]
 fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     node: &Arc<hex_node::recorded::Recorded<R>>,
@@ -446,11 +442,20 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     let mut err = std::io::stderr().lock();
     match node.start_charges() {
         Ok((window, unheld)) => {
-            let _ = writeln!(
-                err,
-                "hex node: the charge learner's window is {} ns",
-                window.as_nanos()
-            );
+            // Its window is longer while an image VM it holds has its rate held over a longer period, its run's own
+            // (docs/design/learned-charge.md C1).
+            let _ = match window {
+                Some(window) => writeln!(
+                    err,
+                    "hex node: the charge learner's window is {} ns",
+                    window.as_nanos()
+                ),
+                None => writeln!(
+                    err,
+                    "hex node: the charge learner's window is its image VMs' longest run rate period, its platform \
+                     having none"
+                ),
+            };
             for why in unheld {
                 let _ = writeln!(err, "hex node: the charge learner can't hold this: {why}");
             }
@@ -461,6 +466,9 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     }
 }
 
+/// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
+/// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, and why the host's
+/// boot session couldn't be read, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
 fn say_recovered(recovered: &RecoverySummary) {
     let mut err = std::io::stderr().lock();
     // Slots are Linux's node's alone: no other OS's hands a box's cgroup on.

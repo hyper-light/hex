@@ -468,8 +468,9 @@ impl Node {
         }
     }
 
-    /// The window the node's charge learner reads over, as the node said it; the run is refused where its learner
-    /// doesn't run (Windows until its window is measured: docs/design/learned-charge.md C1).
+    /// The window the node's charge learner reads its managed VMs over, its platform's, as the node said it; the run
+    /// is refused where its learner doesn't run, or its platform has no window, its managed VMs then booked whole
+    /// (Windows until its window is measured: docs/design/learned-charge.md C1).
     fn window(&self) -> Duration {
         let said = fs::read_to_string(&self.stderr).unwrap();
         if let Some(why) = said
@@ -478,11 +479,19 @@ impl Node {
         {
             panic!("REFUSED: the node's charge learner doesn't run: {why}");
         }
-        let ns = said
+        let window = said
             .lines()
             .find_map(|l| l.strip_prefix("hex node: the charge learner's window is "))
-            .and_then(|rest| rest.strip_suffix(" ns"))
             .unwrap_or_else(|| panic!("the node named no charge window; stderr: {said}"));
+        let Some(ns) = window.strip_suffix(" ns") else {
+            let why = said
+                .lines()
+                .find_map(|l| l.strip_prefix("hex node: the charge learner can't hold this: "))
+                .unwrap_or(window);
+            panic!(
+                "REFUSED: the node's platform has no window, its managed VMs booked whole: {why}"
+            );
+        };
         Duration::from_nanos(ns.parse().unwrap())
     }
 }
