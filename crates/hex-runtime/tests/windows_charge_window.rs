@@ -52,9 +52,12 @@ use hex_runtime::windows::sys::{self, Job, Limits, Spawn};
 const EVERY: Duration = Duration::from_millis(1);
 #[cfg(windows)]
 const FOR: Duration = Duration::from_secs(10);
-/// The caps, per `hex_core::job::RATE_SCALE` (10,000) of the machine: 10%, 20% and 50%.
-#[cfg(windows)]
-const CAPS: [u32; 3] = [1_000, 2_000, 5_000];
+/// The caps a run is capped at on a machine of `processors`, per `hex_core::job::RATE_SCALE` (10,000) of it: ROOT's 10%,
+/// 20% and 50%.
+fn caps(processors: u32) -> Vec<u32> {
+    let _ = processors;
+    vec![1_000, 2_000, 5_000]
+}
 /// What the child is told: how many threads to spin.
 const SPIN: &str = "HEX_TEST_SPIN_THREADS";
 
@@ -320,7 +323,7 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
         panic!("REFUSED, the uncapped run: {why}");
     }
     let demand = u64::from(threads) * 10_000 / u64::from(processors);
-    for cap in CAPS {
+    for cap in caps(processors) {
         assert!(
             demand > u64::from(cap),
             "{threads} spinners of {processors} processors ask {demand}/10000, not past the cap {cap}/10000"
@@ -400,4 +403,15 @@ fn w14_the_machines_busy_cpu_is_kernel_and_user_less_idle() {
     let second = Duration::from_secs(1);
     assert_eq!(per_machine(busy, second, 32), 5_000);
     assert_eq!(per_machine(busy - 12 * u128::from(s), second, 32), 1_250);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C1 on Windows: the window has to hold at every rate the charge learner sets, so the
+/// probe runs the least cap the learner sets on its machine besides ROOT's (ROOT, 2026-11-13). Do reckon the probe's
+/// caps for jupiter's 32 processors, a machine of one and one of 128; expect each first at the learner's least: Hex's
+/// least CPU bound of 32 processors, 3 per 10,000; of one, 100; of 128, the machine's own least, 1.
+#[test]
+fn w14_the_probe_runs_the_least_cap_the_learner_sets() {
+    assert_eq!(caps(32), [3, 1_000, 2_000, 5_000]);
+    assert_eq!(caps(1).first(), Some(&100));
+    assert_eq!(caps(128).first(), Some(&1));
 }
