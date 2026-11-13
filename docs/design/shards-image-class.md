@@ -1,14 +1,14 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `743c5b32`**, on Linux, macOS and Windows hosts, its run
+runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `1389dc0b`**, on Linux, macOS and Windows hosts, its run
 host started holding only its stdio by Shards' own spawn (D248, §1) and each vCPU's guest time in its usage (D241,
 §4); its real-VM runs and the records its waits seed from are owed (§8).
 
 Sources, read at the revisions named:
-- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `743c5b32`) and its research
-  record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `743c5b32`): the decision this class
-  binds to, its Windows run host among it (731b5e54, 53277586). At `743c5b32` beside it: D234 (a nested runtime's
+- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `1389dc0b`) and its research
+  record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `1389dc0b`): the decision this class
+  binds to, its Windows run host among it (731b5e54, 53277586). At `1389dc0b` beside it: D234 (a nested runtime's
   grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member, `ImageGuest::plug` and
   `ImageRefusal::Plug`), D236 (destinations by name, `Narrowing::destinations`, `Bound::to`), the joint plan's step 5
   (a member's stdin and working directory, `MemberSpec::stdin` and `workdir`, `ImageGuest::take_input`), D241 (the
@@ -18,7 +18,7 @@ Sources, read at the revisions named:
   streams alone, through `shards_ipc`'s spawn), D249 (a run whose command never started ends failed, in its VM's
   words) and D250 (a run that keeps nothing past the microVM keeps the network its image links its members to, its
   network process letting nothing past): image channel version 13.
-- `shards_api::image` at `743c5b32`: `crates/api/src/image.rs` (`Images`, its `boot` and patience, `ImageGuest`,
+- `shards_api::image` at `1389dc0b`: `crates/api/src/image.rs` (`Images`, its `boot` and patience, `ImageGuest`,
   `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, `shards_ipc::spawn_with`, `stop`,
   `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`, `StatsScope`, `RunEnd`, `Narrowing`,
   `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it answers).
@@ -84,7 +84,7 @@ Sources, read at the revisions named:
 - **The guest's kernel and init** (`guest_pair`; ROOT, 2026-11-12). D231's run host inherits the node's environment
   and boots the guest its `SHARDS_KERNEL` and `SHARDS_INIT` name, taking each only as a UTF-8 absolute path and
   dropping any other value without a word, both or neither: the daemon refuses one alone ("SHARDS_KERNEL and
-  SHARDS_INIT go together"; Shards 743c5b32, `api_run.rs` `as_run`, `engine.rs`). `host_images` reads the pair once,
+  SHARDS_INIT go together"; Shards 1389dc0b, `api_run.rs` `as_run`, `engine.rs`). `host_images` reads the pair once,
   as the node starts: one alone, or a value the run host would drop, makes the class unavailable on that node, every
   create refused `Platform` naming both variables before any record, where otherwise every start would be refused
   after its create was recorded (ROOT's r345), or its VMs boot Shards' own guest in place of the one named.
@@ -122,8 +122,13 @@ harness member's):
   (`on_this_host` false, no pid: D231 names none), and its own kill awaits the endpoint (`MemberSignal`); the box's
   KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
-  and the simulator as its echo program; the node's wire carries no member call yet (`hex-client` refuses it, typed),
-  as a member's pipes live in the process that holds the run.
+  and the simulator as its echo program, and the node's wire carries it to a caller elsewhere: `Call::Member` (kind
+  `0x0017`), sent by `hex-client`'s `Runtime::member` as an exec asking for its streams is. On a local socket the
+  node gives the member's own ends with its answer (`Answer::Given`, descriptors); a QUIC client makes its streams
+  itself, so it carries them (lanes) and the node joins each to the member's own, a copy on a thread of its own to the
+  source's end (`serve.rs` `joined`). The member has no pid here for an OS watch, so a thread of the node's waits
+  for its end and tells it as a remote program's (`MemberEnd`); its release under the same lock clears an end told
+  before its start was registered, and its own kill is refused `Awaits(MemberSignal)` as in process.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -250,7 +255,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   (§6).
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `743c5b32` or later (image channel version 13: Hex's `shards`, rebuilt on each host by
+  `1389dc0b` or later (image channel version 13: Hex's `shards`, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and
@@ -261,9 +266,6 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   command's end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own:
   it runs in the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run
   host per box, nor read its use on the host (§4).
-- **A member's streams over the node's wire** (joint plan step 17's remote callers): a wire call that carries the
-  three ends as the exec's asked streams are carried (descriptors on the local socket, stream lanes over QUIC). Until
-  then `Runtime::member` is served in process alone, and a caller over the wire is refused, typed.
 
 ## 9. What would falsify it
 

@@ -6,10 +6,10 @@
 #   scripts/shards-gpu/build.sh OUT [FROM] [--no-gpu]
 # Upstream at vendor/MANIFEST.toml's [projects.shards-gpu] commit, the same as [projects.shards], which holds the
 # physical-GPU filter, selector transport, native identity bridge and the managed launch and report the node's
-# vendored API speaks to (D232, D233), and the run host the node's image boot speaks to (D231 to D249); then each
+# vendored API speaks to (D232, D233), and the run host the node's image boot speaks to (D231 to D250); then each
 # vendor/patches/shards change (the API the run host and the node both speak, so the run host reads what the node
-# writes; none at this commit), then each vendor/patches/shards-gpu change (Windows on arm64's GPU VM process), each
-# in name order as scripts/vendor.py replays them; built as upstream's release builds it: upstream's scripts/gpu-libs
+# writes), then each vendor/patches/shards-gpu change, in name order as scripts/vendor.py replays them (none of either
+# at this commit: Hex's last ones are upstream); built as upstream's release builds it: upstream's scripts/gpu-libs
 # builds the renderer from its pinned sources into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
 # `cargo build --release --locked -p shards`, with the Rust toolchain upstream's rust-toolchain.toml names, for this
 # host's own target. With --no-gpu no renderer is built, and `shards` carries no GPU VM process and refuses a GPU, as
@@ -189,8 +189,10 @@ if [ "$gpu" = yes ]; then
 fi
 # On Linux the VM and network processes are static musl whatever C library `shards` links, built by shards' build
 # script with a nested cargo; since Shards' D242 their C (AWS-LC) wants a musl C compiler, which that script names for
-# the guest init's nested build alone. Named as Shards names a musl target's for its own builds by hand: zig, through
-# its scripts/zig-cc and zig-ar, and ZIG_TARGET (Shards' CLAUDE.md), unless the caller named one.
+# the guest init's nested build alone (`compile`) and not for theirs (`compile_helpers`): an upstream gap, reported to
+# Shards (2026-11-13), without which a glibc host with no musl gcc can't build them. Named here as Shards names a musl
+# target's compiler for its own builds by hand: zig, through its scripts/zig-cc and zig-ar, and ZIG_TARGET (Shards'
+# CLAUDE.md), unless the caller named one.
 if [ "$os" = Linux ]; then
     musl=${arch}_unknown_linux_musl
     cc_var=CC_$musl
