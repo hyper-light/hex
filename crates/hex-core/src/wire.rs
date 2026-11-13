@@ -159,6 +159,7 @@ mod kind {
     pub const RELEASE_BACKING: u16 = 0x0015;
     pub const BACKING_OFFER: u16 = 0x800f;
     pub const BACKING_USAGE: u16 = 0x0016;
+    pub const MEMBER: u16 = 0x0017;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -244,6 +245,17 @@ pub enum Call {
     ReleaseBacking(BackingKey),
     /// Factual host counters from the same native backing owner, answered with Usage.
     BackingUsage(BackingKey),
+    /// Member `member` of running Shards image box `id` that its spec says its caller drives (`Runtime::member`;
+    /// joint plan step 17): the streams `streams` names travel with it as an exec's do, each joined to the member's
+    /// own, and those `ask` names the node gives as an exec's asked streams, the member's own ends ([`Answer::Given`]).
+    /// Answered as an exec is, [`Answer::Started`] (no pid: the member is its guest's) or [`Answer::Given`], and later
+    /// [`Answer::Exited`] with its end. A stream both carried and asked for is refused.
+    Member {
+        id: BoxId,
+        member: Member,
+        streams: Streams,
+        ask: Streams,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -787,6 +799,18 @@ fn parse_request(
             Request::Call(Call::ReleaseBacking(backing_key(&mut r).map_err(bad)?))
         }
         kind::BACKING_USAGE => Request::Call(Call::BackingUsage(backing_key(&mut r).map_err(bad)?)),
+        kind::MEMBER => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::Member {
+                id,
+                member,
+                streams,
+                ask,
+            })
+        }
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -849,7 +873,8 @@ fn parse_request(
         Request::Call(
             Call::Exec { streams, .. }
             | Call::ExecStreams { streams, .. }
-            | Call::Run { streams, .. },
+            | Call::Run { streams, .. }
+            | Call::Member { streams, .. },
         ) if carried => streams.count(),
         _ => 0,
     };
@@ -1112,6 +1137,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::INITIALIZE_BACKING => "an initialize backing",
         kind::RELEASE_BACKING => "a release backing",
         kind::BACKING_USAGE => "a backing usage",
+        kind::MEMBER => "a member",
         _ => "a request",
     }
 }
@@ -1129,6 +1155,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         Call::BackingUsage(key) => {
             w.header(kind::BACKING_USAGE, id);
             put_backing_key(w, *key)
+        }
+        Call::Member {
+            id: b,
+            member,
+            streams,
+            ask,
+        } => {
+            w.header(kind::MEMBER, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
+            Ok(())
         }
         Call::PhysicalReport => {
             w.header(kind::PHYSICAL_REPORT, id);

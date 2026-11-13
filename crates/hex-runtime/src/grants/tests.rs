@@ -5,8 +5,7 @@ use hex_api::{
     Destination, Grant, Member, MemberKind, Ports, Proto, Refusal, ShardsImage, Upstream,
 };
 use proptest::prelude::*;
-use shards_api::image::wire::MemberReach;
-use shards_api::image::{Keep, Narrowing};
+use shards_api::image::{Keep, MemberReach, Narrowing};
 
 use super::*;
 

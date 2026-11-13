@@ -10,8 +10,7 @@ use hex_api::{
     Destination, Grant, MemberKind, Proto, Published, Receiver, Refusal, ShardsImage, check_grants,
     unheld,
 };
-use shards_api::image::wire::MemberReach;
-use shards_api::image::{Bound, Keep, MemberInfo, Narrowing, Publish, Receiving};
+use shards_api::image::{Bound, Keep, MemberInfo, MemberReach, Narrowing, Publish, Receiving};
 
 /// What an image boot is told of a box's grants: the ports it publishes, and how the image's own grants past the
 /// microVM are narrowed.

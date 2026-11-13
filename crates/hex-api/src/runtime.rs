@@ -1860,7 +1860,9 @@ pub enum Upstream {
     /// alone.
     MemberGrantsByName,
     /// What a runtime nested under shards-init needs: a delegated cgroup subtree, CAP_SYS_ADMIN for
-    /// its boxes' namespaces and DRM render nodes, granted by name.
+    /// its boxes' namespaces and DRM render nodes, granted by name. Given in part since Shards 66113379:
+    /// D234's nesting grant (shards-api's `ImageSpec::nesting`) gives the subtree and the capabilities. Not given
+    /// yet: its GPUs' identities and render nodes (D234's `gpus=`, which no image boot's GPU selection carries).
     NestedRuntime,
     /// The Windows host of an image's run: `shards api-run` on Windows, which Shards gives since
     /// 731b5e54 (D231). No call awaits it now; its place in [`Upstream::ALL`] stays, as the node's
@@ -1904,11 +1906,16 @@ pub enum Upstream {
     /// awaits it now (joint plan step 15, docs/design/network-grants.md N4). Its tag stays, the wire being
     /// append-only.
     MemberDestinations,
+    /// A host's connection to a runtime it nests under shards-init: Hex's node, its init the run's own command under
+    /// D234's grant (docs/design/node-under-shards-init.md §5). The node's relay listens on AF_UNIX sockets there, as
+    /// the workload's filter refuses vsock. Shards' agent-control endpoint (D238) has no lane that carries a connection
+    /// to such a socket, and D231's run host binds no endpoint (Shards 7a4ef5c0).
+    NestedChannel,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 15] = [
+    pub const ALL: [Upstream; 16] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1924,6 +1931,7 @@ impl Upstream {
         Upstream::RingPinsWithinRoom,
         Upstream::LiveMove,
         Upstream::MemberDestinations,
+        Upstream::NestedChannel,
     ];
 }
 
@@ -1962,6 +1970,9 @@ impl std::fmt::Display for Upstream {
             Self::LiveMove => "a running Shards microVM moved to another machine (Shards' D176)",
             Self::MemberDestinations => {
                 "a Shards destination kept for the members granted it alone (given by Hex's recorded Shards change)"
+            }
+            Self::NestedChannel => {
+                "a connection to a runtime nested under shards-init (a lane of Shards' agent-control endpoint to its socket)"
             }
         })
     }

@@ -178,6 +178,9 @@ mod hosted {
         fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
             self.0.delete(id)
         }
+        fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+            self.0.member(id, member)
+        }
     }
 
     impl<R: Runtime> Host for Hosted<R> {
@@ -399,6 +402,104 @@ fn hex_quic_27_a_client_holds_itself_to_the_lanes_its_node_grants() {
     drop(held);
     let listed = client.list();
     assert!(listed.is_ok(), "a call after the refused open: {listed:?}");
+    drop(client);
+    drop(server);
+}
+
+/// Joint plan steps 12 and 17's remote callers, AC-T7.4.1 (docs/design/shards-image-class.md §2): a member of a Shards
+/// image VM that its caller drives is handed over through QUIC as through the node's socket. A QUIC client makes the
+/// streams it asks for itself (lanes), so it carries the member's stdin, stdout and stderr, and the node joins each to
+/// the member's own. Do: through a simulator node served over QUIC in this process, create and start a VM whose spec
+/// names a member its caller drives, take that member, write its stdin and close it, read its stdout to its end, and
+/// wait for its end as it comes. Expect: its stdout the bytes written, and its end Code(0).
+#[test]
+fn a_member_is_handed_over_through_quic() {
+    use hex_api::Runtime as _;
+    use std::io::{Read as _, Write as _};
+    let ca = SimCa::new().unwrap();
+    let enrolled = |name: &str| {
+        ca.admit(name, name.as_bytes());
+        enroll::enroll(&ca, name, name.as_bytes().to_vec()).unwrap()
+    };
+    let limits = limits();
+    let node = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled("node.member.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: true,
+            serves: hex_node::quic::ports(false),
+            shape: hex_node::quic::shape(&limits, false),
+        })
+        .unwrap(),
+    );
+    let dir = scratch("mb-");
+    let socket = dir.path().join("node.sock");
+    let quic = Quic::new(
+        Native::bind(&socket).unwrap(),
+        Arc::clone(&node),
+        QuicBounds::of(&limits),
+        None,
+    )
+    .unwrap();
+    let host: Arc<dyn Host> = Arc::new(hosted::Hosted(hex_api::sim::SimRuntime::new()));
+    let server = Server::with_os(quic, host, limits, limits.in_flight, &socket).unwrap();
+    let client_end = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled("client.member.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: false,
+            serves: Vec::new(),
+            shape: Shape {
+                connections: 1,
+                lanes: hex_quic::limits::client_lanes(limits.in_flight, false),
+            },
+        })
+        .unwrap(),
+    );
+    let (client, _peer) = hex_quic::link::connect(
+        Arc::clone(&client_end),
+        "node.member.test",
+        node.local_addr(),
+        false,
+        None,
+    )
+    .unwrap();
+    let claude = hex_api::Member {
+        kind: hex_api::MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let id = client
+        .create(BoxSpec {
+            id: BoxId::new("member-over-quic").unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::ShardsImage(Box::new(hex_api::ShardsImage {
+                members: vec![hex_api::ImageMember::new(claude.clone())],
+                ..hex_api::ShardsImage::new(hex_api::sim::SIM_IMAGE)
+            })),
+            owner: None,
+            allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+            route: None,
+            devices: Vec::new(),
+            band: 0,
+        })
+        .unwrap()
+        .id;
+    client.start(&id).unwrap();
+    let mut member = client.member(&id, &claude).unwrap();
+    let given = member.streams().unwrap();
+    let mut stdin = hex_api::OwnedStream::from(given.stdin.unwrap());
+    let mut stdout = hex_api::OwnedStream::from(given.stdout.unwrap());
+    stdin.write_all(b"a session's line over QUIC\n").unwrap();
+    drop(stdin);
+    let mut echoed = String::new();
+    stdout.read_to_string(&mut echoed).unwrap();
+    assert_eq!(echoed, "a session's line over QUIC\n");
+    assert_eq!(
+        member.wait_for(std::time::Duration::MAX).unwrap(),
+        Some(hex_api::Exit::Code(0))
+    );
+    drop(member);
+    client.delete(&id).unwrap();
     drop(client);
     drop(server);
 }
