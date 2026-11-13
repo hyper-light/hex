@@ -5,7 +5,7 @@
 //! (bench/native/guest/records.tsv).
 //!
 //! The node runs in the waits census (`HEX_WAITS_CENSUS`, `hex_node::census`), which arms no wait: there the image
-//! waits measure while no record holds them (`hex_runtime::guest::ImageWaits::recorded`), and the census file keeps
+//! waits measure while no record holds them (`hex_runtime::guest::ImageWaits::new`), and the census file keeps
 //! each answer of `hex.image.boot`, `hex.image.stats` and `hex.image.stop`. At its end the test prints, for each,
 //! its count, fastest and slowest (`IMAGE-RECORD`); and, as it goes, every answer the client's own waits record
 //! (`IMAGE-STEP`, each call's answer as the client saw it) and each case's verdict and time (`IMAGE-CASE`).

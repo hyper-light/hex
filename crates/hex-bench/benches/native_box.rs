@@ -218,7 +218,7 @@ mod bench {
             s
         }
         fn ended(&mut self) -> String {
-            // The suite's learned wait: twice the slowest end of the record and this run.
+            // The suite's learned wait: the slowest end of the record and this run.
             let asked = Instant::now();
             match self
                 .proc

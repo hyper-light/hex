@@ -80,6 +80,10 @@ impl HostedConfig {
             ready_by: None,
             binary: Some(self.binary.clone()),
             env: self.env.clone(),
+            // No agent-control endpoint yet (D252): step 39's Link asks for one.
+            control: None,
+            // No GPU: the node VM renders on none (D234's `gpus=` is step 39's).
+            gpu_devices: Vec::new(),
         }
     }
 }

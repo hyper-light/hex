@@ -1760,12 +1760,9 @@ impl<R: Recover> Recorded<R> {
                     "changing a recorded box's lifecycle",
                     "recorded lifecycle methods",
                     crate::store::TURNS,
-                    // try_take never waits. Zero expresses immediate overlap refusal, not a
-                    // timeout guess; the existing Turns owner records the method's actual hold.
-                    hex_core::patience::Patience::seeded(
-                        "recorded.lifecycle",
-                        std::time::Duration::ZERO,
-                    ),
+                    // try_take never waits: an overlap is refused at once, no timeout guessed; the existing
+                    // Turns owner records the method's actual hold.
+                    hex_core::patience::Patience::measuring("recorded.lifecycle"),
                 ),
                 abandoned: Abandoned::default(),
                 adopted: Mutex::new(BTreeSet::new()),

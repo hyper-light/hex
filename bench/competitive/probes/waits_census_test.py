@@ -7,7 +7,6 @@ Run: python3 -B -I bench/competitive/probes/waits_census_test.py
 """
 import contextlib
 import io
-import math
 import os
 import sys
 import tempfile
@@ -17,7 +16,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import waits_census as wc  # noqa: E402
 
-TIMES_SLOWEST = 2  # hex_core::patience::TIMES_SLOWEST: a wait lasts twice its record
 
 
 class Reading(unittest.TestCase):
@@ -58,24 +56,6 @@ class SeedRule(unittest.TestCase):
 
     def test_a_row_whose_answers_outrun_its_run_outs_seeds_from_its_max(self):
         self.assertEqual(wc.seed([900] * wc.SEEDABLE, [400]), 900)
-
-    def test_the_seed_rule_converges_on_a_censored_row(self):
-        # Do: a wait whose answers reach T, seeded at r0 far below it, through census after census, each answer past
-        # the wait's bound (twice its record) a run-out at that bound, each census's seed the next record. Expect: the
-        # record doubles each census until the bound holds every answer, within log2(T / r0) + 1 censuses, and then
-        # nothing runs out and the record is the answers' max.
-        answers = [1_000 + k for k in range(wc.SEEDABLE * 2)] + [3_000_000]  # T = 3 ms, the rest about 1 us
-        record, r0 = 10_000, 10_000
-        for census in range(1, 64):
-            bound = TIMES_SLOWEST * record
-            answered = [a for a in answers if a <= bound]
-            ran_out = [bound for a in answers if a > bound]
-            record = wc.seed(answered, ran_out)
-            if not ran_out:
-                break
-        self.assertEqual(ran_out, [])
-        self.assertEqual(record, max(answers))
-        self.assertLessEqual(census, math.ceil(math.log2(max(answers) / r0)) + 1)
 
 
 class Table(unittest.TestCase):

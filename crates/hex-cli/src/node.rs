@@ -880,15 +880,15 @@ fn configured_guest(
     })?;
     // The Shards class on Agentfile images (joint plan step 12): Shards' image boot, which every host runs, or
     // the refusal naming this node's SHARDS_KERNEL and SHARDS_INIT where its run hosts couldn't take them as a
-    // pair, read here once; and its waits seeded from their records, or the refusal naming the record to take.
-    // A create of the class says either.
+    // pair, read here once, which a create of the class then says; its waits learned from their own answers
+    // (decision 9: no record is read).
     let mut guest = GuestRuntime::new(Arc::new(provider), config)
         .recorded_at(backend_path(state, "@guest").map_err(failed)?)
         .with_runtime_paths(paths)
         .with_gpu_catalog(catalog)
         .with_images(
             hex_runtime::guest::host_images(),
-            hex_runtime::guest::ImageWaits::recorded(),
+            Ok(hex_runtime::guest::ImageWaits::new()),
         )
         .with_runtime_cost(cost)
         .map_err(failed)?;

@@ -165,3 +165,7 @@ hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }
 hyper-quic = { path = "vendor/hyper-raft/crates/hyper-quic" }
 hyper-transport = { path = "vendor/hyper-raft/crates/hyper-transport" }
 shards-api = { path = "vendor/shards/crates/api" }
+# shards-api's controller of a run's agent-control endpoint (shards-remote, D238 and D252) takes hyper-quic from
+# hyper-raft by git upstream: here it is the one vendored copy above, so hex builds one hyper-quic and fetches none.
+[patch."https://github.com/hyper-light/hyper-raft"]
+hyper-quic = { path = "vendor/hyper-raft/crates/hyper-quic" }
