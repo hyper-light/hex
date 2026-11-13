@@ -205,6 +205,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.schedule.forget"),
     // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
     Patience::measuring("client.guest.answer.links"),
+    // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
+    Patience::measuring("client.guest.answer.lessors"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named
@@ -279,6 +281,8 @@ static QUIC_ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.quic.answer.schedule.forget"),
     // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
     Patience::measuring("client.quic.answer.links"),
+    // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
+    Patience::measuring("client.quic.answer.lessors"),
 ];
 
 static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
@@ -879,8 +883,13 @@ impl<W: Waits> Transport for Stream<W> {
         Ok(true)
     }
 
-    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-        stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from)
+    fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let framed = stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from);
+        // A lease's value crosses in its framed copy alone (docs/design/credential-grants.md C7).
+        if wire::carries_secret(&message) {
+            hex_api::lease::wipe(&mut message);
+        }
+        framed
     }
 
     /// What the connection takes of the frame now. It carries no descriptor: its streams are connections of their

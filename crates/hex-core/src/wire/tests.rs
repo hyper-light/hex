@@ -782,6 +782,95 @@ fn requests() -> Vec<(u64, Request, usize)> {
             3,
         ),
         (206, Request::Call(Call::Links), 0),
+        // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
+        (205, Request::Call(Call::Lessors), 0),
+        (206, Request::Lessor(Ok(())), 0),
+        (
+            207,
+            Request::Lessor(Err(Refusal::Unconfigured {
+                what: "lessors for its image VMs' credentials",
+                why: "no broker answers this run".to_owned(),
+            })),
+            0,
+        ),
+        (
+            208,
+            Request::Leased {
+                run: 206,
+                answer: Ok(Lease {
+                    lease: "lease-1".to_owned(),
+                    value: Value::new(b"a credential's value".to_vec()),
+                    life: Some(std::time::Duration::from_secs(90)),
+                }),
+            },
+            0,
+        ),
+        (
+            209,
+            Request::Leased {
+                run: 206,
+                answer: Ok(Lease {
+                    lease: "lease-2".to_owned(),
+                    value: Value::new(Vec::new()),
+                    life: None,
+                }),
+            },
+            0,
+        ),
+        (
+            210,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Denied("not this run's".to_owned())),
+            },
+            0,
+        ),
+        (
+            211,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::KeyReplaced {
+                    asked: "ab".repeat(32),
+                    current: Some("cd".repeat(32)),
+                }),
+            },
+            0,
+        ),
+        (
+            212,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::KeyReplaced {
+                    asked: "ab".repeat(32),
+                    current: None,
+                }),
+            },
+            0,
+        ),
+        (
+            213,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Unavailable("its broker is away".to_owned())),
+            },
+            0,
+        ),
+        (
+            214,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Ended),
+            },
+            0,
+        ),
+        (
+            215,
+            Request::Leased {
+                run: 206,
+                answer: Err(LeaseRefused::Lapsed),
+            },
+            0,
+        ),
     ]
 }
 
@@ -1123,6 +1212,27 @@ fn answers() -> Vec<(u64, Answer)> {
             more: false,
         },
     ));
+    // docs/design/credential-grants.md C7: the node's lease asks of a connection's orchestrator, and its word that a
+    // lease or a run's lessor is let go.
+    out.push((206, Answer::LessorAsk(id("leasing-1"))));
+    out.push((
+        207,
+        Answer::LeaseAsk {
+            run: 206,
+            reference: "providers/anthropic".to_owned(),
+            key: Some([7; 32]),
+        },
+    ));
+    out.push((
+        208,
+        Answer::LeaseAsk {
+            run: 206,
+            reference: "providers/openai".to_owned(),
+            key: None,
+        },
+    ));
+    out.push((206, Answer::LeaseGiven("lease-1".to_owned())));
+    out.push((206, Answer::LessorEnded));
     out
 }
 
@@ -1890,7 +2000,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0019, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x001c, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -5451,4 +5561,68 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
             ..
         })
     ));
+}
+
+/// docs/design/credential-grants.md C7: a lease's value crosses the wire in its own message alone, which says it carries
+/// one so its holder wipes it ([`carries_secret`]); what reads it holds the value in a `Value`, and neither side prints it.
+#[test]
+fn s33_a_leases_value_crosses_marked_and_never_printed() {
+    let value = b"hex-s33-a-credential-value";
+    let leased = Request::Leased {
+        run: 3,
+        answer: Ok(Lease {
+            lease: "lease-3".to_owned(),
+            value: Value::new(value.to_vec()),
+            life: None,
+        }),
+    };
+    let bytes = request(4, &leased, MAX_MESSAGE).unwrap();
+    assert!(carries_secret(&bytes), "a leased message says it carries a value");
+    for (n, other, _) in requests() {
+        if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
+            let other = request(n, &other, MAX_MESSAGE).unwrap();
+            assert_eq!(
+                carries_secret(&other),
+                other.get(12..14) == Some(&0x001b_u16.to_le_bytes()[..]),
+                "only a leased message says it carries a value"
+            );
+        }
+    }
+    for (n, other) in answers() {
+        assert!(!carries_secret(&answer(n, &other, MAX_MESSAGE).unwrap()));
+    }
+    let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(back, leased);
+    let printed = format!("{back:?} {leased:?}");
+    assert!(!printed.contains("hex-s33"), "a value printed: {printed}");
+    assert!(
+        printed.contains(&format!("Value({} bytes)", value.len())),
+        "{printed}"
+    );
+}
+
+/// docs/design/credential-grants.md C7: an answer to a lease ask names a lease or a refusal of Shards' kinds, and a
+/// lessor's answer one made or a refusal: any other byte there is refused by type, naming it.
+#[test]
+fn s33_a_lease_answer_of_no_defined_kind_is_refused() {
+    let undefined = |kind: u16, body: &[u8]| {
+        let mut w = Writer::new(MAX_MESSAGE);
+        w.header(kind, 5);
+        w.raw(body);
+        let bytes = w.done().unwrap();
+        read_request(&received(&bytes, 0), MAX_MESSAGE)
+    };
+    for (kind, body) in [
+        (0x001b_u16, [1u8, 0, 0, 0, 0, 0, 0, 0, 2].as_slice()),
+        (0x001b, [1, 0, 0, 0, 0, 0, 0, 0, 1, 5].as_slice()),
+        (0x001a, [2].as_slice()),
+    ] {
+        match undefined(kind, body) {
+            Err(Bad {
+                id: 5,
+                fault: Fault::Value { .. },
+            }) => {}
+            other => panic!("kind {kind:#06x} body {body:?}: {other:?}"),
+        }
+    }
 }

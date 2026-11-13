@@ -159,6 +159,8 @@ pub struct Runs {
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
+    /// Its lessors over its wire, where its image VMs lease through them ([`Node::lease_over_wire`]).
+    wire_lessors: OnceLock<Arc<crate::serve::WireLessors>>,
     attachments: hex_runtime::devices::SharedCatalog,
     attachment_turns: Turns,
     backends: OnceLock<backends::Backends>,
@@ -255,6 +257,16 @@ enum Source {
 }
 
 impl Node {
+    /// Its image VMs' credentials leased over its wire (joint plan step 33; docs/design/credential-grants.md C7):
+    /// `lessors`, which its guest runtime's image class was built with, each box's route kept by its socket as the box is
+    /// created. Given once.
+    pub fn lease_over_wire(&self, lessors: Arc<crate::serve::WireLessors>) -> Result<(), Refusal> {
+        self.wire_lessors.set(lessors).map_err(|_| Refusal::Invalid {
+            what: "lessors over the node's wire",
+            why: "the node was given them already".to_owned(),
+        })
+    }
+
     /// The program started, its stdio as given: an oci box whose init runs is known to the supervisor,
     /// with what its exec needs, so the hot path reads nothing from disk; any other box's record says what
     /// it is.
@@ -390,6 +402,7 @@ impl Node {
         // devfs makes none, so it parks none.
         let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
+            wire_lessors: OnceLock::new(),
             attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
                 |_| Refusal::Exhausted {
                     what: "shared runtime device catalog owners",
@@ -2276,6 +2289,10 @@ impl Node {
 impl crate::serve::Host for Node {
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
         Node::abandoned(self, id)
+    }
+
+    fn lessors(&self) -> Option<Arc<crate::serve::WireLessors>> {
+        self.wire_lessors.get().cloned()
     }
 
     /// Its VM backends' evented connections to their guests join the core's loop ([`Node::forward_vm`]).
