@@ -1,7 +1,7 @@
 //! The initialized native owner's existing records and method/device turns. A weak
 //! reference connects this adapter to Node or Recorded without another record owner.
 
-use std::sync::Weak;
+use std::sync::{OnceLock, Weak};
 
 use hex_core::record::{BoxRecord, Phase};
 
@@ -25,6 +25,34 @@ pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
     })
 }
 
+/// Binds `books` into `slot` once: refused where it is gone, and where another is bound, however the binding raced.
+pub(super) fn bind_once(
+    slot: &OnceLock<Weak<dyn Books>>,
+    books: Weak<dyn Books>,
+) -> Result<(), Refusal> {
+    if books.upgrade().is_none() {
+        return Err(Refusal::Broken("guest record authority is gone".into()));
+    }
+    if let Some(bound) = slot.get() {
+        return if Weak::ptr_eq(bound, &books) {
+            Ok(())
+        } else {
+            Err(Refusal::Broken(
+                "guest record authority cannot be rebound".into(),
+            ))
+        };
+    }
+    slot.set(books).or_else(|books| {
+        if slot.get().is_some_and(|bound| Weak::ptr_eq(bound, &books)) {
+            Ok(())
+        } else {
+            Err(Refusal::Broken(
+                "guest record authority changed during initialization".into(),
+            ))
+        }
+    })
+}
+
 impl GuestRuntime {
     /// The same initialized immutable catalog for the canonical Box/Pool join;
     /// cloning this triomphe owner allocates no new catalog or holder cache.
@@ -35,31 +63,9 @@ impl GuestRuntime {
     /// Called once after the existing Arc<Node> or Arc<Recorded<WithGuest<P>>>
     /// exists. Coercing that Arc to Books and downgrading allocates no new owner.
     pub fn bind_books(&self, books: Weak<dyn Books>) -> Result<(), Refusal> {
-        if books.upgrade().is_none() {
-            return Err(Refusal::Broken("guest record authority is gone".into()));
-        }
-        if let Some(bound) = self.books.get() {
-            return if Weak::ptr_eq(bound, &books) {
-                Ok(())
-            } else {
-                Err(Refusal::Broken(
-                    "guest record authority cannot be rebound".into(),
-                ))
-            };
-        }
-        self.books.set(books).or_else(|books| {
-            if self
-                .books
-                .get()
-                .is_some_and(|bound| Weak::ptr_eq(bound, &books))
-            {
-                Ok(())
-            } else {
-                Err(Refusal::Broken(
-                    "guest record authority changed during initialization".into(),
-                ))
-            }
-        })
+        bind_once(&self.books, books.clone())?;
+        // Its image class keeps its boxes' records by the same authority.
+        self.images.bind_books(books)
     }
 
     pub fn uses_books(&self) -> bool {
