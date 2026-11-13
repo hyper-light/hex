@@ -278,6 +278,24 @@ fn box_cpu() -> u64 {
     cpu[cpu.len().div_ceil(2) - 1]
 }
 
+/// The process box beside the fleet, `id`, bounded at its CPU cap `cpu_milli`, which it books and asks whole.
+fn box_spec(id: BoxId, cpu_milli: u64) -> BoxSpec {
+    BoxSpec {
+        id,
+        bounds: Bounds {
+            cpu_max_milli: Some(u32::try_from(cpu_milli).unwrap()),
+            memory_max: Some(hex_api::MIN_MEMORY),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+        owner: None,
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
+        band: 0,
+    }
+}
+
 /// The deadline guarding the node's start and each create of `kind`: twice the node's own boot bound for the class, so
 /// the node's refusal, typed, comes first (module docs).
 fn guard(kind: Kind) -> Duration {
@@ -674,20 +692,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     let boxed = BoxId::new("charge-box").unwrap();
     let _spinning = client
         .run_before(
-            BoxSpec {
-                id: boxed.clone(),
-                bounds: Bounds {
-                    cpu_max_milli: Some(u32::try_from(box_cpu).unwrap()),
-                    memory_max: Some(hex_api::MIN_MEMORY),
-                    ..Bounds::default()
-                },
-                class: ClassSpec::Process,
-                owner: None,
-                devices: Vec::new(),
-                allocation: None,
-                route: None,
-                band: 0,
-            },
+            box_spec(boxed.clone(), box_cpu),
             spinner(box_cpu),
             Stdio::null(),
             Instant::now() + wait,
@@ -968,5 +973,52 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         "HEX-CHARGE-FLEET learner cpu_ns={} of_ran_ns={} measured={measured:?}",
         learner.as_nanos(),
         ran.as_nanos()
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1): the process box beside the fleet runs its spinners under the bounds it books, so
+/// the run's CPU contention is real and its box's readings are its spinners'. Do run, in a macOS process box bounded as
+/// the driver bounds it, the driver's spinner for the box's CPU cap; expect the shell and every spinner of it running,
+/// never its program ended first (a bound that can't hold the shell ends it at once, and every contended window would
+/// then read the box short).
+#[cfg(target_os = "macos")]
+#[test]
+fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
+    use hex_api::Runtime as _;
+    use hex_core::patience::Patience;
+
+    static RUNNING: Patience = Patience::measuring("test.hex_cli.charge_fleet.box_spinners");
+    // A node's own macOS runtime, as `hex node` makes it.
+    let model = hex_runtime::macos::machine_model().unwrap();
+    let rates = hex_core::watch::seed(&model);
+    let rt = hex_runtime::macos::MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .unwrap();
+    let cpu = box_cpu();
+    let id = BoxId::new("w14-charge-box").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(box_spec(id.clone(), cpu)).unwrap();
+    let mut program = rt.exec(&id, spinner(cpu), Stdio::null()).unwrap();
+    // The shell and one member a CPU of its cap.
+    let members = cpu.div_ceil(1000) + 1;
+    let mut ended = None;
+    hex_testkit::waits::until(&RUNNING, "the box's spinners running, or its program's end", || {
+        if let Ok(Some(exit)) = program.try_wait() {
+            ended = Some(exit);
+            return true;
+        }
+        rt.usage(&id).is_ok_and(|usage| usage.pids >= members)
+    })
+    .unwrap();
+    let usage = rt.usage(&id).unwrap();
+    rt.delete(&id).unwrap();
+    assert_eq!(
+        ended,
+        None,
+        "the box's spinner ended before its {members} members ran, under {:?}: {usage:?}",
+        box_spec(id, cpu).bounds
     );
 }
