@@ -1949,20 +1949,19 @@ fn native_encoding_upper_bound(
     Ok(())
 }
 
-/// An initialized native form's routes, as Linux offers them (`devices::native_routes`): the `process`
-/// route, and in the `oci` form the `oci` route beside it, the keys its encoding bound reserves
-/// (`native_encoding_upper_bound`), so a node that runs containers still takes `process` boxes (joint plan
-/// step 13). Only Holding::report's Hcs-route entries enter the `oci` snapshot, each eligible for the `oci`
-/// route alone; the `process` snapshot supplies no devices.
+/// A native form's routes, as Linux offers them (`devices::native_routes`): the `process` route, and in
+/// an initialized `oci` form the `oci` route beside it, the keys its encoding bound reserves
+/// (`native_encoding_upper_bound`), so a node that runs containers still takes `process` boxes, and so
+/// does one whose `oci` form isn't initialized (its service unavailable, or Containers off), offering its
+/// `process` route alone (joint plan step 13). Only Holding::report's Hcs-route entries enter the `oci`
+/// snapshot, each eligible for the `oci` route alone; the `process` snapshot supplies no devices.
 fn native_route_offer(
     report: &mut Capacity,
     class: Class,
     initialized: bool,
 ) -> Result<(), Refusal> {
-    if !initialized {
-        return Ok(());
-    }
-    crate::devices::native_routes(report, class, native_platform())
+    let form = if initialized { class } else { Class::Process };
+    crate::devices::native_routes(report, form, native_platform())
 }
 
 impl Runtime for WinRuntime {
