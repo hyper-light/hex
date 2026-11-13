@@ -379,7 +379,10 @@ impl State {
     /// Holds the box as its watcher's read decided (the graded hold, the lead 2026-11-09): of `order`, its
     /// running members, each in `run` runs across the wait, continued if the watcher held it, and the rest are
     /// held, each stopped in turn. A member the box's own programs stopped is theirs, never held, so never
-    /// continued. Returns how many members it holds.
+    /// continued. A held member this read finds running escaped its stop (one that didn't take, or a continue from
+    /// elsewhere: joint plan step 14, ROOT 2026-11-13), and would run past its charge on its neighbours' CPU: it is
+    /// stopped again by its hold's token, once a read, never waited on, and counted (`Status::restops`). Returns how
+    /// many members it holds and how many it stopped again.
     fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<Applied, Refusal> {
         self.apply_by(order, run, members, sys::run_state)
     }
@@ -402,20 +405,36 @@ impl State {
         held.stopped.reserve(additional)?;
         held.added.clear();
         held.continued.clear();
+        let mut restopped = 0u64;
         let result = (|| {
             for &member in order {
                 let Ok(pid) = i32::try_from(member) else {
                     continue;
+                };
+                let live = || {
+                    run_state(pid)
+                        .map(|state| state == Some(sys::Run::Live))
+                        .map_err(|error| Refusal::os("reading a member's run state", error))
                 };
                 if run.contains(&member) {
                     if let Some(member) = held.stopped.get(&pid) {
                         self.signal_stopped(member, sys::MemberSignal::Continue)?;
                         held.continued.push(pid);
                     }
-                } else if !held.stopped.contains(&pid)
-                    && run_state(pid)
-                        .map_err(|error| Refusal::os("reading a member's run state", error))?
-                        == Some(sys::Run::Live)
+                } else if let Some(stopped) = held.stopped.get(&pid) {
+                    if live()? {
+                        match self.signal_stopped(stopped, sys::MemberSignal::Stop)? {
+                            Some(again) => {
+                                held.stopped.refresh(again)?;
+                                restopped = restopped.saturating_add(1);
+                            }
+                            // Gone since: nothing left to hold.
+                            None => {
+                                held.stopped.remove(&pid);
+                            }
+                        }
+                    }
+                } else if live()?
                     && let Some(member) = self.stopped_member(pid, members)?
                     && let Some(member) = self.signal_stopped(member, sys::MemberSignal::Stop)?
                 {
@@ -433,10 +452,16 @@ impl State {
         } = &mut *held;
         stopped.retain(|pid| continued.binary_search(pid).is_err());
         stopped.append_reserved(added)?;
+        let count = held.stopped.len();
+        drop(held);
+        if restopped > 0 {
+            let mut status = self.status()?;
+            status.restops = status.restops.saturating_add(restopped);
+        }
         result?;
         Ok(Applied {
-            held: held.stopped.len(),
-            restopped: 0,
+            held: count,
+            restopped,
         })
     }
 
@@ -2236,10 +2261,11 @@ impl Watcher {
         if !cpu_run {
             self.run.clear();
         }
-        let mut held = self.state.apply(&self.order, &self.run, &self.last)?.held;
+        let applied = self.state.apply(&self.order, &self.run, &self.last)?;
+        let mut held = applied.held;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
-        let next = self.cpu_pace(native.vm.as_ref(), next, &mut held)?;
+        let next = self.cpu_pace(native.vm.as_ref(), next, &mut held, applied.restopped)?;
         // How late the watcher acted past its wait: its wake, its read and its stops, through all of which a
         // member running across the wait runs on (the lead, 2026-11-09: from the reads' own observed delays).
         if let Some((at, wait)) = armed {
@@ -2263,11 +2289,14 @@ impl Watcher {
         Ok(next)
     }
 
+    /// The scope's CPU control's turn after the read's hold, which stopped `restopped` held members again: a hold, its
+    /// response measured unless a member had escaped a stop in this read, or the run it permits.
     fn cpu_pace(
         &mut self,
         scope: Option<&super::managed::Scope>,
         next: Option<Duration>,
         held: &mut usize,
+        restopped: u64,
     ) -> Result<Option<Duration>, Refusal> {
         let Some(scope) = scope else { return Ok(next) };
         let owner = self.state.id.as_ref();
@@ -2279,13 +2308,17 @@ impl Watcher {
             Some(super::cpu::Decision::Hold(_)) => {
                 // Its response runs from when its credit ran out, read off the observation that held it (2c).
                 let ran_out = scope.cpu_ran_out(owner).ok().flatten();
-                *held = self.state.apply(&self.order, &[], &self.last)?.held;
+                let applied = self.state.apply(&self.order, &[], &self.last)?;
+                *held = applied.held;
                 scope.cpu_held(owner)?;
                 // The hold's response (joint plan step 14, 2c; ROOT, 2026-11-13): from its credit's running out until
                 // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
-                // didn't take its stop, ended, left or couldn't be read, a response of no time, or one its control or the
-                // helper refuses, is no sample (Karn's point): counted, never the scope's refusal.
+                // didn't take its stop (one this read had to stop again among them), ended, left or couldn't be read, a
+                // response of no time, or one its control or the helper refuses, is no sample (Karn's point): counted,
+                // never the scope's refusal.
+                let escaped = restopped.saturating_add(applied.restopped);
                 let learned = ran_out
+                    .filter(|_| escaped == 0)
                     .zip(stopped_after(&self.order, sys::run_state))
                     .and_then(|(from, stopped)| stopped.checked_duration_since(from))
                     .filter(|response| !response.is_zero())
