@@ -256,8 +256,8 @@ fn hex_cv_l1() {
 /// 7. Phase 6 again with `HEX_CV_LOSS=partition`: once B3 says `HEX_CV_READY`, drop the lane's UDP port on A; once it
 ///    says `HEX_CV_LOST`, let it through again, then `touch $HEX_CV_DIR/healed` on B. The port, by A's OS (as root):
 ///    Linux `iptables -I INPUT -p udp --dport <port> -j DROP`, healed with `-D` for `-I`; macOS
-///    `echo 'block drop in quick proto udp to any port <port>' | pfctl -a hex-cv -f - && pfctl -E`, healed with
-///    `pfctl -a hex-cv -F rules`; Windows `New-NetFirewallRule -DisplayName hex-cv -Direction Inbound -Protocol UDP
+///    `echo 'block drop in quick proto udp to any port <port>' | pfctl -a com.apple/hex-cv -f - && pfctl -E` (macOS's
+///    pf.conf loads `com.apple/*` anchors alone), healed with `pfctl -a com.apple/hex-cv -F rules`; Windows `New-NetFirewallRule -DisplayName hex-cv -Direction Inbound -Protocol UDP
 ///    -LocalPort <port> -Action Block`, healed with `Remove-NetFirewallRule -DisplayName hex-cv`.
 /// 8. On A, `touch $HEX_CV_DIR/stop`, then kill the scheduler as in 6: A3 says `HEX_CV_BOOKS` and `HEX_CV_LEFT=none`.
 /// 9. `b4`, on B, with `HEX_CV_BOOKS`.
