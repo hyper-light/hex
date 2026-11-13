@@ -213,12 +213,23 @@ struct ModelGuest {
     outside: Mutex<std::collections::BTreeMap<String, Outside>>,
 }
 
+/// The period the model's run host says its VM's governor holds a rate over (D247's `rate_period`): the model's
+/// fixture, which its runs all say.
+const MODEL_RATE_PERIOD: Duration = Duration::from_millis(100);
+
 impl ImageGuest for ModelGuest {
     fn members(&self) -> &[MemberInfo] {
         &self.members
     }
     fn published(&self) -> &[Bound] {
         &self.published
+    }
+    // No agent-control endpoint: the image class asks for none yet (D252).
+    fn control(&self) -> Option<&shards_api::image::ControlAt> {
+        None
+    }
+    fn rate_period(&self) -> Duration {
+        MODEL_RATE_PERIOD
     }
     fn take_output(
         &self,
@@ -944,7 +955,7 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
         ))
     );
     let mut missed = guest_times(vcpus);
-    missed.vcpus[0].unread = Some("its vCPU fd answered EBADF".to_owned());
+    missed.vcpus[0].unread = Some(shards_abi::guest_time::Unread::ThreadStat(Some(9)));
     let mut departed = guest_times(vcpus);
     departed.departed_ns = 5;
     for (microvm, says) in [
@@ -953,7 +964,7 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
             microvm(Err("GUEST_TIME went unanswered".to_owned())),
             "GUEST_TIME went unanswered",
         ),
-        (microvm(Ok(missed)), "EBADF"),
+        (microvm(Ok(missed)), "vCPU 0: its thread's stat: errno 9"),
         (microvm(Ok(guest_times(vcpus + 1))), "vCPUs"),
         (microvm(Ok(departed)), "no longer has"),
     ] {

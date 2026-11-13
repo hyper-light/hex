@@ -861,9 +861,9 @@ fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
 /// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): through Shards' own client, a guest whose muxer answers the first
 /// CONNECT, then takes the next and never answers it: expect that dial refused by type at its deadline, the link's
 /// bound from its start, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM
-/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is Shards' own input for a
-/// withheld answer (`conformance::UNSERVED_PATIENCE`), and twice it releases the muxer only where the dial overran,
-/// as Shards' `withheld_reply_expires_before_fixture_release` does.
+/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is an input, short so the case is,
+/// and twice it releases the muxer only where the dial overran, as Shards' `withheld_reply_expires_before_fixture_release`
+/// does.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
@@ -929,7 +929,9 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
         let _ = held.recv();
         (first, second)
     });
-    let bound = shards_api::conformance::UNSERVED_PATIENCE;
+    // An input: the first dial's deadline, short so the case is. Shards' conformance asked an unserved port with this
+    // one (UNSERVED_PATIENCE) until its judged waits (Part B, ca7a04d0d) took that constant out.
+    let bound = Duration::from_millis(200);
     let link = shards::ShardsLink::new(Arc::from(guest), bound);
     let control = link.dial(stream::CONTROL_PORT).unwrap();
     let (sent, answer) = std::sync::mpsc::channel();

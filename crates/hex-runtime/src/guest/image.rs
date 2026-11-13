@@ -660,6 +660,10 @@ impl GuestRuntime {
             credentials: Vec::new(),
             binary: Some(self.config.binary.clone()),
             env,
+            // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
+            control: None,
+            // No GPU (D232's identities): an image VM renders on none here.
+            gpu_devices: Vec::new(),
         })
     }
 
