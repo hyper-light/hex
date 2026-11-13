@@ -1690,6 +1690,28 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
     runtime
 }
 
+/// A guest that runs, as a node restarted with its shared guest up takes it back (joint plan step 14, C7), bound to
+/// `backing`, whose agent answers its connection's first ask with `capacity`.
+pub(super) fn running_guest(
+    capacity: Option<hex_api::Capacity>,
+    backing: Option<super::shared::Binding>,
+) -> triomphe::Arc<Booted> {
+    let kept = Kept::new(true);
+    kept.running.lock().unwrap().insert(123);
+    let guest: Arc<dyn shards_api::Guest> = kept.guest(123).into();
+    let link: LinkOwner = own_link(CapacityLink(capacity)).unwrap();
+    let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();
+    booted_owner(Booted {
+        guest: GuestHandle::Shared(guest),
+        link,
+        client,
+        evented: Mutex::new(None),
+        owner: None,
+        backing,
+    })
+    .unwrap()
+}
+
 pub(super) fn model_connection() -> (LinkOwner, Client) {
     let link: LinkOwner = own_link(CapacityLink(None)).unwrap();
     let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();

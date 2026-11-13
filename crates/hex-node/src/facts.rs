@@ -1037,6 +1037,29 @@ fn statvfs(dir: &Path) -> Disk {
 mod tests {
     use super::*;
 
+    /// Joint plan step 14 (C7; ROOT, 2026-11-13): a Linux node's capacity answer says what its machine has run and how
+    /// long it has been up, as a shared backing's runtime learns its guest's own CPU from its agent's answer; another
+    /// platform's says neither. Do answer this machine's capacity twice. Expect, on Linux, both read, its CPU time and
+    /// uptime never falling from one answer to the next; elsewhere, neither.
+    #[test]
+    fn w14_a_linux_nodes_capacity_answer_says_its_machines_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = capacity(dir.path(), "node".into()).unwrap().own;
+        let next = capacity(dir.path(), "node".into()).unwrap().own;
+        if cfg!(target_os = "linux") {
+            let (Some(cpu), Some(up)) = (first.cpu_ns, first.uptime_ns) else {
+                panic!("{first:?}");
+            };
+            assert!(up > 0, "{first:?}");
+            assert!(
+                next.cpu_ns >= Some(cpu) && next.uptime_ns >= Some(up),
+                "{first:?} then {next:?}"
+            );
+        } else {
+            assert_eq!((first, next), Default::default());
+        }
+    }
+
     /// CP-T7.4, the per-OS facts: do probe this machine; expect its platform the build's, threads
     /// and memory and the volume's size read (each OS's own interface: `/proc` and statvfs on Linux,
     /// sysctls and statvfs on macOS, `GlobalMemoryStatusEx` and `GetDiskFreeSpaceExW` on Windows), free

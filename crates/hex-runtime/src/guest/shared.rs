@@ -1346,12 +1346,9 @@ impl GuestRuntime {
             .guest_overhead
             .lock()
             .map_err(|_| uncertain(key, "its guest's learned overhead is poisoned as it learns"))?;
-        // Another answer may have measured meanwhile: its reading gives way to this one's, the most of each kept.
+        // Another answer may have measured meanwhile ([`merged`]).
         let merged = match *seen {
-            Some((at, other)) if at == key => Seen {
-                overhead: most(measured.overhead, other.overhead),
-                ..measured
-            },
+            Some((at, other)) if at == key => merged(measured, other),
             _ => measured,
         };
         *seen = Some((key, merged));
@@ -2088,6 +2085,15 @@ fn most(a: hex_api::LearnedOverhead, b: hex_api::LearnedOverhead) -> hex_api::Le
         cpu_milli: max(a.cpu_milli, b.cpu_milli),
         mem_bytes: max(a.mem_bytes, b.mem_bytes),
         disk_bytes: max(a.disk_bytes, b.disk_bytes),
+    }
+}
+
+/// What a shared backing keeps of its guest after an answer measured `measured` while another had kept `other`
+/// meanwhile (joint plan step 14, C7). Original (red): the most of each dimension, this answer's reading kept.
+pub(super) fn merged(measured: Seen, other: Seen) -> Seen {
+    Seen {
+        overhead: most(measured.overhead, other.overhead),
+        ..measured
     }
 }
 

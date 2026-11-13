@@ -174,6 +174,13 @@ pub fn meminfo(text: &str) -> Option<(u64, u64)> {
     Some((field("MemTotal")?, field("MemAvailable")?))
 }
 
+/// A Linux machine's CPU time since its boot and its uptime, in nanoseconds (joint plan step 14, C7), from `/proc/stat`'s
+/// text `stat`, `/proc/uptime`'s `uptime`, and the kernel's clock ticks a second, `hz`. Original (red): neither read.
+pub fn machine_time(stat: &str, uptime: &str, hz: u64) -> hex_api::MachineTime {
+    let _ = (stat, uptime, hz);
+    hex_api::MachineTime::default()
+}
+
 /// A cgroup v2 `memory.max`: a limit in bytes, or none for `max`.
 pub fn cgroup_max(text: &str) -> Option<u64> {
     text.trim().parse().ok()
@@ -331,6 +338,49 @@ impl Facts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Joint plan step 14 (C7; ROOT, 2026-11-13), CLAUDE.md §6: a machine's CPU time is every CPU's user, nice, system,
+    /// irq and softirq ticks (proc(5): guest time is within user and nice; idle, iowait and steal are no work of its
+    /// own) at its clock's ticks a second, and its uptime `/proc/uptime`'s first field. Do read a real `cpu` line of
+    /// 100 user, 20 nice, 30 system, 400 idle, 50 iowait, 6 irq, 7 softirq and 8 steal ticks at 100 a second, with an
+    /// uptime of 12345.67 s; then broken texts. Expect 1.63 s of CPU and 12345.67 s up; then none where a text breaks.
+    #[test]
+    fn w14_a_machines_time_is_its_cpus_work_since_boot_and_its_uptime() {
+        let stat = "cpu  100 20 30 400 50 6 7 8 0 0\ncpu0 50 10 15 200 25 3 3 4 0 0\nintr 1 2 3\n";
+        assert_eq!(
+            machine_time(stat, "12345.67 54321.00\n", 100),
+            hex_api::MachineTime {
+                cpu_ns: Some(1_630_000_000),
+                uptime_ns: Some(12_345_670_000_000),
+            }
+        );
+        assert_eq!(
+            machine_time(stat, "7 1\n", 250).uptime_ns,
+            Some(7_000_000_000)
+        );
+        for (stat, uptime) in [
+            ("", ""),
+            ("cpu0 1 2 3 4 5 6 7 8\n", "1.5x 2"),
+            ("cpu  1 2 3\n", "1.1234567891 2"),
+            ("cpu  lots 2 3 4 5 6 7 8\n", "-1 2"),
+            (
+                "cpu  18446744073709551615 0 0 0 0 0 0 0\n",
+                "18446744073709551615.99 1",
+            ),
+        ] {
+            assert_eq!(
+                machine_time(stat, uptime, 100),
+                hex_api::MachineTime::default(),
+                "{stat:?} {uptime:?}"
+            );
+        }
+        let unclocked = machine_time("cpu  1 2 3 4 5 6 7 8\n", "1.5 2", 0);
+        assert_eq!(
+            (unclocked.cpu_ns, unclocked.uptime_ns),
+            (None, Some(1_500_000_000)),
+            "no clock rate reads no CPU time"
+        );
+    }
 
     /// CLAUDE.md §6, hostile input: do read real and broken `/proc/meminfo` text; expect bytes from the
     /// real, nothing from the broken.
