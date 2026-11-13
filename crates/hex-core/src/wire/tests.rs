@@ -4710,6 +4710,7 @@ fn learned_capacity() -> Capacity {
                 disk_bytes: Some(0),
             },
         }],
+        rates: Vec::new(),
     });
     capacity
 }
@@ -4779,6 +4780,39 @@ fn a_node_vms_learned_holding_and_end_cross_the_wire() {
     );
 }
 
+/// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds each running managed VM's CPU to its rate crosses the wire
+/// on its class's capacity answer, after the ceilings, where its node tells it. Do: encode a capacity whose learned
+/// rates name a box its platform's cap holds, with why, one its governor holds under its job, and a node VM its
+/// governor holds; read it back, and write and read it as JSON. Expect it back exactly each way.
+#[test]
+fn w14_d255_what_holds_each_managed_vms_rate_crosses_the_wire() {
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.rates = vec![
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-7").unwrap()),
+                held: hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-8").unwrap()),
+                held: hex_api::RateHeld::GovernorUnderJob,
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16])),
+                held: hex_api::RateHeld::Governor,
+            },
+        ];
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let json = serde_json::to_value(&capacity).unwrap();
+    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
+}
+
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with
 /// a prior more than a class has profiles, a prior booked past its ceiling, and a box's holding twice; then read one
 /// whose holdings' count says one more than a node's boxes. Expect each refused, the last before any holding is read.
@@ -4813,9 +4847,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
         learned.ceilings = Vec::new();
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count and
-    // no ceiling's.
-    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
+    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count, no
+    // ceiling's and no rate's.
+    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -4910,8 +4944,8 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its id's length, the id, five u64s, its band and its unmoved capability's
-    // option and tag; then no ceiling's count.
-    let at = bytes.len() - (3 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
+    // option and tag; then no ceiling's count and no rate's.
+    let at = bytes.len() - (4 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(

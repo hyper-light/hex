@@ -276,6 +276,34 @@ pub trait Recover: Runtime {
         })
     }
 
+    /// Joint plan step 14 (D255): asks the governor of managed VM `record` to hold its vCPUs to `rate` milli-CPU, through
+    /// the guest this owner boots it in (`GuestRuntime::managed_rate`). An owner that boots no managed guest has no
+    /// governor to ask: its platform's cap is to hold the VM, told why.
+    fn managed_rate(
+        &self,
+        record: &BoxRecord,
+        rate: u64,
+    ) -> Result<hex_runtime::guest::ManagedRate, Refusal> {
+        let _ = (record, rate);
+        Ok(hex_runtime::guest::ManagedRate::Platform(
+            Refusal::Platform {
+                what: "a managed VM's governor",
+                platform: std::env::consts::OS,
+                why: "this native owner boots no managed guest whose governor it asks".to_owned(),
+            },
+        ))
+    }
+
+    /// Joint plan step 14 (D255): the period managed VM `record`'s governor holds its rate over, as its VM process last
+    /// answered: none before its first answer, and none from an owner that boots no managed guest.
+    fn managed_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
+        let _ = record;
+        Ok(None)
+    }
+
     /// Joint plan step 14 (C4): caps the managed VM's CPU at `rate` milli-CPU, its share as the charge learner
     /// water-fills it, where this owner caps CPU rather than weighs it; refused, typed, by an owner that holds no rate.
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
@@ -2105,19 +2133,37 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         self.runtime.host_use(&record.spec.id)
     }
 
-    fn rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
-        self.runtime.image_rate_period(record)
+    fn rate_period(&self, record: &BoxRecord) -> Result<Option<std::time::Duration>, Refusal> {
+        if charges::running_image(record) {
+            return self.runtime.image_rate_period(record).map(Some);
+        }
+        self.runtime.managed_rate_period(record)
     }
 
-    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
+    /// D255: a managed VM's governor first, through the guest its node boots it in. Where its VM process takes no rate,
+    /// its platform's cap holds it, told why. On Windows its job's CPU rate is set at the same rate besides, the hard
+    /// ceiling: the job covers the VMM's own CPU too, so it binds first, the learner holding none apart (owed on
+    /// Shards: a managed guest's per-vCPU guest time). On macOS the CPU control stays at the VM's ceiling, a backstop.
+    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
         if charges::running_image(record) {
             return self
                 .runtime
                 .rate(&record.spec.id, std::num::NonZeroU64::new(rate))
-                .map(|_| ());
+                .map(|_| hex_api::RateHeld::Governor);
         }
-        self.runtime
-            .set_managed_rate(NativeRecord::Box(record), rate)
+        match self.runtime.managed_rate(record, rate)? {
+            hex_runtime::guest::ManagedRate::Governor { .. } if cfg!(windows) => {
+                self.runtime
+                    .set_managed_rate(NativeRecord::Box(record), rate)?;
+                Ok(hex_api::RateHeld::GovernorUnderJob)
+            }
+            hex_runtime::guest::ManagedRate::Governor { .. } => Ok(hex_api::RateHeld::Governor),
+            hex_runtime::guest::ManagedRate::Platform(why) => {
+                self.runtime
+                    .set_managed_rate(NativeRecord::Box(record), rate)?;
+                Ok(hex_api::RateHeld::Platform(why.to_string()))
+            }
+        }
     }
 
     fn set_room(&self, record: &BoxRecord, room: i64) -> Result<(), Refusal> {
@@ -2227,9 +2273,19 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 return learner.next_window();
             }
         };
+        let records: Vec<BoxRecord> = records.into_values().flatten().collect();
+        let io = Managed {
+            runtime: &self.runtime,
+            store: &self.books.store,
+        };
+        // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
+        if let Err(why) = learner.govern(&io, &records) {
+            learner.failed(why);
+            return learner.next_window();
+        }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let sorted = match charges::sort(records.into_values().flatten(), learner.manages()) {
+        let sorted = match charges::sort(records, |record| learner.learns(record)) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
@@ -2246,10 +2302,6 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         let running = sorted.learned;
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let io = Managed {
-            runtime: &self.runtime,
-            store: &self.books.store,
-        };
         let _ = learner.window(&io, &running, budget, std::time::Instant::now());
         let next = learner.next_window();
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
@@ -3065,6 +3117,22 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
 
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         self.host().managed_usage(record)
+    }
+
+    /// D255: the box's managed VM is booted in its guest runtime, whose governor ask it is.
+    fn managed_rate(
+        &self,
+        record: &BoxRecord,
+        rate: u64,
+    ) -> Result<hex_runtime::guest::ManagedRate, Refusal> {
+        self.guest().managed_rate(record, rate)
+    }
+
+    fn managed_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
+        self.guest().managed_rate_period(record)
     }
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
