@@ -192,9 +192,10 @@ fn shards(_: &BoxId) -> Result<Option<Met>, Refusal> {
 /// Joint plan step 14 (AC-T7.4.1), C4 and C5 in the node: the placement's cgroup paths and weights. Do run a window
 /// of two cold Shards VMs, each booked at its whole 16-CPU, 8 GiB receipt, on a 32-CPU machine whose fleet budget is
 /// half of it, beside another node's fleet budgeted 8 CPUs; then a second window with nothing changed. Expect each
-/// VM's own cgroup given its weight by booking and `memory.high` its budget held at its 8 GiB ceiling (its `cpu.max`
-/// and `memory.max` left as its create wrote them); `.vm/node-a` capped at 16 CPUs and weighing half the machine;
-/// `.vm` weighing both fleets' 24 CPUs of 32; and the second window writing nothing.
+/// VM's own cgroup's `memory.max` its create wrote lifted to the kernel's none, its `memory.swap.max` with it (ROOT,
+/// 2026-11-13: no chosen memory bound), then its weight by booking and its `memory.high` its budget, 32 GiB, half the
+/// fleet's (its `cpu.max` left as its create wrote it, its ceiling); `.vm/node-a` capped at 16 CPUs and weighing half
+/// the machine; `.vm` weighing both fleets' 24 CPUs of 32; and the second window writing nothing.
 #[test]
 fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     let io = Record::default();
@@ -216,10 +217,14 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     assert_eq!(
         io.take(),
         vec![
+            vm("vm-1", "memory.max", "max"),
+            vm("vm-1", "memory.swap.max", "max"),
             vm("vm-1", "cpu.weight", "10000"),
-            vm("vm-1", "memory.high", &(8 * GIB).to_string()),
+            vm("vm-1", "memory.high", &(32 * GIB).to_string()),
+            vm("vm-2", "memory.max", "max"),
+            vm("vm-2", "memory.swap.max", "max"),
             vm("vm-2", "cpu.weight", "10000"),
-            vm("vm-2", "memory.high", &(8 * GIB).to_string()),
+            vm("vm-2", "memory.high", &(32 * GIB).to_string()),
             (fleet(), "cpu.weight", "5000".to_owned()),
             (fleet(), "cpu.max", "1600000 100000".to_owned()),
             (root().join(".vm"), "cpu.weight", "7500".to_owned()),

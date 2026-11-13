@@ -47,12 +47,12 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
     DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
-    ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedEnd, LearnedHolding,
-    LearnedPrior, LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
-    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec,
-    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs,
-    RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
-    check_grants, check_published,
+    ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedCeiling, LearnedEnd,
+    LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse, LifecycleCause, MAX_DEVICES,
+    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
+    Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, Receiver,
+    Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal,
+    Upstream, Usage, User, check_grants, check_published,
 };
 
 use crate::netns;
@@ -1737,6 +1737,11 @@ const LEARNED_END_BYTES: usize = 5 * size_of::<u64>() + 1 + 2;
 /// One learned end at its least: a one-byte box id with its length, then the rest with no unmoved capability.
 const LEARNED_END_MIN_BYTES: usize = size_of::<u32>() + 1 + LEARNED_END_BYTES - 1;
 
+/// One learned ceiling at its least (C1): its profile's id, its envelope, and each dimension of its overhead none.
+const LEARNED_CEILING_MIN_BYTES: usize = 32 + RESOURCE_BYTES + 3;
+/// One learned ceiling at its most: each dimension of its overhead learned.
+const LEARNED_CEILING_BYTES: usize = 32 + RESOURCE_BYTES + 3 * (1 + size_of::<u64>());
+
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
 /// their receipts first, and a holding left out counts at its receipt: only those least past theirs are dropped.
@@ -1818,6 +1823,18 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     for end in &learned.ended {
         put_learned_end(w, end)?;
     }
+    // Last (C1): each profile's ceiling, its envelope and the overhead learned past it, a dimension none while cold.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.ceilings.len(), LEARNED_CEILING_MIN_BYTES)?;
+    for ceiling in &learned.ceilings {
+        w.reserve_fixed(LEARNED_CEILING_BYTES)?;
+        w.raw(&ceiling.profile);
+        put_resources(w, ceiling.envelope);
+        let overhead = ceiling.overhead;
+        for dim in [overhead.cpu_milli, overhead.mem_bytes, overhead.disk_bytes] {
+            w.option(dim, Writer::u64);
+        }
+    }
     Ok(())
 }
 
@@ -1882,11 +1899,28 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         "learned ends",
         learned_end,
     )?;
+    let ceilings = r.bounded_list(
+        LEARNED_CEILING_MIN_BYTES,
+        MAX_LEARNED_PRIORS,
+        "learned ceilings",
+        |r| {
+            Ok(LearnedCeiling {
+                profile: r.array::<32>()?,
+                envelope: resources(r)?,
+                overhead: LearnedOverhead {
+                    cpu_milli: r.option(Reader::u64)?,
+                    mem_bytes: r.option(Reader::u64)?,
+                    disk_bytes: r.option(Reader::u64)?,
+                },
+            })
+        },
+    )?;
     Ok(Learned {
         priors,
         used,
         holdings,
         ended,
+        ceilings,
     })
 }
 
@@ -3517,7 +3551,7 @@ impl<'a> Reader<'a> {
                     "count exceeds the u16 device index address space"
                 } else if what == "physical report.unavailable" {
                     "count exceeds the supported VM backend classes"
-                } else if what == "learned priors" {
+                } else if what == "learned priors" || what == "learned ceilings" {
                     "count exceeds a class's profiles"
                 } else if what == "learned holdings" || what == "learned ends" {
                     "count exceeds a node's boxes"
