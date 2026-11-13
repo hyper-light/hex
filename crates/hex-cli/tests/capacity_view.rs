@@ -27,11 +27,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use hex_api::capacity::Why;
-use hex_core::patience::Patience;
 use hex_quic::Refused;
 use hex_quic::enroll::sim::SimCa;
 use hex_quic::enroll::{Ca, Request, store};
-use hex_testkit::waits::within;
 
 #[path = "capacity_view/machine.rs"]
 mod machine;
@@ -46,9 +44,6 @@ const KEEPER: &str = "scheduler.capacity-view.test";
 const HOLDER: &str = "kiln.capacity-view.test";
 /// A peer kiln's CA enrolled that the lane doesn't name.
 const STRANGER: &str = "stranger.capacity-view.test";
-
-/// A refused dial's answer: the keeper's endpoint turning a peer it doesn't name away at its handshake.
-static REFUSAL: Patience = Patience::measuring("test.hex_cli.capacity_view.refusal");
 
 /// A folder of the test's own: under ~/.cache on Unix (the hazards' rule: never /tmp), the system's temp folder on
 /// Windows, as Hex's Windows tests take.
@@ -79,10 +74,11 @@ fn enroll_holder(ca: &SimCa, dir: &Path, name: &str, grant: &[u8]) {
 }
 
 /// A dial by the peer enrolled in `dir`, which the lane at `address` doesn't name: refused at its handshake, typed
-/// Identity, as for a certificate kiln's CA didn't issue (hex-quic.md Q10).
+/// Identity, as for a certificate kiln's CA didn't issue (hex-quic.md Q10). It waits for its answer with no deadline of
+/// the test's: the driver ends a dial nothing answers once QUIC's idle timeout passes (RFC 9000 §10.1).
 fn a_stranger_is_turned_away(dir: &Path, address: SocketAddr) {
     let end = stand_in::endpoint(&stand_in::credentials(dir), address);
-    let dialed = within(&REFUSAL, |by| end.dial(KEEPER, address, by));
+    let dialed = end.dial(KEEPER, address, None);
     assert!(
         matches!(dialed, Err(Refused::Identity)),
         "a peer the lane doesn't name: {dialed:?}"
@@ -301,7 +297,7 @@ mod two_hosts {
     use hex_core::patience::Patience;
     use hex_quic::enroll::sim::SimCa;
     use hex_quic::enroll::{Ca, Issued, Request};
-    use hex_testkit::waits::until;
+    use hex_testkit::waits::follow::{self, Party};
 
     use super::stand_in::{Rng, StandIn, workload};
     use super::{a_stranger_is_turned_away, enroll_holder, machine};
@@ -311,7 +307,8 @@ mod two_hosts {
     const HOLDER_GRANT: &[u8] = b"hex-cv-2h holder";
     const STRANGER_GRANT: &[u8] = b"hex-cv-2h stranger";
 
-    /// The operator's word that the keeper is back: what B3 waits for once its link has gone.
+    /// The operator's word that the keeper is back: what B3 waits for once its link has gone, following the operator by
+    /// their life alone (decision 9), however long the heal takes them.
     static HEALED: Patience = Patience::measuring("test.hex_cli.capacity_view.healed");
 
     /// The steps of kiln-shaped work a phase runs (`HEX_CV_STEPS`, else HEX-CV-L1's), a test generator's parameter.
@@ -567,9 +564,10 @@ mod two_hosts {
         );
         let lost = kiln.until_lost();
         say("HEX_CV_LOST", lost.0);
-        until(
+        follow::until(
             &HEALED,
             "the operator's word that the keeper is back",
+            || Party::Live,
             || healed.exists(),
         )
         .unwrap();
