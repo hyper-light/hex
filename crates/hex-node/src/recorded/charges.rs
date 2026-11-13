@@ -1001,6 +1001,7 @@ pub(crate) fn learned(
         used,
         holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
         ended,
+        ceilings: Vec::new(),
     })
 }
 
