@@ -11,6 +11,13 @@
 //! - **Its execs** ([`Execs::exec`]). An exec's lane asks for step 6's member exec; once it has
 //!   started, its stdout, stderr and stdin are lanes as a member's are, and its lane carries its
 //!   resizes and signals and tells its exit ([`ExecControl`]).
+//! - **Its members** ([`Execs::member`]). A member's own lane says whether it runs or how it
+//!   ended; it carries the member's signals and its own terminal's resizes, each answered,
+//!   typed ([`MemberSteering`]), and tells its end as it comes ([`MemberEnd`]).
+//! - **Its logs** ([`Execs::log`]). A log lane asks for the log its run keeps of its command's
+//!   output or a member's, as an exec's lane asks; its records come on a lane of their own, as
+//!   an exec's stdout does, each a typed record at its own place in the log ([`Log`]), so that a
+//!   later lane goes on from where this one got to ([`Log::cursor`]).
 //! - **Who it reaches.** No lane opens before the handshake took the microVM's pinned key
 //!   ([`controller`](super::controller)), and no more open at once than the endpoint allows
 //!   (MAX_STREAMS, RFC 9000 §4.6): the rest wait for its room.
@@ -31,7 +38,9 @@ use hyper_quic::{ClientConfig, ConnectionError, StreamId};
 use shards_abi::run::managed::{Channel, InputEnd};
 use shards_abi::run::{Size, Spec};
 
-use super::exec::{self, Limits, Steer, Told};
+use super::exec::{
+    self, Limits, LogAsk, LogChannels, LogCursor, LogRecord, LogSource, Steer, Told, Unlogged, Unsteered,
+};
 use super::unix;
 use super::{
     By, CONTROL_ASK, Ended, NEGOTIATED_BYTES, Negotiated, REFUSED_BYTES, controller, ended, read_negotiated,
@@ -75,11 +84,18 @@ pub enum Fault {
     Revoked,
     /// The member's stdin has ended, having taken `written` bytes, as its init told it.
     InputEnded { written: u64, end: InputEnd },
-    /// An exec did not start ([`exec::Unstarted`]).
+    /// An exec did not start ([`exec::Unstarted`]); a member's lane, that its host serves
+    /// none.
     Unstarted(exec::Unstarted),
+    /// A member's steer was not taken ([`exec::Unsteered`]): its command has ended, it has no
+    /// terminal of its own to size, or its host could not deliver it.
+    Unsteered(Unsteered),
     /// A socket lane's host could not connect its socket: the errno its connect failed with
     /// (D251), `ENOENT` for no such socket, `ECONNREFUSED` for one nothing listens on.
     Unreached(NonZeroU16),
+    /// A log lane reads nothing ([`exec::Unlogged`]): its place is older than the oldest kept
+    /// (`Rotated`, which names it), the run keeps no log, or no member of that index.
+    Unlogged(Unlogged),
     /// The connection ended ([`Ended`]): this side's own close is [`Ended::Local`].
     Lost(Ended),
 }
@@ -108,8 +124,12 @@ enum Heard {
     Fault(Fault),
     /// An exec started: its stdio's handles.
     Started(Box<Started>),
-    /// An exec ended, with this status.
+    /// An exec ended, with this status; or a member.
     Exit(i32),
+    /// A member's lane: the member runs, its lane numbered so for its handle's asks.
+    Running(u64),
+    /// A member's lane: its last steer taken, or why not.
+    Steered(Result<(), Unsteered>),
     /// The control lane's report, beside this side's own.
     Linked(Link),
     /// A socket lane connected: its number for its handle's asks (D251).
@@ -139,6 +159,8 @@ enum Ask {
     Send { lane: u64, frame: Vec<u8> },
     /// An exec's lane to open, its ask its first frame.
     Exec(Box<Asked>),
+    /// A member's own lane to open, its ask its first frame.
+    Member(Box<MemberAsked>),
     /// A socket lane to open, its ask its first frame (D251).
     Socket(Box<SocketAsked>),
     /// A socket lane's bytes its reader took: room for as many more.
@@ -149,6 +171,9 @@ enum Ask {
     Abort { lane: u64 },
     /// A socket lane read no more: STOP_SENDING.
     Stop { lane: u64 },
+    /// An exec's lane let go by its handle before its end: both ways abandoned, which hangs its
+    /// exec up at the endpoint, as its connection's end would (a log lane its reader dropped).
+    Hangup { lane: u64 },
 }
 
 #[derive(Debug)]
@@ -165,7 +190,19 @@ struct Asked {
     member: u32,
     stderr: bool,
     stdin: bool,
+    /// A log lane's: told why it reads none, and its records typed ([`LogRecord::check`]).
+    log: bool,
     tell: mpsc::Sender<Heard>,
+}
+
+/// A member's lane asked for: its first frame, its member, where its steering hears its answers
+/// and where its end is told.
+#[derive(Debug)]
+struct MemberAsked {
+    frame: Vec<u8>,
+    member: u32,
+    tell: mpsc::Sender<Heard>,
+    end: mpsc::Sender<Heard>,
 }
 
 /// The handle's view of a lane gone with its driver: the driver ended, which this side did.
@@ -376,7 +413,13 @@ impl Execs {
     /// [`Fault::Unstarted`], or the connection's end.
     pub fn exec(&self, member: u32, spec: Spec) -> Result<Exec, Fault> {
         let (stderr, stdin) = (spec.tty.is_none(), spec.stdin);
-        self.ask(member, exec::Kind::Exec(Box::new(spec)), stderr, stdin)
+        let ask = exec::Ask {
+            run: self.run,
+            generation: self.generation,
+            member,
+            kind: exec::Kind::Exec(Box::new(spec)),
+        };
+        self.ask(&ask, stderr, stdin)
     }
 
     /// The next connection the harness in member `member` makes to its MCP bridge (D254),
@@ -385,12 +428,18 @@ impl Execs {
     /// [`Fault::Unstarted`] (`Refused` for a member whose run asked for no bridge), or the
     /// connection's end.
     pub fn mcp(&self, member: u32) -> Result<McpConnection, Fault> {
+        let ask = exec::Ask {
+            run: self.run,
+            generation: self.generation,
+            member,
+            kind: exec::Kind::Mcp,
+        };
         let Exec {
             stdout,
             stdin,
             control,
             ..
-        } = self.ask(member, exec::Kind::Mcp, false, true)?;
+        } = self.ask(&ask, false, true)?;
         let to = stdin.ok_or(Fault::Refused(Reason::Protocol))?;
         Ok(McpConnection {
             from: stdout,
@@ -399,22 +448,88 @@ impl Execs {
         })
     }
 
-    /// Asks for `kind` in `member` on a lane of its own, and waits until it has started, its
-    /// stdio's lanes made for an exec of `stderr` and `stdin`.
-    fn ask(&self, member: u32, kind: exec::Kind, stderr: bool, stdin: bool) -> Result<Exec, Fault> {
+    /// Member `member` itself, on a lane of its own: whether it runs, and then its steering
+    /// and its end, or how it ended before. Why there is none, typed: the endpoint's refusal of
+    /// its lane (`Scope` for a member it serves no stream of), its host's
+    /// [`Fault::Unstarted`], or the connection's end.
+    pub fn member(&self, member: u32) -> Result<Member, Fault> {
         let ask = exec::Ask {
             run: self.run,
             generation: self.generation,
             member,
-            kind,
+            kind: exec::Kind::Member,
         };
+        let frame = ask.frame().map_err(|_| Fault::Refused(Reason::Protocol))?;
+        let (tell, heard) = mpsc::channel();
+        let (end, ends) = mpsc::channel();
+        self.asks.hand(Ask::Member(Box::new(MemberAsked {
+            frame,
+            member,
+            tell,
+            end,
+        })));
+        let lane = match heard.recv() {
+            Ok(Heard::Running(lane)) => lane,
+            Ok(Heard::Exit(status)) => return Ok(Member::Ended(status)),
+            Ok(Heard::Fault(fault)) => return Err(fault),
+            Ok(_) | Err(_) => return Err(gone()),
+        };
+        Ok(Member::Running(MemberControl {
+            steering: MemberSteering {
+                lane,
+                asks: self.asks.try_clone().map_err(|_| gone())?,
+                heard,
+                over: None,
+            },
+            end: MemberEnd {
+                heard: ends,
+                exit: None,
+            },
+        }))
+    }
+
+    /// The log the run keeps of `source`'s output (D238's log lane): its `channels`, each from
+    /// its place in `cursor` (the oldest kept where it names none), read as kept now or, with
+    /// `follow`, on as it is kept until its source ends. Waits until its host has started it;
+    /// why it reads none, typed: [`Fault::Unlogged`] (`Rotated`, naming the oldest place kept,
+    /// where a place asked is older), the endpoint's refusal of its lane, its host's
+    /// [`Fault::Unstarted`], or the connection's end.
+    pub fn log(
+        &self,
+        source: LogSource,
+        channels: LogChannels,
+        cursor: LogCursor,
+        follow: bool,
+    ) -> Result<Log, Fault> {
+        let asked = LogAsk {
+            source,
+            channels,
+            cursor,
+            follow,
+        };
+        let ask = exec::Ask::log(self.run, self.generation, asked);
+        let Exec { stdout, control, .. } = self.ask(&ask, false, false)?;
+        Ok(Log {
+            records: stdout,
+            lane: control.lane,
+            asks: control.asks,
+            channels,
+            cursor,
+            finished: false,
+        })
+    }
+
+    /// Asks for `ask` on a lane of its own, and waits until it has started, its stdio's lanes
+    /// made for an exec of `stderr` and `stdin`.
+    fn ask(&self, ask: &exec::Ask, stderr: bool, stdin: bool) -> Result<Exec, Fault> {
         let frame = ask.frame().map_err(|_| Fault::Refused(Reason::Protocol))?;
         let (tell, heard) = mpsc::channel();
         self.asks.hand(Ask::Exec(Box::new(Asked {
             frame,
-            member,
+            member: ask.member,
             stderr,
             stdin,
+            log: matches!(ask.kind, exec::Kind::Log(_)),
             tell,
         })));
         let started = match heard.recv() {
@@ -457,6 +572,65 @@ pub struct McpConnection {
     pub end: ExecControl,
 }
 
+/// A log lane (D238's log lane), as its controller reads it: the records of the log the run
+/// keeps of its source, in the log's order, each at its own place. Let go before it finished,
+/// its lanes are abandoned and its host stops reading.
+#[derive(Debug)]
+pub struct Log {
+    records: Output,
+    /// Its ask's lane, which tells its end: abandoned as the log is let go before it.
+    lane: u64,
+    asks: Asks,
+    channels: LogChannels,
+    cursor: LogCursor,
+    finished: bool,
+}
+
+/// What a log lane gave.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Logged {
+    /// Its next record ([`LogRecord`]): output, a gap its log keeps of what it did not keep, or
+    /// the segments its retention let go before the lane read them.
+    Record(LogRecord),
+    /// It read all it was to: what was kept as it asked, or, followed, until its source ended.
+    Finished,
+}
+
+impl Log {
+    /// Its next record, the one handed out before acknowledged first (step 5's records, one in
+    /// flight). Waits as long as its source writes nothing, where it follows. [`Logged::Finished`]
+    /// once it has read all it was to, then again; a [`Fault`] once its lane is over, then again.
+    pub fn next_record(&mut self) -> Result<Logged, Fault> {
+        match self.records.next_record()? {
+            Got::Record { bytes, .. } => {
+                // Its driver took only records that read ([`LogRecord::check`]).
+                let record = LogRecord::read(bytes)
+                    .map_err(|_| Fault::Lost(Ended::Closed(By::This, Reason::Protocol)))?;
+                self.cursor = self.cursor.past(&record, self.channels);
+                Ok(Logged::Record(record))
+            }
+            Got::Finished => {
+                self.finished = true;
+                Ok(Logged::Finished)
+            }
+        }
+    }
+
+    /// Where a later lane goes on: each channel it reads past every record of it handed out,
+    /// the others where it was asked from.
+    pub fn cursor(&self) -> LogCursor {
+        self.cursor
+    }
+}
+
+impl Drop for Log {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.asks.hand(Ask::Hangup { lane: self.lane });
+        }
+    }
+}
+
 /// A command running in a member: its stdout, its stderr (none on a terminal, whose output is
 /// its stdout), its stdin (where it reads one), and its control.
 #[derive(Debug)]
@@ -465,6 +639,96 @@ pub struct Exec {
     pub stderr: Option<Output>,
     pub stdin: Option<Input>,
     pub control: ExecControl,
+}
+
+/// A member, as its lane first says: running, its control; or ended, with its status (its
+/// command's, or 128 plus the signal that ended it), before its lane asked.
+#[derive(Debug)]
+pub enum Member {
+    Running(MemberControl),
+    Ended(i32),
+}
+
+/// A running member's lane, as two handles that need not wait on each other: its steering and
+/// its end.
+#[derive(Debug)]
+pub struct MemberControl {
+    pub steering: MemberSteering,
+    pub end: MemberEnd,
+}
+
+/// A member's steering: a signal to its command, a resize of its own terminal (D244), each
+/// answered by its host before the next goes.
+#[derive(Debug)]
+pub struct MemberSteering {
+    lane: u64,
+    asks: Asks,
+    heard: mpsc::Receiver<Heard>,
+    /// Why it steers no more, once it does not.
+    over: Option<Fault>,
+}
+
+impl MemberSteering {
+    /// Signals its command with `signal`, a Linux signal's number, `1..=run::NSIG`, refused
+    /// before it is sent otherwise; and waits for its host's answer.
+    pub fn signal(&mut self, signal: u32) -> Result<(), Fault> {
+        if !(1..=shards_abi::run::NSIG).contains(&signal) {
+            return Err(Fault::Refused(Reason::Protocol));
+        }
+        self.steer(Steer::Signal(signal))
+    }
+
+    /// Sizes its own terminal (D244), a 0 in either leaving it as it is; and waits for its
+    /// host's answer, [`Unsteered::Terminal`] for a member with none.
+    pub fn resize(&mut self, size: Size) -> Result<(), Fault> {
+        self.steer(Steer::Resize(size))
+    }
+
+    /// Sends `steer` and waits for its answer: taken, or why not. A member that has ended
+    /// takes none: [`Unsteered::Ended`], from its end on.
+    fn steer(&mut self, steer: Steer) -> Result<(), Fault> {
+        if let Some(fault) = self.over {
+            return Err(fault);
+        }
+        let frame = exec::steering(steer).map_err(|_| gone())?;
+        self.asks.hand(Ask::Send {
+            lane: self.lane,
+            frame,
+        });
+        let over = match self.heard.recv() {
+            Ok(Heard::Steered(Ok(()))) => return Ok(()),
+            Ok(Heard::Steered(Err(why))) => return Err(Fault::Unsteered(why)),
+            Ok(Heard::Exit(_)) => Fault::Unsteered(Unsteered::Ended),
+            Ok(Heard::Fault(fault)) => fault,
+            Ok(_) | Err(_) => gone(),
+        };
+        self.over = Some(over);
+        Err(over)
+    }
+}
+
+/// A member's end, told as it comes.
+#[derive(Debug)]
+pub struct MemberEnd {
+    heard: mpsc::Receiver<Heard>,
+    exit: Option<Result<i32, Fault>>,
+}
+
+impl MemberEnd {
+    /// Waits for the member to end: its status, its command's or 128 plus the signal that
+    /// ended it (D231's `MEMBER_ENDED`), once its whole population has.
+    pub fn wait(&mut self) -> Result<i32, Fault> {
+        if let Some(exit) = self.exit {
+            return exit;
+        }
+        let exit = match self.heard.recv() {
+            Ok(Heard::Exit(status)) => Ok(status),
+            Ok(Heard::Fault(fault)) => Err(fault),
+            Ok(_) | Err(_) => Err(gone()),
+        };
+        self.exit = Some(exit);
+        exit
+    }
 }
 
 /// An exec's lane: its resizes and signals, and its exit.
@@ -899,11 +1163,14 @@ pub enum Granted {
     Sockets,
     /// Member N's MCP bridge (D254), granted where its run asked for one.
     Mcp(u32),
+    /// The log the run keeps of its command or of member N (D238's log lane), read as execs
+    /// are asked for ([`Execs::log`]).
+    Log(LogSource),
 }
 
 impl Granted {
-    /// Its name: `control`, `stdout:N`, `stderr:N`, `stdin:N`, `exec`, `socket` or `mcp:N`,
-    /// N the member's index.
+    /// Its name: `control`, `stdout:N`, `stderr:N`, `stdin:N`, `exec`, `socket`, `mcp:N`,
+    /// `log:run` or `log:N`, N the member's index.
     pub fn name(&self) -> String {
         match self {
             Granted::Control => "control".to_string(),
@@ -913,11 +1180,16 @@ impl Granted {
             Granted::Execs => "exec".to_string(),
             Granted::Sockets => "socket".to_string(),
             Granted::Mcp(member) => format!("mcp:{member}"),
+            Granted::Log(LogSource::Command) => "log:run".to_string(),
+            Granted::Log(LogSource::Member(member)) => format!("log:{member}"),
         }
     }
 }
 
-/// What `subscriptions` grant, in the order the controller dials their lanes.
+/// What `subscriptions` grant, in the order the controller dials their lanes. Where execs are
+/// granted, logs are read as they are asked: the run's command's, and each member's whose
+/// stream the subscriptions name, once each in their order. Another member's is read the same
+/// way, and not named: the controller knows no more of the run's members.
 fn granted(subscriptions: Subscriptions<'_>) -> Vec<Granted> {
     let outputs = subscriptions
         .outputs
@@ -930,10 +1202,29 @@ fn granted(subscriptions: Subscriptions<'_>) -> Vec<Granted> {
         .inputs
         .iter()
         .map(|(scope, _, _)| Granted::Stdin(scope.member));
+    let mut members: Vec<u32> = Vec::new();
+    let named = subscriptions
+        .outputs
+        .iter()
+        .map(|(scope, _, _)| scope.member)
+        .chain(subscriptions.inputs.iter().map(|(scope, _, _)| scope.member));
+    for member in named {
+        if !members.contains(&member) {
+            members.push(member);
+        }
+    }
+    let logs = subscriptions.execs.into_iter().flat_map(|_| {
+        std::iter::once(Granted::Log(LogSource::Command)).chain(
+            members
+                .iter()
+                .map(|member| Granted::Log(LogSource::Member(*member))),
+        )
+    });
     std::iter::once(Granted::Control)
         .chain(outputs)
         .chain(inputs)
         .chain(subscriptions.execs.map(|_| Granted::Execs))
+        .chain(logs)
         .chain(subscriptions.sockets.map(|_| Granted::Sockets))
         .collect()
 }
@@ -979,7 +1270,7 @@ impl Controller {
         let mut id = 1u64;
         for (scope, admitted, from) in subscriptions.outputs {
             let (tell, heard) = mpsc::channel();
-            lanes.push(output_lane(id, *scope, admitted, *from, tell)?);
+            lanes.push(output_lane(id, *scope, admitted, *from, false, tell)?);
             receivers.push((id, heard, *from));
             id = id.saturating_add(1);
         }
@@ -1137,12 +1428,14 @@ fn control_receives() -> usize {
 }
 
 /// An output's lane, subscribed at `from`: what it sends (its subscription, one acknowledgment)
-/// and the largest frame it reads (a record and its head, or a refusal).
+/// and the largest frame it reads (a record and its head, or a refusal). A log lane's records
+/// are held to [`LogRecord::check`] (`log`).
 fn output_lane(
     id: u64,
     scope: Scope,
     admitted: &Admitted,
     from: u64,
+    log: bool,
     tell: mpsc::Sender<Heard>,
 ) -> Result<Lane, managed::Error> {
     let most = admitted
@@ -1155,6 +1448,7 @@ fn output_lane(
             most,
             next: from,
             held: false,
+            log,
         },
         &managed::subscribe(scope, from),
         CONTROL_BYTES.saturating_add(ACK_BYTES),
@@ -1198,9 +1492,27 @@ fn input_receives() -> usize {
     input::TAKEN_BYTES.max(input::ENDED_BYTES).max(REFUSED_BYTES)
 }
 
-/// The largest frame the endpoint sends on an exec's lane: what it tells, or a refusal.
+/// The largest frame the endpoint sends on an exec's lane, or a member's: what it tells, or a
+/// refusal.
 fn exec_receives() -> usize {
     exec::TOLD_BYTES.max(REFUSED_BYTES)
+}
+
+/// The largest frame the endpoint sends on a log lane before its records: its `Rotated`, a
+/// place, or what it tells as an exec's lane is told.
+fn log_receives() -> usize {
+    exec::TOLD_MOST.max(exec_receives())
+}
+
+/// What a member's lane adds to the controller's connection while its member runs: what the
+/// endpoint tells on it before it is read, one frame, and the steer the controller sends on it,
+/// one in flight.
+fn member_limits() -> Option<Limits> {
+    Some(Limits {
+        streams: 0,
+        receive: u64::try_from(exec_receives()).ok()?,
+        send: u64::try_from(STEER_BYTES).ok()?,
+    })
 }
 
 /// Where the stdin record `frame` ends, for one (`input::record`'s): its offset and length.
@@ -1344,17 +1656,33 @@ fn exec_limits(admissions: exec::Admissions, stderr: bool, stdin: bool) -> Optio
 #[derive(Debug, Clone, Copy)]
 enum Carries {
     /// A member's output: its largest record frame, where its next record starts, and whether
-    /// one is handed out and not yet acknowledged (one in flight, step 5).
-    Output { most: usize, next: u64, held: bool },
+    /// one is handed out and not yet acknowledged (one in flight, step 5); a log lane's records
+    /// each a [`LogRecord`] (`log`).
+    Output {
+        most: usize,
+        next: u64,
+        held: bool,
+        log: bool,
+    },
     /// A member's stdin: what its next taken may say.
     Input { pace: Pace },
     /// An exec's lane: the member it runs in and which stdio it has, its number once started,
-    /// and what its lanes add to the connection while it runs.
+    /// and what its lanes add to the connection while it runs; a log lane's (`log`), its
+    /// records its stdout.
     Exec {
         member: u32,
         stderr: bool,
         stdin: bool,
         started: Option<u32>,
+        added: Limits,
+        log: bool,
+    },
+    /// A member's own lane: its member, whether it runs, whether a steer it sent awaits its
+    /// answer, and what the lane adds to the connection while its member runs.
+    Member {
+        member: u32,
+        running: bool,
+        asked: bool,
         added: Limits,
     },
     /// The control lane: whether the endpoint's report came.
@@ -1419,6 +1747,8 @@ struct Lane {
     tell: mpsc::Sender<Heard>,
     /// A socket lane's writer: room as its bytes go, or why no more will (D251).
     room: Option<mpsc::Sender<Result<usize, Fault>>>,
+    /// A member's lane's end, told apart from its steering's answers ([`MemberEnd`]).
+    end: Option<mpsc::Sender<Heard>>,
 }
 
 impl Lane {
@@ -1446,14 +1776,27 @@ impl Lane {
             inbound,
             tell,
             room: None,
+            end: None,
         })
     }
 
     /// Tells its handle `heard`, which ends the lane for a fault, an output's finish or an
-    /// exec's exit. A handle dropped hears nothing.
+    /// exec's exit, or a member's; a member's end, and a fault, told its end's handle too. A
+    /// handle dropped hears nothing.
     fn tell(&mut self, heard: Heard) {
         if matches!(heard, Heard::Fault(_) | Heard::Finished | Heard::Exit(_)) {
             self.stage = Stage::Over;
+        }
+        if let Some(end) = &self.end {
+            match heard {
+                Heard::Exit(status) => {
+                    let _ = end.send(Heard::Exit(status));
+                }
+                Heard::Fault(fault) => {
+                    let _ = end.send(Heard::Fault(fault));
+                }
+                _ => {}
+            }
         }
         let _ = self.tell.send(heard);
     }
@@ -1570,7 +1913,8 @@ impl Lane {
             .checked_add(frame.len())
             .is_some_and(|n| n <= self.out.capacity());
         let room = fits
-            || (matches!(self.carries, Carries::Exec { .. }) && self.out.try_reserve(frame.len()).is_ok());
+            || (matches!(self.carries, Carries::Exec { .. } | Carries::Member { .. })
+                && self.out.try_reserve(frame.len()).is_ok());
         if room {
             self.out.extend_from_slice(frame);
         }
@@ -1600,12 +1944,23 @@ enum Broken {
 }
 
 /// What a lane's frame says: something for its handle; on an exec's lane, that the exec
-/// started under this number; or, on the control lane, the endpoint's report.
+/// started under this number; on a member's, that it runs; or, on the control lane, the
+/// endpoint's report.
 #[derive(Debug)]
 enum Came {
     Heard(Heard),
     Started(u32),
+    Running,
     Negotiated(Negotiated),
+}
+
+/// What began on a lane as it was read, for its driver to act on before it reads on.
+#[derive(Debug, Clone, Copy)]
+enum Began {
+    /// An exec started, its streams numbered so.
+    Exec(u32),
+    /// A member's lane: its member runs.
+    Member,
 }
 
 /// One frame of the endpoint's at the front of `bytes` for a lane carrying `carries`, `heard`
@@ -1620,12 +1975,20 @@ fn frame_of(bytes: &[u8], carries: Carries, heard: bool) -> Result<Option<(Came,
             return Ok(Some((Came::Heard(refused), REFUSED_BYTES)));
         }
         Ok(Some(_)) => return Err(Broken::Protocol),
-        // An exec's lane tells why its exec did not start in a refusal of its own codes.
-        Err(None) if !matches!(carries, Carries::Exec { .. }) => return Err(Broken::Protocol),
+        // An exec's lane tells why its exec did not start in a refusal of its own codes, as a
+        // member's does why its host serves none.
+        Err(None) if !matches!(carries, Carries::Exec { .. } | Carries::Member { .. }) => {
+            return Err(Broken::Protocol);
+        }
         Err(_) => {}
     }
     match carries {
-        Carries::Output { most, next, held } => {
+        Carries::Output {
+            most,
+            next,
+            held,
+            log,
+        } => {
             let Some((tag, len)) = frame::peek(bytes).map_err(|_| Broken::Protocol)? else {
                 return Ok(None);
             };
@@ -1638,7 +2001,7 @@ fn frame_of(bytes: &[u8], carries: Carries, heard: bool) -> Result<Option<(Came,
             };
             let (at, record) = payload.split_first_chunk::<OFFSET>().ok_or(Broken::Protocol)?;
             let at = u64::from_be_bytes(*at);
-            if at != next {
+            if at != next || (log && !LogRecord::check(record)) {
                 return Err(Broken::Protocol);
             }
             let mut bytes = Vec::new();
@@ -1664,7 +2027,7 @@ fn frame_of(bytes: &[u8], carries: Carries, heard: bool) -> Result<Option<(Came,
                 Ok(Some((Came::Heard(ended), n)))
             }
         },
-        Carries::Exec { started, .. } => match exec::told(bytes).map_err(|_| Broken::Protocol)? {
+        Carries::Exec { started, log, .. } => match exec::told(bytes).map_err(|_| Broken::Protocol)? {
             None => Ok(None),
             Some((Told::Started(exec), n)) if started.is_none() && !heard => {
                 Ok(Some((Came::Started(exec), n)))
@@ -1672,8 +2035,35 @@ fn frame_of(bytes: &[u8], carries: Carries, heard: bool) -> Result<Option<(Came,
             Some((Told::Unstarted(why), n)) if started.is_none() && !heard => {
                 Ok(Some((Came::Heard(Heard::Fault(Fault::Unstarted(why))), n)))
             }
+            Some((Told::Unlogged(why), n)) if log && started.is_none() && !heard => {
+                Ok(Some((Came::Heard(Heard::Fault(Fault::Unlogged(why))), n)))
+            }
             Some((Told::Exit(status), n)) if started.is_some() => {
                 Ok(Some((Came::Heard(Heard::Exit(status)), n)))
+            }
+            Some(_) => Err(Broken::Protocol),
+        },
+        // A member's lane: its state first, running (naming it) or ended, or why its host
+        // serves none; then an answer to each steer sent, and its end. An end may come while a
+        // steer sent was never read: its member ended first.
+        Carries::Member {
+            member,
+            running,
+            asked,
+            ..
+        } => match exec::told(bytes).map_err(|_| Broken::Protocol)? {
+            None => Ok(None),
+            Some((Told::Running(which), n)) if !running && !heard && which == member => {
+                Ok(Some((Came::Running, n)))
+            }
+            Some((Told::Unstarted(why), n)) if !running && !heard => {
+                Ok(Some((Came::Heard(Heard::Fault(Fault::Unstarted(why))), n)))
+            }
+            Some((Told::Exit(status), n)) if running || !heard => {
+                Ok(Some((Came::Heard(Heard::Exit(status)), n)))
+            }
+            Some((Told::Steered(answer), n)) if running && asked => {
+                Ok(Some((Came::Heard(Heard::Steered(answer)), n)))
             }
             Some(_) => Err(Broken::Protocol),
         },
@@ -1799,21 +2189,18 @@ impl Drive {
     fn sweep(&mut self, io: &mut Io<'_>) {
         let before = self.lanes.len();
         self.lanes.retain(|l| l.stage != Stage::Over);
-        if let (Some(conn), true) = (self.conn, self.lanes.len() != before) {
-            let limits = self.lanes.iter().try_fold(self.base, |sum, l| match l.carries {
-                Carries::Exec { added, .. } => sum.plus(added),
-                _ => Some(sum),
-            });
-            if let Some(limits) = limits {
-                let _ = io.limit(conn, limits.streams, limits.receive, limits.send);
-            }
+        if let (Some(conn), true) = (self.conn, self.lanes.len() != before)
+            && let Some(limits) = self.limits()
+        {
+            let _ = io.limit(conn, limits.streams, limits.receive, limits.send);
         }
     }
 
     /// Reads lane `at` as far as it has come: each whole frame told, its stream's end and reset
     /// as its protocol has them. An exec that started stops it there: its lanes are made before
-    /// anything after is told ([`Drive::exec_started`]).
-    fn read(&mut self, io: &mut Io<'_>, conn: ConnKey, at: usize) -> Result<Option<u32>, Broken> {
+    /// anything after is told ([`Drive::exec_started`]); and a member that runs, whose lane's
+    /// windows are raised first ([`Drive::member_running`]).
+    fn read(&mut self, io: &mut Io<'_>, conn: ConnKey, at: usize) -> Result<Option<Began>, Broken> {
         let own = self.own;
         let Some(lane) = self.lanes.get_mut(at) else {
             return Ok(None);
@@ -1833,7 +2220,8 @@ impl Drive {
                 heard = true;
                 lane.stage = Stage::Open { stream, heard };
                 let said = match came {
-                    Came::Started(exec) => return Ok(Some(exec)),
+                    Came::Started(exec) => return Ok(Some(Began::Exec(exec))),
+                    Came::Running => return Ok(Some(Began::Member)),
                     Came::Heard(said) => said,
                     Came::Negotiated(endpoint) => linked(own, endpoint)?,
                 };
@@ -1843,6 +2231,7 @@ impl Drive {
                         *held = true;
                     }
                     (Heard::Taken { .. }, Carries::Input { pace }) => *pace = Pace::Told,
+                    (Heard::Steered(_), Carries::Member { asked, .. }) => *asked = false,
                     (Heard::Linked(_), Carries::Control { told }) => *told = true,
                     (Heard::Connected(_), Carries::Socket(socket)) => socket.connected = true,
                     _ => {}
@@ -1893,7 +2282,8 @@ impl Drive {
                     heard = true;
                     lane.stage = Stage::Open { stream, heard };
                     let said = match came {
-                        Came::Started(exec) => return Ok(Some(exec)),
+                        Came::Started(exec) => return Ok(Some(Began::Exec(exec))),
+                        Came::Running => return Ok(Some(Began::Member)),
                         Came::Heard(said) => said,
                         Came::Negotiated(endpoint) => linked(own, endpoint)?,
                     };
@@ -1902,6 +2292,7 @@ impl Drive {
                             *next = at.checked_add(bytes.len() as u64).ok_or(Broken::Protocol)?;
                             *held = true;
                         }
+                        (Heard::Steered(_), Carries::Member { asked, .. }) => *asked = false,
                         (Heard::Linked(_), Carries::Control { told }) => *told = true,
                         (Heard::Connected(_), Carries::Socket(socket)) => socket.connected = true,
                         _ => {}
@@ -1962,6 +2353,7 @@ impl Drive {
             stderr,
             stdin,
             started: None,
+            log,
             ..
         } = lane.carries
         else {
@@ -1988,7 +2380,7 @@ impl Drive {
                 member,
                 channel,
             };
-            made.push(output_lane(lane, scope, &admissions.output, 0, tell).map_err(local)?);
+            made.push(output_lane(lane, scope, &admissions.output, 0, log, tell).map_err(local)?);
             Ok(Output {
                 lane,
                 asks: Asks {
@@ -2041,14 +2433,7 @@ impl Drive {
             *kept = added;
         }
         self.lanes.extend(made);
-        let limits = self
-            .lanes
-            .iter()
-            .try_fold(self.base, |sum, l| match l.carries {
-                Carries::Exec { added, .. } => sum.plus(added),
-                _ => Some(sum),
-            })
-            .ok_or(Broken::Local)?;
+        let limits = self.limits().ok_or(Broken::Local)?;
         let _ = io.limit(conn, limits.streams, limits.receive, limits.send);
         let _ = tell.send(Heard::Started(Box::new(Started {
             lane: id,
@@ -2060,12 +2445,46 @@ impl Drive {
         Ok(())
     }
 
-    /// Reads lane `at`, an exec that started there given its lanes before its lane reads on.
+    /// Reads lane `at`, an exec that started there given its lanes, and a member that runs its
+    /// lane's windows, before its lane reads on.
     fn read_on(&mut self, io: &mut Io<'_>, conn: ConnKey, at: usize) -> Result<(), Broken> {
-        while let Some(exec) = self.read(io, conn, at)? {
-            self.exec_started(io, conn, at, exec)?;
+        while let Some(began) = self.read(io, conn, at)? {
+            match began {
+                Began::Exec(exec) => self.exec_started(io, conn, at, exec)?,
+                Began::Member => self.member_running(io, conn, at)?,
+            }
         }
         Ok(())
+    }
+
+    /// Member lane `at`'s member runs: the connection's windows raised by its lane's while it
+    /// does, and its asker told, its lane's number for its steering.
+    fn member_running(&mut self, io: &mut Io<'_>, conn: ConnKey, at: usize) -> Result<(), Broken> {
+        let added = member_limits().ok_or(Broken::Local)?;
+        let Some(lane) = self.lanes.get_mut(at) else {
+            return Ok(());
+        };
+        let Carries::Member {
+            running, added: kept, ..
+        } = &mut lane.carries
+        else {
+            return Err(Broken::Protocol);
+        };
+        *running = true;
+        *kept = added;
+        let _ = lane.tell.send(Heard::Running(lane.id));
+        let limits = self.limits().ok_or(Broken::Local)?;
+        let _ = io.limit(conn, limits.streams, limits.receive, limits.send);
+        Ok(())
+    }
+
+    /// The connection's windows: its own, and those of each exec that runs and each member's
+    /// lane whose member does.
+    fn limits(&self) -> Option<Limits> {
+        self.lanes.iter().try_fold(self.base, |sum, l| match l.carries {
+            Carries::Exec { added, .. } | Carries::Member { added, .. } => sum.plus(added),
+            _ => Some(sum),
+        })
     }
 
     /// Acts on what a handle asked.
@@ -2077,6 +2496,7 @@ impl Drive {
                     member,
                     stderr,
                     stdin,
+                    log,
                     tell,
                 } = *asked;
                 let id = self.next_id;
@@ -2087,9 +2507,44 @@ impl Drive {
                     stdin,
                     started: None,
                     added: Limits::default(),
+                    log,
+                };
+                let receives = if log { log_receives() } else { exec_receives() };
+                match Lane::new(id, carries, &frame, frame.len(), receives, tell.clone()) {
+                    Ok(lane) if self.lanes.try_reserve(1).is_ok() => self.lanes.push(lane),
+                    _ => {
+                        let _ = tell.send(Heard::Fault(Fault::Lost(Ended::Local)));
+                        return Ok(());
+                    }
+                }
+                self.open(io);
+                return Ok(());
+            }
+            Ask::Member(asked) => {
+                let MemberAsked {
+                    frame,
+                    member,
+                    tell,
+                    end,
+                } = *asked;
+                if let Some(why) = self.lost {
+                    let _ = tell.send(Heard::Fault(Fault::Lost(why)));
+                    let _ = end.send(Heard::Fault(Fault::Lost(why)));
+                    return Ok(());
+                }
+                let id = self.next_id;
+                self.next_id = self.next_id.saturating_add(1);
+                let carries = Carries::Member {
+                    member,
+                    running: false,
+                    asked: false,
+                    added: Limits::default(),
                 };
                 match Lane::new(id, carries, &frame, frame.len(), exec_receives(), tell.clone()) {
-                    Ok(lane) if self.lanes.try_reserve(1).is_ok() => self.lanes.push(lane),
+                    Ok(mut lane) if self.lanes.try_reserve(1).is_ok() => {
+                        lane.end = Some(end);
+                        self.lanes.push(lane);
+                    }
                     _ => {
                         let _ = tell.send(Heard::Fault(Fault::Lost(Ended::Local)));
                         return Ok(());
@@ -2188,6 +2643,18 @@ impl Drive {
                 }
                 return Ok(());
             }
+            Ask::Hangup { lane } => {
+                if let Some(lane) = self.lanes.iter_mut().find(|l| {
+                    l.id == lane && l.stage != Stage::Over && matches!(l.carries, Carries::Exec { .. })
+                }) {
+                    if let (Some(conn), Stage::Open { stream, .. }) = (self.conn, lane.stage) {
+                        io.stop(conn, stream);
+                        io.reset(conn, stream);
+                    }
+                    lane.stage = Stage::Over;
+                }
+                return Ok(());
+            }
             Ask::Consumed { lane, offset } => (lane, managed::consumed(offset).to_vec()),
             Ask::Send { lane, frame } => (lane, frame),
         };
@@ -2223,6 +2690,14 @@ impl Drive {
                 if started.is_none() {
                     return Ok(());
                 }
+            }
+            // A member's steer goes once it runs, one awaiting its answer at a time: its handle
+            // sends the next only once it has the last's.
+            Carries::Member { running, asked, .. } => {
+                if !*running || *asked {
+                    return Ok(());
+                }
+                *asked = true;
             }
             // No handle asks anything of the control lane.
             Carries::Control { .. } => return Ok(()),

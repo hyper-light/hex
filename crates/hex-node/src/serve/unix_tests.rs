@@ -370,6 +370,8 @@ fn granting(name: &str) -> BoxSpec {
         member: claude,
         reference: "providers/anthropic".to_owned(),
         toward: vec!["api.anthropic.com".to_owned()],
+        // As kiln's broker mints one: its prefix, then hex.
+        placeholder: "kiln-placeholder-73333374657374".to_owned(),
     }];
     BoxSpec {
         route: None,
