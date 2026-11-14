@@ -823,6 +823,48 @@ impl Helper {
         }
         Ok((answer, descriptors))
     }
+    /// Joint plan step 14 (2c-4b): the stop response the live helper's managed CPU control learned from its own holds,
+    /// as it answers it (2c-4a's request): none where no helper runs or the one that ran has ended, nothing being learned
+    /// there, and none before its first hold. It starts no helper to ask.
+    fn response(&self) -> Result<Option<Duration>, CallFailure> {
+        let Some(snapshot) = receipt::read(self)? else {
+            return Ok(None);
+        };
+        if snapshot.completed.is_some() {
+            return Ok(None);
+        }
+        snapshot.check_live()?;
+        let process = snapshot.process;
+        let until = self.until(None)?;
+        let id = self.next()?;
+        let bytes = protocol::response::encode(VERSION, id)
+            .map_err(|_| super::configuration("the native response request is invalid"))?;
+        let fd = self.connect(process, until)?;
+        peer(&fd, process)?;
+        frame::send(
+            fd.as_fd(),
+            &bytes,
+            &[],
+            protocol::response::MAX_MESSAGE,
+            Some(until),
+        )
+        .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        let (bytes, descriptors) =
+            frame::receive(fd.as_fd(), protocol::response::MAX_ANSWER, Some(until))
+                .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        peer_after_reply(&fd, process)?;
+        let (version, answer_id, response) =
+            protocol::response::read_answer(&bytes, descriptors.len()).map_err(|_| {
+                super::configuration("the native helper's response answer is invalid")
+            })?;
+        if version != VERSION || answer_id != id {
+            return Err(super::configuration(
+                "the native helper reply belongs to another request or incarnation",
+            )
+            .into());
+        }
+        Ok(response)
+    }
     /// Joint plan step 14 (C4 on macOS): sets `key`'s scope to `rate` milli-CPU, its water-filled share.
     fn set_rate(&self, key: protocol::Key, rate: u64) -> Result<(), CallFailure> {
         let until = self.until(None)?;
@@ -1574,6 +1616,15 @@ pub(super) fn set_rate(
     let (process, _) = helper.identity(false, helper.until(None)?)?;
     let key = protocol::Key::from_record(record, process)?;
     helper.set_rate(key, rate).map_err(CallFailure::refusal)
+}
+
+/// Joint plan step 14 (2c-4b): the stop response this node's managed helper learned from its holds, as it answers it:
+/// none where the node runs no managed helper, none runs now, or it has measured no hold yet.
+pub(super) fn response(runtime: &MacRuntime) -> Result<Option<Duration>, Refusal> {
+    match runtime.managed_helper.as_ref() {
+        Some(helper) => helper.response().map_err(CallFailure::refusal),
+        None => Ok(None),
+    }
 }
 
 /// Joint plan step 14 (C5 on macOS): the last resort ends the canonical scope through its native helper, as its

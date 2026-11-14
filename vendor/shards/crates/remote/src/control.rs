@@ -46,6 +46,7 @@ pub use drive::{
     Controller, Dialed, Exec, ExecControl, Execs, Fault, Got, Granted, Hangup, Input, Link, Linked, Log,
     Logged, McpConnection, Member, MemberControl, MemberEnd, MemberSteering, Output, PendingExec, PendingLog,
     PendingMcp, PendingMember, PendingSocket, Socket, SocketReader, SocketWriter, Sockets, Subscriptions,
+    Wake,
 };
 pub use unix::Admission as SocketAdmission;
 
@@ -356,7 +357,13 @@ impl Drop for Revoke {
 /// own, and keep its [`Revoke`].
 pub struct Endpoint {
     driver: Driver<Lanes>,
+    /// Where it serves.
     pub address: SocketAddr,
+    /// Its driver's waker and wake, the other two sockets it holds, on loopback and connected
+    /// to each other ([`Driver::wake_addr`], [`Sender::waker_addr`]): with `address`, every
+    /// socket its run holds for it, which a host's UDP table (Windows' shows no peer) lists.
+    pub waker: SocketAddr,
+    pub wake: SocketAddr,
     /// The SHA-256 of the microVM's key, which its controller pins.
     pub fingerprint: Fingerprint,
 }
@@ -365,6 +372,8 @@ impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
             .field("address", &self.address)
+            .field("waker", &self.waker)
+            .field("wake", &self.wake)
             .field("fingerprint", &self.fingerprint)
             .finish()
     }
@@ -455,6 +464,8 @@ impl Endpoint {
             },
         )?;
         let address = driver.local()?;
+        let waker = sender.waker_addr()?;
+        let wake = driver.wake_addr()?;
         let lanes = driver.handler_mut();
         lanes.execs.wake = Some(sender.try_clone()?);
         lanes.sockets.wake = Some(sender.try_clone()?);
@@ -476,6 +487,8 @@ impl Endpoint {
             Endpoint {
                 driver,
                 address,
+                waker,
+                wake,
                 fingerprint: vm.fingerprint(),
             },
             Served {
@@ -2594,6 +2607,239 @@ mod tests {
                 Err(Fault::Unstarted(exec::Unstarted::Refused))
             );
             host.join().unwrap();
+        }
+
+        /// Tries `try_` until it says other than none yet (its `WouldBlock`), the controller's
+        /// wake drained before each try and waited for after each none, as one controller
+        /// thread of many lanes does: a wake lost leaves the wait ringless at the tests'
+        /// patience, which fails.
+        #[allow(clippy::panic_in_result_fn)]
+        fn woken<T>(wake: &Wake, mut try_: impl FnMut() -> Result<Option<T>, Fault>) -> Result<T, Fault> {
+            loop {
+                wake.drain().unwrap();
+                match try_() {
+                    Ok(None) => assert!(
+                        wake.wait(PATIENCE).unwrap(),
+                        "no ring within patience: a wake lost"
+                    ),
+                    Ok(Some(got)) => return Ok(got),
+                    Err(fault) => return Err(fault),
+                }
+            }
+        }
+
+        /// The production controller of member 0's streams and its execs at `serving`.
+        fn drive_execs(
+            kiln: &Identity,
+            vm: Fingerprint,
+            serving: &Serving,
+        ) -> (Dialed, JoinHandle<Result<(), managed::Error>>) {
+            let (outputs, inputs) = all(0);
+            drive(
+                kiln,
+                vm,
+                serving.address,
+                Subscriptions {
+                    outputs: &outputs,
+                    inputs: &inputs,
+                    execs: Some(exec_admissions()),
+                    sockets: None,
+                },
+            )
+        }
+
+        /// An MCP connection (D254) of member 0 its host has started, and the host's side of it.
+        fn mcp(execs: &Execs, starts: &mpsc::Receiver<exec::Start>) -> (McpConnection, exec::Start) {
+            let mut ask = execs.mcp(0).unwrap();
+            let start = starts.recv_timeout(PATIENCE).unwrap();
+            start.replies.tell(exec::Reply::Started);
+            let connection = ask
+                .wait(PATIENCE)
+                .unwrap()
+                .expect("answered within the tests' patience");
+            (connection, start)
+        }
+
+        /// An output's try says none where no record has come, never a wait; its records, its
+        /// finish and its fault each ring the controller's wake, and a try after the ring finds
+        /// what rang, exactly as `next_record` says it, the record before acknowledged as the
+        /// next is tried for.
+        #[test]
+        fn an_outputs_try_says_none_until_its_record_finish_or_fault_rings_the_wake() {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, starts) = Serving::with_execs(&vm, kiln.fingerprint());
+            let (dialed, _driver) = drive_execs(&kiln, vm.fingerprint(), &serving);
+            let execs = dialed.execs.as_ref().unwrap();
+            let (
+                McpConnection {
+                    mut from,
+                    to: _to,
+                    end: _end,
+                },
+                start,
+            ) = mcp(execs, &starts);
+            assert_eq!(from.try_next_record(), Ok(None), "nothing come");
+            submit_to(&start.stdout, b"first");
+            assert_eq!(
+                woken(&dialed.wake, || from.try_next_record()),
+                Ok(Got::Record {
+                    at: 0,
+                    bytes: b"first".to_vec()
+                })
+            );
+            assert_eq!(from.try_next_record(), Ok(None), "nothing more come");
+            // Its room for the next: the first acknowledged by the try after it.
+            submit_to(&start.stdout, b"second");
+            assert_eq!(
+                woken(&dialed.wake, || from.try_next_record()),
+                Ok(Got::Record {
+                    at: 5,
+                    bytes: b"second".to_vec()
+                })
+            );
+            start.stdout.1.finish().unwrap();
+            assert_eq!(woken(&dialed.wake, || from.try_next_record()), Ok(Got::Finished));
+            assert_eq!(
+                from.try_next_record(),
+                Ok(Some(Got::Finished)),
+                "its finish, again"
+            );
+            assert_eq!(from.cursor(), 11);
+
+            let (
+                McpConnection {
+                    from: mut cut,
+                    to: _to,
+                    end: _end,
+                },
+                start,
+            ) = mcp(execs, &starts);
+            // Its lane open first: an output aborted before its lane came refuses the lane.
+            submit_to(&start.stdout, b"before");
+            assert_eq!(
+                woken(&dialed.wake, || cut.try_next_record()),
+                Ok(Got::Record {
+                    at: 0,
+                    bytes: b"before".to_vec()
+                })
+            );
+            start.stdout.1.abort();
+            assert_eq!(woken(&dialed.wake, || cut.try_next_record()), Err(Fault::Revoked));
+            assert_eq!(cut.try_next_record(), Err(Fault::Revoked), "its fault, again");
+            assert_eq!(cut.next_record(), Err(Fault::Revoked), "as its wait says it");
+        }
+
+        /// An input's try says none while the endpoint has no room, as while the record before
+        /// is in flight, never a wait; its room, its end and its fault each ring the
+        /// controller's wake, and a try after the ring says them exactly as `write` does. Its
+        /// cursor passes a record once the endpoint has taken it.
+        #[test]
+        fn an_inputs_try_says_none_until_its_room_end_or_fault_rings_the_wake() {
+            const EPIPE: i32 = 32;
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, starts) = Serving::with_execs(&vm, kiln.fingerprint());
+            let (dialed, _driver) = drive_execs(&kiln, vm.fingerprint(), &serving);
+            let execs = dialed.execs.as_ref().unwrap();
+            let (
+                McpConnection {
+                    from: _from,
+                    mut to,
+                    end: _end,
+                },
+                start,
+            ) = mcp(execs, &starts);
+            let (relay, input) = start.stdin.as_ref().unwrap();
+            assert_eq!(woken(&dialed.wake, || to.try_write(b"first")), Ok(5));
+            assert_eq!(to.try_write(b"second"), Ok(None), "the first in flight: no room");
+            assert_eq!(to.cursor(), 0, "nothing taken yet");
+            let Next::Record { bytes, .. } = relay.next() else {
+                panic!("the first record")
+            };
+            assert_eq!(bytes, b"first");
+            relay.delivered(bytes);
+            assert_eq!(woken(&dialed.wake, || to.try_write(b"second")), Ok(6));
+            assert_eq!(to.cursor(), 5, "the first taken");
+            let Next::Record { bytes, .. } = relay.next() else {
+                panic!("the second record")
+            };
+            assert_eq!(bytes, b"second");
+            // The harness gone while the second is in flight: its end, told as `write` tells it.
+            input.ended(5, InputEnd::Aborted(EPIPE));
+            let ended = Fault::InputEnded {
+                written: 5,
+                end: InputEnd::Aborted(EPIPE),
+            };
+            assert_eq!(woken(&dialed.wake, || to.try_write(b"third")), Err(ended));
+            assert_eq!(to.try_write(b"third"), Err(ended), "its end, again");
+            assert_eq!(to.write(b"third"), Err(ended), "as its write says it");
+
+            let (
+                McpConnection {
+                    from: _from,
+                    to: mut cut,
+                    end: _end,
+                },
+                start,
+            ) = mcp(execs, &starts);
+            assert_eq!(woken(&dialed.wake, || cut.try_write(b"first")), Ok(5));
+            start.stdin.as_ref().unwrap().1.abort();
+            assert_eq!(
+                woken(&dialed.wake, || cut.try_write(b"second")),
+                Err(Fault::Revoked)
+            );
+            assert_eq!(cut.try_write(b"second"), Err(Fault::Revoked), "its fault, again");
+        }
+
+        /// An MCP connection whose harness has stopped reading, the record its controller sent
+        /// held by its host undelivered, ends at once as `let_go` lets its end go: its host's
+        /// steering closes (the hangup, as its host hears it) with no wait for that record,
+        /// and the write waiting on it, and the connection's output, end, typed.
+        fn a_connection_let_go_ends_with_its_record_in_flight(let_go: fn(ExecControl)) {
+            let (vm, kiln) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let (serving, starts) = Serving::with_execs(&vm, kiln.fingerprint());
+            let (dialed, _driver) = drive_execs(&kiln, vm.fingerprint(), &serving);
+            let execs = dialed.execs.as_ref().unwrap();
+            let (
+                McpConnection {
+                    mut from,
+                    mut to,
+                    end,
+                },
+                start,
+            ) = mcp(execs, &starts);
+            let (wrote_tx, wrote) = mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let _ = wrote_tx.send(to.write(b"never taken"));
+            });
+            let (relay, _input) = start.stdin.as_ref().unwrap();
+            // The host holds the record, writing it to a harness that reads nothing.
+            let Next::Record { bytes, .. } = relay.next() else {
+                panic!("the record in flight")
+            };
+            assert_eq!(bytes, b"never taken");
+            let_go(end);
+            assert_eq!(
+                start.steer.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected),
+                "its host hears the hangup, the record in flight untaken"
+            );
+            assert_eq!(
+                wrote.recv_timeout(PATIENCE),
+                Ok(Err(Fault::Revoked)),
+                "the write waiting on the record in flight ends"
+            );
+            assert_eq!(from.next_record(), Err(Fault::Revoked));
+            writer.join().unwrap();
+        }
+
+        #[test]
+        fn a_dropped_exec_control_hangs_its_mcp_connection_up_at_once() {
+            a_connection_let_go_ends_with_its_record_in_flight(drop);
+        }
+
+        #[test]
+        fn a_hung_up_exec_control_hangs_its_mcp_connection_up_at_once() {
+            a_connection_let_go_ends_with_its_record_in_flight(ExecControl::hangup);
         }
 
         /// An endpoint of no member stream (an orchestrator's run host's, D252) takes asks in the

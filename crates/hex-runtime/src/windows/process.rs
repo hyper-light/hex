@@ -538,6 +538,13 @@ impl JobBox {
         Ok(self.native_job()?.borrowed())
     }
 
+    /// The ids of the processes live in the box's job now ([`sys::Job::member_ids`]).
+    pub(super) fn member_ids(&self) -> Result<Vec<u32>, Refusal> {
+        self.native_job()?
+            .member_ids()
+            .map_err(|error| Refusal::os("listing a job's members", error))
+    }
+
     /// The box's job handle value, for the keeper to duplicate (`super::keeper`); the box keeps the handle.
     pub fn job_token(&self) -> Result<usize, Refusal> {
         Ok(self.native_job()?.raw() as usize)

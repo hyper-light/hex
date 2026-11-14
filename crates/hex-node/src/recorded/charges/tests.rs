@@ -113,6 +113,8 @@ struct Record {
     governed: RefCell<BTreeMap<String, Duration>>,
     /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
     cycle: std::cell::Cell<Option<Duration>>,
+    /// Why that cycle is cold, where the test says it is (2c-4b): its helper has measured no stop.
+    cold: RefCell<Option<String>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
     rooms: RefCell<Vec<(String, i64)>>,
@@ -170,8 +172,11 @@ impl Managed for Record {
             .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
     }
 
-    fn cap_cycle(&self, _: u64) -> Result<Option<Duration>, Refusal> {
-        Ok(self.cycle.get())
+    fn cap_cycle(&self, _: u64) -> Result<CapCycle, Refusal> {
+        if let Some(cold) = self.cold.borrow().as_ref() {
+            return Ok(CapCycle::Cold(cold.clone()));
+        }
+        Ok(self.cycle.get().map_or(CapCycle::Never, CapCycle::Of))
     }
 
     fn least(&self, holder: Holder<'_>) -> u64 {
@@ -976,6 +981,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
         .unwrap();
@@ -2584,6 +2590,55 @@ fn w14_each_vms_share_is_held_at_its_own_actuators_least() {
     );
 }
 
+/// The review's A-14 (2c-4b; ROOT, 2026-11-13: a cold start told, never guessed): a VM its platform's cap holds, whose
+/// cap's cycle isn't known yet (its helper has measured no stop), is held at its share with no cycle in the learner's
+/// window, and what holds its rate says so. Do run a window of a managed VM whose process takes no rate, so its
+/// platform's cap holds it, on a learner whose platform's cap's cycle is cold; then answer the class's capacity. Expect
+/// no window taken from it, and its rate told held by its platform's cap, naming why its cycle is cold.
+#[test]
+fn w14_2c4b_a_cold_cap_cycle_is_told_on_its_vms_rate() {
+    let io = Record::default();
+    let held = vm("vm-2", 2);
+    io.set("vm-2", 0, GIB);
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    *io.cold.borrow_mut() = Some("its helper has measured no stop".to_owned());
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&held)),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        learner.next_window(),
+        None,
+        "no cycle taken from a cold cap"
+    );
+    let rates = learner
+        .learned(
+            Class::Shards,
+            &[cost()],
+            &holders(std::slice::from_ref(&held)),
+        )
+        .unwrap()
+        .unwrap()
+        .rates;
+    assert_eq!(
+        rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            held: hex_api::RateHeld::Platform(
+                "its VM process takes no rate; its helper has measured no stop".to_owned()
+            ),
+        }]
+    );
+}
+
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): a platform cap's cycle sets the learner's window only for a VM that cap
 /// holds, at that VM's own share, and where it does, the class's capacity answer names that VM and the window: every
 /// VM's read waits on it, a slowdown told, never silent. Do run a window of a managed VM its governor holds over a
@@ -3752,4 +3807,64 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         Vec::<&str>::new(),
         "asked while the lock its capacity answers take was held"
     );
+}
+
+/// Batch 1114c's per-window reads, measured before any change (AC-T7.4.1): what one charge window's `Store::all` and
+/// `Store::all_node_vms` cost a node holding `n` image VMs' records and `n` Ended node VM rows, the reads every window
+/// makes. A measurement, not a verdict: run alone (`--ignored --exact --nocapture --test-threads=1`) with
+/// `HEX_WINDOW_READS_N`, the counts to measure at (comma-separated), and `HEX_WINDOW_READS_ROUNDS`, the reads of each;
+/// unset, it measures nothing. Prints one line a count: each read's n, p50, p90, p99 and max in nanoseconds (nearest
+/// rank), the files read from the page cache as a running node's are.
+#[test]
+#[ignore = "a measurement, run alone (its docs)"]
+fn measure_a_windows_record_reads() {
+    let (Ok(counts), Some(rounds)) = (
+        std::env::var("HEX_WINDOW_READS_N"),
+        std::env::var("HEX_WINDOW_READS_ROUNDS")
+            .ok()
+            .and_then(|r| r.parse::<usize>().ok()),
+    ) else {
+        return;
+    };
+    let rank = |sorted: &[u128], p: usize| sorted[(sorted.len() * p).div_ceil(100).max(1) - 1];
+    for n in counts
+        .split(',')
+        .map(|n| n.trim().parse::<usize>().unwrap())
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+        for i in 0..n {
+            store
+                .put(&image_vm(&format!("img-{i}"), u64::try_from(i).unwrap()))
+                .unwrap();
+            let mut run = [0u8; 16];
+            run[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+            let row = hex_core::record::NodeVmRecord {
+                run: hex_api::NodeRun::from_bytes(run),
+                ..node_row(0, hex_api::NodeVmPhase::Ended)
+            };
+            store.put_node_vm(&row).unwrap();
+        }
+        let time = |read: &dyn Fn() -> usize| {
+            let mut took: Vec<u128> = (0..rounds)
+                .map(|_| {
+                    let began = Instant::now();
+                    assert_eq!(read(), n);
+                    began.elapsed().as_nanos()
+                })
+                .collect();
+            took.sort_unstable();
+            let max = took.last().copied().unwrap_or_default();
+            format!(
+                "n={} p50={} p90={} p99={} max={max}",
+                took.len(),
+                rank(&took, 50),
+                rank(&took, 90),
+                rank(&took, 99)
+            )
+        };
+        let all = time(&|| store.all().unwrap().len());
+        let rows = time(&|| store.all_node_vms().unwrap().len());
+        eprintln!("WINDOW-READS records={n} all: {all}; all_node_vms: {rows}");
+    }
 }

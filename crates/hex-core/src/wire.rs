@@ -49,17 +49,17 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
-    DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
-    GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
-    IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
-    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedReservations, LearnedUnacted,
-    LearnedUnread, LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
-    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
-    Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials,
-    check_grants, check_published, check_sign_ins,
+    ConnectFailure, ConnectPhase, ConnectReply, ControlWake, CredentialGrant, Destination,
+    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit,
+    GpuEligibility, Grant, GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs,
+    ImagePlatform, IoKind, IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
+    LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
+    LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
+    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
+    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -4074,6 +4074,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         put_address(w, at.ip());
         w.u16(at.port());
     });
+    // Shards' D252 amended (image channel v30): that endpoint's waker and wake, after every older field.
+    w.option(info.control_wake, |w, held| {
+        for at in [held.waker, held.wake] {
+            put_address(w, at.ip());
+            w.u16(at.port());
+        }
+    });
     Ok(())
 }
 
@@ -4119,10 +4126,23 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     };
     info.credentials = credentials(r, &info.grants)?;
     info.control = r.option(|r| Ok(SocketAddr::new(address(r)?, r.u16()?)))?;
+    info.control_wake = r.option(|r| {
+        Ok(ControlWake {
+            waker: SocketAddr::new(address(r)?, r.u16()?),
+            wake: SocketAddr::new(address(r)?, r.u16()?),
+        })
+    })?;
+    if info.control.is_none() && info.control_wake.is_some() {
+        return Err(Fault::value(
+            "control_wake",
+            "an agent-control endpoint's waker and wake told without the endpoint",
+        ));
+    }
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)
         .map_err(|e| Fault::value("published", e.to_string()))?;

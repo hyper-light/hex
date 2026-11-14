@@ -1528,6 +1528,13 @@ impl WinRuntime {
         managed::usage(self, record)
     }
 
+    /// The ids of the processes live in managed VM `record`'s job now: its VM process and every process it starts
+    /// (Shards' confined VM process among them, which maps its guest's RAM). Public for the guest-cost producer, which
+    /// tells its guest's RAM apart in the member that maps it (AC-T7.4.1).
+    pub fn managed_members(&self, record: NativeRecord<'_>) -> Result<Vec<u32>, Refusal> {
+        managed::members(self, record)
+    }
+
     /// Whether this node takes back box `spec` a node before it made (native plan step 8, T-T7.1.2; asked
     /// by the node's recovery before it takes a box back or removes it): for an `oci` box, whether its
     /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
@@ -1858,6 +1865,7 @@ impl WinRuntime {
                 last_resort: None,
                 ended: None,
                 control: None,
+                control_wake: None,
                 credentials: Vec::new(),
             }),
             Held::Oci(b) => oci::info(b),

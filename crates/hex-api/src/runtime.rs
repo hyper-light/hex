@@ -2604,6 +2604,30 @@ pub struct BoxInfo {
     /// (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<std::net::SocketAddr>,
+    /// The two other UDP sockets that endpoint holds beside `control` (Shards' D252 amended, image channel v30): its
+    /// driver's waker and wake, loopback sockets connected to each other, which no grant makes either. With `control`,
+    /// every socket the endpoint holds ([`BoxInfo::control_sockets`]), which a host's table may show with no peer
+    /// (Windows'). Told with `control` alone, so none where it is none. After `control`, so absent means none
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_wake: Option<ControlWake>,
+}
+
+/// The waker and the wake of a run's agent-control endpoint ([`BoxInfo::control_wake`]; Shards' `ControlAt::waker` and
+/// `ControlAt::wake`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlWake {
+    pub waker: std::net::SocketAddr,
+    pub wake: std::net::SocketAddr,
+}
+
+impl BoxInfo {
+    /// Every socket its run's agent-control endpoint holds: its served address, its waker's and its wake's (Shards'
+    /// `ControlAt::sockets`), where it told all three.
+    pub fn control_sockets(&self) -> Option<[std::net::SocketAddr; 3]> {
+        let (address, held) = (self.control?, self.control_wake?);
+        Some([address, held.waker, held.wake])
+    }
 }
 
 fn is_zero(n: &u64) -> bool {
