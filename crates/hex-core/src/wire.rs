@@ -49,11 +49,12 @@ use hex_api::{
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
     LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
-    LearnedRate, LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
-    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
-    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
-    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
-    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
+    LearnedRate, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
+    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase,
+    NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published,
+    RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
+    check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -2295,6 +2296,8 @@ const LEARNED_CEILING_MIN_BYTES: usize = 32 + RESOURCE_BYTES + 3;
 const LEARNED_CEILING_BYTES: usize = 32 + RESOURCE_BYTES + 3 * (1 + size_of::<u64>());
 /// One learned rate at its least (D255): its holder at its least, then what holds it with no reason.
 const LEARNED_RATE_MIN_BYTES: usize = HOLDER_MIN_BYTES + 1;
+/// A learned rate's VMM own taking its share (D260): its tag, then its own and its share.
+const OWN_TAKES_SHARE_BYTES: usize = 1 + 2 * size_of::<u64>();
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
@@ -2402,17 +2405,24 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
             w.option(dim, Writer::u64);
         }
     }
-    // Last (D255): what holds each managed VM's rate, after the ceilings.
+    // Then (D255): what holds each managed VM's rate, after the ceilings.
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.rates.len(), LEARNED_RATE_MIN_BYTES)?;
     for rate in &learned.rates {
         put_learned_rate(w, rate)?;
     }
-    Ok(())
+    // Last (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
+    w.reserve_fixed(1)?;
+    w.option_with(learned.window.as_ref(), |w, window| {
+        w.reserve_fixed(size_of::<u64>().saturating_add(1))?;
+        w.u64(window.window_ns);
+        w.option_with(window.slowed_by.as_ref(), put_holder)
+    })
 }
 
-/// One learned rate (D255): its holder, then 0 its governor, 1 its governor under its job, or 2 and why, its platform's
-/// cap.
+/// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
+/// platform's cap, 3 and why its governor with its VMM's own unheld, or 4 and its VMM's own and its share, its VMM's own
+/// taking its share.
 fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
     put_holder(w, &rate.id)?;
     w.reserve_fixed(1)?;
@@ -2429,6 +2439,17 @@ fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
             w.u8(2);
             w.string(why)
         }
+        RateHeld::GovernorOwnUnheld(why) => {
+            w.u8(3);
+            w.string(why)
+        }
+        RateHeld::OwnTakesShare { own, share } => {
+            w.reserve_fixed(OWN_TAKES_SHARE_BYTES)?;
+            w.u8(4);
+            w.u64(*own);
+            w.u64(*share);
+            Ok(())
+        }
     }
 }
 
@@ -2436,9 +2457,10 @@ fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
 fn learned_rate_bytes(rate: &LearnedRate) -> usize {
     let held = match &rate.held {
         RateHeld::Governor | RateHeld::GovernorUnderJob => 1,
-        RateHeld::Platform(why) => 1usize
+        RateHeld::Platform(why) | RateHeld::GovernorOwnUnheld(why) => 1usize
             .saturating_add(size_of::<u32>())
             .saturating_add(why.len()),
+        RateHeld::OwnTakesShare { .. } => OWN_TAKES_SHARE_BYTES,
     };
     holder_bytes(&rate.id).saturating_add(held)
 }
@@ -2450,6 +2472,11 @@ fn learned_rate(r: &mut Reader<'_>) -> Result<LearnedRate, Fault> {
         0 => RateHeld::Governor,
         1 => RateHeld::GovernorUnderJob,
         2 => RateHeld::Platform(r.string("a managed VM's rate's reason")?),
+        3 => RateHeld::GovernorOwnUnheld(r.string("a managed VM's rate's reason")?),
+        4 => RateHeld::OwnTakesShare {
+            own: r.u64()?,
+            share: r.u64()?,
+        },
         tag => {
             return Err(Fault::value(
                 "a learned rate",
@@ -2620,6 +2647,12 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         "learned rates",
         learned_rate,
     )?;
+    let window = r.option(|r| {
+        Ok(LearnedWindow {
+            window_ns: r.u64()?,
+            slowed_by: r.option(holder)?,
+        })
+    })?;
     Ok(Learned {
         priors,
         used,
@@ -2627,6 +2660,7 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         ended,
         ceilings,
         rates,
+        window,
     })
 }
 

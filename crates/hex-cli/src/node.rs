@@ -442,8 +442,8 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     let mut err = std::io::stderr().lock();
     match node.start_charges() {
         Ok((window, unheld)) => {
-            // Its window is longer while an image VM it holds has its rate held over a longer period, its run's own
-            // (docs/design/learned-charge.md C1).
+            // Its window is the longest period of the caps it holds, which its classes' capacity answers tell as it
+            // moves (docs/design/learned-charge.md C1).
             let _ = match window {
                 Some(window) => writeln!(
                     err,
@@ -452,8 +452,8 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
                 ),
                 None => writeln!(
                     err,
-                    "hex node: the charge learner's window is its image VMs' longest run rate period, its platform \
-                     having none"
+                    "hex node: the charge learner's window is the longest period of the caps it holds, told on its \
+                     classes' capacity answers; none while it holds none"
                 ),
             };
             for why in unheld {
@@ -467,8 +467,9 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
 }
 
 /// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
-/// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, and why the host's
-/// boot session couldn't be read, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
+/// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, why the host's boot
+/// session couldn't be read, what it did with each node VM row an earlier node left, and the last-resort ends those
+/// rows kept, none on record told, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
 fn say_recovered(recovered: &RecoverySummary) {
     let mut err = std::io::stderr().lock();
     // Slots are Linux's node's alone: no other OS's hands a box's cgroup on.
@@ -508,6 +509,8 @@ fn say_recovered(recovered: &RecoverySummary) {
             .collect();
         let _ = writeln!(err, "hex node: recovered: node VM {run}: {settled}");
     }
+    // What the charge learner's node VM ends begin from (joint plan step 39, place 1): a cold start is told.
+    let _ = writeln!(err, "hex node: recovered: {}", recovered.node_vm_ends);
 }
 
 /// The Linux node: its boxes in cgroups under `--box-root` (else beside its own cgroup), recovered, its socket's

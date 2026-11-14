@@ -16,7 +16,7 @@ pub mod hosted;
 mod image;
 mod leases;
 mod managed;
-pub use managed::ManagedRate;
+pub use managed::{ManagedGuestTime, ManagedRate};
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
 mod observer;
@@ -1599,6 +1599,36 @@ impl GuestRuntime {
         }
     }
 
+    /// Joint plan step 14 (D260; ROOT, 2026-11-13): managed box `record`'s VM's vCPUs' guest time, as its VM process
+    /// answers its use through its booted managed guest ([`managed::guest_time`]), each held to the VM's size: none apart
+    /// for a box whose guest is held through no managed guest of its own, told why.
+    pub fn managed_guest_time(
+        &self,
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<ManagedGuestTime, Refusal> {
+        let id = &record.spec.id;
+        let Some(booted) = self.booted_for_record(Some(record), id)? else {
+            return Err(Refusal::NoSuchBox(id.try_clone()?));
+        };
+        match &booted.guest {
+            GuestHandle::Managed(guest) => {
+                let vcpus = record
+                    .spec
+                    .allocation
+                    .ok_or_else(|| Refusal::Invalid {
+                        what: "a managed VM's guest time",
+                        why: format!("box {id} holds no allocation to size its vCPUs by"),
+                    })?
+                    .vm_size()?
+                    .vcpus;
+                managed::guest_time(guest, id, vcpus)
+            }
+            GuestHandle::Shared(_) | GuestHandle::Node(_) => Ok(ManagedGuestTime::Unheld(
+                "its guest is held through no managed guest of its own".to_owned(),
+            )),
+        }
+    }
+
     /// Joint plan step 14 (D255): the period managed box `record`'s VM's governor holds its rate over, as its VM process
     /// last answered: none before its first answer, and none for a box whose guest is held through no managed guest of
     /// its own.
@@ -1614,6 +1644,41 @@ impl GuestRuntime {
             GuestHandle::Managed(guest) => guest.rate_period(),
             GuestHandle::Shared(_) | GuestHandle::Node(_) => None,
         })
+    }
+
+    /// Joint plan step 39 (place 3): what node VM `run` costs its host (D241), its node's charge learner's read of it.
+    pub fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<hex_api::HostUse, Refusal> {
+        self.images.host_use_node(run)
+    }
+
+    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D247), its run's own.
+    pub fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<std::time::Duration, Refusal> {
+        self.images.rate_period_node(run)
+    }
+
+    /// Joint plan step 39 (place 3): holds node VM `run`'s vCPUs together to `rate` milli-CPU through its run's rate
+    /// (D247), its node's charge learner's cap.
+    pub fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.images.rate_node(run, rate)
+    }
+
+    /// Joint plan step 39 (place 3): stops node VM `run`'s run, its node's charge learner's last resort (C5), its end kept
+    /// in its row; the guest it was is booted again at the next ask, its run ended.
+    pub fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
+        self.images.stop_node(run).map(|_| ())
+    }
+
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), its node's charge
+    /// learner's word, as an image box's guest is told.
+    pub fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.images.room_node(run, Some(room)).map(|_| ())
     }
 
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as

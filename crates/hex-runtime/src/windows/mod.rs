@@ -1473,6 +1473,18 @@ impl WinRuntime {
     pub fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         managed::stop(self, record)
     }
+
+    /// Joint plan step 14 (C4 on Windows; ROOT, 2026-11-13): the least share a managed VM's job holds it at, its hard
+    /// cap's least unit on this machine (`hex_core::job::least_milli`).
+    pub fn managed_least(&self) -> u64 {
+        hex_core::job::least_milli(self.processors)
+    }
+
+    /// Joint plan step 14 (D260): how long the process created at `started` has run, a managed VM's VM process by its
+    /// record's `init` ([`process_life`]).
+    pub fn managed_life(&self, started: u64) -> Result<std::time::Duration, Refusal> {
+        process_life(started)
+    }
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
@@ -2314,9 +2326,75 @@ fn handle(given: Option<OwnedHandle>) -> Result<OwnedHandle, Refusal> {
     }
 }
 
+/// FILETIME's epoch, 1601-01-01 UTC, to the system time's, 1970-01-01: 369 years of 365 days and 89 leap days (every
+/// fourth year, less 1700, 1800 and 1900), 86,400 s a day. Microsoft converts a `time_t` to a FILETIME by the same
+/// offset, 116,444,736,000,000,000 intervals.
+const UNIX_EPOCH_SINCE_1601: std::time::Duration =
+    std::time::Duration::from_secs((369 * 365 + 89) * 86_400);
+/// A FILETIME's interval, in nanoseconds: 100 ns.
+const FILETIME_INTERVAL_NS: u64 = 100;
+/// A FILETIME's intervals a second.
+const FILETIME_PER_SECOND: u64 = 1_000_000_000 / FILETIME_INTERVAL_NS;
+
+/// Joint plan step 14 (D260): how long the process created at `started` has run: from its creation, as `GetProcessTimes`
+/// reads it (a FILETIME, 100 ns intervals since 1601-01-01 UTC: a managed VM's `init`, Shards' `Identity::started`), to
+/// now on the same clock, the system time, which Windows reads as a FILETIME too (`SystemTime::now`). Refused where the
+/// creation is past now.
+pub fn process_life(started: u64) -> Result<std::time::Duration, Refusal> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Refusal::Invalid {
+            what: "the system time",
+            why: "it is before 1970".to_owned(),
+        })?;
+    life_since(started, now)
+}
+
+/// The life of a process created at FILETIME `started`, the system time being `now` past the Unix epoch.
+fn life_since(started: u64, now: std::time::Duration) -> Result<std::time::Duration, Refusal> {
+    let past = || Refusal::Invalid {
+        what: "a process's start",
+        why: format!("FILETIME {started} is past now on the system time"),
+    };
+    let seconds = started.checked_div(FILETIME_PER_SECOND).ok_or_else(past)?;
+    let nanos = started
+        .checked_rem(FILETIME_PER_SECOND)
+        .and_then(|intervals| intervals.checked_mul(FILETIME_INTERVAL_NS))
+        .ok_or_else(past)?;
+    let start = std::time::Duration::from_secs(seconds)
+        .checked_add(std::time::Duration::from_nanos(nanos))
+        .ok_or_else(past)?;
+    now.checked_add(UNIX_EPOCH_SINCE_1601)
+        .and_then(|now| now.checked_sub(start))
+        .ok_or_else(past)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Joint plan step 14 (D260; AC-T7.4.1): a process's life runs from its creation FILETIME to now on the system time.
+    /// Do reckon the life of a process created at the Unix epoch, as Microsoft's FILETIME of it says it
+    /// (116,444,736,000,000,000), a day and 7 intervals past the epoch; of one created a second past now; and of one
+    /// created at the epoch, now. Expect a day less 700 ns; the second past now refused, typed; and the system time since
+    /// 1970, more than none.
+    #[test]
+    fn w14_d260_a_process_life_runs_from_its_creation_to_now() {
+        let epoch = 116_444_736_000_000_000u64;
+        let day = std::time::Duration::from_secs(86_400);
+        assert_eq!(
+            life_since(epoch + 7, day).unwrap(),
+            day - std::time::Duration::from_nanos(700)
+        );
+        assert!(matches!(
+            life_since(epoch + 10_000_000, std::time::Duration::ZERO),
+            Err(Refusal::Invalid {
+                what: "a process's start",
+                ..
+            })
+        ));
+        assert!(process_life(epoch).unwrap() > std::time::Duration::ZERO);
+    }
     use std::sync::atomic::Ordering;
 
     fn device_runtime(scratch: &Path) -> WinRuntime {

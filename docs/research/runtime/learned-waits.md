@@ -67,7 +67,8 @@ is wired:
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
-| `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W* |
+| `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W*, the run-out told as W* passes; on the supervising thread, which every box shares, within W* alone, a run's box past it followed on a thread of its own (the review's E-3) |
+| `node.run_said` (hex-node `supervise::run`) | the claimer removing a run's box | its word, which comes on every path, its drop saying it stopped where it unwound | none: a local site | liveness alone past W* (the review's E-3) |
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
 | `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
@@ -77,6 +78,7 @@ is wired:
 | `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
+| `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
 alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
@@ -169,7 +171,12 @@ Production, a W* that still ends something:
 1. **`node.emptying` in the socket's core** (hex-node `serve`): a collected run's end (`Job::Collect`) and a gone
    client's program's end (`Shared::gone`) were `Exit::Unknown` at W*, a killed program's end (`Unwatched::Killed`)
    was given up at W*, and a stopping server's drain stopped at W*. Done: each follows its programs past W* by their
-   lives, the run-out told (`emptying::end_of_killed`; the drain's own loop).
+   lives, the run-out told (`emptying::end_of_killed`; the drain's own loop). On the supervising thread a run's box
+   past W* was followed there, its run-out told only once the follow ended, and every other box's end, removal and the
+   zombie sweep waited behind it, a delete of the box waiting on it silently (the review's E-3, 2026-11-14). Done: the
+   supervising thread waits within W* alone and hands a box past it to a thread of its own, every emptying wait tells
+   its run-out as W* passes (`emptying::wait_killed`), and the delete's wait for the claimer's word learns its own W*
+   (`node.run_said`), past it the run-out told.
 2. **`parked.ready`** (hex-node `createpool::CLAIMS`): a claimed init silent past W* was taken for hung, killed, and
    the claim fell back to a seed's clone of the same request, on the same sync pipe, where a word the killed init had
    written by then stood first: a rootless init's ask for its maps, answered with the new init's pid, the kernel

@@ -275,19 +275,35 @@ impl MacRuntime {
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
-    /// Joint plan step 14 (C1 on macOS): the charge learner's window, the longest cycle this control runs at any rate the
-    /// learner sets: its cycle at Hex's least CPU bound (`hex_api::MIN_CPU_MILLI`, the least the learner caps a VM at),
-    /// so each VM's rate holds on average over one window. Refused where no measured control is configured.
-    pub fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 14 (C1 on macOS; ROOT, 2026-11-13): the cycle this control holds a scope at `rate` milli-CPU
+    /// over, its run and then its hold ([`cpu::cycle`]), so a VM it holds there keeps its rate on average over one: the
+    /// charge learner's window takes it for each VM the control holds. None at the control's ceiling or past it, where
+    /// no scope is ever held. Refused where no measured control is configured.
+    pub fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
         let (control, ceiling) = self
             .cpu_control
             .ok_or_else(|| managed::configuration("managed VM CPU control is not initialized"))?;
-        let (run, hold) = cpu::cycle(u64::from(hex_api::MIN_CPU_MILLI), ceiling, control.response)
-            .map_err(|_| {
-                managed::configuration("the CPU control has no cycle at Hex's least CPU bound")
-            })?;
+        if rate >= ceiling {
+            return Ok(None);
+        }
+        let (run, hold) = cpu::cycle(rate, ceiling, control.response).map_err(|_| {
+            managed::configuration("the CPU control has no cycle at the rate it is asked")
+        })?;
         run.checked_add(hold)
+            .map(Some)
             .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
+    }
+
+    /// Joint plan step 14 (C4 on macOS; ROOT, 2026-11-13): the least share a managed VM's CPU control holds it at, its
+    /// rate's unit.
+    pub fn managed_least(&self) -> u64 {
+        cpu::LEAST_RATE
+    }
+
+    /// Joint plan step 14 (D260): how long the process that started at `started` has run, a managed VM's VM process by
+    /// its record's `init` ([`process_life`]).
+    pub fn managed_life(&self, started: u64) -> Result<std::time::Duration, Refusal> {
+        process_life(started)
     }
 
     /// Joint plan step 14 (C4 on macOS): the managed scope's CPU rate becomes `rate` milli-CPU, its share as the node's
@@ -913,4 +929,22 @@ fn c_string(s: &str) -> Result<CString, Refusal> {
 fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
     rustix::fs::open("/dev/null", flags | OFlags::CLOEXEC, Mode::empty())
         .map_err(|e| Refusal::os("opening /dev/null", e))
+}
+
+/// Joint plan step 14 (D260): how long the process that started at `started` has run: from its start, as `proc_pid_rusage`
+/// reads it (`ri_proc_start_abstime`, Mach absolute time: a managed VM's `init`, Shards' `Identity::started`), to now on
+/// the same clock (`CLOCK_UPTIME_RAW`, Mach absolute time in nanoseconds). Refused where a clock can't be read, or where
+/// the start is past now, which no process's is.
+pub fn process_life(started: u64) -> Result<std::time::Duration, Refusal> {
+    let timebase = sys::Timebase::get()
+        .map_err(|why| Refusal::os("reading Mach absolute time's units", why))?;
+    let now = sys::uptime_raw().map_err(|why| Refusal::Os {
+        op: "reading the clock a process's life is reckoned on",
+        why: why.to_string(),
+    })?;
+    now.checked_sub(std::time::Duration::from_nanos(timebase.nanos(started)))
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a process's start",
+            why: format!("{started} Mach ticks is past now on its own clock"),
+        })
 }

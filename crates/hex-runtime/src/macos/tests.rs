@@ -991,3 +991,58 @@ fn a_process_box_bounded_where_macos_holds_no_bound_is_refused_typed() {
     drop((rootless, helped));
     drop(server);
 }
+
+/// Joint plan step 14 (D260; AC-T7.4.1): a process's life runs from its start, as `proc_pid_rusage` reads it, to now on
+/// the same clock. Do take this test process's start; note the time since this test began; read its life, then again;
+/// then read the life of a start past every now. Expect its life at least the time the test had run (the process began
+/// before it), no more than the machine has been up, never less on its second read; and the start past now refused,
+/// typed.
+#[test]
+fn w14_d260_a_process_life_runs_from_its_start_to_now_on_one_clock() {
+    let began = std::time::Instant::now();
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let started = super::sys::rusage(pid).unwrap().unwrap().started;
+    let ran = began.elapsed();
+    let life = super::process_life(started).unwrap();
+    assert!(life >= ran, "{life:?} against {ran:?}");
+    assert!(life <= super::sys::uptime_raw().unwrap(), "{life:?}");
+    assert!(super::process_life(started).unwrap() >= life);
+    assert!(matches!(
+        super::process_life(u64::MAX),
+        Err(Refusal::Invalid {
+            what: "a process's start",
+            ..
+        })
+    ));
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13; AC-T7.4.1): the managed control's cycle at a rate is its run and its hold at
+/// that rate, the longer the lower the rate, and none at its ceiling, where it holds no scope. Do make a runtime with a
+/// measured control of a 1 ms response, and take its cycle at a thousandth of a CPU, at a CPU, and at its ceiling.
+/// Expect the first two its control's own run and hold at those rates, the first the longer; the last none.
+#[test]
+fn w14_the_controls_cycle_at_a_rate_is_its_run_and_hold_there() {
+    let model = super::machine_model().unwrap();
+    let rates = hex_core::watch::seed(&model);
+    let response = Duration::from_millis(1);
+    let runtime = MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .unwrap()
+    .with_cpu_control(super::CpuControl {
+        cost_id: [7; 32],
+        response,
+    })
+    .unwrap();
+    let (_, ceiling) = runtime.cpu_control.unwrap();
+    let at = |rate| {
+        let (run, hold) = super::cpu::cycle(rate, ceiling, response).unwrap();
+        run + hold
+    };
+    assert_eq!(runtime.cap_cycle(1).unwrap(), Some(at(1)));
+    assert_eq!(runtime.cap_cycle(1_000).unwrap(), Some(at(1_000)));
+    assert!(at(1) > at(1_000));
+    assert_eq!(runtime.cap_cycle(ceiling).unwrap(), None);
+}
