@@ -96,9 +96,11 @@ struct Record {
     periods: RefCell<BTreeMap<String, Duration>>,
     /// The image VMs whose run's period the test has made unreadable.
     unread_periods: RefCell<Vec<String>>,
-    /// Each managed VM's governor's period, as its VM process last answered it (D255), as the test sets it: none for
-    /// a VM it sets none for.
+    /// Each managed VM's governor's period, as its VM process last answered it (D255), as the test sets it: the test's
+    /// window for a VM its governor holds that it sets none for, none for one its platform's cap holds.
     governed: RefCell<BTreeMap<String, Duration>>,
+    /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
+    cycle: std::cell::Cell<Option<Duration>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
     rooms: RefCell<Vec<(String, i64)>>,
@@ -111,6 +113,8 @@ struct Record {
     lives: RefCell<BTreeMap<String, Duration>>,
     /// Each cap as the learner told it (D260), in order.
     caps: RefCell<Vec<Told>>,
+    /// Each VM's actuator's least share (C4), as the test sets it: a governor's for a VM it sets none for.
+    leasts: RefCell<BTreeMap<String, u64>>,
     refuse_rates: std::cell::Cell<bool>,
     /// Whether an intent's write is refused, as a store whose write fails refuses it.
     refuse_intents: std::cell::Cell<bool>,
@@ -139,6 +143,18 @@ impl Managed for Record {
             .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
     }
 
+    fn cap_cycle(&self, _: u64) -> Result<Option<Duration>, Refusal> {
+        Ok(self.cycle.get())
+    }
+
+    fn least(&self, holder: Holder<'_>) -> u64 {
+        self.leasts
+            .borrow()
+            .get(&named(holder))
+            .copied()
+            .unwrap_or(GOVERNOR_LEAST.get())
+    }
+
     fn life(&self, holder: Holder<'_>) -> Result<Duration, Refusal> {
         self.lives
             .borrow()
@@ -161,7 +177,16 @@ impl Managed for Record {
             return Err(Refusal::Broken("its run's period unread".into()));
         }
         if !holder.image() {
-            return Ok(self.governed.borrow().get(&name).copied());
+            if let Some(period) = self.governed.borrow().get(&name) {
+                return Ok(Some(*period));
+            }
+            if matches!(
+                self.held.borrow().get(&name),
+                Some(hex_api::RateHeld::Platform(_))
+            ) {
+                return Ok(None);
+            }
+            return Ok(Some(WINDOW));
         }
         Ok(Some(
             self.periods.borrow().get(&name).copied().unwrap_or(WINDOW),
@@ -257,7 +282,7 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
         io.set(record.spec.id.as_str(), 0, GIB);
     }
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
@@ -317,7 +342,7 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     for record in &vms {
         io.set(record.spec.id.as_str(), 0, GIB);
     }
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     io.refuse_rates.set(true);
     let start = Instant::now();
     assert_eq!(
@@ -353,7 +378,7 @@ fn w14_a_cold_class_is_carried_at_its_admission() {
         ..cost()
     };
     let receipt = census.allocate(CapacityResources::default()).unwrap();
-    let learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let learned = learner
         .learned(Class::Shards, &[census], &[])
         .unwrap()
@@ -408,7 +433,7 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
@@ -495,7 +520,7 @@ fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [
@@ -606,7 +631,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
 /// the class's capacity answer to carry its two latest ends, latest first, and the oldest forgotten once a third came.
 #[test]
 fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
-    let mut learner = Learner::new(Some(WINDOW), res(20, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(20, 64 * GIB)).unwrap();
     let why = |held: u64| charge::Excess {
         held,
         budget: GIB,
@@ -679,7 +704,7 @@ fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
         io.set(record.spec.id.as_str(), 0, 0);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
@@ -749,7 +774,7 @@ fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
         io.set(record.spec.id.as_str(), 0, 2 * GIB);
     }
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
@@ -788,7 +813,7 @@ fn w14_a_capping_learner_holds_its_machines_population_of_vms_of_as_many_classes
         own("vm-4", 4),
     );
     let machine = res(20, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), machine).unwrap();
+    let mut learner = Learner::new(true, machine).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(&[one, two.clone()]), machine, start)
@@ -902,7 +927,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         .borrow_mut()
         .insert("img-1".to_owned(), use_at(0, 0, 16, GIB));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
@@ -963,7 +988,7 @@ fn w14_a_census_free_class_starts_cold_and_learns_its_vmm_overhead() {
     let records = std::slice::from_ref(&record);
     let io = Record::default();
     io.set("vm-1", 0, GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let envelope = res(16_000, 8 * GIB);
     let ceilings = |learner: &Learner| {
         learner
@@ -1026,7 +1051,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         },
     );
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     learner
         .window(
             &io,
@@ -1135,11 +1160,11 @@ fn unused(io: &Record, name: &str, held: u64) {
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): a capping learner's window is the longest period of the caps it holds,
-/// its platform's for managed VMs and each image VM's its run's own (D247's `ImageGuest::rate_period`), re-read each
-/// window, never a number of its own. Do run a window of two image VMs whose runs say 100 ms and 500 ms, on a learner
-/// whose platform's window is 300 ms; then one after the 500 ms run has ended; then one after the other run says
-/// 700 ms (a period Shards derives later reaches Hex as it is). Expect its window after each the longest of those it
-/// then holds: 500 ms, the platform's 300 ms, then 700 ms.
+/// each image VM's its run's own (D247's `ImageGuest::rate_period`), re-read each window, never a number of its own:
+/// its platform's cap's cycle counts only for a VM that cap holds. Do run a window of two image VMs whose runs say
+/// 100 ms and 500 ms, on a learner whose platform's cap derives cycles; then one after the 500 ms run has ended; then one
+/// after the other run says 700 ms (a period Shards derives later reaches Hex as it is). Expect its window after each
+/// the longest of those it then holds: 500 ms, 100 ms, then 700 ms.
 #[test]
 fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_read_each_window() {
     let io = Record::default();
@@ -1154,7 +1179,7 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
         .borrow_mut()
         .insert("img-2".to_owned(), Duration::from_millis(500));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(&[short.clone(), long]), budget, start)
@@ -1174,8 +1199,8 @@ fn w14_a_capping_learners_window_is_the_longest_period_of_the_caps_it_holds_re_r
         .unwrap();
     assert_eq!(
         learner.next_window(),
-        Some(WINDOW),
-        "the platform's, once the longer run has ended"
+        Some(Duration::from_millis(100)),
+        "the shorter run's, once the longer run has ended: no cap of its platform's holds a VM"
     );
     io.periods
         .borrow_mut()
@@ -1431,7 +1456,7 @@ fn w14_a_vm_whose_read_fails_counts_whole_against_the_budget_until_it_reads() {
     io.set("vm-1", 0, GIB);
     io.set("vm-2", 0, GIB);
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
@@ -1486,7 +1511,7 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
     }
     io.unread_periods.borrow_mut().push("img-3".to_owned());
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(
@@ -1532,10 +1557,10 @@ fn w14_an_image_vm_whose_period_read_fails_counts_whole_against_the_budget_until
 }
 
 /// Joint plan step 14 (D255, C1; ROOT, 2026-11-13): a managed VM's governor holds its rate over its VM process's own
-/// period, so the learner's window is the longest of its platform's and those periods, re-read each window, as an image
-/// VM's run's is. Do run a window of a managed VM whose governor answered a 500 ms period, on a learner whose
-/// platform's window is 300 ms; then one after its process answered 200 ms. Expect the window 500 ms, then the
-/// platform's 300 ms.
+/// period, so the learner's window is the longest of those periods, re-read each window, as an image VM's run's is: its
+/// platform's cap's cycle counts only for a VM that cap holds. Do run a window of a managed VM whose governor answered a
+/// 500 ms period, on a learner whose platform's cap derives cycles; then one after its process answered 200 ms. Expect
+/// the window 500 ms, then 200 ms.
 #[test]
 fn w14_d255_a_managed_vms_governor_period_is_the_learners_window() {
     let io = Record::default();
@@ -1545,7 +1570,7 @@ fn w14_d255_a_managed_vms_governor_period_is_the_learners_window() {
         .borrow_mut()
         .insert("vm-1".to_owned(), Duration::from_millis(500));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     assert_eq!(learner.next_window(), Some(Duration::from_millis(500)));
@@ -1555,7 +1580,7 @@ fn w14_d255_a_managed_vms_governor_period_is_the_learners_window() {
     learner
         .window(&io, &holders(&vms), budget, start + WINDOW)
         .unwrap();
-    assert_eq!(learner.next_window(), Some(WINDOW));
+    assert_eq!(learner.next_window(), Some(Duration::from_millis(200)));
 }
 
 /// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds each managed VM's rate is told on its class's capacity
@@ -1579,7 +1604,7 @@ fn w14_d255_what_holds_each_managed_vms_rate_is_told_on_its_classs_capacity_answ
         .borrow_mut()
         .insert("vm-3".to_owned(), hex_api::RateHeld::GovernorUnderJob);
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     learner
         .window(&io, &holders(&vms), budget, Instant::now())
         .unwrap();
@@ -1629,7 +1654,7 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
         "vm-2".to_owned(),
         hex_api::RateHeld::Platform(unsupported.clone()),
     );
-    let mut learner = Learner::new(None, res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(false, res(32_000, 64 * GIB)).unwrap();
     learner.govern(&io, &holders(&vms)).unwrap();
     assert_eq!(
         *io.rates.borrow(),
@@ -1698,7 +1723,7 @@ fn w14_d260_a_managed_vm_is_held_split_from_its_first_use_answer() {
         .borrow_mut()
         .insert("vm-1".to_owned(), Duration::from_secs(10));
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
@@ -1738,7 +1763,7 @@ fn w14_d260_until_its_first_use_answer_a_vms_own_is_unheld_and_told() {
         ManagedGuestTime::Unheld("the microVM has not started".to_owned()),
     );
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
@@ -1829,7 +1854,7 @@ fn w14_d260_an_image_vms_governor_takes_its_share_less_its_vmms_own() {
         use_at(3_000_000_000, 156_250_000, Duration::from_secs(10)),
     );
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner
         .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
@@ -1992,6 +2017,113 @@ fn w39_a_node_with_no_node_vm_end_on_record_says_so_at_start() {
     assert_eq!(
         recovered.node_vm_ends.to_string(),
         "node VM: no last-resort end on record"
+    );
+}
+
+/// Joint plan step 14 (C4; ROOT, 2026-11-13; AC-T7.4.1): each VM's share is held at least at its own actuator's least,
+/// never Hex's cgroup least: an image VM's governor's, a thousandth of a CPU (`GOVERNOR_LEAST`); a managed VM's its
+/// platform's cap's, here a Windows job's on 128 processors, 13 thousandths (`hex_core::job::least_milli`). Do run a
+/// window of an image VM and a managed VM, each booked no CPU, in a fleet budget of a thousandth of a CPU. Expect the
+/// image VM's share 1 and the managed VM's 13.
+#[test]
+fn w14_each_vms_share_is_held_at_its_own_actuators_least() {
+    let io = Record::default();
+    let mut image = image_vm("img-1", 1);
+    let mut managed = vm("vm-1", 2);
+    for record in [&mut image, &mut managed] {
+        record.spec.allocation = Some(
+            cost()
+                .allocate(CapacityResources::default())
+                .unwrap()
+                .booked_at(res(0, 4 * GIB)),
+        );
+    }
+    unused(&io, "img-1", GIB);
+    io.set("vm-1", 0, GIB);
+    io.leasts.borrow_mut().insert("vm-1".to_owned(), 13);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(&[image, managed]),
+            res(1, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    let mut shares = io.rates.borrow().clone();
+    shares.sort();
+    assert_eq!(
+        shares,
+        vec![("img-1".to_owned(), 1), ("vm-1".to_owned(), 13)]
+    );
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a platform cap's cycle sets the learner's window only for a VM that cap
+/// holds, at that VM's own share, and where it does, the class's capacity answer names that VM and the window: every
+/// VM's read waits on it, a slowdown told, never silent. Do run a window of a managed VM its governor holds over a
+/// 100 ms period, on a learner whose platform's cap holds a VM over 2 s at any rate; then a window with a second managed
+/// VM whose process takes no rate, so that cap holds it; then answer the class's capacity. Expect the first window's
+/// next window 100 ms, told with no VM named; then 2 s, told naming the second VM.
+#[test]
+fn w14_a_platform_caps_cycle_sets_the_window_only_for_the_vms_it_holds_and_is_told() {
+    let io = Record::default();
+    let governed = vm("vm-1", 1);
+    let held = vm("vm-2", 2);
+    io.set("vm-1", 0, GIB);
+    io.set("vm-2", 0, GIB);
+    io.governed
+        .borrow_mut()
+        .insert("vm-1".to_owned(), Duration::from_millis(100));
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    io.cycle.set(Some(Duration::from_secs(2)));
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&governed)),
+            budget,
+            start,
+        )
+        .unwrap();
+    assert_eq!(learner.next_window(), Some(Duration::from_millis(100)));
+    let told = |learner: &Learner| {
+        learner
+            .learned(
+                Class::Shards,
+                &[cost()],
+                &holders(&[governed.clone(), held.clone()]),
+            )
+            .unwrap()
+            .unwrap()
+            .window
+    };
+    assert_eq!(
+        told(&learner),
+        Some(hex_api::LearnedWindow {
+            window_ns: 100_000_000,
+            slowed_by: None,
+        })
+    );
+    learner
+        .window(
+            &io,
+            &holders(&[governed.clone(), held.clone()]),
+            budget,
+            start + Duration::from_millis(100),
+        )
+        .unwrap();
+    assert_eq!(learner.next_window(), Some(Duration::from_secs(2)));
+    assert_eq!(
+        told(&learner),
+        Some(hex_api::LearnedWindow {
+            window_ns: 2_000_000_000,
+            slowed_by: Some(LearnedHolder::Box(BoxId::new("vm-2").unwrap())),
+        })
     );
 }
 
@@ -2167,7 +2299,7 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
         .insert("node-7".to_owned(), held(0, 0, GIB));
     let node = [Holder::Node { row: &row, band: 0 }];
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &node, budget, start).unwrap();
     io.host.borrow_mut().insert(
@@ -2358,7 +2490,7 @@ fn w39_a_node_vm_learns_under_a_key_of_its_own() {
     unused(&io, "node-7", 9 * GIB);
     let node = [Holder::Node { row: &row, band: 0 }];
     let budget = res(24_000, 64 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &node, budget, start).unwrap();
     learner.window(&io, &node, budget, start + WINDOW).unwrap();
@@ -2393,7 +2525,7 @@ fn w39_an_intent_the_last_resort_couldnt_write_is_told_typed() {
     }
     io.refuse_intents.set(true);
     let budget = res(24_000, 16 * GIB);
-    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
     learner.window(&io, &holders(&vms), budget, start).unwrap();
     for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {

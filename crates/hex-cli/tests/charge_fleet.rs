@@ -36,7 +36,8 @@
 //!   for its answer while the node's connection stands, every wait of the run unarmed
 //!   (`hex_core::patience::measure_all`), and the node's start waits for its ready line while the node runs, its end
 //!   the refusal; the node's own waits refuse, typed, as theirs do. No boot record is read;
-//! - the run's window: the node's learner's, as the node says it.
+//! - the run's window: the node's learner's, as the node says it at its start, or as the class's capacity answers tell
+//!   it as the caps it holds move.
 //!
 //! Inputs, each by its own variable, a missing one failing by name:
 //! - `HEX_CHARGE_CLASS`: `shards-image` (Agentfile image VMs of `HEX_IMAGE`, `NAME@sha256:...`, which the driver pulls
@@ -468,10 +469,10 @@ impl Node {
         }
     }
 
-    /// The window the node's charge learner reads its managed VMs over, its platform's, as the node said it; the run
-    /// is refused where its learner doesn't run, or its platform has no window, its managed VMs then booked whole
-    /// (Windows until its window is measured: docs/design/learned-charge.md C1).
-    fn window(&self) -> Duration {
+    /// The window the node's charge learner reads its VMs over as the node said it at its start: Linux's, `cpu.max`'s
+    /// period; on macOS and Windows none until it holds a cap, the longest period of the caps it holds then being told on
+    /// the class's capacity answers (docs/design/learned-charge.md C1). The run is refused where its learner doesn't run.
+    fn window(&self) -> Option<Duration> {
         let said = fs::read_to_string(&self.stderr).unwrap();
         if let Some(why) = said
             .lines()
@@ -483,16 +484,9 @@ impl Node {
             .lines()
             .find_map(|l| l.strip_prefix("hex node: the charge learner's window is "))
             .unwrap_or_else(|| panic!("the node named no charge window; stderr: {said}"));
-        let Some(ns) = window.strip_suffix(" ns") else {
-            let why = said
-                .lines()
-                .find_map(|l| l.strip_prefix("hex node: the charge learner can't hold this: "))
-                .unwrap_or(window);
-            panic!(
-                "REFUSED: the node's platform has no window, its managed VMs booked whole: {why}"
-            );
-        };
-        Duration::from_nanos(ns.parse().unwrap())
+        window
+            .strip_suffix(" ns")
+            .map(|ns| Duration::from_nanos(ns.parse().unwrap()))
     }
 }
 
@@ -614,6 +608,11 @@ struct Vm {
     last: Option<(u64, Instant)>,
 }
 
+/// The learner's first window over the fleet's first VM, told on the class's capacity answer (C1): a fact no recorded
+/// operation makes, so its wait measures (hex_testkit::waits).
+static TOLD_WINDOW: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_cli.charge_fleet.told_window");
+
 /// Each VM's holding on the class's capacity answer, by box: its booking and what it holds past it (C8).
 fn holdings(capacity: &hex_api::Capacity) -> BTreeMap<String, CapacityResources> {
     capacity
@@ -671,7 +670,10 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         pull_image(&out.join("state"));
     }
     let node = Node::start(&out);
-    let window = node.window();
+    let mut window = node.window();
+    // The riser: the first VM admitted where the node told its window at its start; else the second, once its first
+    // VM's cap has given its learner a window to warm the riser's charge over.
+    let riser: u32 = if window.is_some() { 0 } else { 1 };
     let client = Client::connect(&node.socket).unwrap();
     let capacity = client
         .capacity(class)
@@ -714,11 +716,17 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         .unwrap();
     let begun = Instant::now();
     let run = traces.iter().map(|(_, steps)| length(steps)).max().unwrap();
-    let rises_after = window * u32::try_from(SEEDABLE).unwrap();
-    assert!(
-        rises_after < run,
-        "the longest trace ({run:?}) is shorter than a riser's warm-up, SEEDABLE windows ({rises_after:?})"
-    );
+    let warm_up = |window: Duration| {
+        let rises_after = window * u32::try_from(SEEDABLE).unwrap();
+        assert!(
+            rises_after < run,
+            "the longest trace ({run:?}) is shorter than a riser's warm-up, SEEDABLE windows ({rises_after:?})"
+        );
+        rises_after
+    };
+    if let Some(window) = window {
+        warm_up(window);
+    }
     let peak_mib = traces
         .iter()
         .flat_map(|(_, steps)| steps)
@@ -736,7 +744,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
     let (mut played, mut gone_otherwise) = (0u64, 0u64);
     // Each window's readings come at least a window after the last's, however long an admission's create took: a
     // window is never a sliver caught up after a slow one.
-    let mut next = Instant::now() + window;
+    let mut next = Instant::now() + window.unwrap_or_default();
     while begun.elapsed() < run {
         hex_wait::rest_until(next).unwrap();
         let capacity = client
@@ -744,6 +752,10 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
             .unwrap()
             .expect("the class's capacity");
         let held = holdings(&capacity);
+        // The learner's window as the class's capacity answer tells it, as the caps it holds move (C1).
+        if let Some(told) = capacity.learned.as_ref().and_then(|l| l.window.as_ref()) {
+            window = Some(Duration::from_nanos(told.window_ns));
+        }
         // Admission (C6): the next VM's booking against the budget less every VM's holding, its receipt where none.
         let taken = vms.iter().fold(CapacityResources::default(), |sum, vm| {
             sum.checked_add(
@@ -759,10 +771,12 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
             if fits(room, next_receipt.booking()) {
                 let (trace, steps) = &traces[usize::try_from(admitted).unwrap() % traces.len()];
                 let mut steps = steps.clone();
-                if admitted == 0 {
+                if admitted == u64::from(riser) {
                     // The riser: its trace until its charge has warmed, then every vCPU and the most any trace holds.
                     let mut kept = Vec::new();
                     let mut spent = 0u64;
+                    let rises_after =
+                        warm_up(window.expect("the learner's window, told before the riser"));
                     let rise = u64::try_from(rises_after.as_millis()).unwrap();
                     for step in &steps {
                         if spent >= rise {
@@ -798,6 +812,25 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                 });
                 admitted += 1;
                 refused_at = None;
+                if window.is_none() {
+                    // No window told yet: the learner gives one once it holds this VM's cap, which the class's capacity
+                    // answer then tells; the riser waits for it.
+                    hex_testkit::waits::until(
+                        &TOLD_WINDOW,
+                        "the learner's window, told on the class's capacity answer",
+                        || {
+                            window = client
+                                .capacity(class)
+                                .ok()
+                                .flatten()
+                                .and_then(|c| c.learned)
+                                .and_then(|l| l.window)
+                                .map(|told| Duration::from_nanos(told.window_ns));
+                            window.is_some()
+                        },
+                    )
+                    .unwrap();
+                }
             } else {
                 refused += 1;
                 if rise_window.is_some() {
@@ -808,9 +841,10 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         }
         let at = windows.len();
         if rise_window.is_none()
+            && let Some(window) = window
             && vms
                 .iter()
-                .any(|vm| vm.n == 0 && vm.started.elapsed() >= rises_after)
+                .any(|vm| vm.n == riser && vm.started.elapsed() >= warm_up(window))
         {
             rise_window = Some(at);
         }
@@ -896,7 +930,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                 gone_otherwise += 1;
             }
             // The riser is kept to the end, for its inspect.
-            if id.as_str() != "charge-vm-0"
+            if id.as_str() != format!("charge-vm-{riser}")
                 && let Err(why) = client.delete(&id)
             {
                 eprintln!("CHARGE delete {id}: {why}");
@@ -908,20 +942,21 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
             budget: capacity.total.cpu_milli,
             readings,
         });
-        next = Instant::now() + window;
+        next = Instant::now() + window.unwrap_or_default();
     }
     let ran = begun.elapsed();
     let (learner, measured) = learner_cpu(node.child.id());
-    let riser = client.inspect(&BoxId::new("charge-vm-0").unwrap()).ok();
+    let riser_id = BoxId::new(&format!("charge-vm-{riser}")).unwrap();
+    let riser_info = client.inspect(&riser_id).ok();
     for vm in &vms {
         let _ = client.delete(&vm.id);
     }
-    let _ = client.delete(&BoxId::new("charge-vm-0").unwrap());
+    let _ = client.delete(&riser_id);
     let _ = client.delete(&boxed);
     fs::write(out.join("windows.tsv"), tsv).unwrap();
 
     let cast = Cast {
-        riser: rise_window.map(|at| (0, at)),
+        riser: rise_window.map(|at| (riser, at)),
         boxed: Some(BOX),
     };
     let report = trial::report(&cast, &windows);
@@ -941,7 +976,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         "HEX-CHARGE-FLEET os={os} class={kind:?} window_ns={} windows={} ran_ms={} vms_peak={peak} \
          envelope_density={envelope} admitted={admitted} refused_for_room={refused} ended_with_their_traces={played} \
          ended_otherwise={gone_otherwise}",
-        window.as_nanos(),
+        window.unwrap_or_default().as_nanos(),
         report.windows,
         ran.as_millis()
     );
@@ -967,7 +1002,9 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         report.jain_mean_ppm,
         report.box_short
     );
-    let ended = riser.as_ref().and_then(|info| info.last_resort.as_ref());
+    let ended = riser_info
+        .as_ref()
+        .and_then(|info| info.last_resort.as_ref());
     println!(
         "HEX-CHARGE-FLEET riser rise_window={rise_window:?} windows={} over_booking={} given_of_asked_ppm={} \
          neighbours_short={} refused_while_rising={refused_rising} exit={:?} last_resort={ended:?}",
@@ -975,7 +1012,7 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         report.riser_over,
         report.riser_given_ppm,
         report.neighbours_short,
-        riser.as_ref().and_then(|info| info.exit)
+        riser_info.as_ref().and_then(|info| info.exit)
     );
     println!(
         "HEX-CHARGE-FLEET violations os={os} past={past} counted={counted} per_million={}",
