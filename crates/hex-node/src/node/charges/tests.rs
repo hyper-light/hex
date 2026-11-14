@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 
 use super::*;
 use crate::recorded::charges::{Resort, record_last_resort, with_last_resort};
-use hex_api::{LearnedEnd, LearnedPrior, LearnedUse};
+use hex_api::{BoxId, LearnedEnd, LearnedPrior, LearnedUse};
 use hex_core::record::BoxRecord;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
@@ -13,6 +13,14 @@ fn box_of(holder: &hex_api::LearnedHolder) -> &str {
     match holder {
         hex_api::LearnedHolder::Box(id) => id.as_str(),
         hex_api::LearnedHolder::Node(run) => panic!("a box's learner named a node VM, {run:?}"),
+    }
+}
+
+/// The box a holder of this learner's is: its id.
+fn box_id(holder: &hex_api::LearnedHolder) -> &BoxId {
+    match holder {
+        hex_api::LearnedHolder::Box(id) => id,
+        hex_api::LearnedHolder::Node(run) => panic!("a box's learner held a node VM, {run:?}"),
     }
 }
 
@@ -130,8 +138,15 @@ impl Cgroups for Record {
         Ok(())
     }
 
-    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
-        self.events.borrow_mut().push(format!("intend {id}"));
+    fn intend(
+        &self,
+        id: &hex_api::LearnedHolder,
+        scope: Scope,
+        end: &LearnedEnd,
+    ) -> Result<bool, Refusal> {
+        self.events
+            .borrow_mut()
+            .push(format!("intend {}", box_of(id)));
         match self.records.borrow().as_ref() {
             Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
@@ -177,11 +192,11 @@ fn fleet() -> PathBuf {
     root().join(".vm").join("node-a")
 }
 
-fn running(ids: &[(&str, u8)]) -> Vec<(BoxId, Scope, BoxCgroup)> {
+fn running(ids: &[(&str, u8)]) -> Vec<(hex_api::LearnedHolder, Scope, BoxCgroup)> {
     ids.iter()
         .map(|(id, n)| {
             (
-                BoxId::new(id).unwrap(),
+                hex_api::LearnedHolder::Box(BoxId::new(id).unwrap()),
                 Scope::Native([*n; 16]),
                 BoxCgroup::at(fleet().join(id)),
             )
@@ -193,7 +208,7 @@ fn whole() -> Allocation {
     cost().allocate(CapacityResources::default()).unwrap()
 }
 
-fn shards(_: &BoxId) -> Result<Option<Met>, Refusal> {
+fn shards(_: &hex_api::LearnedHolder) -> Result<Option<Met>, Refusal> {
     Ok(met(Class::Shards, whole(), 0))
 }
 
@@ -262,8 +277,8 @@ fn w14_a_shards_guests_room_awaits_guest_room_alone() {
         io.set(cgroup.dir(), 0, GIB);
     }
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
-    let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let class = if id.as_str() == "vm-1" {
+    let record = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let class = if box_of(id) == "vm-1" {
             Class::Shards
         } else {
             Class::Firecracker
@@ -273,7 +288,7 @@ fn w14_a_shards_guests_room_awaits_guest_room_alone() {
     learner
         .window(&io, vms, record, &[], machine(), Instant::now())
         .unwrap();
-    let vm1 = BoxId::new("vm-1").unwrap();
+    let vm1 = hex_api::LearnedHolder::Box(BoxId::new("vm-1").unwrap());
     assert_eq!(learner.awaits(), vec![(&vm1, Upstream::GuestRoom)]);
 }
 
@@ -310,8 +325,8 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
     assert_eq!(booked.booking(), prior);
     let both = running(&[("vm-1", 1), ("vm-2", 2)]);
     io.set(both[1].2.dir(), 0, 2 * GIB);
-    let record = move |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let allocation = if id.as_str() == "vm-2" {
+    let record = move |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let allocation = if box_of(id) == "vm-2" {
             booked
         } else {
             whole()
@@ -380,7 +395,7 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
 
 /// The node root of the one-scale tests: a process box capped at 4 CPUs and 4 GiB, one with no cap, and under `.oci` a
 /// box capped at 2 CPUs, each still at its owner's weight, beside a fleet of one VM; the VM's running list.
-fn boxes_beside_a_fleet(io: &Record) -> Vec<(BoxId, Scope, BoxCgroup)> {
+fn boxes_beside_a_fleet(io: &Record) -> Vec<(hex_api::LearnedHolder, Scope, BoxCgroup)> {
     let gib4 = (4 * GIB).to_string();
     io.dir(
         &root().join("box-a"),
@@ -553,7 +568,7 @@ fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
 
 /// Three Shards VMs of 16 CPUs and 8 GiB, each booked at 4 GiB of memory (their class's prior), in a fleet whose
 /// memory budget is 16 GiB, so each VM's budget is its booking and a third of the 4 GiB slack: what `running` lists.
-fn booked_at_four(_: &BoxId) -> Result<Option<Met>, Refusal> {
+fn booked_at_four(_: &hex_api::LearnedHolder) -> Result<Option<Met>, Refusal> {
     Ok(met(
         Class::Shards,
         whole().booked_at(res(16_000, 4 * GIB)),
@@ -561,7 +576,7 @@ fn booked_at_four(_: &BoxId) -> Result<Option<Met>, Refusal> {
     ))
 }
 
-fn fleet_of_three() -> Vec<(BoxId, Scope, BoxCgroup)> {
+fn fleet_of_three() -> Vec<(hex_api::LearnedHolder, Scope, BoxCgroup)> {
     running(&[("vm-1", 1), ("vm-2", 2), ("vm-3", 3)])
 }
 
@@ -603,7 +618,7 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
     let Resort::Ending { id, why, .. } = learner.resort() else {
         panic!("not ending: {:?}", learner.resort());
     };
-    assert_eq!(id.as_str(), "vm-2");
+    assert_eq!(box_of(id), "vm-2");
     assert_eq!(why.held, 7 * GIB);
     assert!(why.budget < why.held, "{why:?}");
     assert_eq!(
@@ -667,8 +682,8 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
 /// saying band 1.
 #[test]
 fn w14_the_last_resort_ends_the_lowest_band_first() {
-    let banded = |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let band = match id.as_str() {
+    let banded = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let band = match box_of(id) {
             "vm-1" => 2,
             "vm-2" => 3,
             _ => 1,
@@ -722,8 +737,8 @@ fn w14_the_last_resort_ends_the_lowest_band_first() {
 /// growth, its 16 GiB budget.
 #[test]
 fn w14_of_two_vms_rising_into_one_room_the_later_begun_is_ended() {
-    let begun = |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let started = match id.as_str() {
+    let begun = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let started = match box_of(id) {
             "vm-first" => 1,
             "vm-second" => 2,
             _ => 3,
@@ -840,7 +855,7 @@ fn shards_spec(id: &BoxId) -> hex_api::BoxSpec {
 }
 
 /// Three Shards VMs recorded in `store` as a node's create records them, and their running list.
-fn recorded_three(store: &crate::store::Store) -> Vec<(BoxId, Scope, BoxCgroup)> {
+fn recorded_three(store: &crate::store::Store) -> Vec<(hex_api::LearnedHolder, Scope, BoxCgroup)> {
     let mut vms = Vec::new();
     for name in ["vm-1", "vm-2", "vm-3"] {
         let id = BoxId::new(name).unwrap();
@@ -853,7 +868,11 @@ fn recorded_three(store: &crate::store::Store) -> Vec<(BoxId, Scope, BoxCgroup)>
         store.made(&made).unwrap();
         let record = store.get(&id).unwrap().unwrap().unwrap();
         let scope = Scope::Native(*record.native_scope.unwrap().bytes());
-        vms.push((id, scope, BoxCgroup::at(fleet().join(name))));
+        vms.push((
+            hex_api::LearnedHolder::Box(id),
+            scope,
+            BoxCgroup::at(fleet().join(name)),
+        ));
     }
     vms
 }
@@ -901,7 +920,12 @@ fn w14_why_survives_a_crash_between_the_end_and_the_windows_writes() {
     drop(io);
     drop(store);
     let store = open();
-    let end = store.get(&vms[1].0).unwrap().unwrap().unwrap().last_resort;
+    let end = store
+        .get(box_id(&vms[1].0))
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .last_resort;
     let end = end.expect("vm-2's why, written before its end");
     assert_eq!(
         (box_of(&end.id), end.held, end.budget),
@@ -909,7 +933,12 @@ fn w14_why_survives_a_crash_between_the_end_and_the_windows_writes() {
     );
     for other in [&vms[0].0, &vms[2].0] {
         assert_eq!(
-            store.get(other).unwrap().unwrap().unwrap().last_resort,
+            store
+                .get(box_id(other))
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .last_resort,
             None
         );
     }
@@ -928,7 +957,7 @@ fn w14_a_restarted_node_carries_out_the_end_its_intent_names() {
     let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
     let vms = recorded_three(&store);
     let intent = LearnedEnd {
-        id: hex_api::LearnedHolder::Box(vms[1].0.clone()),
+        id: vms[1].0.clone(),
         held: 12 * GIB,
         budget: 8 * GIB,
         band: 0,
@@ -938,8 +967,8 @@ fn w14_a_restarted_node_carries_out_the_end_its_intent_names() {
         unmoved: Some(Upstream::LiveMove),
     };
     assert!(record_last_resort(&store, &vms[1].0, vms[1].1, Some(&intent)).unwrap());
-    let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let recorded = store.get(id).unwrap().unwrap().unwrap();
+    let record = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let recorded = store.get(box_id(id)).unwrap().unwrap().unwrap();
         Ok(Some(Met {
             intent: recorded.last_resort,
             ..met(Class::Shards, whole().booked_at(res(16_000, 4 * GIB)), 0).unwrap()
@@ -1012,7 +1041,7 @@ fn w14_a_refused_end_withdraws_its_intent() {
     );
     let (left, failed) = write_ends(&store, learner.unrecorded());
     assert!(left.is_empty() && failed.is_none(), "{left:?} {failed:?}");
-    let record = store.get(&vms[1].0).unwrap().unwrap().unwrap();
+    let record = store.get(box_id(&vms[1].0)).unwrap().unwrap().unwrap();
     assert_eq!(record.last_resort, None, "its intent withdrawn");
 }
 
@@ -1038,7 +1067,11 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         store.made(&made).unwrap();
         let record = store.get(&id).unwrap().unwrap().unwrap();
         let scope = Scope::Native(*record.native_scope.unwrap().bytes());
-        vms.push((id, scope, BoxCgroup::at(fleet().join(name))));
+        vms.push((
+            hex_api::LearnedHolder::Box(id),
+            scope,
+            BoxCgroup::at(fleet().join(name)),
+        ));
     }
     let io = Record::default();
     for (_, _, cgroup) in &vms {
@@ -1074,7 +1107,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     drop(store);
 
     let store = open();
-    let ended = store.get(&vms[1].0).unwrap().unwrap().unwrap();
+    let ended = store.get(box_id(&vms[1].0)).unwrap().unwrap().unwrap();
     let end = ended.last_resort.clone().unwrap();
     assert_eq!(box_of(&end.id), "vm-2");
     assert_eq!((end.held, end.budget), (12 * GIB, 8 * GIB));
@@ -1084,12 +1117,17 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     );
     for other in [&vms[0].0, &vms[2].0] {
         assert_eq!(
-            store.get(other).unwrap().unwrap().unwrap().last_resort,
+            store
+                .get(box_id(other))
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .last_resort,
             None
         );
     }
     let mut info = hex_api::BoxInfo {
-        id: vms[1].0.clone(),
+        id: box_id(&vms[1].0).clone(),
         class: hex_api::Class::Shards,
         state: hex_api::BoxState::Empty,
         bounds: ended.spec.bounds.clone(),
@@ -1138,8 +1176,8 @@ fn w14_the_learner_holds_its_machines_population_of_vms_of_as_many_classes() {
         io.set(cgroup.dir(), 0, GIB);
     }
     // Each VM a class of its own: its receipt's profile is its number.
-    let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
-        let n: u8 = id.as_str().strip_prefix("vm-").unwrap().parse().unwrap();
+    let record = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let n: u8 = box_of(id).strip_prefix("vm-").unwrap().parse().unwrap();
         let mut allocation = whole();
         allocation.cost.id = [n; 32];
         Ok(met(Class::Shards, allocation, 0))
@@ -1227,6 +1265,6 @@ fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
         io.file(&fleet().join("vm-1"), "memory.high"),
         Some((56 * GIB).to_string())
     );
-    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| id.as_str()).collect();
+    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| box_of(id)).collect();
     assert_eq!(unread, ["vm-2"]);
 }

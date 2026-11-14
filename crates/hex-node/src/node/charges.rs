@@ -17,8 +17,8 @@ use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedEnd, MAX_LEARNED_HOLDINGS,
-    Refusal, RuntimeCost, Upstream, Usage,
+    Allocation, Bounds, CapacityResources, Learned, LearnedEnd, LearnedHolder,
+    MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_runtime::linux::cgroup::BoxCgroup;
@@ -48,7 +48,7 @@ pub(super) trait Cgroups {
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
     /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
     /// lifetime, before its end (C5, intent first): whether it was written.
-    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
+    fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
 /// The kernel's cgroups, and the node's records.
@@ -89,7 +89,7 @@ impl Cgroups for Kernel<'_> {
         cgroup.kill()
     }
 
-    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+    fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         record_last_resort(self.store, id, scope, Some(end))
     }
 }
@@ -101,7 +101,7 @@ struct Kills<'a, C> {
 }
 
 impl<C: Cgroups> Reach for Kills<'_, C> {
-    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+    fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         self.io.intend(id, scope, end)
     }
 
@@ -136,7 +136,7 @@ pub(super) struct Met {
 
 /// One VM the learner reads.
 struct Vm {
-    id: BoxId,
+    id: LearnedHolder,
     /// How the core holds it: its place in the node's start order and its scope (C3).
     lifetime: Lifetime,
     class: Class,
@@ -173,7 +173,7 @@ pub(super) struct Learner {
     /// The last resort (C5), which ends a VM by killing its cgroup.
     last: LastResort,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
-    unread: Vec<(BoxId, Refusal)>,
+    unread: Vec<(LearnedHolder, Refusal)>,
 }
 
 /// A VM's vCPUs: its admitted guest's CPU in whole CPUs, rounded up.
@@ -386,7 +386,7 @@ impl Learner {
     /// The VMs its last window couldn't read, and why: each counted whole, at its receipt, against the fleet's budget
     /// until a read succeeds (joint plan step 14; ROOT, 2026-11-13).
     #[cfg(test)]
-    pub(super) fn unread(&self) -> &[(BoxId, Refusal)] {
+    pub(super) fn unread(&self) -> &[(LearnedHolder, Refusal)] {
         &self.unread
     }
 
@@ -396,8 +396,8 @@ impl Learner {
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
-        running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
+        running: Vec<(LearnedHolder, Scope, BoxCgroup)>,
+        record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -410,8 +410,8 @@ impl Learner {
     fn learn(
         &mut self,
         io: &impl Cgroups,
-        running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
+        running: Vec<(LearnedHolder, Scope, BoxCgroup)>,
+        record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -729,7 +729,7 @@ impl Learner {
 
     /// The capability each guest's room awaits, by its box (C7).
     #[cfg(test)]
-    fn awaits(&self) -> Vec<(&BoxId, Upstream)> {
+    fn awaits(&self) -> Vec<(&LearnedHolder, Upstream)> {
         self.rooms
             .iter()
             .filter_map(|(scope, needs)| self.vms.get(scope).map(|vm| (vm, *needs)))
@@ -751,7 +751,9 @@ impl Node {
             Ok((
                 running
                     .into_iter()
-                    .map(|(id, scope, cgroup)| (id, Scope::Native(scope), cgroup))
+                    .map(|(id, scope, cgroup)| {
+                        (LearnedHolder::Box(id), Scope::Native(scope), cgroup)
+                    })
                     .collect::<Vec<_>>(),
                 self.cgroups.held_slots()?,
                 self.native_capacity()?.total,
@@ -761,7 +763,11 @@ impl Node {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
-        let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
+        let record = |id: &LearnedHolder| -> Result<Option<Met>, Refusal> {
+            // A node VM's row is the step-39 holder's: none of this learner's yet.
+            let LearnedHolder::Box(id) = id else {
+                return Ok(None);
+            };
             let Some(record) = self.record(id)? else {
                 return Ok(None);
             };
