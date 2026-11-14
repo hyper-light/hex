@@ -77,10 +77,11 @@ class FakeProc:
         self.root = root
         os.makedirs(root)
 
-    def put(self, pid, kb, rollup=True):
+    def put(self, pid, kb, rollup=True, pss=None):
         os.makedirs(os.path.join(self.root, str(pid)), exist_ok=True)
         if rollup:
-            text = f"55d0c0000000-7ffc00000000 ---p 00000000 00:00 0    [rollup]\nRss:   {kb} kB\nPss:   {kb} kB\n"
+            pss = kb if pss is None else pss
+            text = f"55d0c0000000-7ffc00000000 ---p 00000000 00:00 0    [rollup]\nRss:   {kb} kB\nPss:   {pss} kB\n"
             FakeCgroup.write(os.path.join(self.root, str(pid)), "smaps_rollup", text)
         else:
             text = f"Name:\tagent\nVmPeak:\t{2 * kb} kB\nVmRSS:\t{kb} kB\nThreads:\t4\n"
@@ -139,9 +140,9 @@ class AttachTest(unittest.TestCase):
 
     def test_w14_a_cgroup_with_no_memory_controller_is_recorded_from_its_processes_rss(self):
         """ROOT, 2026-11-13: kiln's per-agent cgroups have cpu but no memory controller. Do attach to a running session
-        whose cgroup has no memory.current, its two processes holding 1 MiB (its smaps_rollup's Rss) and 2 MiB (its
+        whose cgroup has no memory.current, its two processes holding 1 MiB (its smaps_rollup's Pss) and 2 MiB (its
         status's VmRSS, it having no smaps_rollup); let a window pass, then one in which the second ends, after which
-        the session empties. Expect the trace's header to name its memory as its processes' Rss, its steps to hold 3
+        the session empties. Expect the trace's header to name its memory as its processes' Pss, its steps to hold 3
         MiB, then 1 MiB, the ended process out of the sum, and its CPU cpu.stat's as before."""
         fake = FakeCgroup(os.path.join(self.dir.name, "e"), cpu_max_on_session=False)
         fake.set(1_000_000, None, populated=True)
@@ -171,9 +172,39 @@ class AttachTest(unittest.TestCase):
         rt.attach(out, fake.session, fake.root, now_ns=now_ns, sleep_until=sleep_until, proc=proc.root)
         with open(out) as f:
             text = f.read()
-        self.assertIn("# memory: procs-rss", text)
+        self.assertIn("# memory: procs-pss", text)
         steps = [tuple(map(int, line.split())) for line in text.splitlines() if not line.startswith("#")]
         self.assertEqual(steps, [(100, 1, 3), (100, 1, 1)])
+
+    def test_e9_a_cgroup_with_no_memory_controller_counts_its_subtree_and_a_shared_page_once(self):
+        """The review's E-9: do attach to a session whose cgroup has no memory.current, one process in it holding 2 MiB
+        resident of which half it shares (Pss 1 MiB), and one in a cgroup below it holding 2 MiB of its own; let one
+        window pass, after which the session empties. Expect its step to hold 3 MiB: the child cgroup's process in the
+        sum (its CPU, cpu.stat's, is the subtree's too), and the shared page counted by its share, not whole."""
+        fake = FakeCgroup(os.path.join(self.dir.name, "e9"), cpu_max_on_session=False)
+        fake.set(1_000_000, None, populated=True)
+        FakeCgroup.write(fake.session, "cgroup.procs", "21\n")
+        child = os.path.join(fake.session, "tool")
+        os.makedirs(child)
+        FakeCgroup.write(child, "cgroup.procs", "22\n")
+        proc = FakeProc(os.path.join(self.dir.name, "proc-e9"))
+        proc.put(21, 2048, pss=1024)
+        proc.put(22, 2048)
+        clock = [0]
+
+        def now_ns():
+            return clock[0]
+
+        def sleep_until(deadline_ns):
+            clock[0] = deadline_ns
+            fake.set(1_100_000, None, populated=False)
+
+        out = os.path.join(self.dir.name, "e9.txt")
+        rt.attach(out, fake.session, fake.root, now_ns=now_ns, sleep_until=sleep_until, proc=proc.root)
+        with open(out) as f:
+            text = f.read()
+        steps = [tuple(map(int, line.split())) for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(steps, [(100, 1, 3)])
 
     def test_w14_a_session_in_its_cgroups_memory_says_so(self):
         """Do attach to a session whose cgroup has memory.current. Expect the trace's header to name its memory as the

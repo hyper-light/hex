@@ -99,8 +99,6 @@ pub fn thread_stack_bytes() -> io::Result<usize> {
         .ok_or_else(|| io::Error::other("Windows reported no thread stack extent"))
 }
 
-/// The enclosing job's declared process ceiling, if it sets one. Kernel allocation failures remain
-/// authoritative when the current job has none, or another enclosing job is tighter.
 /// How many handles this process holds now: `GetProcessHandleCount` of its own pseudo-handle
 /// (learn.microsoft.com, "GetProcessHandleCount function"), what a node held at its start beside its
 /// bounds as it fits them (`hex_node::serve::fit`), as Linux's node reads `/proc/self/fd`.
@@ -115,6 +113,8 @@ pub fn open_handles() -> io::Result<u64> {
     Ok(u64::from(count))
 }
 
+/// The enclosing job's declared process ceiling, if it sets one. Kernel allocation failures remain
+/// authoritative when the current job has none, or another enclosing job is tighter.
 pub fn enclosing_process_limit() -> io::Result<Option<usize>> {
     use windows_sys::Win32::System::JobObjects::{
         IsProcessInJob, JOBOBJECT_BASIC_LIMIT_INFORMATION, JobObjectBasicLimitInformation,

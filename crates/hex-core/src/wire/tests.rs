@@ -1924,6 +1924,7 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         "wire.rs",
         "stream.rs",
         "schedule.rs",
+        "netns.rs",
         "../../hex-sim/src/peer.rs",
         "../../hex-sim/src/model.rs",
         "../../hex-api/src/spec.rs",
@@ -1933,6 +1934,7 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         "../../hex-api/src/runtime.rs",
         "../../hex-api/src/grants.rs",
         "../../hex-api/src/credentials.rs",
+        "../../hex-api/src/lease.rs",
     ];
     let mut sources: Vec<Vec<u8>> = paths
         .iter()
