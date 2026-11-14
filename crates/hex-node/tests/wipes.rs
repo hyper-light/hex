@@ -22,7 +22,8 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, ClassSpec, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_client::Client;
-use hex_node::serve::{Host, Limits, Server, WireLessors};
+use hex_node::serve::{Host, Limits, Native, Server, WireLessors};
+use hex_quic::enroll::{self, sim::SimCa};
 use hex_testkit::wipes::{self, SECRET};
 
 /// Every block this test binary frees is read for the watched secret.
@@ -286,6 +287,114 @@ fn e6_no_block_freed_holds_a_secret_the_node_carried_on_its_socket() {
         watching.found(),
         0,
         "freed blocks still holding the secret the node carried, (size, where) of each: {:?}",
+        watching.seen()
+    );
+}
+
+/// The test's broker, its run's flows' class and its harness VM, holding `held`, the secret's one value.
+fn secrets(held: &Arc<Value>) -> Arc<Secrets> {
+    Arc::new(Secrets {
+        sim: SimRuntime::default(),
+        lessors: WireLessors::new(),
+        secret: Arc::clone(held),
+    })
+}
+
+/// A peer's credentials, enrolled with the simulated CA under `name`.
+fn enrolled(ca: &SimCa, name: &str) -> hex_quic::tls::Credentials {
+    ca.admit(name, name.as_bytes());
+    enroll::enroll(ca, name, name.as_bytes().to_vec()).unwrap()
+}
+
+/// E-6, over QUIC (docs/design/hex-quic.md): as on the socket, a harness VM's lease, capture and refresh, each
+/// carrying the secret, between the node and a client that reached it over QUIC, through hex-quic's control lane;
+/// expect every flow to have carried the secret whole, and no block freed meanwhile, the node's, hex-quic's or its
+/// client's, to have held it.
+#[test]
+fn e6_no_block_freed_holds_a_secret_the_node_carried_over_quic() {
+    let secret = secret();
+    let dir = scratch();
+    let watching = wipes::watch(&secret).unwrap();
+    let captured = Arc::new(AtomicBool::new(false));
+    {
+        let held = Arc::new(Value::new(secret.to_vec()));
+        let host = secrets(&held);
+        let ca = SimCa::new().unwrap();
+        let limits = Limits {
+            connections: 4,
+            message_bytes: hex_core::wire::MAX_MESSAGE,
+            in_flight: 4,
+            programs: 4,
+        };
+        let node = Arc::new(
+            hex_quic::Endpoint::start(hex_quic::Config {
+                credentials: enrolled(&ca, "node.wipes.test"),
+                bind: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+                listen: true,
+                serves: hex_node::quic::ports(false),
+                shape: hex_node::quic::shape(&limits, false),
+            })
+            .unwrap(),
+        );
+        let socket = dir.path().join("node.sock");
+        let quic = hex_node::quic::Quic::new(
+            Native::bind(&socket).unwrap(),
+            Arc::clone(&node),
+            hex_node::quic::Bounds::of(&limits),
+            None,
+        )
+        .unwrap();
+        let server = Server::with_os(
+            quic,
+            Arc::clone(&host) as Arc<dyn Host>,
+            limits,
+            limits.in_flight,
+            &socket,
+        )
+        .unwrap();
+        let client_end = Arc::new(
+            hex_quic::Endpoint::start(hex_quic::Config {
+                credentials: enrolled(&ca, "client.wipes.test"),
+                bind: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+                listen: false,
+                serves: Vec::new(),
+                shape: hex_quic::Shape {
+                    connections: 1,
+                    lanes: hex_quic::limits::client_lanes(limits.in_flight, false),
+                },
+            })
+            .unwrap(),
+        );
+        let (client, _) = hex_quic::link::connect(
+            client_end,
+            "node.wipes.test",
+            node.local_addr(),
+            false,
+            None,
+        )
+        .unwrap();
+        let client = client
+            .with_lessors(Arc::new(Broker {
+                secret: held,
+                captured: Arc::clone(&captured),
+            }))
+            .unwrap();
+        let spec = harness("e6-quic-harness");
+        let id = spec.id.clone();
+        client.create(spec).unwrap();
+        client.start(&id).unwrap();
+        client.signal(&id, Signal::KILL).unwrap();
+        client.delete(&id).unwrap();
+        drop((client, server, host, node));
+    }
+    assert!(
+        captured.load(Ordering::Acquire),
+        "the capture carried the secret whole to the client's broker"
+    );
+    assert_eq!(
+        watching.found(),
+        0,
+        "freed blocks still holding the secret the node carried over QUIC, (size, where) of each: {:?}",
         watching.seen()
     );
 }
