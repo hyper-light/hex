@@ -336,12 +336,19 @@ struct Vm {
     band: u8,
     vcpus: u32,
     booking: [u64; 3],
-    /// Its last reading: CPU in milli-CPU over the window, memory's and disk's high-water marks.
-    held: [u64; 3],
+    /// Its last reading: CPU in milli-CPU over the window, memory's and disk's high-water marks; none before its first,
+    /// what it holds being no fact yet (ROOT, 2026-11-13: its first reading is a baseline, never a window's growth).
+    held: Option<[u64; 3]>,
     tail: Tail,
 }
 
 impl Vm {
+    /// What it holds of memory and disk as the rule counts it: its last reading; before its first, its booking, what
+    /// the ledger holds of it, so a VM never read is never past its budget nor counted as nothing.
+    fn holding(&self) -> [u64; 3] {
+        self.held.unwrap_or([0; 3])
+    }
+
     /// Its charge (C1): the p99.9 of its last SEEDABLE windows, no less than its booking while it is cold, each at
     /// most `ceiling`, its class's now ([`ceiling_of`]).
     fn charge(&self, ceiling: [u64; 3]) -> [u64; 3] {
@@ -591,7 +598,7 @@ impl<K: Ord + Copy> Node<K> {
                 band,
                 vcpus,
                 booking: dims(booking),
-                held: [0; 3],
+                held: None,
                 tail: Tail::new()?,
             },
         );
@@ -629,10 +636,18 @@ impl<K: Ord + Copy> Node<K> {
                 band,
                 vcpus,
                 booking: each(dims(booking), ceiling, u64::min),
-                held: [0; 3],
+                held: None,
                 tail: Tail::new()?,
             },
         );
+        Ok(())
+    }
+
+    /// Takes VM `id`'s first reading, `mem_bytes` of memory held as its learner first meets it, as its baseline (C1, C5;
+    /// ROOT, 2026-11-13): what it holds from then, which its room and its budget's hold reckon with, and what its next
+    /// reading's growth is counted from, never a window's growth itself. Refused for a VM read before.
+    pub fn baseline(&mut self, id: &K, mem_bytes: u64) -> Result<(), ChargeError> {
+        let _ = (id, mem_bytes);
         Ok(())
     }
 
@@ -710,8 +725,9 @@ impl<K: Ord + Copy> Node<K> {
             sample.mem_bytes,
             sample.disk_bytes.unwrap_or(booked_disk),
         ];
-        let [_, before, _] = vm.held;
-        vm.held = reading;
+        // Growth is what it holds past its reading before; a first reading is a baseline, none (ROOT, 2026-11-13).
+        let before = vm.held.map(|[_, mem, _]| mem);
+        vm.held = Some(reading);
         let was_cold = !vm.tail.full();
         vm.tail.push(reading)?;
         // A warmed VM's windows are its class's evidence (C2): its whole tail as it warms, then each window.
@@ -723,7 +739,7 @@ impl<K: Ord + Copy> Node<K> {
         let class = vm.class;
         self.grew = self
             .grew
-            .saturating_add(sample.mem_bytes.saturating_sub(before));
+            .saturating_add(sample.mem_bytes.saturating_sub(before.unwrap_or(0)));
         // A held VM's class is never forgotten (`remember`), so its record is there.
         let record = self.classes.get_mut(&class).ok_or(ChargeError::Invalid {
             what: "a class's record",
@@ -1036,7 +1052,7 @@ impl<K: Ord + Copy> Node<K> {
                 .checked_add(share(mem)?)
                 .and_then(|b| b.checked_add(extra))
                 .ok_or(ChargeError::Overflow("a VM's memory budget"))?;
-            let [_, held, _] = vm.held;
+            let [_, held, _] = vm.holding();
             let room = i64::try_from(bytes)
                 .ok()
                 .zip(i64::try_from(held).ok())
@@ -1093,7 +1109,7 @@ impl<K: Ord + Copy> Node<K> {
         let held = self
             .vms
             .values()
-            .map(|vm| vm.held)
+            .map(Vm::holding)
             .fold(0u64, |total, [_, mem, _]| total.saturating_add(mem));
         let growth = self.growth();
         let fleet = Pressure {
@@ -1107,7 +1123,7 @@ impl<K: Ord + Copy> Node<K> {
         let budgets = self.budgets()?;
         let excess = |id: &K, bytes: u64| {
             self.vms.get(id).map(|vm| {
-                let [_, held, _] = vm.held;
+                let [_, held, _] = vm.holding();
                 Excess {
                     held,
                     budget: bytes,
@@ -1120,7 +1136,7 @@ impl<K: Ord + Copy> Node<K> {
         if planted(Mutant::EndLargestHolder) {
             let largest = budgets.iter().max_by_key(|(id, _)| {
                 self.vms.get(id).map_or(0, |vm| {
-                    let [_, mem, _] = vm.held;
+                    let [_, mem, _] = vm.holding();
                     mem
                 })
             });
@@ -1184,7 +1200,7 @@ impl<K: Ord + Copy> Node<K> {
 /// What a VM takes of its node: its booking, and for memory and disk what it holds past it.
 fn physical(vm: &Vm) -> [u64; 3] {
     let [b0, b1, b2] = vm.booking;
-    let [_, h1, h2] = vm.held;
+    let [_, h1, h2] = vm.holding();
     [b0, b1.max(h1), b2.max(h2)]
 }
 

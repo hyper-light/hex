@@ -905,8 +905,9 @@ fn image_vm(name: &str, started: u64) -> BoxRecord {
 /// held at its ceiling's 16 CPUs until it has run, told so from its first window with its VMM's own unheld (D260: its
 /// run here tells no span to reckon it over), then capped through its rate at the 10.667 CPUs it was charged, its
 /// governor's rate leaving out its VMM's own over the window, 2.666 CPUs; its guest told its room, its budget less what
-/// it holds, as it moves (64 GiB, then 61 GiB); and the third window refused, typed, its guest time naming a vCPU count
-/// other than its reading before's.
+/// it holds, as it moves, from what it holds as it is met, its baseline (63 GiB, then 61 GiB; ROOT, 2026-11-13: never
+/// its whole budget); and the third window refused, typed, its guest time naming a vCPU count other than its reading
+/// before's.
 #[test]
 fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     let io = Record::default();
@@ -955,7 +956,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     assert_eq!(
         *io.rooms.borrow(),
         vec![
-            ("img-1".to_owned(), i64::try_from(64 * GIB).unwrap()),
+            ("img-1".to_owned(), i64::try_from(63 * GIB).unwrap()),
             ("img-1".to_owned(), i64::try_from(61 * GIB).unwrap()),
         ]
     );
@@ -2275,7 +2276,8 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
 /// Joint plan step 39 (ROOT, 2026-11-13: a node VM's guest needs its room told like any guest's, D188): a node VM's guest is
 /// told its room as an image VM's guest is, everything it holds coming out of it. Do run a window of a node VM of 16
 /// vCPUs, booked at 4 CPUs and 4 GiB, in a 24-CPU fleet budget; then one in which its VM process ran 3.2 s of CPU in 300
-/// ms, holding 3 GiB. Expect its guest told its room, its budget less what it holds, as it moves: 64 GiB, then 61 GiB.
+/// ms, holding 3 GiB. Expect its guest told its room, its budget less what it holds, as it moves, from what it holds as
+/// it is met, its baseline (ROOT, 2026-11-13, A-1: never its whole budget): 63 GiB, then 61 GiB.
 #[test]
 fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
     let io = Record::default();
@@ -2305,7 +2307,7 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
     assert_eq!(
         *io.rooms.borrow(),
         vec![
-            ("node-7".to_owned(), i64::try_from(64 * GIB).unwrap()),
+            ("node-7".to_owned(), i64::try_from(63 * GIB).unwrap()),
             ("node-7".to_owned(), i64::try_from(61 * GIB).unwrap()),
         ]
     );

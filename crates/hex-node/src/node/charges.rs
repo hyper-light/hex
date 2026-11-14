@@ -562,6 +562,10 @@ impl Learner {
                     receipt,
                 )
                 .map_err(refused)?;
+            // What it holds as it is met is its baseline, never a window's growth (ROOT, 2026-11-13).
+            self.node
+                .baseline(&lifetime, usage.memory_bytes)
+                .map_err(refused)?;
             // Its create wrote its ceiling's CPU as its `cpu.max` (`Node::managed_bounds`); a VM made before ruling B
             // also has a `memory.max`, taken as written so the first window lifts it. Its `memory.swap.max` stays off,
             // never the learner's to lift (HEX-RT-15).
