@@ -1148,6 +1148,7 @@ impl Driver {
         let (answer, changed) = finish(&mut state, heard, false)?;
         if changed {
             readmit(&mut state)?;
+            self.wake_reserved();
         }
         Ok(answer)
     }
@@ -1190,7 +1191,9 @@ impl Driver {
     /// Wakes, where one is waiting, the thread that tells its node what every holder has reserved
     /// ([`Driver::on_reserved`]): a wake already told is the same word, and one whose thread has ended tells nothing.
     pub fn wake_reserved(&self) {
-        let _ = &self.reserved_wake;
+        if let Some(wake) = self.reserved_wake.get() {
+            let _ = wake.try_send(());
+        }
     }
 
     /// The wake of the thread that tells its node what every holder has reserved (the review's A-10): told at each change
@@ -1227,8 +1230,20 @@ impl Driver {
     /// its node's charge learner takes it off its fleet's budget (the review's A-10): each runtime's refusal is answered,
     /// for its caller to tell. Nothing where no view is open.
     pub fn tell_reserved(&self) -> Result<Vec<Refusal>, Error> {
-        let _ = self.reserved_word()?;
-        Ok(Vec::new())
+        let Some(word) = self.reserved_word()? else {
+            return Ok(Vec::new());
+        };
+        let mut refused = Vec::new();
+        for runtime in self.runtimes.distinct() {
+            if let Err(why) = runtime.reserved(word) {
+                refused.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                    what: "a keeper's word's refusals",
+                    bound: self.runtimes.by_class.len(),
+                })?;
+                refused.push(why);
+            }
+        }
+        Ok(refused)
     }
 
     /// The machine's view as the keeper would answer it now.

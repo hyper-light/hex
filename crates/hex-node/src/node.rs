@@ -2416,6 +2416,18 @@ impl Runtime for Node {
             supervise::Taken::NoRun => self.delete_box(id),
         }
     }
+
+    /// The machine's capacity view's word, kept for its charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed. Its learner reads it at its next window, each `cpu.max` period.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        crate::recorded::charges::keep_word(
+            &mut *self
+                .reserved
+                .lock()
+                .map_err(|_| Refusal::Broken("the keeper's word's lock was poisoned".into()))?,
+            word,
+        )
+    }
 }
 
 impl Node {

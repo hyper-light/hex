@@ -2511,11 +2511,18 @@ pub(crate) fn measured(
             what: "a fleet's budget",
             why: "what is free and what its VMs hold overflow".into(),
         })?;
-    let _ = reserved;
     Ok(CapacityResources {
-        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
-        mem_bytes: memory.saturating_sub(off.mem_bytes),
-        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
+        cpu_milli: machine
+            .cpu_milli
+            .saturating_sub(off.cpu_milli)
+            .saturating_sub(reserved.cpu_milli),
+        mem_bytes: memory
+            .saturating_sub(off.mem_bytes)
+            .saturating_sub(reserved.mem_bytes),
+        disk_bytes: free
+            .disk_bytes
+            .saturating_sub(off.disk_bytes)
+            .saturating_sub(reserved.disk_bytes),
     })
 }
 

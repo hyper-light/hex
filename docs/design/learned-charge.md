@@ -25,7 +25,7 @@ being GitHub's main (`025aae6d`):
   job's unit), never one platform-wide number; a platform's cap's cycle counted in the learner's window only for the
   VMs that cap holds, each at its own share, and named on the capacity answers where it sets the window.
 - Built (the review's A-10, ROOT, 2026-11-14): the fleet's budget measured each window from what the machine has free
-  (C7), on every OS.
+  (C7), on every OS, less what the capacity view's holders reserve as its keeper tells the node (`--capacity-view`).
 - Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
   On Hex: 2c-4b, the node's call for its macOS helper's slowest response (`MacRuntime::cap_cycle` from it, the managed
   control's row requirement dropped), which a control's cycle needs only for a managed VM whose process takes no rate
@@ -346,7 +346,12 @@ counted twice: only its headroom comes off, and one past its booking takes the e
 memory its footprint, clean file pages in neither. A use or file count that can't be read gives nothing back and takes
 a whole booking off; no disk use is read, so a booking's disk comes off whole. A box whose record can't be read takes
 its memory and disk out of what is free, its CPU counted at its machine. The budget is so never more than what is free
-and what the VMs hold. kiln's reservations come off it once the keeper tells the node them (A-10's second part). Each
+and what the VMs hold. What the capacity view's holders reserve, kiln's runs, comes off it in every dimension as the
+keeper last told the node (`capacity-view.md` CV10, `Call::Reserved`): a holder's runs' use is missing from what is
+free too, so it is counted twice, an under-count and never a credit, until kiln's holder reports what its runs use. A
+node run without `--capacity-view` counts no reservation (no holder reserves room there) and says so; one run with it
+learns nothing until its keeper has spoken since it started, its VMs booked whole, told kiln's reservations not yet
+heard; a word to a node run without the flag is still counted, told unconfigured (`Learned::reservations`). Each
 VM's budget (C5) is its share; D188 turns it into its guest's room, and everything the VM holds comes out of it,
 its D230 ring pins included (pinned guest RAM, so in what it holds). A Shards image VM's guest is told its room
 through its run (`Runtime::room`, D241's `ImageGuest::room`): its budget less what it holds, each window it moves,

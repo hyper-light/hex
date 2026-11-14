@@ -1187,11 +1187,18 @@ fn measured(
         off = off.checked_add(headroom).ok_or_else(overflow)?;
     }
     let memory = free.mem_bytes.checked_add(held).ok_or_else(overflow)?;
-    let _ = reserved;
     Ok(CapacityResources {
-        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
-        mem_bytes: memory.saturating_sub(off.mem_bytes),
-        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
+        cpu_milli: machine
+            .cpu_milli
+            .saturating_sub(off.cpu_milli)
+            .saturating_sub(reserved.cpu_milli),
+        mem_bytes: memory
+            .saturating_sub(off.mem_bytes)
+            .saturating_sub(reserved.mem_bytes),
+        disk_bytes: free
+            .disk_bytes
+            .saturating_sub(off.disk_bytes)
+            .saturating_sub(reserved.disk_bytes),
     })
 }
 
@@ -1457,7 +1464,29 @@ impl Node {
         let Some(shared) = self.backends.get().and_then(|b| b.learner.as_ref()) else {
             return;
         };
-        let reserved = CapacityResources::default();
+        // What the capacity view's holders have reserved, as the node's configuration and its keeper's word say (A-10):
+        // until the keeper of a view that serves its machine has spoken since the node started, its VMs are booked whole,
+        // none learned, told so.
+        let reservations = match self.reservations() {
+            Ok(reservations) => reservations,
+            Err(why) => {
+                if let Ok(mut learner) = shared.lock() {
+                    learner.failed(why);
+                }
+                return;
+            }
+        };
+        let reserved = {
+            let Ok(mut learner) = shared.lock() else {
+                return;
+            };
+            learner.told_reservations(reservations);
+            match reservations {
+                hex_api::LearnedReservations::Unheard => return,
+                hex_api::LearnedReservations::Heard { reserved, .. } => reserved,
+                hex_api::LearnedReservations::Unserved => CapacityResources::default(),
+            }
+        };
         let read = || -> Result<Running, Refusal> {
             let running = self.supervisor.running_vms()?;
             Ok((

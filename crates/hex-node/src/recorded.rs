@@ -2607,7 +2607,24 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             learner.failed(why);
             learner.next_window()
         };
-        let reserved = hex_api::CapacityResources::default();
+        // What the capacity view's holders have reserved, as the node's configuration and its keeper's word say (A-10):
+        // until the keeper of a view that serves its machine has spoken since the node started, its VMs are booked whole,
+        // none learned, told so, and its keeper's word wakes it.
+        let reservations = match self.books.reservations() {
+            Ok(reservations) => reservations,
+            Err(why) => return fail(why),
+        };
+        let reserved = {
+            let Ok(mut learner) = shared.lock() else {
+                return None;
+            };
+            learner.told_reservations(reservations);
+            match reservations {
+                hex_api::LearnedReservations::Unheard => return learner.next_window(),
+                hex_api::LearnedReservations::Heard { reserved, .. } => reserved,
+                hex_api::LearnedReservations::Unserved => hex_api::CapacityResources::default(),
+            }
+        };
         let read = self.books.store.all().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
@@ -3106,6 +3123,21 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// such box while its record named devices, as the delete finds it gone then.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
         self.delete_by(id, |runtime| runtime.delete_with_host_use(id), None)
+    }
+
+    /// The machine's capacity view's word, kept for the charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed; the learner then told, so one waiting for its keeper's first word runs a window now.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        charges::keep_word(
+            &mut *self
+                .books
+                .reserved
+                .lock()
+                .map_err(|_| broken("the keeper's word's lock was poisoned"))?,
+            word,
+        )?;
+        self.begun();
+        Ok(())
     }
 }
 
