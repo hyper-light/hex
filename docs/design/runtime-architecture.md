@@ -483,7 +483,10 @@ fitted places, its two control connections and four for each place (a program's 
 connection; `serve::fit::lanes`), counted among the node's own with its controller's two descriptors. A lane holds
 two on the node's side, its socket pair's ends, which its two copiers share, as a control connection's handles share
 the owner's end: no duplicate, which Windows makes inheritable (the review's D-5). `hex_client::guest::lanes::FDS_A_LANE`
-counts them, and its tests hold it to the descriptors the process's own table shows (the review's D-6).
+counts them, and its tests hold it to the descriptors the process's own table shows (the review's D-6). A guest's Shards
+connection is shared so too, its handles reading and writing it through Shards' `&dyn Stream`, and an exec's stream
+goes to its caller as its connection's own socket, moved, never a duplicate (`Link::dial_handoff_before`: a Shards
+stream's socket, a bridged connection's owner end).
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of
@@ -2523,8 +2526,8 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
   evidence the rule is held to and its falsifier's data, cited here. Every managed create and attach follows its guest
   (the review's C-9, 2026-11-14), a GPU create's too since Shards takes a VM process's GPU report with no clock
-  (`Until::Released`, Shards b4a018090; (c2)): its budget has no deadline (`managed::Budget::following`),
-  and its native launch, first relay dial and join each wait within their own W* and past it follow their party. So
+  (`Until::Released`, Shards b4a018090; (c2)): it is told no deadline, and its native launch, first relay dial and
+  join each wait within their own W* and past it follow their party. So
   does the guest's own boot: within W*, the slowest boot its node has seen, past it told and followed by its VM's life
   through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34). So do the macOS managed
   helper's asks: its config carries no control patience, an ask with no caller's deadline carries no expiry (its

@@ -491,7 +491,7 @@ pub fn boot_managed(
     transaction: &dyn crate::devices::Transaction,
     plan: shards_api::PreparedBoot,
 ) -> Result<shards_api::ManagedGuest, Refusal> {
-    managed::boot(transaction, plan, managed::Budget::following())
+    managed::boot(transaction, plan)
 }
 
 /// What tells a node's loop that bytes wait to be written on a connection it watches.
@@ -832,36 +832,16 @@ impl GuestRuntime {
         Ok(())
     }
 
-    /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given.
+    /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given: with no deadline, its
+    /// connection follows its guest (the review's C-9).
     fn join(&self, b: &Booted) -> Result<(), Refusal> {
-        self.join_with_deadline(b, None)
-    }
-
-    fn join_before(&self, b: &Booted, budget: managed::Budget) -> Result<(), Refusal> {
-        budget.remaining()?;
-        // With no deadline, its join follows its guest (the review's C-9).
-        self.join_with_deadline(b, budget.deadline())?;
-        budget.remaining()?;
-        Ok(())
-    }
-
-    fn join_with_deadline(&self, b: &Booted, deadline: Option<Instant>) -> Result<(), Refusal> {
         let joins = self.joins.lock().map_err(poisoned)?.clone();
         let Some(joins) = joins else {
             return Ok(());
         };
         let (token, room) = joins.reserve()?;
-        let (client, pump) = match deadline {
-            Some(at) => Client::connect_evented_before(triomphe::Arc::clone(&b.link), room, at)?,
-            None => Client::connect_evented(triomphe::Arc::clone(&b.link), room)?,
-        };
+        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
         let client = evented_owner(client)?;
-        if deadline.is_some_and(|at| Instant::now() >= at) {
-            return Err(Refusal::os(
-                "joining the guest within its original create budget",
-                std::io::ErrorKind::TimedOut,
-            ));
-        }
         *b.evented.lock().map_err(poisoned)? = Some(client);
         joins.join(token, pump)
     }

@@ -510,7 +510,6 @@ pub(super) fn observe(
     booted: &crate::guest::Booted,
     receipt: &mut crate::guest::pool::Receipt,
     path: &std::path::Path,
-    budget: crate::guest::managed::Budget,
 ) -> Result<(), Refusal> {
     let key = receipt.original.key;
     observe_receipt(
@@ -518,7 +517,6 @@ pub(super) fn observe(
         booted,
         &mut Receipt::Pool(receipt),
         path,
-        budget,
         &|why| crate::guest::pool::uncertain(key, why),
     )
 }
@@ -528,16 +526,13 @@ pub(super) fn observe_selected(
     booted: &crate::guest::Booted,
     receipt: &mut crate::guest::selected::Record,
     path: &std::path::Path,
-    budget: crate::guest::managed::Budget,
 ) -> Result<(), Refusal> {
-    budget.remaining()?;
     let id = receipt.id.try_clone()?;
     observe_receipt(
         configured,
         booted,
         &mut Receipt::Selected(receipt),
         path,
-        budget,
         &|why| crate::guest::books::uncertain(&id, why).unwrap_or_else(std::convert::identity),
     )
 }
@@ -547,7 +542,6 @@ fn observe_receipt(
     booted: &crate::guest::Booted,
     receipt: &mut Receipt<'_>,
     path: &std::path::Path,
-    budget: crate::guest::managed::Budget,
     uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
     use hex_api::{Ask, BoxId, BoxSpec, ClassSpec, Exit, Stdio};
@@ -578,9 +572,8 @@ fn observe_receipt(
     }
     let id = BoxId::try_new(&name)?;
     let requested = id.try_clone()?;
-    // A GPU create's observer follows its guest, as its budget does (the review's C-9, (c2)): its program is told no
-    // deadline.
-    let program = driver::program(configured, count, budget.remaining()?)?;
+    // A GPU create's observer follows its guest (the review's C-9, (c2)): its program is told no deadline.
+    let program = driver::program(configured, count)?;
     let bounds = configured.bounds();
     let spec = BoxSpec {
         id: requested,
@@ -654,7 +647,6 @@ fn observe_receipt(
     // The failed-stage marker and exact ordinary guest ID derivation survive an
     // interrupted launch. Recovery never retries or upgrades that attempt.
     receipt.write(path)?;
-    budget.remaining()?;
     let stdio = Stdio {
         ask: Ask {
             stdin: false,
@@ -663,17 +655,14 @@ fn observe_receipt(
         },
         ..Stdio::null()
     };
-    // Within its budget where it has one, else following its guest (the review's C-9).
-    let launched = match budget.deadline() {
-        Some(at) => booted.client.run_before(spec, program, stdio, at),
-        None => hex_api::Runtime::run(&booted.client, spec, program, stdio),
-    };
+    // Following its guest, with no deadline (the review's C-9).
+    let launched = hex_api::Runtime::run(&booted.client, spec, program, stdio);
     let mut process = match launched {
         Ok(process) => process,
         Err(why) => {
             // A refused/timed-out launch may have reached the guest. Its exact
             // known guest ID is the cleanup authority; no PID lookup/retry.
-            return failed(why, booted, receipt, path, &id, budget, uncertain);
+            return failed(why, booted, receipt, path, &id, uncertain);
         }
     };
     let result = (|| {
@@ -689,12 +678,13 @@ fn observe_receipt(
         let attempt = receipt.attempt_mut().ok_or_else(|| {
             uncertain("its receipt lost its boot attempt while its output drained")
         })?;
-        streams.drain(&mut attempt.stdout, &mut attempt.stderr, budget)?;
+        streams.drain(&mut attempt.stdout, &mut attempt.stderr)?;
         attempt.phase = AttemptPhase::Waiting;
         receipt.write(path)?;
+        // Followed to its end, with no bound (the review's C-9).
         let exit = process
-            .wait_for(budget.remaining()?.unwrap_or(std::time::Duration::MAX))?
-            .ok_or_else(|| uncertain("its GPU observer didn't end within its boot's budget"))?;
+            .wait_for(std::time::Duration::MAX)?
+            .ok_or_else(|| uncertain("its GPU observer's wait came back with no end"))?;
         facts_mut(receipt, uncertain)?.exited(exit)?;
         receipt.write(path)?;
         if exit != Exit::Code(0) {
@@ -703,19 +693,16 @@ fn observe_receipt(
             })?;
             return Err(exited(attempt.stderr.bytes()?));
         }
-        budget.remaining()?;
         receipt
             .attempt_mut()
             .ok_or_else(|| uncertain("its receipt lost its boot attempt before its cleanup"))?
             .phase = AttemptPhase::Deleting;
         receipt.write(path)?;
-        cleanup(booted, receipt, path, &id, budget, uncertain)?;
-        budget.remaining()?;
+        cleanup(booted, receipt, path, &id, uncertain)?;
         let attempt = receipt
             .attempt()
             .ok_or_else(|| uncertain("its receipt lost its boot attempt as its report was read"))?;
         let report = Report::parse(attempt.stdout.bytes()?, count, configured.queues())?;
-        budget.remaining()?;
         receipt.set_readiness(Evidence {
             scope,
             configuration: configured.identity(),
@@ -733,7 +720,7 @@ fn observe_receipt(
     if let Err(why) = result {
         // No extra deadline/reaper: an expired delete retains the canonical
         // Pool grant/attempt. Closing asked sockets cannot prove row/scope gone.
-        return failed(why, booted, receipt, path, &id, budget, uncertain);
+        return failed(why, booted, receipt, path, &id, uncertain);
     }
     Ok(())
 }
@@ -753,15 +740,11 @@ fn cleanup(
     receipt: &mut Receipt<'_>,
     path: &std::path::Path,
     id: &hex_api::BoxId,
-    budget: crate::guest::managed::Budget,
     uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
     facts_mut(receipt, uncertain)?.cleaning();
     receipt.write(path)?;
-    let outcome = match budget.deadline() {
-        Some(at) => booted.client.delete_before(id, at),
-        None => hex_api::Runtime::delete(&booted.client, id),
-    };
+    let outcome = hex_api::Runtime::delete(&booted.client, id);
     let captured = match &outcome {
         Ok(()) => {
             facts_mut(receipt, uncertain)?.deleted(false);
@@ -789,7 +772,6 @@ fn failed(
     receipt: &mut Receipt<'_>,
     path: &std::path::Path,
     id: &hex_api::BoxId,
-    budget: crate::guest::managed::Budget,
     uncertain: &dyn Fn(&str) -> Refusal,
 ) -> Result<(), Refusal> {
     let phase = receipt
@@ -803,7 +785,7 @@ fn failed(
         .failed(phase, &why)
         .and_then(|()| receipt.write(path));
     let cleanup = if facts_mut(receipt, uncertain)?.needs_cleanup() {
-        cleanup(booted, receipt, path, id, budget, uncertain)
+        cleanup(booted, receipt, path, id, uncertain)
     } else {
         Ok(())
     };

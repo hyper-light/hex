@@ -1066,8 +1066,6 @@ impl GuestRuntime {
         if self.shared_key()? != Some(key) {
             return Err(refused(key, LifecycleCause::Pending));
         }
-        // A shared backing carries no devices: its boot follows its guest (the review's C-9).
-        let budget = managed::Budget::following();
         let books = self
             .books
             .get()
@@ -1087,7 +1085,7 @@ impl GuestRuntime {
                     self.pool_alive(&booted, key)?;
                     booted
                 }
-                None => self.boot_pool(transaction, record, budget)?,
+                None => self.boot_pool(transaction, record)?,
             };
             let mut record = transaction
                 .read_pool(&key)?
@@ -1129,7 +1127,6 @@ impl GuestRuntime {
         &self,
         transaction: &dyn Transaction,
         record: PoolRecord,
-        budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
         let path = self.pool_path()?;
         let key = record.key;
@@ -1177,7 +1174,7 @@ impl GuestRuntime {
                         "its running shared controller's vsock isn't its socket",
                     ));
                 }
-                managed::attach(transaction, plan, identity, budget)?
+                managed::attach(transaction, plan, identity)?
             }
             Phase::Intent => {
                 // An existing Intent is an interrupted attempt, not permission
@@ -1188,9 +1185,8 @@ impl GuestRuntime {
                         "an interrupted shared boot of it left its intent",
                     ));
                 }
-                budget.remaining()?;
                 pool::write(path, &receipt)?;
-                managed::boot(transaction, plan, budget)?
+                managed::boot(transaction, plan)?
             }
             Phase::Stopping(_) | Phase::Released { .. } => {
                 return Err(uncertain(
@@ -1218,7 +1214,7 @@ impl GuestRuntime {
         receipt.checked_report()?;
         receipt.phase = Phase::Running(identity);
         pool::write(path, &receipt)?;
-        let booted = self.connect_managed(guest, None, Some(binding), budget)?;
+        let booted = self.connect_managed(guest, None, Some(binding))?;
         let guest_capacity = booted
             .client
             .capacity(Class::Oci)?
@@ -1237,7 +1233,6 @@ impl GuestRuntime {
         if !guest_capacity.total.holds(room) {
             return Err(uncertain(key, "its guest's capacity doesn't hold its room"));
         }
-        budget.remaining()?;
         Ok(booted)
     }
 

@@ -253,9 +253,6 @@ impl GuestRuntime {
 
     pub(super) fn create_recorded(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         self.check_allocation(&spec)?;
-        // Every create follows its guest, one with devices too: Shards takes its GPU report with no clock (the review's
-        // C-9, (c2)).
-        let budget = managed::Budget::following();
         let books = self.books.get().ok_or_else(|| {
             Refusal::Broken("a dedicated guest needs the native record authority".into())
         })?;
@@ -317,7 +314,6 @@ impl GuestRuntime {
                             "this node has no GPU catalog for its devices",
                         )?)?
                         .prepare(&spec, &records, &pools)?;
-                    budget.remaining()?;
                     transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
                     transaction
                         .read(&id)?
@@ -343,7 +339,6 @@ impl GuestRuntime {
         } else {
             (spec, None)
         };
-        budget.remaining()?;
         let complete = |transaction: &dyn devices::Transaction| {
             if expected_scope.is_some() {
                 let source = source
@@ -392,13 +387,12 @@ impl GuestRuntime {
                 }
                 // Original workload/charge/route remains canonical. The inner
                 // OCI rewrite cannot mint or replace this receipt.
-                budget.remaining()?;
                 transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
             }
             let record = transaction
                 .read(&id)?
                 .ok_or(uncertain(&id, "its record is gone right after its put")?)?;
-            let info = self.create_selected(record.spec, transaction, budget)?;
+            let info = self.create_selected(record.spec, transaction)?;
             let mut record = transaction.read(&id)?.ok_or(uncertain(
                 &id,
                 "its record is gone after its selected create",

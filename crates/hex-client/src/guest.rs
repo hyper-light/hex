@@ -180,6 +180,18 @@ pub trait Link: Send + Sync + 'static {
         let _ = (named, deadline);
         None
     }
+    /// A connection to port `port` for an exec's stream, handed to its caller whole (the review's D-5): its own
+    /// socket, moved, never a duplicate open beside it, which on Windows passes to a process another thread starts
+    /// until its inheritance is cleared. None where this link's connections are facades of its own: their caller's
+    /// end is a duplicate ([`caller_end`]), close-on-exec at once on Unix.
+    fn dial_handoff_before(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Option<Result<Handoff, Refusal>> {
+        let _ = (port, deadline);
+        None
+    }
     /// The seal its control connection's messages that carry a secret go under (`hex_core::wire::seal`; a node over
     /// QUIC, docs/design/hex-quic.md Q13), asked once that connection is dialed: none where the link seals nothing, its
     /// secrets crossing as the node's socket carries them, each copy wiped (docs/design/credential-grants.md C7).
@@ -194,6 +206,42 @@ pub trait Link: Send + Sync + 'static {
 pub struct Piped {
     pub end: hex_api::End,
     pub cut: Option<Cut>,
+}
+
+/// A connection a link hands to an exec's caller whole ([`Link::dial_handoff_before`]; the review's D-5): its own socket,
+/// moved to the caller once it is named, never a duplicate.
+pub enum Handoff {
+    /// A Shards connection ([`shards::ShardsStream::into_end`]).
+    Shards(shards::ShardsStream),
+    /// The owner's end of a bridged connection ([`bridge::Bridged::into_socket`]), its cut told to its program's end.
+    Bridged(bridge::Bridged),
+}
+
+impl Handoff {
+    /// The connection, named and half-closed through it before it is handed over.
+    fn conn(&mut self) -> &mut dyn Duplex {
+        match self {
+            Self::Shards(stream) => stream,
+            Self::Bridged(bridged) => bridged,
+        }
+    }
+
+    /// Its socket, its caller's from here, left waiting as a caller's file does (HEX-RT-17).
+    fn into_end(self) -> Result<hex_api::End, Refusal> {
+        match self {
+            Self::Shards(stream) => stream.into_end(),
+            Self::Bridged(bridged) => {
+                let local = bridged
+                    .into_socket()
+                    .map_err(os("handing a bridged stdio connection to its caller"))?;
+                #[cfg(unix)]
+                let socket = std::os::fd::OwnedFd::from(local);
+                #[cfg(windows)]
+                let socket = std::os::windows::io::OwnedSocket::from(local);
+                waiting_end(socket)
+            }
+        }
+    }
 }
 
 /// The same fallibly allocated link retained by every stream on a connection.
@@ -535,23 +583,33 @@ impl<W: Waits> Stream<W> {
         let mut conn = self
             .link
             .dial_before(stream::STDIO_PORT, deadline.map(ReplyDeadline::at))?;
+        self.name(&mut *conn, named, deadline)?;
+        Ok(conn)
+    }
+
+    /// Names stdio connection `conn` for its exec, within `deadline` where the call has one. An output stream carries
+    /// nothing this way once named: where the link carries a half-close, its own half ends, so its peer's End closes
+    /// the connection whole, which no reader sleeps through (Shards M236), and the peer's side ends both halves with
+    /// nothing left open to reset (AC-T7.4.1; joint plan step 4, ROOT's decision of 2026-11-12).
+    fn name(
+        &self,
+        conn: &mut dyn Duplex,
+        named: Named,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<(), Refusal> {
         match deadline {
-            Some(deadline) => name_before(&mut *conn, named, deadline)?,
+            Some(deadline) => name_before(conn, named, deadline)?,
             None => conn
                 .write_all(&stream::name(named))
                 .map_err(os("naming a stdio connection"))?,
         }
-        // An output stream carries nothing this way once named: where the link carries a half-close, its own half
-        // ends, so its peer's End closes the connection whole, which no reader sleeps through (Shards M236), and the
-        // peer's side ends both halves with nothing left open to reset (AC-T7.4.1; joint plan step 4, ROOT's decision
-        // of 2026-11-12).
         if self.link.carries_half_close()
             && matches!(named.stream, stream::Stdio::Out | stream::Stdio::Err)
         {
             conn.shutdown(Shutdown::Write)
                 .map_err(os("ending an output stream's own half"))?;
         }
-        Ok(conn)
+        Ok(())
     }
 }
 
@@ -602,6 +660,21 @@ impl<W: Waits> Stream<W> {
                 }
                 return Ok(Some(end));
             }
+            // A connection the link hands over whole goes to its caller as its own socket (the review's D-5).
+            if let Some(deadline) = deadline {
+                deadline.remaining("dialing a stdio connection")?;
+            }
+            if let Some(handoff) = self
+                .link
+                .dial_handoff_before(stream::STDIO_PORT, deadline.map(ReplyDeadline::at))
+            {
+                let mut handoff = handoff?;
+                self.name(handoff.conn(), named, deadline)?;
+                if let (Some(name), Some(cut)) = (output(stream), handoff.conn().cut()) {
+                    self.watch(exec.id, name, cut)?;
+                }
+                return handoff.into_end().map(Some);
+            }
             let conn = self.dial_named_before(named, deadline)?;
             if let (Some(name), Some(cut)) = (output(stream), conn.cut()) {
                 self.watch(exec.id, name, cut)?;
@@ -650,33 +723,45 @@ fn output(stream: stream::Stdio) -> Option<&'static str> {
     }
 }
 
-/// The caller's own end of a guest stdio connection: its descriptor, duplicated; this side's closes as the
-/// connection drops. HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw
-/// descriptor outlives this handoff, so its caller's OwnedStream must block itself; the control connection
-/// stays evented.
+/// The caller's own end of a guest stdio connection whose link hands none over whole ([`Link::dial_handoff_before`]):
+/// its descriptor, duplicated; this side's closes as the connection drops. On Unix the duplicate is close-on-exec as it
+/// is made. On Windows a duplicate socket comes back inheritable until it is cleared (the review's D-5): a test's TCP
+/// stand-in comes here alone, every Windows link of production handing its connections over (Shards', a node's over
+/// QUIC) or carrying them on pipes of its own ([`Link::dial_piped`]).
 #[cfg(any(unix, windows))]
 fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
     let end = conn
         .handle()
         .try_clone_to_owned()
         .map_err(os("handing a stdio connection to its caller"))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsSocket;
+        hex_afunix::no_inherit(end.as_socket())
+            .map_err(os("keeping a caller's stdio connection from its children"))?;
+    }
+    waiting_end(end)
+}
+
+/// A stdio connection's socket as its caller's end (HEX-RT-17): Shards waits around a non-blocking socket in its Stream
+/// wrapper, and only the raw socket outlives the handoff, so it is left waiting, as its caller's OwnedStream needs; the
+/// control connection stays evented.
+#[cfg(any(unix, windows))]
+fn waiting_end(socket: shards_api::OwnedSocket) -> Result<hex_api::End, Refusal> {
     #[cfg(unix)]
     {
-        let flags = rustix::fs::fcntl_getfl(&end)
+        let flags = rustix::fs::fcntl_getfl(&socket)
             .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
-        rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+        rustix::fs::fcntl_setfl(&socket, flags & !rustix::fs::OFlags::NONBLOCK)
             .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
-        Ok(end)
+        Ok(socket)
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsSocket;
-        // Winsock's duplicate is inheritable: the caller's end passes to no process it starts.
-        hex_afunix::no_inherit(end.as_socket())
-            .map_err(os("keeping a caller's stdio connection from its children"))?;
-        hex_afunix::set_nonblocking(end.as_socket(), false)
+        hex_afunix::set_nonblocking(socket.as_socket(), false)
             .map_err(os("making a caller's stdio connection wait"))?;
-        Ok(end.into())
+        Ok(socket.into())
     }
 }
 
@@ -719,19 +804,23 @@ pub(crate) fn open_offered(
                 )
                 .map_err(|why| shards::refusal(OP, &why))?;
                 deadline.remaining(OP)?;
-                let mut conn = shards::ShardsStream(conn);
+                let mut conn = shards::ShardsStream::new(conn)?;
                 name_before(&mut conn, named, deadline)?;
                 conn
             }
             None => {
-                let mut conn =
-                    shards::ShardsStream(connect_following(&identity, offer.setup, &OFFERED)?);
+                let mut conn = shards::ShardsStream::new(connect_following(
+                    &identity,
+                    offer.setup,
+                    &OFFERED,
+                )?)?;
                 conn.write_all(&stream::name(named))
                     .map_err(os("naming a stdio connection"))?;
                 conn
             }
         };
-        caller_end(&conn).map(Some)
+        // Its own socket, moved to the caller, never a duplicate (the review's D-5).
+        conn.into_end().map(Some)
     };
     Ok(hex_api::Given {
         stdin: open(offer.streams.stdin, stream::Stdio::In)?,
