@@ -2197,6 +2197,27 @@ impl Runtime for Node {
         })
     }
 
+    /// A VM box's backend signals its member (goal 2's item 2); any other box has none, refused as the trait refuses it.
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.signal_member(id, member, signal);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members a signal reaches"
+            ),
+        })
+    }
+
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         if let Some(backend) = self.backend_record(id)? {
             return backend.room(id, room);

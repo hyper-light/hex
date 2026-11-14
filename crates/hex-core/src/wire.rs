@@ -187,6 +187,7 @@ mod kind {
     pub const CAPTURE_ASK: u16 = 0x8015;
     pub const REFRESH_ASK: u16 = 0x8016;
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
+    pub const MEMBER_SIGNAL: u16 = 0x001e;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -312,6 +313,13 @@ pub enum Call {
     /// (docs/design/credential-grants.md C7): the node asks it over this connection ([`Answer::LessorAsk`],
     /// [`Answer::LeaseAsk`]). Answered [`Answer::Done`], or refused by type where the node leases through no connection.
     Lessors,
+    /// `signal` to member `member` of running Shards image box `id` alone (`Runtime::signal_member`; goal 2's item 2),
+    /// on its own lane of its run's agent-control endpoint: answered [`Answer::Done`], or refused by type. Appended.
+    MemberSignal {
+        id: BoxId,
+        member: Member,
+        signal: Signal,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1312,6 +1320,14 @@ fn parse_request(
         kind::NETNS => Request::Call(Call::Netns),
         kind::LINKS => Request::Call(Call::Links),
         kind::LESSORS => Request::Call(Call::Lessors),
+        kind::MEMBER_SIGNAL => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let signal = r.u8().map_err(bad)?;
+            let signal = Signal::new(i64::from(signal))
+                .map_err(|e| bad(Fault::value("signal", e.to_string())))?;
+            Request::Call(Call::MemberSignal { id, member, signal })
+        }
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1722,6 +1738,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::LEASED => "a leased",
         kind::CAPTURED => "a captured",
         kind::REFRESHED => "a refreshed",
+        kind::MEMBER_SIGNAL => "a member's signal",
         _ => "a request",
     }
 }
@@ -1822,6 +1839,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Lessors => {
             w.header(kind::LESSORS, id);
+            Ok(())
+        }
+        Call::MemberSignal {
+            id: b,
+            member,
+            signal,
+        } => {
+            w.header(kind::MEMBER_SIGNAL, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            let n = u8::try_from(signal.number())
+                .map_err(|_| Fault::value("signal", format!("{} isn't a byte", signal.number())))?;
+            w.u8(n);
             Ok(())
         }
         Call::Kill { exec } => {

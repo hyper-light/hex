@@ -778,6 +778,13 @@ enum Job<O: Os> {
     /// A program here whose watch reported its end before its runtime could tell it: a run's, whose box its node
     /// is removing (decision 7). Its end is waited for on a worker, so the I/O thread waits on no removal.
     Collect(Box<Watched<O>>),
+    /// A remote member's own kill (goal 2's item 2; [`MemberEnd`]): KILL to member `member` of box `id` alone, its
+    /// host's `signal_member`, whose lane's answer it waits for on a worker, as every call does; `done` hears it.
+    MemberKill {
+        id: BoxId,
+        member: hex_api::Member,
+        done: Killed,
+    },
 }
 
 /// What a call that starts a program starts: a program in a box there is (an exec), or a `process` box made for
@@ -802,6 +809,9 @@ impl Launch {
 struct MemberEnd<O: Os> {
     shared: std::sync::Weak<Shared<O>>,
     token: u64,
+    /// Its box and itself, which its own kill names (goal 2's item 2).
+    id: BoxId,
+    member: hex_api::Member,
     /// Its caller let it go: its end goes to no one. Taken for its end's telling and for its release alike, so a
     /// release either comes first, and nothing is told, or after, and clears what was told before its start was
     /// registered ([`Table::early`]).
@@ -823,13 +833,38 @@ impl<O: Os> MemberEnd<O> {
     }
 }
 
+/// Tells a kill's `done` whether it went, where no one has yet.
+fn killed(done: &Mutex<Option<Killed>>, sent: Result<(), Refusal>) {
+    if let Some(done) = done.lock().ok().and_then(|mut done| done.take()) {
+        done(sent);
+    }
+}
+
 impl<O: Os> Remote for MemberEnd<O> {
-    /// A member's own kill awaits Shards' agent-control endpoint (joint plan step 11), as the `Proc`
-    /// `Runtime::member` gives refuses it in process: refused by type, its box's KILL or delete ending it with its VM.
+    /// KILL to the member alone, on its own lane of its run's agent-control endpoint (goal 2's item 2), as the `Proc`
+    /// `Runtime::member` gives kills it in process: its host's `signal_member`, run on a worker as every call is
+    /// ([`Job::MemberKill`]), which tells `done` the lane's answer; or here, refused, where the queue takes no job.
     fn kill(&self, done: Killed) {
-        done(Err(Refusal::Awaits {
-            needs: hex_api::Upstream::MemberSignal,
-        }));
+        let Some(shared) = self.shared.upgrade() else {
+            return done(Err(Refusal::Broken(
+                "the node serving the member has ended".to_owned(),
+            )));
+        };
+        let id = match self.id.try_clone() {
+            Ok(id) => id,
+            Err(why) => return done(Err(why)),
+        };
+        // A queue that refuses the job (its lock poisoned) drops it, and the worker's telling with it.
+        let done = Arc::new(Mutex::new(Some(done)));
+        let telling = Arc::clone(&done);
+        let queued = shared.enqueue(Job::MemberKill {
+            id,
+            member: self.member.clone(),
+            done: Box::new(move |sent| killed(&telling, sent)),
+        });
+        if let Err(why) = queued {
+            killed(&done, Err(why));
+        }
     }
 
     /// No one waits for its end any longer: it runs on, its end told no one, and an end told before its start was
@@ -2071,6 +2106,10 @@ impl<O: Os> Shared<O> {
                         }) => self.list(&conn, header, &infos),
                         // No worker to wait in: its end isn't known, and is sent so, or counted in its box as
                         // `finish` counts one.
+                        Some(Job::MemberKill { done, .. }) => {
+                            done(Err(Refusal::os("starting a worker for a member's kill", e)));
+                            Ok(())
+                        }
                         Some(Job::Collect(w)) => {
                             let open = w.conn.out.lock().is_ok_and(|out| out.open);
                             if open && !w.killed {
@@ -2134,6 +2173,18 @@ impl<O: Os> Shared<O> {
                     infos,
                 } => {
                     let _ = self.list(&conn, header, &infos);
+                }
+                // A member that no longer runs has nothing to end, as in process (the image class's `MemberProc`):
+                // its end is told as it comes. The worker follows the member's lane as long as its answer takes, as
+                // the image class's `Steering::signal` waits: decision 9's follow, untold until Shards' lane asks take
+                // a patience (Hex's ask of Shards, through ROOT, 2026-11-14).
+                Job::MemberKill { id, member, done } => {
+                    done(
+                        match self.host.signal_member(&id, &member, hex_api::Signal::KILL) {
+                            Err(Refusal::NotRunning(..)) => Ok(()),
+                            sent => sent,
+                        },
+                    );
                 }
                 Job::Collect(mut w) => {
                     let exit = match &mut w.run {
@@ -2341,6 +2392,9 @@ impl<O: Os> Shared<O> {
             Call::Create(spec) => self.create(conn, *spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),
+            Call::MemberSignal { id, member, signal } => host
+                .signal_member(&id, &member, signal)
+                .map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => {
@@ -2686,6 +2740,8 @@ impl<O: Os> Shared<O> {
         let end = Arc::new(MemberEnd {
             shared: Arc::downgrade(self),
             token,
+            id: id.try_clone()?,
+            member: member.clone(),
             released: Mutex::new(false),
         });
         let telling = Arc::clone(&end);
