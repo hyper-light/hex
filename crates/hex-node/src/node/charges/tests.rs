@@ -1268,3 +1268,25 @@ fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
     let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| box_of(id)).collect();
     assert_eq!(unread, ["vm-2"]);
 }
+
+/// Joint plan step 39, place 1 (ROOT, 2026-11-13), as the macOS and Windows learner carries them: the last-resort ends
+/// its node's start reads back from node VM rows join the learner's ends. Do carry why the last resort ended node VM 4
+/// into a learner that has run no window, then answer the Shards class. Expect that end among the class's ends.
+#[test]
+fn w39_a_carried_node_vm_end_is_among_the_learners_ends() {
+    let run = hex_api::NodeRun::from_bytes([4; 16]);
+    let end = LearnedEnd {
+        id: hex_api::LearnedHolder::Node(run),
+        held: 3 * GIB,
+        budget: 2 * GIB,
+        band: 0,
+        fleet_held: 9 * GIB,
+        fleet_growth: GIB,
+        fleet_budget: 8 * GIB,
+        unmoved: Some(Upstream::LiveMove),
+    };
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner.carry_ended(vec![end.clone()]).unwrap();
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(learned.ended, [end]);
+}
