@@ -75,10 +75,14 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 // const is evaluated again in each crate that uses it, beyond this allow's reach (at be251865 hex-client's and
 // hex-runtime's builds tripped the lint on jupiter so).
 #[allow(long_running_const_eval)]
+// Its sources are every file that defines a type the wire writes or reads (the review's D-11, 2026-11-14: each name in
+// this module's `use` lists, found where it's defined): netns.rs's reason bound and counts, and hex-api's leases and
+// sign-ins, among them.
 pub static IDENTITY: u64 = identity(&[
     include_bytes!("wire.rs"),
     include_bytes!("stream.rs"),
     include_bytes!("schedule.rs"),
+    include_bytes!("netns.rs"),
     include_bytes!("../../hex-sim/src/peer.rs"),
     include_bytes!("../../hex-sim/src/model.rs"),
     include_bytes!("../../hex-api/src/spec.rs"),
@@ -88,6 +92,7 @@ pub static IDENTITY: u64 = identity(&[
     include_bytes!("../../hex-api/src/runtime.rs"),
     include_bytes!("../../hex-api/src/grants.rs"),
     include_bytes!("../../hex-api/src/credentials.rs"),
+    include_bytes!("../../hex-api/src/lease.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
