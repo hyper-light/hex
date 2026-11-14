@@ -195,6 +195,21 @@ pub(crate) fn node_band<'r>(
     band
 }
 
+/// What the node VMs among `rows` that boot (Booting, their runs not ended) book (ROOT, 2026-11-13): each its receipt's
+/// booking, as the scheduler books it from its row's first write, off the fleet's budget until it is Ready and learned,
+/// so no room or rate hands out what its boot is using.
+pub(crate) fn booting(rows: &[NodeVmRecord]) -> Result<CapacityResources, Refusal> {
+    rows.iter()
+        .filter(|row| row.phase == hex_api::NodeVmPhase::Booting && row.exit.is_none())
+        .try_fold(CapacityResources::default(), |sum, row| {
+            sum.checked_add(row.allocation.booking())
+        })
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a node's booting node VMs' bookings",
+            why: "they overflow".into(),
+        })
+}
+
 /// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
 pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, Refusal> {
     let mut holders = Vec::new();

@@ -22,6 +22,7 @@
 //! whose lock it can take, is let go with its lock file and its diagnostics; one whose owner still runs stays, its
 //! receipt booked, and a thread follows that owner to its end, then lets it go.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -328,6 +329,9 @@ impl Store {
             return Err(allocation(TURNS));
         }
         let mut owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
+        if record.phase == NodeVmPhase::Ready {
+            self.one_ready(&owners, &record.run)?;
+        }
         let (last_resort, started) = match self.node_vm(&record.run)? {
             Some(row) => (row.last_resort, row.started),
             None => (None, Some(self.next_start()?)),
@@ -365,6 +369,23 @@ impl Store {
         }
         if record.phase == NodeVmPhase::Ended {
             owners.remove(&record.run);
+        }
+        Ok(())
+    }
+
+    /// Refused where a run this process holds other than `run` is Ready (ROOT, 2026-11-13): one node VM serves a node's
+    /// oci class, its one guest (`GuestRuntime` holds one booted guest; shards-guest.md §1), so a node holds one Ready at
+    /// a time, and a second is a damaged row. Rows another process holds aren't this node's guests.
+    fn one_ready(&self, owners: &BTreeMap<NodeRun, File>, run: &NodeRun) -> Result<(), Refusal> {
+        for other in owners.keys().filter(|other| *other != run) {
+            if self
+                .node_vm(other)?
+                .is_some_and(|row| row.phase == NodeVmPhase::Ready)
+            {
+                return Err(damaged(
+                    "a second node VM Ready in one node: one guest serves its oci class",
+                ));
+            }
         }
         Ok(())
     }

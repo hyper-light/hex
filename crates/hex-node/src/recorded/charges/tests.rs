@@ -1227,6 +1227,8 @@ struct Imaging {
     node_reads: std::sync::atomic::AtomicUsize,
     node_rates: std::sync::Mutex<Vec<(hex_api::NodeRun, u64)>>,
     node_rooms: std::sync::Mutex<Vec<(hex_api::NodeRun, i64)>>,
+    /// Each rate an image box's run was held to, in order.
+    box_rates: std::sync::Mutex<Vec<(String, u64)>>,
 }
 
 #[derive(Clone, Default)]
@@ -1278,9 +1280,13 @@ impl hex_api::Runtime for Images {
     }
     fn rate(
         &self,
-        _: &BoxId,
+        id: &BoxId,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.0.box_rates.lock().unwrap().push((
+            id.as_str().to_owned(),
+            rate.map_or(0, std::num::NonZeroU64::get),
+        ));
         Ok(rate)
     }
     fn host_use(&self, _: &BoxId) -> Result<HostUse, Refusal> {
@@ -2212,4 +2218,61 @@ fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
         .map(|(run, _)| *run)
         .collect();
     assert_eq!(told, [node_run(7)]);
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a node VM's boot is charged): a node VM's receipt comes off the fleet's budget
+/// from its row's first write, as the scheduler books it, so no room or rate hands out what its boot is using. Do keep,
+/// on a node whose platform holds no window, a process box capped at all but 8 CPUs of the machine, a Shards image VM
+/// of 16 vCPUs booked at 2 CPUs whose run says 70 ms, and a node VM's row Booting, its 16-CPU receipt booked at 4 CPUs;
+/// then run a window. Expect the image VM, the one VM learned, capped at the 4 CPUs the booting node VM's booking leaves
+/// of the 8.
+#[test]
+fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let left = 8_000;
+    let capped = BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new("proc-1").unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(u32::try_from(machine.cpu_milli.saturating_sub(left)).unwrap()),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+            band: 0,
+        },
+        Phase::Ready,
+        Vec::new(),
+    );
+    store.put(&capped).unwrap();
+    let mut image = image_vm("img-1", 1);
+    image.spec.allocation = image
+        .spec
+        .allocation
+        .map(|allocation| allocation.booked_at(res(2_000, 2 * GIB)));
+    store.put(&image).unwrap();
+    let booking = res(4_000, 4 * GIB);
+    let mut booting = node_row(8, hex_api::NodeVmPhase::Booting);
+    booting.allocation = booting.allocation.booked_at(booking);
+    store.put_node_vm(&booting).unwrap();
+    node.start_charges().unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), left - booking.cpu_milli)]
+    );
 }

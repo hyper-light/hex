@@ -2538,6 +2538,20 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 return learner.next_window();
             }
         };
+        // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
+        if let Err(why) = charges::booting(&rows).and_then(|booking| {
+            sorted.whole = sorted
+                .whole
+                .checked_add(booking)
+                .ok_or_else(|| Refusal::Invalid {
+                    what: "a node's boxes' bookings",
+                    why: "they overflow".into(),
+                })?;
+            Ok(())
+        }) {
+            learner.failed(why);
+            return learner.next_window();
+        }
         // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
         let nodes = charges::nodes(&rows, band).and_then(|nodes| {
             sorted
