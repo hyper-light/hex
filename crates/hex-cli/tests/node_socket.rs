@@ -731,6 +731,10 @@ fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache:
 struct GuestPorts(PathBuf);
 
 impl hex_client::guest::Link for GuestPorts {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let name = match port {
             stream::CONTROL_PORT => "control.sock",

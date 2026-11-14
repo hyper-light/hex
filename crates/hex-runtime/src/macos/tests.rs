@@ -92,6 +92,11 @@ impl Privileged for Sim {
         Ok(self.inner.lock().expect("sim lock").members.clone())
     }
 
+    /// The stand-in's user is empty once its KILL has cleared its members.
+    fn empties_within(&self, _uid: u32, _slice: Duration) -> Result<bool, Refusal> {
+        Ok(self.inner.lock().expect("sim lock").members.is_empty())
+    }
+
     fn kill(&self, _uid: u32, signal: i32) -> io::Result<usize> {
         let mut s = self.inner.lock().expect("sim lock");
         let n = s.members.len();
@@ -355,6 +360,11 @@ impl Privileged for Shells {
 
     fn kill(&self, _uid: u32, _signal: i32) -> io::Result<usize> {
         Ok(0)
+    }
+
+    /// The stand-in's programs aren't its user's (they run as this test's), so its user holds none: as its listing.
+    fn empties_within(&self, _uid: u32, _slice: Duration) -> Result<bool, Refusal> {
+        Ok(true)
     }
 }
 
@@ -1332,8 +1342,9 @@ fn e11_a_rootless_delete_of_a_run_being_made_waits_for_its_making() {
     );
 }
 
-/// E-11 in the box-user mode (step 2), through a daemon on a real socket: its helper keeps no end of a program whose
-/// box it has dropped, so the run's end, read after the delete, is Unknown (`proc::UserProc`).
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket: the helper keeps a dropped box's programs
+/// until their own ends come, never an end made up at a time (the review's E-12), so the run's end, read after the
+/// delete, is its KILL's, Signal(9), as in the rootless mode.
 #[test]
 fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1341,7 +1352,7 @@ fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
         &helped(dir.path()),
         "e11-making-helped",
         kill_by_pid,
-        Exit::Unknown,
+        Exit::Signal(9),
     );
 }
 

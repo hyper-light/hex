@@ -24,6 +24,8 @@ being GitHub's main (`025aae6d`):
 - Built (ROOT, 2026-11-13): each VM's cap held at its own actuator's least (a governor's, macOS's control's, a Windows
   job's unit), never one platform-wide number; a platform's cap's cycle counted in the learner's window only for the
   VMs that cap holds, each at its own share, and named on the capacity answers where it sets the window.
+- Built (the review's A-10, ROOT, 2026-11-14): the fleet's budget measured each window from what the machine has free
+  (C7), on every OS.
 - Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
   On Hex: 2c-4b, the node's call for its macOS helper's slowest response (`MacRuntime::cap_cycle` from it, the managed
   control's row requirement dropped), which a control's cycle needs only for a managed VM whose process takes no rate
@@ -332,7 +334,19 @@ machine checked at commit (f68 A), Sparrow's late binding (f69 A).
 **The choice.** A fleet is the Hex VMs on one machine, the group a budget holds as a Shards slice holds a group of
 microVMs (D183, D188). Its budget is the combined view's room for Hex on that machine (step 13): the machine's room
 less kiln's reservations and less what neither books. So it follows fleet scale (a laptop's is what the person's
-own work and kiln's runs leave; a dedicated machine's is the machine's) and hardware (the machine's facts). Each
+own work and kiln's runs leave; a dedicated machine's is the machine's) and hardware (the machine's facts).
+Each window measures it (the review's A-10; ROOT, 2026-11-14; `recorded::charges::measured`, `node::charges::measured`):
+every CPU of the machine less what the holders the learner doesn't learn book (native boxes at their caps, VMs booked
+whole, booting node VMs); and the memory and disk the machine reads free, read after the window's VMs and boxes so a
+growth between the reads shrinks it, with what its learned VMs hold, less what each of those holders may still grow
+into, its booking past what it takes. What a holder takes is missing from what is free already, so it is never
+counted twice: only its headroom comes off, and one past its booking takes the excess. On Linux the free figure is
+`MemAvailable`, which counts reclaimable file pages free already, so a VM gives back its `memory.current` less its
+`memory.stat` file pages, and a box takes its use less them; on macOS it is the free and speculative pages, and a VM's
+memory its footprint, clean file pages in neither. A use or file count that can't be read gives nothing back and takes
+a whole booking off; no disk use is read, so a booking's disk comes off whole. A box whose record can't be read takes
+its memory and disk out of what is free, its CPU counted at its machine. The budget is so never more than what is free
+and what the VMs hold. kiln's reservations come off it once the keeper tells the node them (A-10's second part). Each
 VM's budget (C5) is its share; D188 turns it into its guest's room, and everything the VM holds comes out of it,
 its D230 ring pins included (pinned guest RAM, so in what it holds). A Shards image VM's guest is told its room
 through its run (`Runtime::room`, D241's `ImageGuest::room`): its budget less what it holds, each window it moves,
@@ -348,9 +362,16 @@ measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `g
 from its guest agent's capacity answer, each dimension the most seen, only rising, kept per backing generation
 (`guest::shared::guest_seen`): its memory in use (its total less its free) past what its boxes hold; its disk in use,
 its boxes' disk no usage reads; and its CPU, its machine's CPU time past its boxes' over the uptime between two
-answers, read from `/proc/stat` and `/proc/uptime` (`hex_api::Capacity::own`, `hex_sim::facts::machine_time`). The
-first answer's CPU is read since the guest's boot, its boot's work among it, so it stands only until the first
-interval replaces it; then the most of the intervals, an interval over which its boxes changed giving none. A
+answers, read from `/proc/stat` and `/proc/uptime` (`hex_api::Capacity::own`, `hex_sim::facts::machine_time`), its
+boxes' CPU time the guest node's own count of everything under its box root (its cgroup's `usage_usec`, which keeps an
+ended box's time: cgroup v2 flushes a removed cgroup's counts into its parent's, seen on adacachy2's 7.3.3), so an
+interval spans its boxes' coming and going. An interval counts only once its counters resolve its share to the unit
+it is kept in, a milli-CPU (the review's A-8): `/proc/stat` is in USER_HZ ticks (100 a second on x86_64 and arm64, the
+kernel's user ABI), its five fields each floored, a CPU's time charged a scheduler tick at a time, and `/proc/uptime`
+in hundredths, so an interval's error is at most 5 ticks and 3 more for each CPU, and it resolves at a thousand times
+that (110 s for a 2-CPU guest); the reading it starts from is kept meanwhile, so answers close together no longer feed
+their noise into the most. The first answer's CPU is read since the guest's boot, its boot's work among it, so it
+stands only until the first resolved interval replaces it; then the most of the resolved intervals. A
 backing is cold only before it is Live: its runtime takes the first measurement before its record says Live and
 leaves it Granted without one (`GuestRuntime::initialize_pool`), so a placement never meets a cold guest. Its offer
 carries what was seen (`BackingOffer::guest`); a new box fits its envelope with it, a dimension not yet measured

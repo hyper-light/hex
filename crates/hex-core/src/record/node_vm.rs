@@ -48,17 +48,17 @@ fn damaged(why: &str) -> Refusal {
 }
 
 impl NodeVmRecord {
-    /// A record whole: this format's version, an image named, its receipt whole, an exit where and only where its run
-    /// ended, and a last-resort end of its own VM's alone. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
-    /// and units) and to booking no more than it charges: the node sized the VM, so no workload of a box's is kept
-    /// for it to be rederived from.
+    /// A record whole: this format's version, an image pinned by its digest ([`hex_api::check_pinned`]), its receipt
+    /// whole, an exit where and only where its run ended, and a last-resort end of its own VM's alone. Its receipt is
+    /// held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds and units) and to booking
+    /// no more than it charges: the node sized the VM, so no workload of a box's is kept for it to be rederived from.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.version != RECORD_VERSION {
             return Err(damaged("a format version this node doesn't read"));
         }
-        if self.image.is_empty() {
-            return Err(damaged("no image named"));
-        }
+        // Pinned by its digest, as its node read it (the review's C-17): a row naming a tag would boot whatever the
+        // tag names by the time its node boots it again.
+        hex_api::check_pinned("a node VM's record", &self.image)?;
         self.allocation.vm_size()?;
         if self
             .allocation

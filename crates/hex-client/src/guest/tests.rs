@@ -20,6 +20,10 @@ struct Loopback {
 }
 
 impl Link for Loopback {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = match port {
             stream::CONTROL_PORT => self.control,
@@ -56,6 +60,10 @@ fn link_owner_retains_one_instance_without_dial_effects() {
         drops: Arc<AtomicUsize>,
     }
     impl Link for Counted {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
             self.dials.fetch_add(1, Ordering::SeqCst);
             Err(Refusal::Broken("owned test dial".into()))
@@ -418,6 +426,10 @@ struct Recording {
 }
 
 impl Link for Recording {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
@@ -2097,6 +2109,10 @@ struct ConnectLink {
 }
 
 impl Link for ConnectLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         self.budget
     }
@@ -2809,6 +2825,10 @@ mod token_end {
     struct Paired(Mutex<Option<UnixStream>>);
 
     impl Link for Paired {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             assert_eq!(port, stream::CONTROL_PORT);
             own_duplex(self.0.lock().unwrap().take().expect("dialed once"))
@@ -3043,6 +3063,10 @@ mod cut_short {
     }
 
     impl Link for Cuttables {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             if port == stream::CONTROL_PORT {
                 return own_duplex(TcpStream::connect(self.control).unwrap());
