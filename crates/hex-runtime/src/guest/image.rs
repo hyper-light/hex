@@ -834,8 +834,8 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::GpuProbe(why) => {
             Refusal::Broken(format!("Shards refused {op} as a GPU report: {why}"))
         }
-        // The disk its box was admitted with is short of what Shards keeps of its run host's diagnostics to quote a
-        // run's end (the review's B-9): the box can't keep them.
+        // Shards refused even the tail it keeps of its run host's diagnostics to quote a run's end, the bound a box
+        // admitted with less disk keeps (the review's B-9): the box can't keep them.
         ImageRefusal::DiagnosticsBound { bound, tail } => Refusal::Invalid {
             what: "shards image",
             why: format!(
@@ -1686,9 +1686,10 @@ impl ImageBoot {
 /// Boots `spec` on a thread of its own, its answer its `party`'s slot's, the party going with the thread, or with its
 /// closure where no thread starts, so a follower sees the boot end with no answer: Shards waits for the run's start or
 /// its host's end alone (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps
-/// its diagnostics in `kept` from then on, after what it kept until then, the file held within `bound` bytes (the
-/// review's B-9); a run whose host can't is stopped, its host and every process it started followed to their end, and
-/// its boot is refused in those words.
+/// its diagnostics in `kept` from then on, after what it kept until then, the file held within `bound` bytes, or where
+/// that is short of the tail Shards keeps to quote a run's end (a VM whose root is in its RAM is admitted with no disk),
+/// within that tail, Shards' own bound, its longest report of a VM's end (the review's B-9); a run whose host can't is
+/// stopped, its host and every process it started followed to their end, and its boot is refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
@@ -1704,7 +1705,19 @@ fn boot_on_its_thread(
             let booted = images
                 .boot_stoppable(&spec, Duration::MAX, &stop)
                 .and_then(|guest| {
-                    match guest.keep_diagnostics(kept, bound) {
+                    let again = kept.try_clone();
+                    let held = match guest.keep_diagnostics(kept, bound) {
+                        // Shards keeps more of them to quote than the box's disk admits: the file holds that tail.
+                        Err(ImageRefusal::DiagnosticsBound { tail, .. }) => match again {
+                            Ok(kept) => guest.keep_diagnostics(kept, tail),
+                            Err(why) => Err(ImageRefusal::Os {
+                                what: "the run host's diagnostics",
+                                kind: why.kind(),
+                            }),
+                        },
+                        held => held,
+                    };
+                    match held {
                         Ok(()) => Ok(guest),
                         // Never left to its drop: the run is stopped, which answers once its host and every process
                         // it started are gone (D231's stop), and the boot refused in the keep's words.

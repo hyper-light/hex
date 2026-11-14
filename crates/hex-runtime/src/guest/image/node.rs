@@ -114,7 +114,8 @@ impl ImageClass {
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
             return Err(why);
         }
-        // Its diagnostics held within the disk its allocation was admitted with, as an image box's are (the review's B-9).
+        // Its diagnostics held within the disk its allocation was admitted with, or the tail Shards keeps to quote a run's
+        // end where that is less, as an image box's are (the review's B-9).
         let kept_within = vm.allocation.resources.disk_bytes;
         if let Err(why) = boot_on_its_thread(
             images,
