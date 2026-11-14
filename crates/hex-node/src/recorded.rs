@@ -332,6 +332,13 @@ pub trait Recover: Runtime {
         Err(no_node_vm(run, "stop"))
     }
 
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), as an image VM's
+    /// guest is told it. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        let _ = room;
+        Err(no_node_vm(run, "room"))
+    }
+
     /// Joint plan step 14 (D255): asks the governor of managed VM `record` to hold its vCPUs to `rate` milli-CPU, through
     /// the guest this owner boots it in (`GuestRuntime::managed_rate`). An owner that boots no managed guest has no
     /// governor to ask: its platform's cap is to hold the VM, told why.
