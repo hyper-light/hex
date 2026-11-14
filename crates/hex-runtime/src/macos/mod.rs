@@ -277,23 +277,19 @@ impl MacRuntime {
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
-    /// Joint plan step 14 (C1 on macOS; ROOT, 2026-11-13): the cycle this control holds a scope at `rate` milli-CPU
-    /// over, its run and then its hold ([`cpu::cycle`]), so a VM it holds there keeps its rate on average over one: the
-    /// charge learner's window takes it for each VM the control holds. None at the control's ceiling or past it, where
-    /// no scope is ever held. Refused where no measured control is configured.
-    pub fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
-        let (control, ceiling) = self
+    /// Joint plan step 14 (C1 on macOS; ROOT, 2026-11-13; 2c-4b): the cycle this control holds a scope at `rate`
+    /// milli-CPU over, its run and then its hold ([`cpu::cycle`]) at the stop response its managed helper learned from
+    /// its own holds, asked of it each time ([`cycle_of`]), so a VM it holds there keeps its rate on average over one:
+    /// the charge learner's window takes it for each VM the control holds. Never at the control's ceiling or past it;
+    /// cold, told, until its helper has measured a hold, or where none runs. Refused where no control is configured.
+    pub fn cap_cycle(&self, rate: u64) -> Result<crate::guest::CapCycle, Refusal> {
+        let (_, ceiling) = self
             .cpu_control
             .ok_or_else(|| managed::configuration("managed VM CPU control is not initialized"))?;
         if rate >= ceiling {
-            return Ok(None);
+            return Ok(crate::guest::CapCycle::Never);
         }
-        let (run, hold) = cpu::cycle(rate, ceiling, control.response).map_err(|_| {
-            managed::configuration("the CPU control has no cycle at the rate it is asked")
-        })?;
-        run.checked_add(hold)
-            .map(Some)
-            .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
+        cycle_of(rate, ceiling, managed::response(self)?)
     }
 
     /// Joint plan step 14 (C4 on macOS; ROOT, 2026-11-13): the least share a managed VM's CPU control holds it at, its
@@ -1055,6 +1051,27 @@ fn c_string(s: &str) -> Result<CString, Refusal> {
 fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
     rustix::fs::open("/dev/null", flags | OFlags::CLOEXEC, Mode::empty())
         .map_err(|e| Refusal::os("opening /dev/null", e))
+}
+
+/// Joint plan step 14 (C1 on macOS; 2c-4b): the managed control's cycle at `rate` milli-CPU below its `ceiling`, its run
+/// and its hold at the stop `response` its helper learned ([`cpu::cycle`]); cold, told, where it has learned none, as
+/// no response is guessed (decision 9's cold start).
+pub(crate) fn cycle_of(
+    rate: u64,
+    ceiling: u64,
+    response: Option<std::time::Duration>,
+) -> Result<crate::guest::CapCycle, Refusal> {
+    let Some(response) = response else {
+        return Ok(crate::guest::CapCycle::Cold(
+            "its control's cycle is unknown until its managed helper measures a stop".to_owned(),
+        ));
+    };
+    let (run, hold) = cpu::cycle(rate, ceiling, response).map_err(|_| {
+        managed::configuration("the CPU control has no cycle at the rate it is asked")
+    })?;
+    run.checked_add(hold)
+        .map(crate::guest::CapCycle::Of)
+        .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
 }
 
 /// Joint plan step 14 (D260): how long the process that started at `started` has run: from its start, as `proc_pid_rusage`

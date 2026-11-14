@@ -1030,34 +1030,57 @@ fn w14_d260_a_process_life_runs_from_its_start_to_now_on_one_clock() {
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13; AC-T7.4.1): the managed control's cycle at a rate is its run and its hold at
-/// that rate, the longer the lower the rate, and none at its ceiling, where it holds no scope. Do make a runtime with a
-/// measured control of a 1 ms response, and take its cycle at a thousandth of a CPU, at a CPU, and at its ceiling.
-/// Expect the first two its control's own run and hold at those rates, the first the longer; the last none.
+/// that rate at the stop response its helper learned, the longer the lower the rate. Do take the cycle of a control whose
+/// helper learned a 1 ms response at a thousandth of a CPU and at a CPU. Expect each its control's own run and hold at
+/// that rate, the first the longer.
 #[test]
 fn w14_the_controls_cycle_at_a_rate_is_its_run_and_hold_there() {
+    let ceiling = super::cpu_ceiling().unwrap();
+    let response = Duration::from_millis(1);
+    let at = |rate| {
+        let (run, hold) = super::cpu::cycle(rate, ceiling, response).unwrap();
+        run + hold
+    };
+    assert_eq!(
+        super::cycle_of(1, ceiling, Some(response)).unwrap(),
+        crate::guest::CapCycle::Of(at(1))
+    );
+    assert_eq!(
+        super::cycle_of(1_000, ceiling, Some(response)).unwrap(),
+        crate::guest::CapCycle::Of(at(1_000))
+    );
+    assert!(at(1) > at(1_000));
+}
+
+/// The review's A-14 (2c-4b; ROOT, 2026-11-13: no record seeds, a cold start told): the node's control takes its cycle
+/// from its helper's learned stop response, never a number its node configured, so before its helper has measured a
+/// stop, or with no helper running, its cycle is cold, told. Do make a runtime whose control its node configured cold, as
+/// it sends it, with no managed helper, and take its cycle at a thousandth of a CPU and at its ceiling. Expect the first
+/// cold, naming its helper's measurement, and the second never.
+#[test]
+fn w14_2c4b_a_control_whose_helper_measured_no_stop_has_a_cold_cycle() {
     let model = super::machine_model().unwrap();
     let rates = hex_core::watch::seed(&model);
-    let response = Duration::from_millis(1);
     let runtime = MacRuntime::new(
         rates.bytes,
         rates.processes,
         hex_core::watch::lateness_seed(&model),
     )
     .unwrap()
-    .with_cpu_control(super::CpuControl {
-        cost_id: [7; 32],
-        response,
-    })
+    .with_cpu_control(super::CpuControl::cold([7; 32]))
     .unwrap();
     let (_, ceiling) = runtime.cpu_control.unwrap();
-    let at = |rate| {
-        let (run, hold) = super::cpu::cycle(rate, ceiling, response).unwrap();
-        run + hold
-    };
-    assert_eq!(runtime.cap_cycle(1).unwrap(), Some(at(1)));
-    assert_eq!(runtime.cap_cycle(1_000).unwrap(), Some(at(1_000)));
-    assert!(at(1) > at(1_000));
-    assert_eq!(runtime.cap_cycle(ceiling).unwrap(), None);
+    assert!(
+        matches!(
+            runtime.cap_cycle(1).unwrap(),
+            crate::guest::CapCycle::Cold(why) if why.contains("managed helper")
+        ),
+        "a cycle cold until its helper measures a stop"
+    );
+    assert_eq!(
+        runtime.cap_cycle(ceiling).unwrap(),
+        crate::guest::CapCycle::Never
+    );
 }
 
 /// The run's thread's stop at the hold on its box (the review's E-11): a fact no recorded operation makes, waited for
