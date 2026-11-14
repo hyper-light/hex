@@ -89,17 +89,19 @@ pub fn sockets(pids: &[u32]) -> Vec<Socket> {
     read_lsof(&stdout)
 }
 
-/// The sockets lsof's field output lists, each once: per file, its family (`t`), protocol (`P`), name (`n`: its local
-/// address, then `->` and its peer's where it has one) and TCP state (`T` `ST=`). A file of another protocol is left
-/// out.
+/// The sockets lsof's field output lists, each once, with the processes holding it: per process (`p`, its pid), per
+/// file, its family (`t`), protocol (`P`), name (`n`: its local address, then `->` and its peer's where it has one) and
+/// TCP state (`T` `ST=`). A file of another protocol is left out; one listed before any process fails the reading.
 fn read_lsof(text: &str) -> Vec<Socket> {
     #[derive(Default)]
     struct File {
+        pid: u32,
         ipv6: bool,
         protocol: String,
         name: String,
         listening: bool,
     }
+    let mut pid = None;
     let mut files: Vec<File> = Vec::new();
     for line in text.lines() {
         let Some(id) = line.chars().next() else {
@@ -107,7 +109,17 @@ fn read_lsof(text: &str) -> Vec<Socket> {
         };
         let value = line.get(id.len_utf8()..).unwrap_or_default();
         match id {
-            'f' => files.push(File::default()),
+            'p' => {
+                pid = Some(
+                    value
+                        .parse()
+                        .unwrap_or_else(|_| panic!("lsof's process {value:?}")),
+                );
+            }
+            'f' => files.push(File {
+                pid: pid.unwrap_or_else(|| panic!("lsof listed a file before its process")),
+                ..File::default()
+            }),
             't' => {
                 if let Some(file) = files.last_mut() {
                     file.ipv6 = value == "IPv6";
@@ -142,15 +154,16 @@ fn read_lsof(text: &str) -> Vec<Socket> {
             Some((local, remote)) => (local, Some(remote)),
             None => (file.name.as_str(), None),
         };
-        let socket = Socket {
-            tcp,
-            local: address(local, file.ipv6),
-            remote: remote.map(|r| address(r, file.ipv6)),
-            listening: tcp && file.listening,
-        };
-        if !out.contains(&socket) {
-            out.push(socket);
-        }
+        super::add(
+            &mut out,
+            Socket {
+                tcp,
+                local: address(local, file.ipv6),
+                remote: remote.map(|r| address(r, file.ipv6)),
+                listening: tcp && file.listening,
+                pids: vec![file.pid],
+            },
+        );
     }
     out
 }
@@ -184,28 +197,43 @@ fn address(text: &str, ipv6: bool) -> SocketAddr {
 }
 
 /// lsof's field output read (no VM): do read a listing of a TCP listener, a UDP socket, a TCP connection both ways,
-/// a wildcard IPv6 listener and a file of no internet protocol; expect each socket once, as it is.
+/// a wildcard IPv6 listener, a file of no internet protocol, and the UDP socket again under a third process it was
+/// handed on to; expect each socket once, as it is, held by each process that lists it.
 #[test]
 fn lsofs_field_output_reads_as_it_names_sockets() {
     let listing = "p39261\nf3\ntIPv4\nPTCP\nn127.0.0.1:63822\nTST=LISTEN\nTQR=0\nTQS=0\nf4\ntIPv4\nPUDP\n\
                    n127.0.0.1:58890\nf5\ntIPv4\nPTCP\nn127.0.0.1:63823->127.0.0.1:63822\nTST=ESTABLISHED\n\
                    p39262\nf7\ntIPv6\nPTCP\nn*:7101\nTST=LISTEN\nf8\ntIPv6\nPTCP\n\
-                   n[fe80::1%en0]:50000->[2001:db8::1]:443\nTST=ESTABLISHED\nf9\ntIPv4\nPICMP\nn*:*\n";
+                   n[fe80::1%en0]:50000->[2001:db8::1]:443\nTST=ESTABLISHED\nf9\ntIPv4\nPICMP\nn*:*\n\
+                   p39263\nf3\ntIPv4\nPUDP\nn127.0.0.1:58890\n";
     let read = read_lsof(listing);
-    let socket = |tcp, local: &str, remote: Option<&str>, listening| Socket {
+    let socket = |tcp, local: &str, remote: Option<&str>, listening, pids: &[u32]| Socket {
         tcp,
         local: local.parse().unwrap(),
         remote: remote.map(|r| r.parse().unwrap()),
         listening,
+        pids: pids.to_vec(),
     };
     assert_eq!(
         read,
         [
-            socket(true, "127.0.0.1:63822", None, true),
-            socket(false, "127.0.0.1:58890", None, false),
-            socket(true, "127.0.0.1:63823", Some("127.0.0.1:63822"), false),
-            socket(true, "[::]:7101", None, true),
-            socket(true, "[fe80::1]:50000", Some("[2001:db8::1]:443"), false),
+            socket(true, "127.0.0.1:63822", None, true, &[39261]),
+            socket(false, "127.0.0.1:58890", None, false, &[39261, 39263]),
+            socket(
+                true,
+                "127.0.0.1:63823",
+                Some("127.0.0.1:63822"),
+                false,
+                &[39261]
+            ),
+            socket(true, "[::]:7101", None, true, &[39262]),
+            socket(
+                true,
+                "[fe80::1]:50000",
+                Some("[2001:db8::1]:443"),
+                false,
+                &[39262]
+            ),
         ]
     );
 }

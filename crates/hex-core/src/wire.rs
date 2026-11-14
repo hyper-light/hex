@@ -3950,7 +3950,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
     // Joint plan step 12: why its run ended where it failed, in its runtime's words, after every older field.
     w.option_with(info.ended.as_ref(), |w, words| w.string(words))?;
     // Joint plan step 33: the record's credential grants, after every older field.
-    put_credentials(w, &info.credentials, &info.grants)
+    put_credentials(w, &info.credentials, &info.grants)?;
+    // Joint plan step 15 (N6): its run's agent-control endpoint, after every older field.
+    w.option(info.control, |w, at| {
+        put_address(w, at.ip());
+        w.u16(at.port());
+    });
+    Ok(())
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -3994,9 +4000,11 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         })?,
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
+        control: None,
         credentials: Vec::new(),
     };
     info.credentials = credentials(r, &info.grants)?;
+    info.control = r.option(|r| Ok(SocketAddr::new(address(r)?, r.u16()?)))?;
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)
         .map_err(|e| Fault::value("published", e.to_string()))?;
