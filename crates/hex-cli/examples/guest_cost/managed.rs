@@ -614,13 +614,19 @@ impl Probe for VmmCpu {
     fn read(&mut self) -> Result<Use, String> {
         // D260's order: what its vCPUs ran of its guest first, then its job's whole, so the whole less the vCPUs' is
         // never less than none.
+        let asked =
+            |why: &dyn std::fmt::Display| format!("asking the guest's VM process its use: {why}");
         let used = match self.vm.host_use(Duration::MAX) {
-            Ok(used) => Some(used),
+            Ok(shards_api::ManagedUsed::Running(used)) => Some(used),
+            // Its end (Shards' D260), in the words its refusal of the ask said it before.
+            Ok(shards_api::ManagedUsed::Ended(ended)) => {
+                return Err(asked(&shards_api::Refusal::Ended(ended.end)));
+            }
             Err(shards_api::Refusal::ManagedIo {
                 kind: std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound,
                 ..
             }) if matches!(self.said, Said::Not(_)) => None,
-            Err(e) => return Err(format!("asking the guest's VM process its use: {e}")),
+            Err(e) => return Err(asked(&e)),
         };
         let times = match used.as_ref().map(|used| &used.microvm.guest) {
             Some(Ok(times)) => {

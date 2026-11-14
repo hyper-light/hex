@@ -527,10 +527,15 @@ window, which would under-count Hex here.
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md
   section 13; Shards R05, R13). Against `hex node` and `hex schedule serve` as processes of their own, the scheduler
   enrolled by `hex node enroll` and a CA's answer: HEX-CV-L1 (`capacity_view::hex_cv_l1`, a normal test on every OS,
-  over loopback): a peer the lane doesn't name refused at its handshake, Hex's boxes and the holder's runs filling the
+  over loopback): a peer the lane doesn't name refused at its handshake, Hex's box and the holder's runs filling the
   room and refused past it, the scheduler killed and started again, a link dropped, kiln-shaped work, every view's CPU
   held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
-  records once it has ended, the holder's own. Hex's boxes are `process` boxes, placed where its scheduler places one
+  records once it has ended, the holder's own. Every size is a record's and no step is counted (ROOT's ruling 7,
+  2026-11-14): the holder asks kiln's recorded legs in recorded order (hex-sim's `kiln_needs`) until the room refuses
+  one, ends every run, and asks again until refused, ending with that set held, so a loss after it and the books it
+  ends with hold the holder's runs, never nothing; Hex's own box is the first recorded `oci` leg (`oci_needs`), one
+  being the fewest that puts Hex's admission in the view and hints it (the recorded fleet ran 0.045 at once on an `oci`
+  host, by Little's law). Hex's box is a `process` box, placed where its scheduler places one
   under its `oci` class: on Linux and Windows, whose `oci` form offers a `process` route beside its `oci` one; not on a
   Mac, which places Shards microVMs alone, where the holder meets the machine's room alone. HEX-CV-2H
   (`capacity_view::two_hosts`, ignored phases, ROOT's): the same
