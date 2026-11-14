@@ -20,6 +20,25 @@ fn a_value_with_quotes_a_backslash_a_newline_and_control_characters_is_one_json_
     assert_eq!(serde_json::from_str::<String>(&written).unwrap(), value);
 }
 
+/// Do: form an event line of a text value holding a quote, a backslash, a newline and a control character, and a
+/// number. Expect: `<area> event=<name>`, the text a JSON string, the number itself, one line.
+#[test]
+fn an_event_lines_values_are_json_strings_and_whole_numbers() {
+    let formed = line(
+        "hex.test",
+        "formed",
+        &[
+            ("why", Value::Text("a \"b\" \\ c\nd\u{1}")),
+            ("count", Value::Number(42)),
+        ],
+    );
+    assert_eq!(
+        formed,
+        "hex.test event=formed why=\"a \\\"b\\\" \\\\ c\\nd\\u0001\" count=42"
+    );
+    assert!(!formed.contains('\n'));
+}
+
 proptest! {
     /// Do: write any text as a value. Expect: one line, which a JSON reader reads back as the text.
     #[test]
