@@ -64,7 +64,8 @@ impl std::fmt::Debug for CredentialGrant {
 /// Two credentials toward one host are taken: Shards' injector fills each in only where its own placeholder stands
 /// (D242's step 3), so neither stands in the other's way.
 ///
-/// Bounded by its input (C5): three working lists, reserved fallibly and sorted, and no recursion.
+/// Bounded by its input (C5): its working lists reserved fallibly, sorted and merged ([`unfit`]), O(n log n) in the
+/// hosts named and the grants, and no recursion.
 pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> Result<(), Refusal> {
     let hosts = credentials
         .iter()
@@ -76,6 +77,13 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
     let mut each: Vec<(&str, &str, &Member, usize)> = working(hosts)?;
     let mut granted: Vec<(&Member, &str, usize)> = working(credentials.len())?;
     let mut standing: Vec<(&str, &str, usize)> = working(credentials.len())?;
+    let mut lists: Vec<(&Member, &[String])> = working(credentials.len())?;
+    lists.extend(
+        credentials
+            .iter()
+            .map(|grant| (&grant.member, grant.toward.as_slice())),
+    );
+    let unfit = unfit(&lists, hosts, grants)?;
     for (at, grant) in credentials.iter().enumerate() {
         grant
             .member
@@ -88,19 +96,18 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
                 grant.reference
             )));
         }
-        for (i, host) in grant.toward.iter().enumerate() {
-            if named_before(grant.toward.get(..i).unwrap_or_default(), host) {
-                return Err(invalid(format!(
-                    "credentials[{at}].toward names {host:?} twice"
-                )));
-            }
-            if !reached(grants, &grant.member, host) {
-                return Err(invalid(format!(
+        if let Some((i, why)) = unfit.get(at).copied().flatten() {
+            let host = grant.toward.get(i).map(String::as_str).unwrap_or_default();
+            return Err(invalid(match why {
+                Unfit::Twice => format!("credentials[{at}].toward names {host:?} twice"),
+                Unfit::Unreached => format!(
                     "credentials[{at}].toward[{i}] {host:?} is no host an egress grant of {} reaches by name, by TCP: a \
                      credential grant grants no egress, and TLS names a server by its DNS name alone (RFC 6066 §3)",
                     grant.member
-                )));
-            }
+                ),
+            }));
+        }
+        for host in &grant.toward {
             each.push((host.as_str(), grant.reference.as_str(), &grant.member, at));
         }
         if !token(&grant.placeholder) {
@@ -204,32 +211,93 @@ fn token(placeholder: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
 }
 
-/// Whether an egress grant of `member`'s reaches `host` by name, by TCP.
-fn reached(grants: &[Grant], member: &Member, host: &str) -> bool {
-    grants.iter().any(|grant| {
-        looked();
-        matches!(grant, Grant::Egress { member: m, to: Destination::Name(name), ports }
-            if m == member && name == host && ports.proto == Proto::Tcp)
-    })
+/// Why a grant's host is refused at its place in its list ([`unfit`]): named there before, or reached by no egress
+/// grant of its member's by name, by TCP. A host that is both is named twice, which is looked at first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Unfit {
+    Twice,
+    Unreached,
 }
 
-/// Whether `host` is among `before`, the hosts its list names ahead of it.
-fn named_before(before: &[String], host: &str) -> bool {
-    before.iter().any(|earlier| {
-        looked();
-        earlier == host
-    })
+/// Each list's first unfit host by its place, in the lists' order: where list `at` of `lists` (a member, and the hosts a
+/// grant of its names) first names a host it named before, or one no egress grant of its member's in `grants` reaches
+/// by name, by TCP; none where every host fits. `hosts` is how many the lists name in all. Sorted and merged (C5): every
+/// list's hosts with their member and place, and every TCP egress grant's member and host by name, each sorted, then
+/// walked together once, each look a step past one of them or at the host before, so O(n log n) in the hosts and the
+/// grants, never a look at every earlier host and every grant for each host.
+fn unfit(
+    lists: &[(&Member, &[String])],
+    hosts: usize,
+    grants: &[Grant],
+) -> Result<Vec<Option<(usize, Unfit)>>, Refusal> {
+    let mut reach: Vec<(&Member, &str)> = working(grants.len())?;
+    for grant in grants {
+        if let Grant::Egress {
+            member,
+            to: Destination::Name(host),
+            ports,
+        } = grant
+            && ports.proto == Proto::Tcp
+        {
+            reach.push((member, host.as_str()));
+        }
+    }
+    reach.sort_unstable();
+    let mut asked: Vec<(&Member, &str, usize, usize)> = working(hosts)?;
+    for (at, (member, toward)) in lists.iter().enumerate() {
+        for (i, host) in toward.iter().enumerate() {
+            asked.push((*member, host.as_str(), at, i));
+        }
+    }
+    asked.sort_unstable();
+    let mut first: Vec<Option<(usize, Unfit)>> = working(lists.len())?;
+    first.resize(lists.len(), None);
+    let mut reached = reach.iter().peekable();
+    let mut before = None;
+    for &(member, host, at, i) in &asked {
+        let twice = before.is_some_and(|before| {
+            looked();
+            before == (member, host, at)
+        });
+        let found = loop {
+            let Some(&&next) = reached.peek() else {
+                break false;
+            };
+            looked();
+            match next.cmp(&(member, host)) {
+                std::cmp::Ordering::Less => {
+                    reached.next();
+                }
+                std::cmp::Ordering::Equal => break true,
+                std::cmp::Ordering::Greater => break false,
+            }
+        };
+        let why = if twice {
+            Some(Unfit::Twice)
+        } else if found {
+            None
+        } else {
+            Some(Unfit::Unreached)
+        };
+        if let Some(why) = why
+            && let Some(kept) = first.get_mut(at)
+            && kept.is_none_or(|kept| (i, why) < kept)
+        {
+            *kept = Some((i, why));
+        }
+        before = Some((member, host, at));
+    }
+    Ok(first)
 }
 
-/// The looks this thread's checks have made at an earlier host or an egress grant, as each answers whether a grant's
-/// host was named before in its list and whether its member's egress reaches it: the work C5 bounds by the hosts named,
-/// which the tests count (CLAUDE.md §6).
 #[cfg(test)]
 thread_local! {
+    /// The looks this thread's checks have made at an earlier host or an egress grant ([`unfit`]): the work C5 bounds by
+    /// the hosts named and the grants, which the tests count (CLAUDE.md §6).
     static LOOKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// One look at an earlier host or an egress grant ([`LOOKS`], the tests' count alone).
+/// One look at an earlier host or an egress grant, which the tests count (`LOOKS`) and nothing else does.
 fn looked() {
     #[cfg(test)]
     LOOKS.with(|looks| looks.set(looks.get().saturating_add(1)));
@@ -322,7 +390,8 @@ pub struct SignInGrant {
 ///   stands for two things: a sign-in's access and refresh placeholders, two sign-ins', or a sign-in's and a credential
 ///   grant's (Shards' `check_sign_ins`), so each placeholder is one token's alone.
 ///
-/// Bounded by its input: one working list, reserved fallibly and sorted, and no recursion.
+/// Bounded by its input as [`check_credentials`] is: its working lists reserved fallibly, sorted and merged ([`unfit`]),
+/// and no recursion.
 pub fn check_sign_ins(
     sign_ins: &[SignInGrant],
     credentials: &[CredentialGrant],
@@ -337,6 +406,20 @@ pub fn check_sign_ins(
             bound: usize::MAX,
         })?;
     let mut standing: Vec<(&str, String)> = working(count)?;
+    let hosts = sign_ins
+        .iter()
+        .try_fold(0usize, |n, grant| n.checked_add(grant.toward.len()))
+        .ok_or(Refusal::Exhausted {
+            what: "sign-ins",
+            bound: usize::MAX,
+        })?;
+    let mut lists: Vec<(&Member, &[String])> = working(sign_ins.len())?;
+    lists.extend(
+        sign_ins
+            .iter()
+            .map(|grant| (&grant.member, grant.toward.as_slice())),
+    );
+    let unfit = unfit(&lists, hosts, grants)?;
     for (at, grant) in sign_ins.iter().enumerate() {
         grant
             .member
@@ -368,19 +451,16 @@ pub fn check_sign_ins(
                 grant.sign_in
             )));
         }
-        for (i, host) in grant.toward.iter().enumerate() {
-            if named_before(grant.toward.get(..i).unwrap_or_default(), host) {
-                return Err(signed_in(format!(
-                    "sign_ins[{at}].toward names {host:?} twice"
-                )));
-            }
-            if !reached(grants, &grant.member, host) {
-                return Err(signed_in(format!(
+        if let Some((i, why)) = unfit.get(at).copied().flatten() {
+            let host = grant.toward.get(i).map(String::as_str).unwrap_or_default();
+            return Err(signed_in(match why {
+                Unfit::Twice => format!("sign_ins[{at}].toward names {host:?} twice"),
+                Unfit::Unreached => format!(
                     "sign_ins[{at}].toward[{i}] {host:?} is no host an egress grant of {} reaches by name, by TCP: a \
                      sign-in grants no egress, and TLS names a server by its DNS name alone (RFC 6066 §3)",
                     grant.member
-                )));
-            }
+                ),
+            }));
         }
         let Some(captured) = &grant.captured else {
             continue;

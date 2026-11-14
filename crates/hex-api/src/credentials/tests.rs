@@ -482,12 +482,60 @@ fn b11_the_credential_and_sign_in_checks_merge_their_hosts_against_the_egress_gr
         LOOKS.with(std::cell::Cell::get)
     };
     let credential_looks = counted(&|| check_credentials(&credentials, &grants));
-    let sign_in_looks = counted(&|| {
-        check_sign_ins(std::slice::from_ref(&signed_in), &credentials, &grants)
-    });
+    let sign_in_looks =
+        counted(&|| check_sign_ins(std::slice::from_ref(&signed_in), &credentials, &grants));
     let bound = u64::try_from(2 * n + grants.len()).unwrap();
     assert!(
         credential_looks <= bound && sign_in_looks <= bound,
         "looks: the credential's {credential_looks}, the sign-in's {sign_in_looks}; a merge's at most {bound}"
     );
+}
+
+/// The review's B-11 (AC-T7.7.2, C2): the merge tells a grant's first unfit host in its list's order, as a look at each
+/// host in turn would. Do check credentials toward [a, b, a] with b unreached, toward [a, a] with a unreached, and
+/// toward [a, b, b, c] with c unreached, then a sign-in toward [a, b, a] with b unreached. Expect b at 1 told unreached,
+/// a at 0 told unreached, b told named twice, then the sign-in's b at 1 told unreached.
+#[test]
+fn b11_a_grants_first_unfit_host_is_told_in_its_lists_order() {
+    let grants = [
+        egress(claude(), "a.example", Proto::Tcp),
+        egress(claude(), "c.example", Proto::Udp),
+    ];
+    let reaches = [
+        egress(claude(), "a.example", Proto::Tcp),
+        egress(claude(), "b.example", Proto::Tcp),
+    ];
+    for (toward, over, says) in [
+        (
+            &["a.example", "b.example", "a.example"][..],
+            &grants[..],
+            "credentials[0].toward[1] \"b.example\" is no host",
+        ),
+        (
+            &["a.example", "a.example"][..],
+            &[][..],
+            "credentials[0].toward[0] \"a.example\" is no host",
+        ),
+        (
+            &["a.example", "b.example", "b.example", "c.example"][..],
+            &reaches[..],
+            "credentials[0].toward names \"b.example\" twice",
+        ),
+    ] {
+        let why = refused(&[credential(claude(), "anthropic/ada", toward)], over);
+        assert!(why.contains(says), "{toward:?}: {why}");
+    }
+    let signed_in = SignInGrant {
+        toward: ["a.example", "b.example", "a.example"]
+            .map(str::to_owned)
+            .to_vec(),
+        ..sign_in("claude/ada", SignInCli::ClaudeCode)
+    };
+    match check_sign_ins(&[signed_in], &[], &grants) {
+        Err(Refusal::Invalid { why, .. }) => assert!(
+            why.contains("sign_ins[0].toward[1] \"b.example\" is no host"),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
 }
