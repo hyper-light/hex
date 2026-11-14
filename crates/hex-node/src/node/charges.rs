@@ -800,16 +800,56 @@ impl Learner {
     }
 }
 
+/// What a window of the node's learner reads first (C1, C4, C7): the VMs running, each by its holder, its lifetime and
+/// its cgroup; the reuse slots live boxes hold, in order; and the fleet's budget.
+pub(super) type Running = (
+    Vec<(LearnedHolder, Scope, BoxCgroup)>,
+    Vec<u64>,
+    CapacityResources,
+);
+
+/// One window of `shared`, the node's charge learner (joint plan step 14): what it reads first (`read`), each VM it
+/// meets found by `record`, its cgroups read and written through `io` at the instant `now` gives once those are read,
+/// and each end its last resort made written into its box's record in `store` after the window, off the learner's lock.
+/// Its failure is kept for the capacity answers.
+pub(super) fn one_window(
+    shared: &Shared,
+    io: &impl Cgroups,
+    store: &crate::store::Store,
+    read: impl FnOnce() -> Result<Running, Refusal>,
+    record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
+    now: impl FnOnce() -> Instant,
+) {
+    let Ok(mut learner) = shared.lock() else {
+        return;
+    };
+    let (running, held, budget) = match read() {
+        Ok(read) => read,
+        Err(why) => return learner.failed(why),
+    };
+    // Its outcome is kept as the learner's fault, which the capacity answers read.
+    let _ = learner.window(io, running, record, &held, budget, now());
+    // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
+    // is kept for the next window and fails this one.
+    let ends = learner.unrecorded();
+    drop(learner);
+    let (left, failed) = write_ends(store, ends);
+    if let Some(why) = failed
+        && let Ok(mut learner) = shared.lock()
+    {
+        learner.keep_unrecorded(left);
+        learner.failed(why);
+    }
+}
+
 impl Node {
     /// One window of the node's charge learner (joint plan step 14), its failure kept for the capacity answers.
     fn learn_window(&self) {
         let Some(shared) = self.backends.get().and_then(|b| b.learner.as_ref()) else {
             return;
         };
-        let Ok(mut learner) = shared.lock() else {
-            return;
-        };
-        let read = self.supervisor.running_vms().and_then(|running| {
+        let read = || -> Result<Running, Refusal> {
+            let running = self.supervisor.running_vms()?;
             Ok((
                 running
                     .into_iter()
@@ -820,10 +860,6 @@ impl Node {
                 self.cgroups.held_slots()?,
                 self.native_capacity()?.total,
             ))
-        });
-        let (running, held, budget) = match read {
-            Ok(read) => read,
-            Err(why) => return learner.failed(why),
         };
         let record = |id: &LearnedHolder| -> Result<Option<Met>, Refusal> {
             // A node VM's row is the step-39 holder's: none of this learner's yet.
@@ -849,23 +885,11 @@ impl Node {
                 intent: record.last_resort,
             }))
         };
-        // Its outcome is kept as the learner's fault, which the capacity answers read.
         let io = Kernel {
             store: &self.store,
             guest: self.backends.get().and_then(|b| b.shards.as_deref()),
         };
-        let _ = learner.window(&io, running, record, &held, budget, Instant::now());
-        // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
-        // is kept for the next window and fails this one.
-        let ends = learner.unrecorded();
-        drop(learner);
-        let (left, failed) = write_ends(&self.store, ends);
-        if let Some(why) = failed
-            && let Ok(mut learner) = shared.lock()
-        {
-            learner.keep_unrecorded(left);
-            learner.failed(why);
-        }
+        one_window(shared, &io, &self.store, read, record, Instant::now);
     }
 
     /// The window the node's charge learner reads over, where one runs (C1): its VM backends' learner's.
