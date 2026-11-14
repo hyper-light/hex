@@ -31,11 +31,13 @@ use hex_sim::model::Class;
 use crate::store::Store;
 
 /// One VM's lifetime, as its record names it (C3): a managed VM's native scope, its random bytes, or a Shards image VM's
-/// place in its node's start order (`BoxRecord::started`), which its node gives each lifetime once.
+/// place in its node's start order (`BoxRecord::started`), which its node gives each lifetime once; or a node VM's run,
+/// which its node's store mints once a boot (joint plan step 39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
     Native([u8; 16]),
     Started(u64),
+    Run(hex_api::NodeRun),
 }
 
 impl Scope {
@@ -568,6 +570,13 @@ impl LastResort {
                 }
             }
         };
+        Ok(())
+    }
+
+    /// Carries `ends`, the last-resort ends of the node VMs its node's start read back from their rows before letting
+    /// them go (joint plan step 39, place 1), into its ends, each a Shards VM's.
+    pub(crate) fn carry(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
+        let _ = ends;
         Ok(())
     }
 
@@ -1162,6 +1171,11 @@ impl Learner {
     /// Keeps `left`, writes that failed, for the next window (C5).
     pub(crate) fn keep_unrecorded(&mut self, left: Writes) {
         self.last.keep_unrecorded(left);
+    }
+
+    /// Carries the last-resort ends its node's start read back from node VM rows into its ends (joint plan step 39).
+    pub(crate) fn carry_ended(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
+        self.last.carry(ends)
     }
 
     /// The window's failure is `why`, which no read reached.

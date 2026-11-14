@@ -46,6 +46,8 @@ pub struct RecoverySummary {
     /// The node VM rows an earlier node process left, each by its run with what this start did with it (joint plan
     /// step 39).
     pub node_vms: Vec<(hex_api::NodeRun, crate::store::NodeVmSettled)>,
+    /// The last-resort ends those rows kept, carried into the charge learner's ends; none on record told as such.
+    pub node_vm_ends: crate::store::NodeVmEnds,
 }
 
 /// Why recovery keeps a Shards image box's record and claim: its run is an earlier node process's, which
@@ -1965,7 +1967,7 @@ impl<R: Recover> Recorded<R> {
         self.books.store.remove_strays()?;
         let mut summary = RecoverySummary {
             boot_unknown: self.books.store.boot_unread().map(str::to_owned),
-            node_vms: self.books.store.settle_node_vms()?,
+            node_vms: self.books.store.settle_node_vms()?.rows,
             ..RecoverySummary::default()
         };
         let torn = self.remove_torn_before_this_boot(torn, &mut summary)?;

@@ -82,6 +82,7 @@ impl ImageClass {
             phase: NodeVmPhase::Booting,
             diagnostics: Some(diagnostics.clone()),
             exit: None,
+            last_resort: None,
         };
         // The boot's intent, durable before any effect.
         books.put_node_vm(&record)?;

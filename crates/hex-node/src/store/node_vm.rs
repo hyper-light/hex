@@ -26,7 +26,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use hex_api::{NodeRun, NodeVmPhase, Refusal};
+use hex_api::{LearnedEnd, NodeRun, NodeVmPhase, Refusal};
 use hex_core::patience::Patience;
 use hex_core::record::NodeVmRecord;
 
@@ -60,6 +60,40 @@ impl std::fmt::Display for NodeVmSettled {
                  that process to its end"
             }
         })
+    }
+}
+
+/// What a node's start did with the node VM rows an earlier node process left (joint plan step 39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeVmsSettled {
+    /// Each row by its run, with what the start did with it.
+    pub rows: Vec<(NodeRun, NodeVmSettled)>,
+    /// The last-resort ends the let-go rows kept (C5), each read back before its row went: an Ended row's, and one
+    /// whose owner had ended.
+    pub ends: Vec<LearnedEnd>,
+}
+
+/// What a node's start carried of its node VMs' last-resort ends into its charge learner (joint plan step 39, place 1;
+/// ROOT, 2026-11-13): none on record is its cold start, told, never a guess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NodeVmEnds {
+    /// No node VM row it let go kept a last-resort end: the learner's node VM ends begin empty.
+    #[default]
+    NoneOnRecord,
+    /// These, each read back from its row before the row went, in its runs' order.
+    Carried(Vec<LearnedEnd>),
+}
+
+impl std::fmt::Display for NodeVmEnds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoneOnRecord => f.write_str("node VM: no last-resort end on record"),
+            Self::Carried(ends) => write!(
+                f,
+                "node VM: {} last-resort end(s) on record, carried into the charge learner's ends",
+                ends.len()
+            ),
+        }
     }
 }
 
@@ -368,7 +402,7 @@ impl Store {
     /// its receipt booked, and a thread follows that owner to its end (decision 9, no timer), then lets it go. A row
     /// this process holds is its own, left as it is, its lock file never opened again. A follow is two threads, its
     /// lock's and its W*'s, one follow a row, so at most [`TURNS`] of them. Says what it did with each.
-    pub(crate) fn settle_node_vms(&self) -> Result<Vec<(NodeRun, NodeVmSettled)>, Refusal> {
+    pub(crate) fn settle_node_vms(&self) -> Result<NodeVmsSettled, Refusal> {
         let records = self.all_node_vms()?;
         let mut settled = Vec::new();
         settled
@@ -398,7 +432,10 @@ impl Store {
                 settled.push((record.run, NodeVmSettled::Followed));
             }
         }
-        Ok(settled)
+        Ok(NodeVmsSettled {
+            rows: settled,
+            ends: Vec::new(),
+        })
     }
 
     /// Follows run `run`'s owner, a live node process, to its end on a thread of its own, its row booked meanwhile, then

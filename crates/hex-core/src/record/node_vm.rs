@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use hex_api::{Allocation, Exit, NodeRun, NodeVmPhase, Refusal};
+use hex_api::{Allocation, Exit, LearnedEnd, NodeRun, NodeVmPhase, Refusal};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_RECORD_BYTES, RECORD_VERSION};
@@ -28,6 +28,11 @@ pub struct NodeVmRecord {
     /// Its run's end, once it has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
+    /// Why the charge learner's last resort ended or is ending its VM, written before its end (C5, intent first) and kept
+    /// across the node's restarts: a node VM is never a box, so its row is where its end is kept, and a node's start
+    /// reads it back into its learner's ends before it lets the row go (joint plan step 39).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resort: Option<LearnedEnd>,
 }
 
 fn damaged(why: &str) -> Refusal {
