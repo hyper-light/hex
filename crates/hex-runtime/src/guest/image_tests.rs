@@ -163,8 +163,9 @@ impl Books for Owner {
     ) -> Result<hex_core::record::PoolRecord, Refusal> {
         Err(broken("an image box prepares no pool"))
     }
+    /// Its host's own pool, as a node's Store answers it ([`host_pool`]).
     fn capacity(&self) -> Result<Capacity, Refusal> {
-        Err(broken("the image tests read no capacity"))
+        Ok(host_pool())
     }
     fn physical_devices(&self) -> Result<Vec<DeviceInfo>, Refusal> {
         Ok(Vec::new())
@@ -3856,19 +3857,53 @@ fn guest_pool() -> Capacity {
     }
 }
 
-/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
-/// answer, its record the one source): do ask the `oci` class's capacity of a node whose guest is a node VM under
-/// shards-init. Expect its guest's pool, fenced by its node VM's run, carrying that node VM's receipt as its record
-/// keeps it: its run, what its allocation books, Ready.
-#[test]
-fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record() {
-    let images = ModelImages::new();
-    let sockets = super::super::tests::socket_fixture();
-    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
-    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
-    let owner = Arc::new(Owner::new());
-    let (runtime, _) = image_form(&images, &owner);
-    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+/// A node's host's own pool, as its Store answers it: 8 CPUs and a GiB of memory and of disk, half of each free.
+fn host_pool() -> Capacity {
+    Capacity {
+        own: Default::default(),
+        id: "image-host".into(),
+        total: CapacityResources {
+            cpu_milli: 8_000,
+            mem_bytes: 1 << 30,
+            disk_bytes: 1 << 30,
+        },
+        free: CapacityResources {
+            cpu_milli: 4_000,
+            mem_bytes: 1 << 29,
+            disk_bytes: 1 << 29,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    }
+}
+
+/// The route an oci box takes into its node's node VM (V2): a Linux image of its host's architecture, no GPU.
+fn node_vm_route() -> hex_api::RouteOffer {
+    hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch: super::super::route::host_platform().unwrap().arch,
+            },
+            execution: hex_api::Execution::NodeVm,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    }
+}
+
+/// The receipt the node VM `owner` keeps the one record of answers (joint plan step 39, V2): its run, what its
+/// allocation books, Ready, and what its guest is admitted at.
+fn node_vm_receipt(owner: &Owner) -> hex_api::NodeVmReceipt {
     let record = owner
         .node_vms
         .lock()
@@ -3877,22 +3912,87 @@ fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record()
         .next()
         .cloned()
         .unwrap();
-    let run: String = record
-        .run
-        .bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    assert_eq!(capacity.id, format!("node-vm:{run}"));
+    hex_api::NodeVmReceipt {
+        run: record.run,
+        booking: record.allocation.booking(),
+        phase: NodeVmPhase::Ready,
+        guest: record.allocation.guest().unwrap(),
+    }
+}
+
+/// V2, macOS's defect (ROOT, 2026-11-13: in the image form the oci answer was the node VM guest's own pool, so the
+/// scheduler took the guest's plane for its whole node's, its host boxes held to the guest's room): a node whose guest
+/// is a node VM under shards-init answers its oci class on its host's plane, as a node whose guest is shared does, its
+/// one route its node VM's, and carries the node VM's receipt with what its guest is admitted at (joint plan step 39).
+/// Do ask the oci class's capacity of such a node, its host reporting no oci pool of its own (macOS's). Expect the
+/// host's pool, its id and its room; one route, NodeVm, for a Linux image of the host's architecture and no GPU; and
+/// the node VM's receipt as its record keeps it.
+#[test]
+fn v2_the_image_forms_oci_answer_is_its_hosts_pool_routed_through_its_node_vm() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    let host = host_pool();
     assert_eq!(
-        capacity.node_vms,
-        vec![hex_api::NodeVmReceipt {
-            run: record.run,
-            booking: record.allocation.booking(),
-            phase: NodeVmPhase::Ready,
-        }]
+        (capacity.id.as_str(), capacity.total, capacity.free),
+        (host.id.as_str(), host.total, host.free)
     );
+    assert_eq!(capacity.routes, [node_vm_route()]);
+    assert_eq!(capacity.node_vms, [node_vm_receipt(&owner)]);
+    capacity.check().unwrap();
     drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// V2, Windows' defect (ROOT, 2026-11-13: where its host runs oci images of its own, the node answered its host's native
+/// oci pool and left its node VM out, so the scheduler never saw it): a node whose host has an oci pool of its own and
+/// whose guest is a node VM answers its oci class with its host's routes and its node VM's beside them, and the node
+/// VM's receipt. Do ask the oci class's capacity of such a node, its host reporting a native Windows oci route. Expect
+/// the host's pool, its native routes first and then the NodeVm route, and the node VM's receipt.
+#[test]
+fn v2_a_host_with_an_oci_pool_of_its_own_answers_its_node_vm_beside_it() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let native_route = hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Windows,
+                arch: super::super::route::host_platform().unwrap().arch,
+            },
+            execution: hex_api::Execution::Native,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    };
+    let native = Capacity {
+        routes: vec![native_route],
+        ..host_pool()
+    };
+    let node = super::super::WithGuest::configured(
+        super::super::tests::native_reporting(native.try_clone().unwrap()),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let capacity = node.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        (capacity.id.as_str(), capacity.total),
+        (native.id.as_str(), native.total)
+    );
+    assert_eq!(capacity.routes, [native_route, node_vm_route()]);
+    assert_eq!(capacity.node_vms, [node_vm_receipt(&owner)]);
+    capacity.check().unwrap();
+    drop(node);
     assert!(relay.join().unwrap());
 }
 
@@ -3952,6 +4052,105 @@ fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
         other => panic!("a Shards image VM recorded as {other:?}"),
     }
     runtime.delete(&id).unwrap();
+}
+
+/// V2 (ROOT, 2026-11-13: when the inner node refuses what the host-side pool admitted, tell it, with both numbers): a
+/// node VM's guest refusing room for a box its host's pool admitted is told with the pool's numbers beside the guest's
+/// own, never as the guest's words alone. Do tell a guest's Full and Exhausted refusals, its pool holding 1.5 CPUs and
+/// 3 GiB, 2 CPUs and 4 GiB booked with the box, the guest saying 1 CPU and 2 GiB free; then one of a guest whose free
+/// room can't be read. Expect each refusal typed Invalid, naming the pool's room, what it booked and the guest's free
+/// room, and the guest's own words; and the unread room said so.
+#[test]
+fn v2_a_node_vms_guest_refusing_what_its_hosts_pool_admitted_is_told_with_both_numbers() {
+    let gib = 1u64 << 30;
+    let pool = CapacityResources {
+        cpu_milli: 1_500,
+        mem_bytes: 3 * gib,
+        disk_bytes: 0,
+    };
+    let booked = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 4 * gib,
+        disk_bytes: 0,
+    };
+    let free = CapacityResources {
+        cpu_milli: 1_000,
+        mem_bytes: 2 * gib,
+        disk_bytes: 0,
+    };
+    for refusal in [
+        Refusal::Full(7),
+        Refusal::Exhausted {
+            what: "boxes",
+            bound: 7,
+        },
+    ] {
+        let words = refusal.to_string();
+        let told = GuestRuntime::guest_room_refusal(refusal, pool, booked, Some(free));
+        let Refusal::Invalid { why, .. } = &told else {
+            panic!("{told:?}");
+        };
+        for said in [
+            "1500".to_owned(),
+            (3 * gib).to_string(),
+            "2000".to_owned(),
+            (4 * gib).to_string(),
+            "1000".to_owned(),
+            (2 * gib).to_string(),
+            words,
+        ] {
+            assert!(why.contains(&said), "{said} in {why}");
+        }
+    }
+    let told = GuestRuntime::guest_room_refusal(Refusal::Full(7), pool, booked, None);
+    assert!(
+        matches!(&told, Refusal::Invalid { why, .. } if why.contains("unread")),
+        "{told:?}"
+    );
+}
+
+/// V2 (ROOT, 2026-11-13: on macOS, process boxes got no route once any class reported routes, its process class
+/// answering no pool of its own): a node whose host's process class answers no pool of its own answers it on its host's
+/// plane, the oci answer's, with its native process route, so its process boxes stay placeable beside its node VM's
+/// route. Do ask the process class's capacity of a node whose process side answers none and whose guest is a node VM.
+/// Expect the host's pool, the same plane its oci answer is on, its one route a native process route for its host's
+/// platform with no GPU.
+#[test]
+fn v2_a_host_whose_process_class_answers_no_pool_answers_its_hosts_plane_with_its_process_route() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let node = super::super::WithGuest::configured(
+        hex_api::sim::SimRuntime::new(),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let process = node.capacity(hex_api::Class::Process).unwrap().unwrap();
+    let oci = node.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        (process.id.as_str(), process.total, process.free),
+        (oci.id.as_str(), oci.total, oci.free)
+    );
+    assert_eq!(
+        process.routes,
+        [hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: hex_api::Class::Process,
+                image: super::super::route::host_platform().unwrap(),
+                execution: hex_api::Execution::Native,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            cost: None,
+            backing: None,
+        }]
+    );
+    process.check().unwrap();
+    drop(node);
+    assert!(relay.join().unwrap());
 }
 
 /// What one of the review's B-3, B-5 and B-6 tests waits for: the boot it held, answered once let go.
