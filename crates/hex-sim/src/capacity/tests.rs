@@ -246,3 +246,37 @@ fn the_record_sweep() {
         assert!(!caught.is_empty(), "{mutant:?} caught on no seed of {n}");
     }
 }
+
+/// AC-T7.4.1, joint plan step 13 (H10; R03: a machine's room recorded, never picked): the machine under the nemesis is the
+/// recorded fleet's (`bench/sched/huawei-r5-day30.fleet.trace`, from kiln's runner facts of 2026-11-05) smallest by memory
+/// of the hosts where Hex's own boxes and kiln's runs share one room, those that run Hex's `oci` class: where the two
+/// contend for the least room. Do read the fleet's node rows; expect the room to be that host's CPUs, memory and GPUs.
+#[test]
+fn the_machine_is_the_recorded_fleets_smallest_shared_host() {
+    let fleet = crate::replay::parse(
+        include_str!("../../../../bench/sched/huawei-r5-day30.fleet.trace"),
+        &crate::replay::Limits::default(),
+    )
+    .unwrap();
+    let shared = fleet
+        .nodes
+        .iter()
+        .filter(|n| n.classes.has(crate::model::Class::Oci))
+        .map(|n| n.capacity)
+        .min_by_key(|c| (c.mem_bytes, c.cpu_milli))
+        .unwrap();
+    assert_eq!(
+        (ROOM.cpu_milli, ROOM.mem_bytes, ROOM.gpus),
+        (shared.cpu_milli, shared.mem_bytes, u64::from(shared.gpus))
+    );
+}
+
+/// AC-T7.4.1, CV8 (R03: a bound derived, never picked): the keeper holds a holder's name to a bound, which on this machine
+/// is the longest name its runners say in their hellos. Do make a world of three runners; expect its keeper's name bound
+/// to be its longest runner's name.
+#[test]
+fn the_keepers_name_bound_is_its_runners_longest_name() {
+    let world = World::new(0, 3, None).unwrap();
+    let longest = world.runners.iter().map(|r| r.name.len()).max().unwrap();
+    assert_eq!(world.budget.name_bytes, longest);
+}
