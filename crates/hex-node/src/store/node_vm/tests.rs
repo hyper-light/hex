@@ -176,6 +176,8 @@ fn role(role: &str, dir: &Path) -> std::process::Command {
 /// - `owner`, a node that runs node VM 7: it writes its row Booting, so it holds its lock, then ends;
 /// - `ending owner`, the same, its row then Ready, saying so; once its stdin says `end`, it puts why its last resort
 ///   ends the VM into the row and writes it Ended, letting its lock go, then ends;
+/// - `locking owner`, a node between its first write's lock and its row: it takes node VM 6's lock with no row, says
+///   so, and ends when its stdin ends;
 /// - `holding owner`, the same, then starts a child of its own that outlives it, which on Unix holds a descriptor of
 ///   its lock file's open file description, as a child forked without an exec would; then reads its row back, as a
 ///   node does, says so, and ends when its stdin ends;
@@ -207,6 +209,18 @@ fn node_vm_role() {
         return;
     }
     let store = store_in(&dir);
+    if role == "locking owner" {
+        std::fs::create_dir_all(store.node_vm_directory()).unwrap();
+        let lock = open_lock(&store.node_vm_directory(), &run(6)).unwrap();
+        assert!(try_own(&lock).unwrap());
+        let mut out = std::io::stdout().lock();
+        out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
+        out.flush().unwrap();
+        let mut line = String::new();
+        while std::io::stdin().lock().read_line(&mut line).unwrap() > 0 {}
+        drop(lock);
+        return;
+    }
     let row = diagnosed(&dir, 7, NodeVmPhase::Booting);
     store.put_node_vm(&row).unwrap();
     if role == "owner" {
@@ -637,4 +651,54 @@ fn an_unfollowed_node_vms_line_is_one_line_its_values_json_strings() {
             "ab".repeat(16)
         )
     );
+}
+
+/// The review's C-12 (AC-T7.4.1; joint plan step 39): a row write that fails leaves no temporary file, so none counts
+/// against the rows' scan bound. Do publish node VM 7's row where its place is a folder holding a file, a place its
+/// rename can't take. Expect the write refused and its temporary file gone.
+#[test]
+fn c12_a_row_write_that_fails_leaves_no_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let directory = store.node_vm_directory();
+    let (temporary, place) = scoped_paths(&directory, &name(&run(7)).unwrap()).unwrap();
+    std::fs::create_dir_all(place.join("in-the-way")).unwrap();
+    let bytes = record(7, NodeVmPhase::Booting).encode().unwrap();
+    assert!(
+        store
+            .publish_durable(&directory, &temporary, &place, &bytes)
+            .is_err()
+    );
+    assert!(!temporary.exists(), "its temporary file left");
+}
+
+/// The review's C-12 (AC-T7.4.1; joint plan step 39): a node's start removes what a crash left in the node VM rows'
+/// directory that no row names and no process holds, so none counts against the rows' scan bound for good: a row
+/// write's temporary file, and a lock file with no row. Do leave node VM 4's temporary file and node VM 5's lock file
+/// with no row, and run a node that holds node VM 6's lock with no row yet, as one does between its lock and its first
+/// write; then start a node. Expect node VM 4's and 5's files removed and 6's lock file kept while its holder runs;
+/// then, its holder ended, the next start removes it too.
+#[test]
+fn c12_a_starts_settle_removes_the_strays_a_crash_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let directory = store.node_vm_directory();
+    std::fs::create_dir_all(&directory).unwrap();
+    let (temporary, _) = scoped_paths(&directory, &name(&run(4)).unwrap()).unwrap();
+    std::fs::write(&temporary, b"{\"version\":").unwrap();
+    let unrowed = lock_path(&directory, &run(5)).unwrap();
+    std::fs::write(&unrowed, b"").unwrap();
+    let (mut holder, said) = owner_ready("locking owner", dir.path());
+    let held = lock_path(&directory, &run(6)).unwrap();
+    assert_eq!(store.settle_node_vms().unwrap().rows, []);
+    assert!(
+        !temporary.exists() && !unrowed.exists(),
+        "a crash's strays left"
+    );
+    assert!(held.exists(), "a live holder's lock file removed");
+    drop(holder.stdin.take());
+    assert!(holder.wait().unwrap().success());
+    drop(said);
+    assert_eq!(store.settle_node_vms().unwrap().rows, []);
+    assert!(!held.exists(), "an ended holder's lock file left");
 }
