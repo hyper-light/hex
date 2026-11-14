@@ -47,14 +47,15 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
-    GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
-    LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead,
-    LearnedPrior, LearnedRank, LearnedRate, LearnedUnread, LearnedUnrecorded, LearnedUse,
-    LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
-    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
-    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
-    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
-    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
+    GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
+    IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
+    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedUnread, LearnedUnrecorded,
+    LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
+    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase,
+    NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published,
+    RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
+    check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -188,6 +189,7 @@ mod kind {
     pub const REFRESH_ASK: u16 = 0x8016;
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
     pub const MEMBER_SIGNAL: u16 = 0x001e;
+    pub const START_FOLLOWED: u16 = 0x001f;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -320,6 +322,10 @@ pub enum Call {
         member: Member,
         signal: Signal,
     },
+    /// Box `id` once its start has come to its end (`Runtime::started`): a box still booting followed to its boot's
+    /// answer on the node, a wait on the fact (decision 9), so a remote caller of a start answered Pending never looks;
+    /// answered [`Answer::Info`], or refused by type. Appended (ROOT, 2026-11-14).
+    Started(BoxId),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1328,6 +1334,7 @@ fn parse_request(
                 .map_err(|e| bad(Fault::value("signal", e.to_string())))?;
             Request::Call(Call::MemberSignal { id, member, signal })
         }
+        kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1739,6 +1746,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::CAPTURED => "a captured",
         kind::REFRESHED => "a refreshed",
         kind::MEMBER_SIGNAL => "a member's signal",
+        kind::START_FOLLOWED => "a start followed",
         _ => "a request",
     }
 }
@@ -1792,6 +1800,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Start(b) => {
             w.header(kind::START, id);
+            w.string(b.as_str())
+        }
+        Call::Started(b) => {
+            w.header(kind::START_FOLLOWED, id);
             w.string(b.as_str())
         }
         Call::Exec {
@@ -3930,7 +3942,82 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.string(what)?;
             w.string(why)
         }
+        // The review's B-15: a Shards guest's failure in its own kind, after every older refusal.
+        Refusal::Guest { op, failure } => {
+            w.u8(16);
+            w.string(op)?;
+            put_guest_failure(w, failure)
+        }
     }
+}
+
+/// A Shards guest's failure ([`Refusal::Guest`]): its kind's tag, then its fields, each duration in whole nanoseconds.
+fn put_guest_failure(w: &mut Writer, failure: &GuestFailure) -> Result<(), Fault> {
+    match failure {
+        GuestFailure::Stalled {
+            waited,
+            over,
+            slowest,
+        } => {
+            w.u8(0);
+            for d in [waited, over, slowest] {
+                let nanos = u64::try_from(d.as_nanos())
+                    .map_err(|_| Fault::value("guest stall", "it passes a u64 of nanoseconds"))?;
+                w.u64(nanos);
+            }
+            Ok(())
+        }
+        GuestFailure::Ended(end) => {
+            w.u8(1);
+            match end {
+                GuestEnd::PowerOff => w.u8(0),
+                GuestEnd::Reset => w.u8(1),
+                GuestEnd::Stopped => w.u8(2),
+                GuestEnd::Failed(why) => {
+                    w.u8(3);
+                    return w.string(why);
+                }
+            }
+            Ok(())
+        }
+        GuestFailure::Gone { pid, why } => {
+            w.u8(2);
+            w.u32(*pid);
+            w.string(why)
+        }
+        GuestFailure::Rate(why) => {
+            w.u8(3);
+            w.string(why)
+        }
+        GuestFailure::HostUse(why) => {
+            w.u8(4);
+            w.string(why)
+        }
+    }
+}
+
+fn guest_failure(r: &mut Reader<'_>) -> Result<GuestFailure, Fault> {
+    Ok(match r.u8()? {
+        0 => GuestFailure::Stalled {
+            waited: std::time::Duration::from_nanos(r.u64()?),
+            over: std::time::Duration::from_nanos(r.u64()?),
+            slowest: std::time::Duration::from_nanos(r.u64()?),
+        },
+        1 => GuestFailure::Ended(match r.u8()? {
+            0 => GuestEnd::PowerOff,
+            1 => GuestEnd::Reset,
+            2 => GuestEnd::Stopped,
+            3 => GuestEnd::Failed(r.string("guest end")?),
+            t => return Err(Fault::value("guest end", format!("variant {t}"))),
+        }),
+        2 => GuestFailure::Gone {
+            pid: r.u32()?,
+            why: r.string("guest gone")?,
+        },
+        3 => GuestFailure::Rate(r.string("guest rate")?),
+        4 => GuestFailure::HostUse(r.string("guest host use")?),
+        t => return Err(Fault::value("guest failure", format!("variant {t}"))),
+    })
 }
 
 /// A capability by its place in [`Upstream::ALL`] (append-only).
@@ -4061,6 +4148,10 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         15 => Refusal::Unconfigured {
             what: name(&r.string("refusal name")?)?,
             why: r.string("refusal reason")?,
+        },
+        16 => Refusal::Guest {
+            op: name(&r.string("refusal name")?)?,
+            failure: guest_failure(r)?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })

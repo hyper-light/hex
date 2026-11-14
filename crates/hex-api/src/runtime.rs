@@ -2632,6 +2632,55 @@ pub enum Refusal {
     /// it. After `Failed` (append-only).
     #[error("this node is configured with no {what}: {why}")]
     Unconfigured { what: &'static str, why: String },
+    /// The Shards guest a call needed failed it, `op` what the call was doing, in Shards' own kind ([`GuestFailure`];
+    /// the review's B-15), where an OS error's text would lose which. After `Unconfigured` (append-only).
+    #[error("{op}: the guest {failure}")]
+    Guest {
+        op: &'static str,
+        failure: GuestFailure,
+    },
+}
+
+/// How a Shards guest failed a call ([`Refusal::Guest`]): each of Shards' kinds by itself (Shards R04), so a caller
+/// tells a stalled boot from an ended guest, and either from an OS call's failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GuestFailure {
+    /// Its VM process ran no CPU at all over `over`, a whole W* or more, `slowest` the slowest answer of the wait's kind
+    /// its host had seen, found `waited` into the wait: Shards' Part B judge of a VM's boot or end, which stops no guest.
+    #[error(
+        "stalled: its VM ran no CPU over {over:?}, past the slowest answer of its kind seen, {slowest:?}, \
+         {waited:?} into the wait"
+    )]
+    Stalled {
+        waited: Duration,
+        over: Duration,
+        slowest: Duration,
+    },
+    /// It ended ([`GuestEnd`]).
+    #[error("ended: {0}")]
+    Ended(GuestEnd),
+    /// Its VM process, `pid`, is gone: `why`, in Shards' words.
+    #[error("is gone, its VM process {pid}: {why}")]
+    Gone { pid: u32, why: String },
+    /// Its VM process held its vCPUs to no rate it was told (Shards' D255), in its words.
+    #[error("refused its rate: {0}")]
+    Rate(String),
+    /// Its VM process answered its use with none of the protocol's (Shards' D260), as Shards says.
+    #[error("answered its use with none of the protocol's: {0}")]
+    HostUse(String),
+}
+
+/// How a Shards guest ended ([`GuestFailure::Ended`]): Shards' own ends.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GuestEnd {
+    #[error("it powered off")]
+    PowerOff,
+    #[error("it asked for a reset")]
+    Reset,
+    #[error("it was stopped")]
+    Stopped,
+    #[error("its VM failed: {0}")]
+    Failed(String),
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's

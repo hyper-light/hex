@@ -297,7 +297,14 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
             .err()
             .expect("a node whose guest ends at once is refused");
         assert!(
-            matches!(&refused, hex_api::Refusal::Os { why, .. } if why.contains("the guest has ended")),
+            // Shards' own kind of the guest's failure, its end (the review's B-15).
+            matches!(
+                &refused,
+                hex_api::Refusal::Guest {
+                    failure: hex_api::GuestFailure::Ended(_),
+                    ..
+                }
+            ),
             "{refused:?}"
         );
         assert_eq!(

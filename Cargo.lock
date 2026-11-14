@@ -575,6 +575,7 @@ dependencies = [
  "libc",
  "rustix",
  "sha2 0.10.9",
+ "shards-abi",
  "shards-afunix",
  "shards-api",
  "shards-remote",

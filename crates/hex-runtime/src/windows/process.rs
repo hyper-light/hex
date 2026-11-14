@@ -320,6 +320,11 @@ impl JobBox {
             return Err(self
                 .uncertain("it isn't a VM's job box, or its job was bound before it was adopted"));
         }
+        // Its bounds as its record gives them now, its CPU rate left as the learner holds it: a commit limit a create
+        // before ruling B wrote at its guest's RAM is lifted (joint plan step 14, A-4), as Linux lifts a VM's
+        // memory.max at its first window.
+        job.set_bounds(&sys_limits(&self.state.limits))
+            .map_err(|error| Refusal::os("setting the adopted VM's native job bounds", error))?;
         self.state
             .job
             .set(NativeScope::Adopted(job))

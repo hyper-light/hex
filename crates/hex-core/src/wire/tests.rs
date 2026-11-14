@@ -804,6 +804,8 @@ fn requests() -> Vec<(u64, Request, usize)> {
             }),
             0,
         ),
+        // A start followed to its end (`Runtime::started`), appended (ROOT, 2026-11-14).
+        (209, Request::Call(Call::Started(id("image"))), 0),
         // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
         (205, Request::Call(Call::Lessors), 0),
         (206, Request::Lessor(Ok(())), 0),
@@ -2175,7 +2177,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x001f, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0020, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2582,6 +2584,34 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
         (any_id(), any_text()).prop_map(|(id, why)| Refusal::Failed { id, why }),
         (proptest::sample::select(&SOME_NAMES[..]), any_text())
             .prop_map(|(what, why)| Refusal::Unconfigured { what, why }),
+        (
+            proptest::sample::select(&SOME_NAMES[..]),
+            any_guest_failure()
+        )
+            .prop_map(|(op, failure)| Refusal::Guest { op, failure }),
+    ]
+}
+
+/// Each of a Shards guest's failures (the review's B-15), its durations whole nanoseconds of a u64, as Shards keeps
+/// them.
+fn any_guest_failure() -> impl Strategy<Value = GuestFailure> {
+    let nanos = || any::<u64>().prop_map(std::time::Duration::from_nanos);
+    prop_oneof![
+        (nanos(), nanos(), nanos()).prop_map(|(waited, over, slowest)| GuestFailure::Stalled {
+            waited,
+            over,
+            slowest
+        }),
+        prop_oneof![
+            Just(GuestEnd::PowerOff),
+            Just(GuestEnd::Reset),
+            Just(GuestEnd::Stopped),
+            any_text().prop_map(GuestEnd::Failed),
+        ]
+        .prop_map(GuestFailure::Ended),
+        (any::<u32>(), any_text()).prop_map(|(pid, why)| GuestFailure::Gone { pid, why }),
+        any_text().prop_map(GuestFailure::Rate),
+        any_text().prop_map(GuestFailure::HostUse),
     ]
 }
 
