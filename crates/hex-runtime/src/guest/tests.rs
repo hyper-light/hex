@@ -632,6 +632,47 @@ fn w39_a_guest_under_shards_init_is_read_from_its_image() {
     }
 }
 
+/// The review's C-17 (AC-T7.4.1; docs/design/node-under-shards-init.md §4): a node's guest image is booted by its digest
+/// alone, so a tag that moved never boots another image as the node boots its guest again. Do: read the guest from
+/// variables naming its image by a tag, by a digest too short, by one of another algorithm, by one in upper case, and by
+/// a digest with no name before it. Expect each refused as Invalid naming HEX_GUEST_IMAGE; then the image pinned by its
+/// sha256 digest read whole.
+#[test]
+fn c17_a_guest_image_its_digest_doesnt_pin_is_refused_by_name() {
+    use std::collections::BTreeMap;
+    let read = |image: &str| {
+        let vars: BTreeMap<&str, OsString> = [
+            ("SHARDS_BIN", "/opt/shards"),
+            ("HEX_GUEST_IMAGE", image),
+            ("HEX_GUEST_CPUS", "2"),
+            ("HEX_GUEST_MEMORY_MIB", "1024"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, OsString::from(value)))
+        .collect();
+        GuestConfig::from_vars(move |name| vars.get(name).cloned())
+    };
+    let digest = "0123456789abcdef".repeat(4);
+    for unpinned in [
+        "hex-node:latest".to_owned(),
+        "hex-node@sha256:0123".to_owned(),
+        format!("hex-node@md5:{digest}"),
+        format!("hex-node@sha256:{}", digest.to_uppercase()),
+        format!("@sha256:{digest}"),
+    ] {
+        let read = read(&unpinned);
+        assert!(
+            matches!(read, Err(Refusal::Invalid { what: ENV_IMAGE, .. })),
+            "{unpinned}: {read:?}"
+        );
+    }
+    let pinned = format!("hex-node@sha256:{digest}");
+    assert_eq!(
+        read(&pinned).map(|config| config.boot),
+        Ok(Boot::Image(pinned.clone()))
+    );
+}
+
 /// One value of a spec broken, as HEX-RT-13 breaks them.
 type Break = fn(&mut OciSpec);
 

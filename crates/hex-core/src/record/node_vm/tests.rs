@@ -109,6 +109,25 @@ fn a_node_vms_record_not_whole_is_refused() {
     assert!(NodeVmRecord::decode(&bytes[..bytes.len() - 1]).is_err());
 }
 
+/// The review's C-17 (AC-T7.4.1; docs/design/node-under-shards-init.md §4): a node VM's row names the image it boots
+/// pinned by its digest, so no row keeps one a tag names, which may move before its node boots it again. Do: check rows
+/// naming their image by a tag and by a digest too short. Expect each refused; then one pinned by its sha256 digest
+/// taken.
+#[test]
+fn c17_a_node_vm_row_whose_image_its_digest_doesnt_pin_is_refused() {
+    for unpinned in ["hex-node:latest", "hex-node@sha256:0123"] {
+        let mut row = record(NodeVmPhase::Booting, None);
+        row.image = unpinned.to_owned();
+        assert!(
+            matches!(row.check(), Err(Refusal::Invalid { .. })),
+            "{unpinned}"
+        );
+    }
+    let mut row = record(NodeVmPhase::Booting, None);
+    row.image = format!("hex-node@sha256:{}", "0123456789abcdef".repeat(4));
+    assert_eq!(row.check(), Ok(()));
+}
+
 /// Joint plan step 39: a node VM's receipt is held to the VM it sizes, not to a workload of none. Do: check a record
 /// whose receipt was admitted for a VM of two CPUs and 256 MiB within a profile from none to that, and one booking past
 /// what it charges. Expect: the first whole, the second refused.
