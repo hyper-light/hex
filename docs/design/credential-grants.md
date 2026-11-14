@@ -162,9 +162,10 @@ its boot refuses a credential or sign-in grant's field past what its network pro
 length (`shards_dns::credential::WIRE_MOST`, 65,535 bytes or hosts), by field and never quoting it, as a spec's
 (`ImageRefusal::Spec`), which the image class says as `Invalid` naming `shards image` as it says every spec refusal. The roots a run's
 injector trusts toward a credential's host are its host's (Shards' D242 upstream roots, `37ddeb080`): Hex names none
-of its own (`ImageSpec::upstream_roots` empty), and since then no `SSL_CERT_FILE` or `SSL_CERT_DIR` adds one. The check's three working lists (each grant's hosts, its member and credential, its
-placeholder and credential) are reserved fallibly (refused `Exhausted` past what memory gives), sorted, O(n log n) in
-the hosts named, with no recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
+of its own (`ImageSpec::upstream_roots` empty), and since then no `SSL_CERT_FILE` or `SSL_CERT_DIR` adds one. The checks' working lists (each grant's hosts with its member, every egress grant's
+member and host by name, each grant's member and credential, its placeholder and credential) are reserved fallibly
+(refused `Exhausted` past what memory gives), sorted and merged, O(n log n) in the hosts named and the grants, with no
+recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
 Shards' run host only as long as each passes it on, wiped as each lets go of it, and never printed.
 
 ## C6. What would falsify it

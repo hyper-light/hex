@@ -455,3 +455,87 @@ fn s33_a_sign_in_is_checked_by_its_fields_beside_the_runs_credentials() {
         "a placeholder printed: {printed}"
     );
 }
+
+/// The review's B-11 (= E-7; AC-T7.7.2, C5): the checks of a box's credential and sign-in grants sort and merge, O(n log
+/// n) in the hosts named, never a look at every earlier host and every egress grant for each host. Do check a
+/// credential, then a sign-in, each toward 1,024 hosts that egress grants of its member's own reach, counting the looks
+/// each check makes at an earlier host or an egress grant. Expect both taken, each with at most the looks a merge of the
+/// two sorted lists makes: a step past each host or egress grant, and a look at the host before each, 2 x hosts +
+/// grants (the sorts are std's `sort_unstable`, O(n log n) by its contract, and not counted).
+#[test]
+fn b11_the_credential_and_sign_in_checks_merge_their_hosts_against_the_egress_grants() {
+    let n = 1024;
+    let hosts: Vec<String> = (0..n).map(|i| format!("h{i}.example.com")).collect();
+    let grants: Vec<Grant> = hosts
+        .iter()
+        .map(|host| egress(claude(), host, Proto::Tcp))
+        .collect();
+    let toward: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let credentials = [credential(claude(), "anthropic/ada", &toward)];
+    let signed_in = SignInGrant {
+        toward: hosts.clone(),
+        ..sign_in("claude/ada", SignInCli::ClaudeCode)
+    };
+    let counted = |check: &dyn Fn() -> Result<(), Refusal>| {
+        LOOKS.with(|looks| looks.set(0));
+        check().unwrap();
+        LOOKS.with(std::cell::Cell::get)
+    };
+    let credential_looks = counted(&|| check_credentials(&credentials, &grants));
+    let sign_in_looks =
+        counted(&|| check_sign_ins(std::slice::from_ref(&signed_in), &credentials, &grants));
+    let bound = u64::try_from(2 * n + grants.len()).unwrap();
+    assert!(
+        credential_looks <= bound && sign_in_looks <= bound,
+        "looks: the credential's {credential_looks}, the sign-in's {sign_in_looks}; a merge's at most {bound}"
+    );
+}
+
+/// The review's B-11 (AC-T7.7.2, C2): the merge tells a grant's first unfit host in its list's order, as a look at each
+/// host in turn would. Do check credentials toward [a, b, a] with b unreached, toward [a, a] with a unreached, and
+/// toward [a, b, b, c] with c unreached, then a sign-in toward [a, b, a] with b unreached. Expect b at 1 told unreached,
+/// a at 0 told unreached, b told named twice, then the sign-in's b at 1 told unreached.
+#[test]
+fn b11_a_grants_first_unfit_host_is_told_in_its_lists_order() {
+    let grants = [
+        egress(claude(), "a.example", Proto::Tcp),
+        egress(claude(), "c.example", Proto::Udp),
+    ];
+    let reaches = [
+        egress(claude(), "a.example", Proto::Tcp),
+        egress(claude(), "b.example", Proto::Tcp),
+    ];
+    for (toward, over, says) in [
+        (
+            &["a.example", "b.example", "a.example"][..],
+            &grants[..],
+            "credentials[0].toward[1] \"b.example\" is no host",
+        ),
+        (
+            &["a.example", "a.example"][..],
+            &[][..],
+            "credentials[0].toward[0] \"a.example\" is no host",
+        ),
+        (
+            &["a.example", "b.example", "b.example", "c.example"][..],
+            &reaches[..],
+            "credentials[0].toward names \"b.example\" twice",
+        ),
+    ] {
+        let why = refused(&[credential(claude(), "anthropic/ada", toward)], over);
+        assert!(why.contains(says), "{toward:?}: {why}");
+    }
+    let signed_in = SignInGrant {
+        toward: ["a.example", "b.example", "a.example"]
+            .map(str::to_owned)
+            .to_vec(),
+        ..sign_in("claude/ada", SignInCli::ClaudeCode)
+    };
+    match check_sign_ins(&[signed_in], &[], &grants) {
+        Err(Refusal::Invalid { why, .. }) => assert!(
+            why.contains("sign_ins[0].toward[1] \"b.example\" is no host"),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
