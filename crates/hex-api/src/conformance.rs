@@ -1843,4 +1843,77 @@ mod tests {
             "HEX-RT-4 took {took:?}"
         );
     }
+
+    /// The simulator, every KILL it takes answered `Lifecycle { Pending }`, as a Shards image VM's stop past its W* is
+    /// answered (the 11-13 ruling: the stop goes on, its end recorded when a later call finds it); a KILL the simulator
+    /// refuses is refused so.
+    struct PendingStops {
+        sim: SimRuntime,
+    }
+
+    impl Runtime for PendingStops {
+        fn classes(&self) -> Vec<Class> {
+            self.sim.classes()
+        }
+        fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.sim.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.start(id)
+        }
+        fn exec(
+            &self,
+            id: &BoxId,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.exec(id, program, stdio)
+        }
+        fn run(
+            &self,
+            spec: BoxSpec,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, program, stdio)
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.sim.signal(id, signal)?;
+            if signal != Signal::KILL {
+                return Ok(());
+            }
+            Err(Refusal::Lifecycle {
+                id: id.clone(),
+                cause: crate::LifecycleCause::Pending,
+                why: None,
+            })
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            self.sim.inspect(id)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.sim.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.sim.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.delete(id)
+        }
+    }
+
+    /// HEX-IMG-2 and HEX-IMG-4 (goal 2; ROOT, 2026-11-14): a Shards image VM's KILL its runtime answers
+    /// `Lifecycle { Pending }`, its stop under way past W*, is a stop taken, its end followed to the box's exit as
+    /// [`exit_of`] reads it. Do: run the image cases against a simulator whose every KILL it takes is answered so.
+    /// Expect: no case fails.
+    #[test]
+    fn w2_an_image_vms_stop_answered_pending_is_followed_to_its_end() {
+        let failures = run_image(
+            &PendingStops {
+                sim: SimRuntime::new(),
+            },
+            &SimFixture::ShardsImage,
+        );
+        assert_eq!(failures, Vec::new());
+    }
 }
