@@ -101,17 +101,6 @@ impl<'a> Holder<'a> {
         }
     }
 
-    /// Whether it is holder `id`.
-    pub(crate) fn is(self, id: &LearnedHolder) -> bool {
-        match (self, id) {
-            (Self::Box(record), LearnedHolder::Box(id)) => record.spec.id == *id,
-            (Self::Node { row, .. }, LearnedHolder::Node(run)) => row.run == *run,
-            (Self::Box(_), LearnedHolder::Node(_)) | (Self::Node { .. }, LearnedHolder::Box(_)) => {
-                false
-            }
-        }
-    }
-
     /// The lifetime it names ([`Scope::of`]): a node VM's its run.
     pub(crate) fn scope(self) -> Option<Scope> {
         match self {
@@ -786,6 +775,45 @@ pub(crate) fn between(
         .and_then(|ran| u64::try_from(ran).ok())
         .map_or(after.0, |ran| before.0.saturating_add(ran));
     (value, at)
+}
+
+/// The holders of `holders` that have a scope, sorted by it, for a window's keyed lookups ([`find`]; the review's O(n²)
+/// matching).
+fn by_scope<'h>(holders: &[Holder<'h>]) -> Result<Vec<(Scope, Holder<'h>)>, Refusal> {
+    let mut sorted = Vec::new();
+    sorted
+        .try_reserve_exact(holders.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's VM scopes",
+            bound: holders.len(),
+        })?;
+    sorted.extend(
+        holders
+            .iter()
+            .filter_map(|holder| holder.scope().map(|scope| (scope, *holder))),
+    );
+    sorted.sort_unstable_by_key(|(scope, _)| *scope);
+    Ok(sorted)
+}
+
+/// The holder of `scope` among `sorted` ([`by_scope`]), by one search.
+fn find<'s, 'h>(sorted: &'s [(Scope, Holder<'h>)], scope: &Scope) -> Option<&'s Holder<'h>> {
+    sorted
+        .binary_search_by(|(kept, _)| kept.cmp(scope))
+        .ok()
+        .and_then(|at| sorted.get(at))
+        .map(|(_, holder)| holder)
+}
+
+/// Where `id` falls beside `holder`'s own id in `LearnedHolder`'s order (a box's before a node VM's, each by its own
+/// id), so ids kept sorted are searched by a holder without making its id (the review's O(n²) matching).
+fn order(id: &LearnedHolder, holder: Holder<'_>) -> std::cmp::Ordering {
+    match (id, holder) {
+        (LearnedHolder::Box(id), Holder::Box(record)) => id.cmp(&record.spec.id),
+        (LearnedHolder::Node(run), Holder::Node { row, .. }) => run.cmp(&row.run),
+        (LearnedHolder::Box(_), Holder::Node { .. }) => std::cmp::Ordering::Less,
+        (LearnedHolder::Node(_), Holder::Box(_)) => std::cmp::Ordering::Greater,
+    }
 }
 
 /// `ns` of CPU over `span` in milli-CPU: none over no span.
@@ -1555,7 +1583,8 @@ pub(crate) struct Learner {
     fault: Option<Refusal>,
     /// Why no VM's memory budget is held on this platform (C5), typed.
     unheld: Refusal,
-    /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
+    /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13),
+    /// in their ids' order ([`order`]).
     unread: Vec<(LearnedHolder, Refusal)>,
     /// The machine it runs on, which a box whose record can't be read is counted at ([`Learner::learn`]).
     machine: CapacityResources,
@@ -1663,8 +1692,9 @@ impl Learner {
     /// The managed VMs among `records` whose governors a window asks (D255; ROOT, 2026-11-13), on a platform with no
     /// window: each it hasn't asked, and each whose ask failed. Those no longer running are forgotten.
     fn governing<'h>(&mut self, records: &[Holder<'h>]) -> Result<Vec<Governing<'h>>, Refusal> {
+        let live = by_scope(records)?;
         self.governors
-            .retain(|scope, _| records.iter().any(|record| record.scope() == Some(*scope)));
+            .retain(|scope, _| find(&live, scope).is_some());
         let mut asks = Vec::new();
         if self.manages() {
             return Ok(asks);
@@ -1834,11 +1864,13 @@ impl Learner {
         answers: Vec<Answer<'h>>,
         budget: CapacityResources,
     ) -> Result<Acts<'h>, Refusal> {
-        let scope_of = |holder: &Holder<'_>| holder.scope();
+        // Each VM it holds looked up among the running, sorted once, never compared with each of them (the review's
+        // O(n²) matching).
+        let live = by_scope(running)?;
         let gone: Vec<Scope> = self
             .vms
             .keys()
-            .filter(|scope| !running.iter().any(|r| scope_of(r) == Some(**scope)))
+            .filter(|scope| find(&live, scope).is_none())
             .copied()
             .collect();
         for scope in gone {
@@ -1880,7 +1912,14 @@ impl Learner {
                         what: "the charge learner's unread VMs",
                         bound: running.len(),
                     })?;
-                    self.unread.push((record.id()?, why));
+                    // Kept in its ids' order, so a capacity answer finds each running VM's by one search (the review's
+                    // O(n²) matching).
+                    let id = record.id()?;
+                    let at = self
+                        .unread
+                        .binary_search_by(|(kept, _)| kept.cmp(&id))
+                        .unwrap_or_else(|at| at);
+                    self.unread.insert(at, (id, why));
                     continue;
                 }
             };
@@ -2053,9 +2092,7 @@ impl Learner {
             if vm.held.is_some() && vm.rate == rate && vm.told == told && vm.unset.is_none() {
                 continue;
             }
-            let holder = running
-                .iter()
-                .find(|record| scope_of(record) == Some(scope))
+            let holder = find(&live, &scope)
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
             caps.push(Capping {
                 holder: *holder,
@@ -2087,9 +2124,7 @@ impl Learner {
             {
                 continue;
             }
-            let holder = running
-                .iter()
-                .find(|record| scope_of(record) == Some(scope))
+            let holder = find(&live, &scope)
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
             rooms.push((*holder, scope, budget.room));
         }
@@ -2207,7 +2242,11 @@ impl Learner {
             };
             // One its last window couldn't read carries no holding, so the scheduler counts it at its receipt, whole
             // (C8; ROOT, 2026-11-13): the failure told where its booking would be.
-            if self.unread.iter().any(|(id, _)| record.is(id)) {
+            if self
+                .unread
+                .binary_search_by(|(id, _)| order(id, *record))
+                .is_ok()
+            {
                 continue;
             }
             if let Some(vm) = self.vms.get(&scope)
@@ -2304,7 +2343,12 @@ impl Learner {
             if vm_class(record.class()) != Some(class) {
                 continue;
             }
-            let Some((id, why)) = self.unread.iter().find(|(id, _)| record.is(id)) else {
+            let Some((id, why)) = self
+                .unread
+                .binary_search_by(|(id, _)| order(id, *record))
+                .ok()
+                .and_then(|at| self.unread.get(at))
+            else {
                 continue;
             };
             told.try_reserve(1).map_err(|_| Refusal::Exhausted {
