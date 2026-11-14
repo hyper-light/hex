@@ -74,8 +74,7 @@ impl BoxSpec {
     pub fn backend_class(&self) -> Result<Class, Refusal> {
         self.check()?;
         Ok(match self.route_execution() {
-            None
-            | Some(crate::runtime::Execution::Native | crate::runtime::Execution::NodeVm) => {
+            None | Some(crate::runtime::Execution::Native | crate::runtime::Execution::NodeVm) => {
                 self.class.class()
             }
             Some(

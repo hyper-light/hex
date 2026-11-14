@@ -662,6 +662,8 @@ fn route_of<'a>(
         Some("shared") => hex_api::Execution::ShardsShared,
         Some("dedicated") => hex_api::Execution::ShardsDedicated,
         Some("firecracker") => hex_api::Execution::Firecracker,
+        // V2: appended, so a row written before it names none of it and reads as it was written.
+        Some("node-vm") => hex_api::Execution::NodeVm,
         _ => return Err(damaged("route execution")),
     };
     let gpu = match fields.next() {
@@ -2350,6 +2352,20 @@ impl Node {
                 *b = b
                     .checked_add(r)
                     .ok_or_else(|| damaged("a node VM's receipt past what is booked"))?;
+            }
+        }
+        Ok(booked)
+    }
+
+    /// What the node VMs it runs for itself book of its room, each at its receipt ([`Node::book_node`]; V2): the room
+    /// its own admissions don't have, as no box's admission books it.
+    pub fn nodes_booked(&self) -> Result<lb::Amounts, Stop> {
+        let mut booked = [0u64; lb::DIMS];
+        for receipt in self.nodes.values() {
+            for (b, r) in booked.iter_mut().zip(amounts(receipt)) {
+                *b = b
+                    .checked_add(r)
+                    .ok_or_else(|| damaged("node VM receipts past what is booked"))?;
             }
         }
         Ok(booked)

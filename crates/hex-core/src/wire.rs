@@ -2598,10 +2598,11 @@ fn holder_bytes(holder: &LearnedHolder) -> usize {
     }
 }
 
-/// One node VM's receipt (joint plan step 39): its run, its booking, then its phase's tag.
-const NODE_VM_RECEIPT_BYTES: usize = 16 + RESOURCE_BYTES + 1;
+/// One node VM's receipt (joint plan step 39): its run, its booking, its phase's tag, then its guest's room (V2).
+const NODE_VM_RECEIPT_BYTES: usize = 16 + RESOURCE_BYTES + 1 + RESOURCE_BYTES;
 
-/// A node VM's receipt: its run's 16 bytes, its booking, then its phase, 0 Booting, 1 Ready and 2 Ended.
+/// A node VM's receipt: its run's 16 bytes, its booking, its phase, 0 Booting, 1 Ready and 2 Ended, then what its guest
+/// is admitted at (V2).
 fn put_node_vm_receipt(w: &mut Writer, receipt: &NodeVmReceipt) -> Result<(), Fault> {
     w.reserve_fixed(NODE_VM_RECEIPT_BYTES)?;
     w.raw(receipt.run.bytes());
@@ -2611,6 +2612,7 @@ fn put_node_vm_receipt(w: &mut Writer, receipt: &NodeVmReceipt) -> Result<(), Fa
         NodeVmPhase::Ready => 1,
         NodeVmPhase::Ended => 2,
     });
+    put_resources(w, receipt.guest);
     Ok(())
 }
 
@@ -2630,7 +2632,7 @@ fn node_vm_receipt(r: &mut Reader<'_>) -> Result<NodeVmReceipt, Fault> {
                 ));
             }
         },
-        guest: CapacityResources::default(),
+        guest: resources(r)?,
     })
 }
 

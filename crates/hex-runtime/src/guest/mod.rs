@@ -1125,8 +1125,8 @@ impl GuestRuntime {
         Ok(b)
     }
 
-    /// Each node VM's receipt as its record keeps it (joint plan step 39): its run, what its allocation books and where
-    /// its run stands, from its record owner's rows.
+    /// Each node VM's receipt as its record keeps it (joint plan step 39): its run, what its allocation books, where
+    /// its run stands and what its guest is admitted at (V2), from its record owner's rows.
     fn node_vm_receipts(&self) -> Result<Vec<hex_api::NodeVmReceipt>, Refusal> {
         let records = self.authority()?.all_node_vms()?;
         let mut receipts = Vec::new();
@@ -1136,13 +1136,60 @@ impl GuestRuntime {
                 what: "node VM receipts",
                 bound: records.len(),
             })?;
-        receipts.extend(records.into_iter().map(|record| hex_api::NodeVmReceipt {
-            run: record.run,
-            booking: record.allocation.booking(),
-            phase: record.phase,
-            guest: hex_api::CapacityResources::default(),
-        }));
+        for record in records {
+            receipts.push(hex_api::NodeVmReceipt {
+                run: record.run,
+                booking: record.allocation.booking(),
+                phase: record.phase,
+                guest: record.allocation.guest()?,
+            });
+        }
         Ok(receipts)
+    }
+
+    /// Whether its guest is its node's node VM under shards-init (joint plan step 39): booted through the image class.
+    pub(super) fn node_vm_form(&self) -> bool {
+        matches!(self.config.boot, Boot::Image(_))
+    }
+
+    /// Gives `capacity`, its host's answer for its oci class, its node VM's route and receipts (joint plan step 39;
+    /// ROOT, 2026-11-13, V2): one route, NodeVm, for a Linux image of its host's architecture with no GPU, charged
+    /// nothing at the host as its node VM's receipt pays the host envelope once; and each node VM's receipt, its guest
+    /// the room the scheduler holds that route's boxes to, which the node's ledger books while it boots and runs.
+    pub(super) fn add_node_vm_offers(
+        &self,
+        capacity: &mut hex_api::Capacity,
+    ) -> Result<(), Refusal> {
+        capacity.check()?;
+        if capacity.routes.is_empty() {
+            capacity
+                .device_routes
+                .try_reserve_exact(capacity.devices.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "physical route eligibility",
+                    bound: hex_api::MAX_DEVICES,
+                })?;
+            capacity.device_routes.resize(capacity.devices.len(), 0);
+        }
+        shared::push_offer(
+            capacity,
+            hex_api::RouteOffer {
+                key: hex_api::RouteKey {
+                    class: Class::Oci,
+                    image: hex_api::ImagePlatform {
+                        os: hex_api::ImageOs::Linux,
+                        arch: route::host_platform()?.arch,
+                    },
+                    execution: hex_api::Execution::NodeVm,
+                    gpu: hex_api::GpuEligibility::None,
+                },
+                cost: None,
+                backing: None,
+            },
+            &[],
+        )?;
+        capacity.node_vms = self.node_vm_receipts()?;
+        capacity.check()
     }
 
     /// `why` a node VM's boot failed past its READY, its run stopped first; where its stop fails too, both.
@@ -1294,6 +1341,14 @@ impl Runtime for GuestRuntime {
             return Ok(Some(capacity));
         }
         let booted = self.guest()?;
+        // A node whose guest is a node VM under shards-init answers its oci class on its host's plane, as a node whose
+        // guest is shared does, its route its node VM's (joint plan step 39; ROOT, 2026-11-13, V2): never the guest's
+        // own pool, which the scheduler would take for its whole node's.
+        if class == Class::Oci && matches!(booted.guest, GuestHandle::Node(_)) {
+            let mut capacity = self.authority()?.capacity()?;
+            self.add_node_vm_offers(&mut capacity)?;
+            return Ok(Some(capacity));
+        }
         let capacity = booted.client.capacity(Class::Oci)?.ok_or_else(|| {
             Refusal::Broken("the guest node reported no resource pool".to_owned())
         })?;
@@ -1315,13 +1370,7 @@ impl Runtime for GuestRuntime {
                 format!("guest:{}:{}", identity.pid, identity.started)
             }
         };
-        let mut capacity = guest_capacity(capacity, &self.config, fence)?;
-        // The node VM under shards-init is charged through the oci answer, its receipt as its record keeps it, which the
-        // scheduler books in its node's ledger (joint plan step 39; ROOT's option (a), 2026-11-13).
-        if class == Class::Oci && matches!(booted.guest, GuestHandle::Node(_)) {
-            capacity.node_vms = self.node_vm_receipts()?;
-        }
-        Ok(Some(capacity))
+        Ok(Some(guest_capacity(capacity, &self.config, fence)?))
     }
 
     fn classes(&self) -> Vec<Class> {
@@ -2027,6 +2076,10 @@ impl<P: Runtime> Runtime for WithGuest<P> {
                             )?;
                         }
                         self.oci.add_offers(&mut native, class)?;
+                    } else if self.oci.node_vm_form() {
+                        // Its Linux images go to its node VM, beside its own (Windows'): its route and receipts
+                        // with them (joint plan step 39, V2), so its scheduler sees the node VM.
+                        self.oci.add_node_vm_offers(&mut native)?;
                     }
                     return Ok(Some(native));
                 }

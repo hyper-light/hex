@@ -335,6 +335,10 @@ impl RouteKey {
             (crate::Class::Oci, Execution::ShardsDedicated) => {
                 self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::Required
             }
+            // V2: an oci box of a Linux image in its node's node VM, which passes no device through.
+            (crate::Class::Oci, Execution::NodeVm) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::None
+            }
             (crate::Class::Shards, Execution::ShardsDedicated)
             | (crate::Class::Firecracker, Execution::Firecracker) => {
                 self.image.os == ImageOs::Linux
@@ -694,7 +698,8 @@ impl RouteOffer {
     pub fn check(self) -> Result<(), Refusal> {
         self.key.check()?;
         match (self.key.execution, self.cost, self.backing) {
-            (Execution::Native, None, None) | (Execution::ShardsShared, None, Some(_)) => Ok(()),
+            (Execution::Native | Execution::NodeVm, None, None)
+            | (Execution::ShardsShared, None, Some(_)) => Ok(()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(cost), _) => cost.check(),
             _ => Err(invalid_route(
                 "route charge differs from its actual execution topology",
@@ -800,6 +805,9 @@ impl RouteReceipt {
             (Execution::ShardsShared, None) if self.backing.is_some() => {
                 Ok(CapacityResources::default())
             }
+            // V2: its node VM's receipt, booked beside it, pays the host envelope once; its room is that node VM's
+            // guest's, which the scheduler holds it to.
+            (Execution::NodeVm, None) if self.backing.is_none() => Ok(CapacityResources::default()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
                 allocation.check(workload)?;
                 Ok(allocation.booking())
@@ -818,9 +826,11 @@ impl RouteReceipt {
             ));
         }
         match (self.key.execution, self.backing) {
-            (Execution::Native, Some(_)) | (Execution::ShardsShared, None) => Err(invalid_route(
-                "committed route has an invalid backing relationship",
-            )),
+            (Execution::Native | Execution::NodeVm, Some(_)) | (Execution::ShardsShared, None) => {
+                Err(invalid_route(
+                    "committed route has an invalid backing relationship",
+                ))
+            }
             _ => Ok(()),
         }
     }

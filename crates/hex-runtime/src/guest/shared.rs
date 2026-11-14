@@ -1996,7 +1996,7 @@ pub(super) fn exit_of(status: shards_api::ManagedStatus) -> hex_api::Exit {
     }
 }
 
-fn push_offer(
+pub(super) fn push_offer(
     capacity: &mut hex_api::Capacity,
     offer: hex_api::RouteOffer,
     eligible: &[hex_api::DeviceInfo],

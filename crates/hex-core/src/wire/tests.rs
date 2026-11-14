@@ -4889,9 +4889,10 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
     let mut twice = capacity.try_clone().unwrap();
     twice.node_vms[1].run = twice.node_vms[0].run;
     assert!(twice.check().is_err());
-    // The receipts' count, then each receipt: its run, its booking and its phase, the last of which comes just before
-    // the learner's why, none here (A-3), which ends it.
-    let at = bytes.len() - (size_of::<u32>() + 3 * (16 + 3 * size_of::<u64>() + 1) + 1);
+    // The receipts' count, then each receipt: its run, its booking, its phase and its guest's room (V2), the last of
+    // which comes just before the learner's why, none here (A-3), which ends it.
+    let receipt = 16 + 3 * size_of::<u64>() + 1 + 3 * size_of::<u64>();
+    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1);
     let mut past = bytes.clone();
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -4900,7 +4901,8 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
         Err(Fault::Value { .. })
     ));
     let mut unknown = bytes;
-    let phase = unknown.len() - 2;
+    // The last receipt's phase: before its guest's room and the learner's why.
+    let phase = unknown.len() - 2 - 3 * size_of::<u64>();
     unknown[phase] = 3;
     assert!(matches!(
         read_answer(&received(&unknown, 0), MAX_MESSAGE),
