@@ -1,7 +1,8 @@
 //! Joint plan step 14 (2c; ROOT, 2026-11-13): an append-only native-helper request for the slowest stop response the
 //! helper's managed CPU control has seen in its own holds, from a scope's credit running out to its members read
 //! stopped. It names no scope: the response is the helper's, every scope's control taking it. The helper answers it,
-//! none before its first hold, and the node derives its charge window from it (`MacRuntime::charge_window`).
+//! none before its first hold. The node's cycle of its control at a rate (`MacRuntime::cap_cycle`) is to take it (2c-4b,
+//! owed); until then it takes the response its node configured.
 use super::*;
 
 const KIND: u16 = 0x0015;

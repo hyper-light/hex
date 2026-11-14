@@ -891,12 +891,12 @@ impl<K: Ord + Copy> Node<K> {
     /// last window. `used` says what each used against the cap it ran under: one that used its whole cap, or has run no
     /// window yet, may ask its ceiling. So every VM keeps at least its booking, the caps sum to at most `capacity`
     /// where the bookings fit it (C3; bookings past it stay, as C3 keeps them), and each cap is at most its ceiling and
-    /// at least `least`, the least rate the platform holds.
+    /// at least `least` of it, the least rate the actuator holding it takes (its governor's, its platform's cap's).
     pub fn rates(
         &self,
         capacity: u64,
         used: &BTreeMap<K, (u64, u64)>,
-        least: u64,
+        least: impl Fn(&K) -> u64,
     ) -> Result<Vec<(K, u64)>, ChargeError> {
         let mut entries = Vec::new();
         entries
@@ -927,7 +927,7 @@ impl<K: Ord + Copy> Node<K> {
                 let cap = booking
                     .checked_add(extra)
                     .ok_or(ChargeError::Overflow("a VM's CPU cap"))?;
-                Ok((*id, cap.max(least)))
+                Ok((*id, cap.max(least(id))))
             })
             .collect()
     }
