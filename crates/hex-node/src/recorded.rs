@@ -2536,6 +2536,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// fleet's budget). Its failure is kept for the capacity answers. Answers the window it reads over next.
     fn learn_window(&self) -> Option<std::time::Duration> {
         let (shared, _) = self.books.charges.get()?;
+        // Its learner is taken for each pure step and let go while the node's records and VMs are read and its VMs acted
+        // on (A-2), so a capacity answer, which takes it, never waits on a record or a VM.
+        let fail = |why: Refusal| {
+            let mut learner = shared.lock().ok()?;
+            learner.failed(why);
+            learner.next_window()
+        };
         let read = self.books.store.all().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
@@ -2543,15 +2550,9 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             charges::retire_with_node_vms(&self.books.store, &records, &rows)?;
             Ok((records, rows, self.machine()?))
         });
-        let Ok(mut learner) = shared.lock() else {
-            return None;
-        };
         let (records, rows, machine) = match read {
             Ok(read) => read,
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         };
         // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
         let band = charges::node_band(records.iter());
@@ -2561,19 +2562,22 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             store: &self.books.store,
         };
         // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
-        if let Err(why) = charges::boxes(&records).and_then(|holders| learner.govern(&io, &holders))
+        if let Err(why) =
+            charges::boxes(&records).and_then(|holders| charges::govern(shared, &io, &holders))
         {
-            learner.failed(why);
-            return learner.next_window();
+            return fail(why);
         }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let mut sorted = match charges::sort(&records, &rows, |holder| learner.learns(holder)) {
+        let sorted = {
+            let Ok(learner) = shared.lock() else {
+                return None;
+            };
+            charges::sort(&records, &rows, |holder| learner.learns(holder))
+        };
+        let mut sorted = match sorted {
             Ok(sorted) => sorted,
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         };
         // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
         if let Err(why) = charges::booting(&rows).and_then(|booking| {
@@ -2586,8 +2590,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 })?;
             Ok(())
         }) {
-            learner.failed(why);
-            return learner.next_window();
+            return fail(why);
         }
         // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
         let nodes = charges::nodes(&rows, &band).and_then(|nodes| {
@@ -2602,10 +2605,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         });
         match nodes {
             Ok(nodes) => sorted.learned.extend(nodes),
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         }
         let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
             dim(&sorted.native).saturating_add(dim(&sorted.whole))
@@ -2616,12 +2616,21 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             disk_bytes: machine.disk_bytes,
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&io, &sorted.learned, budget, std::time::Instant::now());
-        let next = learner.next_window();
+        let _ = charges::window(
+            shared,
+            &io,
+            &sorted.learned,
+            budget,
+            std::time::Instant::now(),
+        );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
-        let ends = learner.unrecorded();
-        drop(learner);
+        let (next, ends) = {
+            let Ok(mut learner) = shared.lock() else {
+                return None;
+            };
+            (learner.next_window(), learner.unrecorded())
+        };
         let (left, failed) = charges::write_ends(&self.books.store, ends);
         if let Some(why) = failed
             && let Ok(mut learner) = shared.lock()
