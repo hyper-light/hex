@@ -1511,9 +1511,7 @@ pub(super) fn launch(
         return Err(record.uncertain("its launch's report scope isn't its record's"));
     }
     let deadline = request.map_or(deadline, |request| {
-        Some(deadline.map_or(request.deadline(), |deadline| {
-            deadline.min(request.deadline())
-        }))
+        crate::devices::earlier(deadline, request.until().instant())
     });
     let helper = runtime
         .managed_helper

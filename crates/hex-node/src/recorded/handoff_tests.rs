@@ -334,7 +334,10 @@ fn boot(scope: [u8; 16]) -> shards_api::PreparedBoot {
     };
     shards_api::prepare_boot(&guest, &root.join("shards"), &root.join("v"), 0)
         .unwrap()
-        .with_gpu_report(scope, Instant::now() + Duration::from_secs(60))
+        .with_gpu_report(
+            scope,
+            shards_api::Until::At(Instant::now() + Duration::from_secs(60)),
+        )
         .unwrap()
 }
 fn io() -> shards_api::LaunchIo {

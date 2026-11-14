@@ -454,9 +454,7 @@ pub fn check_managed_report(
             record,
             request.selected(),
         )?;
-        Some(deadline.map_or(request.deadline(), |deadline| {
-            deadline.min(request.deadline())
-        }))
+        earlier(deadline, request.until().instant())
     } else {
         deadline
     };
@@ -1648,6 +1646,18 @@ fn read_bounded(path: &Path, bound: usize) -> Result<Vec<u8>, Refusal> {
     }
     bytes.truncate(used);
     Ok(bytes)
+}
+
+/// The earlier of two deadlines, either of which may be none (a wait that follows): none where both are.
+pub(crate) fn earlier(
+    a: Option<std::time::Instant>,
+    b: Option<std::time::Instant>,
+) -> Option<std::time::Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 #[cfg(test)]

@@ -1257,8 +1257,8 @@ fn c9_a_first_boot_slower_than_w_star_is_followed_never_stopped_and_booted_again
     );
 }
 
-/// HEX-GUEST-34 (the record's slowest boot to ready, a GPU create's budget alone, owed until Shards' GPU report takes no
-/// deadline; the review's C-9): on Linux (KVM), whose boot-to-ready row isn't in records.tsv yet, expect it the slowest
+/// HEX-GUEST-34 (the record's slowest boot to ready, hex-cli's measuring tools' bound alone, owed until their waits
+/// follow; the review's C-9): on Linux (KVM), whose boot-to-ready row isn't in records.tsv yet, expect it the slowest
 /// boot_ready of any class, with no margin, never a refusal.
 #[cfg(target_os = "linux")]
 #[test]
