@@ -315,17 +315,23 @@ fn has_ended(fd: &OwnedFd) -> bool {
     rustix::event::poll(&mut fds, Some(&now)).unwrap() > 0
 }
 
-/// Runs `program` in box `id` to its end, waiting as `wait`, its end's own record, says: for at most its deadline, or,
-/// while it measures, for the end alone. Its answer is told to `wait` and to the census as [`until`]'s are.
+/// Runs `program` in box `id` to its end, as decision 9 waits on `wait` (`follow::within`): within W*, its end; past W*,
+/// its run-out told once, and the wait follows the program to its end, never a verdict at W* (it was one: the gate at
+/// 45fc1605 failed here under load, "the program ended in time"). Its answer is told to `wait` and to the census.
 fn run(node: &Node, id: &BoxId, program: Program, wait: &Patience) -> Exit {
     let mut p = node.exec(id, program, Stdio::null()).expect("exec");
-    let began = Instant::now();
-    let exit = p
-        .wait_for(wait.deadline().unwrap_or(Duration::MAX))
-        .expect("wait")
-        .expect("the program ended in time");
-    hex_testkit::waits::answered(wait, began.elapsed());
-    exit
+    hex_testkit::waits::follow::within(
+        wait,
+        "a box's program's end",
+        || hex_testkit::waits::follow::Party::Live,
+        |by| {
+            let left = by.map_or(Duration::MAX, |by| {
+                by.saturating_duration_since(Instant::now())
+            });
+            p.wait_for(left).expect("wait")
+        },
+    )
+    .expect("the program's end")
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
