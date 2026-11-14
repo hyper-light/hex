@@ -26,11 +26,13 @@ being GitHub's main (`025aae6d`):
   VMs that cap holds, each at its own share, and named on the capacity answers where it sets the window.
 - Built (the review's A-10, ROOT, 2026-11-14): the fleet's budget measured each window from what the machine has free
   (C7), on every OS, less what the capacity view's holders reserve as its keeper tells the node (`--capacity-view`).
+- Built (2c-4b; the review's A-14, 2026-11-14): the macOS node sends its helper the cold control, never a census row's
+  response, and takes its control's cycle from the stop response its helper learned, asked each time
+  (`MacRuntime::cap_cycle`), cold and told on the VM's rate until its helper has measured a stop; a control's cycle
+  matters only for a managed VM whose process takes no rate (D255). Windows needs no window of its job's: every managed
+  VM is `--host-managed`, held by its governor over its period, and one whose process takes no rate is booked whole,
+  told (ROOT, 2026-11-13).
 - Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
-  On Hex: 2c-4b, the node's call for its macOS helper's slowest response (`MacRuntime::cap_cycle` from it, the managed
-  control's row requirement dropped), which a control's cycle needs only for a managed VM whose process takes no rate
-  (D255). Windows needs no window of its job's: every managed VM is `--host-managed`, held by its governor over its
-  period, and one whose process takes no rate is booked whole, told (ROOT, 2026-11-13).
 
 Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>` with kiln's grade; raw texts in
 `~/.cache/hex-lead/research/hexres-c14`); Linux `Documentation/admin-guide/cgroup-v2.rst` at `1590cf03`; Shards
