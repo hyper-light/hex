@@ -100,6 +100,7 @@ fn node(os: Os) -> NodeSpec {
             offers,
             device_routes: Vec::new(),
             backings: vec![backing],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -213,6 +214,7 @@ fn two_cpu_shared_oci_and_one_gpu_dedicated_oci_pay_two_vm_envelopes() {
             ],
             device_routes: vec![2],
             backings: vec![shared],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -285,6 +287,7 @@ fn shared_backing_checks_below_exact_and_over_aggregate_payload_in_the_actual_in
             }],
             device_routes: Vec::new(),
             backings: vec![backing],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -413,6 +416,7 @@ fn cold_claims_reserve_unobserved_ids_before_boot_without_fabricating_devices() 
                     devices: vec![id],
                 },
             ],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -524,6 +528,7 @@ fn pending_gpu_reservations_keep_original_shape_across_refresh_and_backing_hando
                 phase: BackingPhase::Live,
                 devices: vec![id],
             }],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -611,6 +616,7 @@ fn a_prepared_gpu_backing_does_not_hide_an_eligible_native_oci_route() {
             ],
             device_routes: vec![3],
             backings: vec![observer],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -688,6 +694,7 @@ fn a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims() {
             }],
             device_routes: vec![1],
             backings: vec![observer],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -758,6 +765,7 @@ fn one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer() {
                 phase: BackingPhase::Live,
                 devices: ids.to_vec(),
             }],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -818,6 +826,7 @@ fn unavailable_route_keeps_committed_recovery_refund_and_backing_charge() {
                 .iter()
                 .map(|backing| backing.try_clone().unwrap())
                 .collect(),
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -854,6 +863,7 @@ fn unavailable_route_keeps_committed_recovery_refund_and_backing_charge() {
             offers: prior.offers.clone(),
             device_routes: prior.device_routes.clone(),
             backings: prepared,
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -920,6 +930,7 @@ fn subset_observer_fixture(native: bool) -> (NodeSpec, Demand, BackingOffer) {
             offers,
             device_routes: vec![if native { 3 } else { 1 }; 2],
             backings: vec![source.try_clone().unwrap()],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -1418,6 +1429,7 @@ fn committed_pending_recovery_keeps_receipt_charge_and_claim_bounds() {
                 .iter()
                 .map(|backing| backing.try_clone().unwrap())
                 .collect(),
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -1487,6 +1499,7 @@ fn measured_node(guest: hex_api::LearnedOverhead) -> NodeSpec {
             }],
             device_routes: Vec::new(),
             backings: vec![backing],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),

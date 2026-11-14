@@ -473,6 +473,10 @@ impl Routes {
     }
 
     pub fn holds_inner(&self, choice: Choice, demand: &Demand) -> bool {
+        // V2: an oci box in its node's node VM is held to that node VM's guest, its route's inner room.
+        if choice.offer.key.execution == Execution::NodeVm {
+            return self.holds_node_vm(demand);
+        }
         let Some(key) = choice.offer.backing else {
             return true;
         };
@@ -495,6 +499,24 @@ impl Routes {
             })
             .and_then(|used| used.checked_add(capacity_resources(demand.need)));
         used.is_some_and(|used| backing.check_inner(used).is_ok())
+    }
+
+    /// Whether `demand` fits its node's Ready node VM's guest beside what its NodeVm routes hold already (V2), as a
+    /// shared backing's guest holds its routes' (`BackingOffer::check_inner`): with none Ready, none fits.
+    fn holds_node_vm(&self, demand: &Demand) -> bool {
+        let Some(room) = self.catalog.node_vm_room else {
+            return false;
+        };
+        self.catalog
+            .offers
+            .iter()
+            .zip(&self.used)
+            .filter(|(offer, _)| offer.key.execution == Execution::NodeVm)
+            .try_fold(CapacityResources::default(), |sum, (_, used)| {
+                sum.checked_add(capacity_resources(*used))
+            })
+            .and_then(|used| used.checked_add(capacity_resources(demand.need)))
+            .is_some_and(|used| room.holds(used))
     }
 
     /// Released observer history still identifies its one surviving dedicated lifetime. Its

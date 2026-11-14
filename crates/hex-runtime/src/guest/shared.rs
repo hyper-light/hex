@@ -121,7 +121,7 @@ impl GuestRuntime {
                 Execution::ShardsShared => {
                     return Err(route::invalid("shared CPU backing cannot claim GPU IDs"));
                 }
-                Execution::Native | Execution::Firecracker => return Ok(()),
+                Execution::Native | Execution::Firecracker | Execution::NodeVm => return Ok(()),
             }
             let (first, alias) = backing_route_keys(execution, ids)?;
             projection.introduce(first)?;
@@ -1996,7 +1996,7 @@ pub(super) fn exit_of(status: shards_api::ManagedStatus) -> hex_api::Exit {
     }
 }
 
-fn push_offer(
+pub(super) fn push_offer(
     capacity: &mut hex_api::Capacity,
     offer: hex_api::RouteOffer,
     eligible: &[hex_api::DeviceInfo],

@@ -71,6 +71,7 @@ owner, 2026-11-14): the names below are stable. What each follows, and what is w
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W*, the run-out told as W* passes; on the supervising thread, which every box shares, within W* alone, a run's box past it followed on a thread of its own (the review's E-3) |
 | `node.run_said` (hex-node `supervise::run`) | the claimer removing a run's box | its word, which comes on every path, its drop saying it stopped where it unwound | none: a local site | liveness alone past W* (the review's E-3) |
+| `runtime.run_made`, `runtime.run_said` (hex-runtime `run`, macOS and Windows) | a run's setup making its box; the claimer removing it | the setup's move or the claimer's word, each coming on every path, a drop saying its holder stopped where it unwound | none: a local site | liveness alone past W* (the review's E-11) |
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
 | `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |

@@ -163,8 +163,9 @@ impl Books for Owner {
     ) -> Result<hex_core::record::PoolRecord, Refusal> {
         Err(broken("an image box prepares no pool"))
     }
+    /// Its host's own pool, as a node's Store answers it ([`host_pool`]).
     fn capacity(&self) -> Result<Capacity, Refusal> {
-        Err(broken("the image tests read no capacity"))
+        Ok(host_pool())
     }
     fn physical_devices(&self) -> Result<Vec<DeviceInfo>, Refusal> {
         Ok(Vec::new())
@@ -523,6 +524,10 @@ struct ModelImages {
     /// Where the next boots' runs' relays listen, as the test sets it: a run whose boot asks an endpoint then binds a
     /// real one ([`serve_lanes`]); none, and its endpoint is the model's address alone.
     serve: Mutex<Option<std::path::PathBuf>>,
+    /// Where the model's run host serves its members' own lanes on Shards' real agent-control endpoint (D238, D252):
+    /// the members it says ended, and where each signal its host takes is told ([`serve_members`]); none, and it
+    /// serves none.
+    steered: Mutex<Option<(Vec<u32>, Taken)>>,
 }
 
 impl ModelImages {
@@ -544,6 +549,7 @@ impl ModelImages {
             stopped: AtomicUsize::new(0),
             answered: AtomicUsize::new(0),
             serve: Mutex::new(None),
+            steered: Mutex::new(None),
         })
     }
 
@@ -747,10 +753,15 @@ impl Images for ModelImages {
             outside: Mutex::new(outside),
             rate_period: *self.period.lock().unwrap(),
             started_from: *self.started_from.lock().unwrap(),
-            control: match (spec.control.as_ref(), self.serve.lock().unwrap().clone()) {
-                (None, _) => None,
-                (Some(_), None) => Some(model_control()),
-                (Some(ask), Some(dir)) => Some(serve_lanes(ask, dir)),
+            control: match (
+                spec.control.as_ref(),
+                self.serve.lock().unwrap().clone(),
+                self.steered.lock().unwrap().clone(),
+            ) {
+                (None, ..) => None,
+                (Some(ask), _, Some((ended, taken))) => Some(serve_members(ask, ended, taken)),
+                (Some(ask), Some(dir), None) => Some(serve_lanes(ask, dir)),
+                (Some(_), None, None) => Some(model_control()),
             },
             nesting: spec.nesting,
         }))
@@ -987,9 +998,20 @@ fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
     };
     assert_eq!(member.member, MemberName::harness("probe"));
     assert!(member.stdin && !member.terminal);
+    // Each asks its run's agent-control endpoint of its own runtime's key alone, no socket lane (goal 2's item 2).
+    for boot in [&first, &second] {
+        assert!(
+            boot.control
+                .as_ref()
+                .is_some_and(|ask| ask.sockets.is_none()),
+            "{:?}",
+            boot.control
+        );
+    }
     let mut alike = second.clone();
     alike.members.clone_from(&first.members);
     alike.ready_by = first.ready_by;
+    alike.control.clone_from(&first.control);
     assert_eq!(alike, first);
 }
 
@@ -1035,15 +1057,16 @@ fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
     }
 }
 
-/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's MCP bridge reaches its run's controller over the
-/// run's agent-control endpoint alone, which this node asks none of for an image VM's run. Do create a VM driving a
-/// harness that asks no bridge and an agent that asks one. Expect the create refused as Invalid by the agent's field
-/// (`members[1].mcp`), as Shards' own spec check refuses it, before any record; and nothing booted.
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1): a member's MCP bridge reaches its run's controller over the run's
+/// agent-control endpoint alone, which every image VM's run asks of this class's key (goal 2's item 2), so a member
+/// asking one is asked of its run as its spec names it; its connections are `Runtime::mcp`'s (item 3). Do create and
+/// start a VM driving a harness that asks no bridge and an agent that asks one. Expect both made and booted, the boot
+/// asking the endpoint and the agent's bridge alone.
 #[test]
-fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_field() {
+fn w12_a_member_asking_an_mcp_bridge_is_asked_of_its_run_with_its_endpoint() {
     use hex_api::{ImageMember, Member, MemberKind};
     let images = ModelImages::new();
-    let (runtime, owner) = model_runtime(&images, waits());
+    let (runtime, _owner) = model_runtime(&images, waits());
     let mut boxed = spec("image-mcp", None);
     if let ClassSpec::ShardsImage(image) = &mut boxed.class {
         image.members = vec![
@@ -1060,17 +1083,19 @@ fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_
             },
         ];
     }
-    let id = boxed.id.clone();
-    let created = runtime.create(boxed);
-    assert!(
-        matches!(
-            &created,
-            Err(Refusal::Invalid { what: "shards image", why }) if why.contains("members[1].mcp")
-        ),
-        "{created:?}"
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(asked.control.is_some());
+    assert_eq!(
+        asked
+            .members
+            .iter()
+            .map(|member| (member.member.name.as_str(), member.mcp))
+            .collect::<Vec<_>>(),
+        vec![("claude", false), ("helper", true)]
     );
-    assert!(record(&owner, &id).is_none());
-    assert!(images.asked.lock().unwrap().is_empty());
+    runtime.delete(&id).unwrap();
 }
 
 /// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's ask for an MCP bridge rides its boot's member as
@@ -1344,28 +1369,127 @@ fn a_command_that_exits_at_once_has_started() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
-/// Joint plan step 12, steps 11's boundary: do exec a member's program and send TERM to a running VM.
-/// Expect: Awaits(MemberExec) and Awaits(MemberSignal), no stop, and the VM still Running.
+/// What a model image runs, by index: a harness and an agent that each run a program, and files that run none.
+fn three_members() -> Vec<MemberInfo> {
+    let member = |index, kind, name: &str, runs| MemberInfo {
+        index,
+        kind,
+        name: name.to_owned(),
+        runs,
+    };
+    vec![
+        member(0, shards_api::image::MemberKind::Harness, "claude", true),
+        member(1, shards_api::image::MemberKind::Agent, "helper", true),
+        member(2, shards_api::image::MemberKind::Agent, "notes", false),
+    ]
+}
+
+/// Goal 2's item 2 (D238, D252; ROOT, 2026-11-14: a signal reaches every process in the box, a VM's its members'):
+/// a signal but KILL to a running VM rides each live member's own lane on its run's agent-control endpoint, which the
+/// run asks of this class's key alone, its controller dialed as the signal goes; a member that has ended is skipped,
+/// and one that runs no program is none a signal reaches. A member's exec still awaits the endpoint's exec. Do: a run
+/// whose endpoint is Shards' own on loopback, its members a harness, an agent that has ended and files; exec in it,
+/// then send it TERM. Expect: Awaits(MemberExec); TERM taken, the harness's lane alone steered with 15, the box
+/// Running, no stop; the run's spec asking the endpoint of one key and no socket lane.
 #[test]
-fn member_exec_and_signals_await_the_agent_control_endpoint() {
+fn item2_term_reaches_every_live_member_and_the_vm_runs_on() {
     let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((vec![1], Arc::clone(&taken)));
     let (runtime, _owner) = model_runtime(&images, waits());
     let id = runtime.create(spec("image-members", None)).unwrap().id;
     runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        matches!(&asked.control, Some(ask) if ask.sockets.is_none()),
+        "{:?}",
+        asked.control
+    );
     assert!(matches!(
         runtime.exec(&id, hex_api::Program::of(&["true"]), hex_api::Stdio::null()),
         Err(Refusal::Awaits {
             needs: Upstream::MemberExec
         })
     ));
-    assert_eq!(
-        runtime.signal(&id, Signal::TERM),
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal
-        })
-    );
+    assert_eq!(runtime.signal(&id, Signal::TERM), Ok(()));
+    assert_eq!(*taken.lock().unwrap(), vec![(0, 15)]);
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Goal 2's item 2 (ROOT, 2026-11-14): a signal but KILL to a running VM none of whose members a signal reaches (each
+/// runs no program, or has ended) is refused NotRunning, "signal: its run has no member a signal reaches", which says
+/// that nothing in the run can take it, not that the VM ended: it runs on. Do: one run whose members are files alone,
+/// another whose one member has ended; send each TERM. Expect: each refused so, no signal taken, each Running.
+#[test]
+fn item2_term_to_a_run_with_no_member_a_signal_reaches_is_refused_not_running() {
+    for (name, members, ended) in [
+        (
+            "image-files-alone",
+            vec![three_members().swap_remove(2)],
+            vec![],
+        ),
+        (
+            "image-members-ended",
+            vec![three_members().swap_remove(0)],
+            vec![0],
+        ),
+    ] {
+        let images = ModelImages::new();
+        *images.members.lock().unwrap() = members;
+        let taken = Taken::default();
+        *images.steered.lock().unwrap() = Some((ended, Arc::clone(&taken)));
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let id = runtime.create(spec(name, None)).unwrap().id;
+        runtime.start(&id).unwrap();
+        assert_eq!(
+            runtime.signal(&id, Signal::TERM),
+            Err(Refusal::NotRunning(
+                id.clone(),
+                "signal: its run has no member a signal reaches"
+            )),
+            "{name}"
+        );
+        assert!(taken.lock().unwrap().is_empty(), "{name}");
+        assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    }
+}
+
+/// Goal 2's item 2 (D238; Shards' #72): a member's own kill rides its own lane on its run's agent-control endpoint,
+/// dialed as it goes, and the member ends killed, Signal(9), never a code. Do: take a harness its caller drives, of a run
+/// whose endpoint is Shards' own on loopback; kill it, its end then told as its run host tells it. Expect: the kill
+/// taken, its lane steered with 9, and its end Signal(9).
+#[test]
+fn item2_a_members_kill_rides_its_lane_and_it_ends_killed() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = vec![three_members().swap_remove(0)];
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((Vec::new(), Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let mut boxed = spec("image-member-killed", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember::new(claude.clone()));
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.member(&id, &claude).unwrap();
+    assert_eq!(proc.kill(), Ok(()));
+    assert_eq!(*taken.lock().unwrap(), vec![(0, 9)]);
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("claude".to_owned(), MemberEnd::Signaled(9));
+    assert_eq!(
+        proc.wait_for(Duration::ZERO).unwrap(),
+        Some(Exit::Signal(9))
+    );
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create an image VM whose spec names a harness its caller drives, with a
@@ -1373,7 +1497,7 @@ fn member_exec_and_signals_await_the_agent_control_endpoint() {
 /// NotRunning; the boot asks Shards for that member's stdin with its variable and directory and no terminal; the
 /// caller's ends of its three streams, given once; what the caller writes read by the member in order, and its
 /// end of input at the caller's close; what the member writes on stdout and stderr read whole by the caller; no
-/// end until the member's, then its status; its own kill awaiting the agent-control endpoint; a second take
+/// end until the member's, then its status; its kill, its member having ended, answered at once; a second take
 /// refused, as Shards refuses one; a member the spec doesn't name refused.
 #[test]
 fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
@@ -1453,12 +1577,8 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
         .unwrap()
         .insert("claude".to_owned(), MemberEnd::Exited(3));
     assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(Exit::Code(3)));
-    assert_eq!(
-        proc.kill(),
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal
-        })
-    );
+    // Its member has ended: its kill has nothing to end, and rides no lane.
+    assert_eq!(proc.kill(), Ok(()));
     assert!(
         runtime.member(&id, &claude).is_err(),
         "its streams were taken"
@@ -3515,6 +3635,60 @@ fn w39_a_node_vm_whose_boot_is_refused_ends_its_record_in_shards_words() {
     assert!(runtime.images.host_use_node(vm.run).is_err());
 }
 
+/// Each signal the model's member host took, with its member's index, in order.
+type Taken = Arc<Mutex<Vec<(u32, u32)>>>;
+
+/// A run's real agent-control endpoint (D238, D252) on loopback, Shards' own, its microVM's key the model's, taking
+/// `ask`'s controller alone and admitting its members' lanes; its host serves each lane as a run host serves a member's:
+/// a member in `ended` said ended, `Exited(0)`; any other running, the signal it is steered with taken, told to `taken`
+/// with its member's index, and the member then killed by it, `Signaled(n)`, as a command that keeps no handler is. A
+/// model run's endpoint and host live while the test does.
+fn serve_members(
+    ask: &shards_api::image::ControlAsk,
+    ended: Vec<u32>,
+    taken: Taken,
+) -> shards_api::image::ControlAt {
+    use shards_api::control::exec;
+    let vm = shards_api::control::Identity::generate().unwrap();
+    let (endpoint, served) = shards_remote::control::Endpoint::bind(
+        &vm,
+        ask.controller,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        shards_remote::control::Streams {
+            outputs: &[],
+            inputs: &[],
+            execs: Some(shards_api::control::exec_admissions()),
+            sockets: None,
+        },
+    )
+    .unwrap();
+    let address = endpoint.address;
+    std::thread::spawn(move || endpoint.run());
+    let lanes = served.members.unwrap();
+    let revoke = served.revoke;
+    std::thread::spawn(move || {
+        // Held for the endpoint's life: let go, it would end every lane.
+        let _revoke = revoke;
+        for lane in lanes {
+            let member = lane.ask.member;
+            if ended.contains(&member) {
+                lane.replies.tell(exec::Reply::Exited(0));
+                continue;
+            }
+            lane.replies.tell(exec::Reply::Running);
+            if let Ok(exec::Steer::Signal(signal)) = lane.steer.recv() {
+                taken.lock().unwrap().push((member, signal));
+                lane.replies.tell(exec::Reply::Steered(Ok(())));
+                lane.replies.tell(exec::Reply::Signaled(signal));
+            }
+        }
+    });
+    shards_api::image::ControlAt {
+        address,
+        vm: vm.fingerprint(),
+    }
+}
+
 /// A run's real agent-control endpoint (D252) on loopback, its microVM's key the model's own, taking `ask`'s controller
 /// alone and admitting the lanes it grants; its host connects each lane to the socket it names in `dir`, as
 /// shards-init's relay host does (D251), and answers with its run host's end of it ([`lane_to`]). A model run's
@@ -3856,19 +4030,53 @@ fn guest_pool() -> Capacity {
     }
 }
 
-/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's receipt reaches the scheduler on its node's capacity
-/// answer, its record the one source): do ask the `oci` class's capacity of a node whose guest is a node VM under
-/// shards-init. Expect its guest's pool, fenced by its node VM's run, carrying that node VM's receipt as its record
-/// keeps it: its run, what its allocation books, Ready.
-#[test]
-fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record() {
-    let images = ModelImages::new();
-    let sockets = super::super::tests::socket_fixture();
-    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
-    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
-    let owner = Arc::new(Owner::new());
-    let (runtime, _) = image_form(&images, &owner);
-    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+/// A node's host's own pool, as its Store answers it: 8 CPUs and a GiB of memory and of disk, half of each free.
+fn host_pool() -> Capacity {
+    Capacity {
+        own: Default::default(),
+        id: "image-host".into(),
+        total: CapacityResources {
+            cpu_milli: 8_000,
+            mem_bytes: 1 << 30,
+            disk_bytes: 1 << 30,
+        },
+        free: CapacityResources {
+            cpu_milli: 4_000,
+            mem_bytes: 1 << 29,
+            disk_bytes: 1 << 29,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    }
+}
+
+/// The route an oci box takes into its node's node VM (V2): a Linux image of its host's architecture, no GPU.
+fn node_vm_route() -> hex_api::RouteOffer {
+    hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch: super::super::route::host_platform().unwrap().arch,
+            },
+            execution: hex_api::Execution::NodeVm,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    }
+}
+
+/// The receipt the node VM `owner` keeps the one record of answers (joint plan step 39, V2): its run, what its
+/// allocation books, Ready, and what its guest is admitted at.
+fn node_vm_receipt(owner: &Owner) -> hex_api::NodeVmReceipt {
     let record = owner
         .node_vms
         .lock()
@@ -3877,22 +4085,87 @@ fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record()
         .next()
         .cloned()
         .unwrap();
-    let run: String = record
-        .run
-        .bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    assert_eq!(capacity.id, format!("node-vm:{run}"));
+    hex_api::NodeVmReceipt {
+        run: record.run,
+        booking: record.allocation.booking(),
+        phase: NodeVmPhase::Ready,
+        guest: record.allocation.guest().unwrap(),
+    }
+}
+
+/// V2, macOS's defect (ROOT, 2026-11-13: in the image form the oci answer was the node VM guest's own pool, so the
+/// scheduler took the guest's plane for its whole node's, its host boxes held to the guest's room): a node whose guest
+/// is a node VM under shards-init answers its oci class on its host's plane, as a node whose guest is shared does, its
+/// one route its node VM's, and carries the node VM's receipt with what its guest is admitted at (joint plan step 39).
+/// Do ask the oci class's capacity of such a node, its host reporting no oci pool of its own (macOS's). Expect the
+/// host's pool, its id and its room; one route, NodeVm, for a Linux image of the host's architecture and no GPU; and
+/// the node VM's receipt as its record keeps it.
+#[test]
+fn v2_the_image_forms_oci_answer_is_its_hosts_pool_routed_through_its_node_vm() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    let capacity = runtime.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    let host = host_pool();
     assert_eq!(
-        capacity.node_vms,
-        vec![hex_api::NodeVmReceipt {
-            run: record.run,
-            booking: record.allocation.booking(),
-            phase: NodeVmPhase::Ready,
-        }]
+        (capacity.id.as_str(), capacity.total, capacity.free),
+        (host.id.as_str(), host.total, host.free)
     );
+    assert_eq!(capacity.routes, [node_vm_route()]);
+    assert_eq!(capacity.node_vms, [node_vm_receipt(&owner)]);
+    capacity.check().unwrap();
     drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// V2, Windows' defect (ROOT, 2026-11-13: where its host runs oci images of its own, the node answered its host's native
+/// oci pool and left its node VM out, so the scheduler never saw it): a node whose host has an oci pool of its own and
+/// whose guest is a node VM answers its oci class with its host's routes and its node VM's beside them, and the node
+/// VM's receipt. Do ask the oci class's capacity of such a node, its host reporting a native Windows oci route. Expect
+/// the host's pool, its native routes first and then the NodeVm route, and the node VM's receipt.
+#[test]
+fn v2_a_host_with_an_oci_pool_of_its_own_answers_its_node_vm_beside_it() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let native_route = hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Windows,
+                arch: super::super::route::host_platform().unwrap().arch,
+            },
+            execution: hex_api::Execution::Native,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    };
+    let native = Capacity {
+        routes: vec![native_route],
+        ..host_pool()
+    };
+    let node = super::super::WithGuest::configured(
+        super::super::tests::native_reporting(native.try_clone().unwrap()),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let capacity = node.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        (capacity.id.as_str(), capacity.total),
+        (native.id.as_str(), native.total)
+    );
+    assert_eq!(capacity.routes, [native_route, node_vm_route()]);
+    assert_eq!(capacity.node_vms, [node_vm_receipt(&owner)]);
+    capacity.check().unwrap();
+    drop(node);
     assert!(relay.join().unwrap());
 }
 
@@ -3952,6 +4225,105 @@ fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
         other => panic!("a Shards image VM recorded as {other:?}"),
     }
     runtime.delete(&id).unwrap();
+}
+
+/// V2 (ROOT, 2026-11-13: when the inner node refuses what the host-side pool admitted, tell it, with both numbers): a
+/// node VM's guest refusing room for a box its host's pool admitted is told with the pool's numbers beside the guest's
+/// own, never as the guest's words alone. Do tell a guest's Full and Exhausted refusals, its pool holding 1.5 CPUs and
+/// 3 GiB, 2 CPUs and 4 GiB booked with the box, the guest saying 1 CPU and 2 GiB free; then one of a guest whose free
+/// room can't be read. Expect each refusal typed Invalid, naming the pool's room, what it booked and the guest's free
+/// room, and the guest's own words; and the unread room said so.
+#[test]
+fn v2_a_node_vms_guest_refusing_what_its_hosts_pool_admitted_is_told_with_both_numbers() {
+    let gib = 1u64 << 30;
+    let pool = CapacityResources {
+        cpu_milli: 1_500,
+        mem_bytes: 3 * gib,
+        disk_bytes: 0,
+    };
+    let booked = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 4 * gib,
+        disk_bytes: 0,
+    };
+    let free = CapacityResources {
+        cpu_milli: 1_000,
+        mem_bytes: 2 * gib,
+        disk_bytes: 0,
+    };
+    for refusal in [
+        Refusal::Full(7),
+        Refusal::Exhausted {
+            what: "boxes",
+            bound: 7,
+        },
+    ] {
+        let words = refusal.to_string();
+        let told = GuestRuntime::guest_room_refusal(refusal, pool, booked, Some(free));
+        let Refusal::Invalid { why, .. } = &told else {
+            panic!("{told:?}");
+        };
+        for said in [
+            "1500".to_owned(),
+            (3 * gib).to_string(),
+            "2000".to_owned(),
+            (4 * gib).to_string(),
+            "1000".to_owned(),
+            (2 * gib).to_string(),
+            words,
+        ] {
+            assert!(why.contains(&said), "{said} in {why}");
+        }
+    }
+    let told = GuestRuntime::guest_room_refusal(Refusal::Full(7), pool, booked, None);
+    assert!(
+        matches!(&told, Refusal::Invalid { why, .. } if why.contains("unread")),
+        "{told:?}"
+    );
+}
+
+/// V2 (ROOT, 2026-11-13: on macOS, process boxes got no route once any class reported routes, its process class
+/// answering no pool of its own): a node whose host's process class answers no pool of its own answers it on its host's
+/// plane, the oci answer's, with its native process route, so its process boxes stay placeable beside its node VM's
+/// route. Do ask the process class's capacity of a node whose process side answers none and whose guest is a node VM.
+/// Expect the host's pool, the same plane its oci answer is on, its one route a native process route for its host's
+/// platform with no GPU.
+#[test]
+fn v2_a_host_whose_process_class_answers_no_pool_answers_its_hosts_plane_with_its_process_route() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let node = super::super::WithGuest::configured(
+        hex_api::sim::SimRuntime::new(),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let process = node.capacity(hex_api::Class::Process).unwrap().unwrap();
+    let oci = node.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        (process.id.as_str(), process.total, process.free),
+        (oci.id.as_str(), oci.total, oci.free)
+    );
+    assert_eq!(
+        process.routes,
+        [hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: hex_api::Class::Process,
+                image: super::super::route::host_platform().unwrap(),
+                execution: hex_api::Execution::Native,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            cost: None,
+            backing: None,
+        }]
+    );
+    process.check().unwrap();
+    drop(node);
+    assert!(relay.join().unwrap());
 }
 
 /// What one of the review's B-3, B-5 and B-6 tests waits for: the boot it held, answered once let go.
