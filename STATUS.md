@@ -84,7 +84,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
   of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
   its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `16451e19f` or later).
-  A member asking an MCP bridge (D254) is refused by its field until the class asks its run an agent-control endpoint.
+  Every run asks its agent-control endpoint of the class's own key (D238, D252): a signal but KILL reaches each member
+  that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

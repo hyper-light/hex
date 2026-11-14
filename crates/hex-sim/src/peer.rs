@@ -599,6 +599,7 @@ fn write_route(
         hex_api::Execution::ShardsShared => "shared",
         hex_api::Execution::ShardsDedicated => "dedicated",
         hex_api::Execution::Firecracker => "firecracker",
+        hex_api::Execution::NodeVm => "node-vm",
     };
     let gpu = match route.key.gpu {
         hex_api::GpuEligibility::Any => "any",
@@ -661,6 +662,8 @@ fn route_of<'a>(
         Some("shared") => hex_api::Execution::ShardsShared,
         Some("dedicated") => hex_api::Execution::ShardsDedicated,
         Some("firecracker") => hex_api::Execution::Firecracker,
+        // V2: appended, so a row written before it names none of it and reads as it was written.
+        Some("node-vm") => hex_api::Execution::NodeVm,
         _ => return Err(damaged("route execution")),
     };
     let gpu = match fields.next() {
@@ -2354,6 +2357,20 @@ impl Node {
         Ok(booked)
     }
 
+    /// What the node VMs it runs for itself book of its room, each at its receipt ([`Node::book_node`]; V2): the room
+    /// its own admissions don't have, as no box's admission books it.
+    pub fn nodes_booked(&self) -> Result<lb::Amounts, Stop> {
+        let mut booked = [0u64; lb::DIMS];
+        for receipt in self.nodes.values() {
+            for (b, r) in booked.iter_mut().zip(amounts(receipt)) {
+                *b = b
+                    .checked_add(r)
+                    .ok_or_else(|| damaged("node VM receipts past what is booked"))?;
+            }
+        }
+        Ok(booked)
+    }
+
     /// What this node's own admissions hold of its room now, for the machine's capacity view (joint plan
     /// step 13, `docs/design/capacity-view.md` CV2; step 14's C8): what they book ([`Node::booked`]), each
     /// holder its shell rebooked (a box, a node VM) held at what it said instead of its receipt. GPUs stay their
@@ -3266,6 +3283,58 @@ mod adversarial_device_recovery_tests;
 mod tests {
     use super::*;
 
+    /// V2 (ROOT, 2026-11-13: placement rows written before NodeVm still read): a row names its route's execution by
+    /// word, so one written before NodeVm, naming only the executions there were, reads as it was written, and one
+    /// naming NodeVm reads back. Do write an owner's row for an oci box routed natively and one for an oci box routed
+    /// NodeVm, then read each. Expect the native row's route word the one a build before NodeVm wrote,
+    /// "r1:oci:linux:amd64:native:none:-", the NodeVm row's "r1:oci:linux:amd64:node-vm:none:-", and each read back to
+    /// its demand and route.
+    #[test]
+    fn v2_placement_rows_written_before_node_vm_routes_still_read() {
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 1_000,
+                mem_bytes: hex_api::MIN_MEMORY,
+                ..Resources::default()
+            },
+            kind: Kind::Plain,
+            class: Class::Oci,
+            ask: Ask {
+                runtime_class: Some(hex_api::Class::Oci),
+                ..Ask::default()
+            },
+        };
+        for (execution, word) in [
+            (
+                hex_api::Execution::Native,
+                "r1:oci:linux:amd64:native:none:-",
+            ),
+            (
+                hex_api::Execution::NodeVm,
+                "r1:oci:linux:amd64:node-vm:none:-",
+            ),
+        ] {
+            let route = hex_api::RouteReceipt {
+                key: hex_api::RouteKey {
+                    class: hex_api::Class::Oci,
+                    image: hex_api::ImagePlatform {
+                        os: hex_api::ImageOs::Linux,
+                        arch: hex_api::ImageArch::Amd64,
+                    },
+                    execution,
+                    gpu: hex_api::GpuEligibility::None,
+                },
+                backing: None,
+            };
+            let row = own_text(State::Asked, &demand, &[], None, Some(route)).unwrap();
+            assert!(row.split(' ').any(|said| said == word), "{row}");
+            assert_eq!(
+                recorded_assignment(&row, &[]).unwrap(),
+                (demand, None, Some(route))
+            );
+        }
+    }
+
     /// AC-T7.4.1: an original OCI payload keeps its actual guest route through commit, wire and
     /// recovery. These are model callbacks/rows, not native VM receipts or execution evidence.
     #[test]
@@ -3325,6 +3394,7 @@ mod tests {
                     phase: BackingPhase::Live,
                     devices: Vec::new(),
                 }],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3431,6 +3501,7 @@ mod tests {
                     phase: BackingPhase::Live,
                     devices: Vec::new(),
                 }],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3503,6 +3574,7 @@ mod tests {
                 offers: vec![offer],
                 device_routes: vec![1; 2],
                 backings: vec![parent.try_clone().unwrap()],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3614,6 +3686,7 @@ mod tests {
                 ],
                 device_routes: vec![1, 0],
                 backings: vec![parent.try_clone().unwrap(), current.try_clone().unwrap()],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),

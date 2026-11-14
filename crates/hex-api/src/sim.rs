@@ -254,8 +254,9 @@ impl SimRuntime {
 }
 
 impl SimRuntime {
-    /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does; any other is its
-    /// members' and awaits Shards' agent-control endpoint; once it has ended, none reaches it.
+    /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does; any other is its run's
+    /// members', which its image runs and take it as their lanes give it (goal 2's item 2), the VM running on;
+    /// once it has ended, none reaches it.
     fn signal_vm(b: &SimBox, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         let init = match &b.init {
             Some(init) if init.exit()?.is_none() => init,
@@ -264,9 +265,7 @@ impl SimRuntime {
         if signal == Signal::KILL {
             return init.end(Exit::Signal(Signal::KILL.number()));
         }
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal,
-        })
+        Ok(())
     }
 
     /// A running image VM's usage: every vCPU ran the guest the whole time since its boot. Before its
