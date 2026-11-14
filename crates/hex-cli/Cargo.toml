@@ -63,6 +63,8 @@ hex-runtime.workspace = true
 [dev-dependencies]
 # The conformance suite over the node's QUIC listener (tests/quic_conformance.rs).
 hex-quic.workspace = true
+# image_grants_real's probe tests hold their closed target's port bound and never listening, on every OS.
+socket2.workspace = true
 # AC-T7.4.1: the managed API controls retain the same fallible native receipt.
 triomphe.workspace = true
 hex-api.workspace = true
