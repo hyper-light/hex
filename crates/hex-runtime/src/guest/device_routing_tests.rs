@@ -120,6 +120,7 @@ fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     let guest = Arc::new(NoGuest {
         backend: Ok(shards_api::Backend::Kvm),

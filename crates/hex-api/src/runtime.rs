@@ -1172,6 +1172,62 @@ pub struct LearnedRate {
     pub held: RateHeld,
 }
 
+/// Joint plans step 14 and 39 (ROOT, 2026-11-13: what Hex decides on its own says why): a running VM its learner
+/// couldn't read in its last window, counted whole at its receipt against its fleet's budget, by its holder, and why,
+/// in its refusal's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedUnread {
+    pub id: LearnedHolder,
+    pub why: String,
+}
+
+impl LearnedUnread {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            why: copy_words(&self.why, "why a learner couldn't read a VM")?,
+        })
+    }
+}
+
+/// Joint plan step 14 (C7): a running VM whose guest can't yet be held within its room, by its holder, and the
+/// capability that holding awaits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedAwait {
+    pub id: LearnedHolder,
+    pub needs: Upstream,
+}
+
+impl LearnedAwait {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            needs: self.needs,
+        })
+    }
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13): a node VM ranked above every box, its band, what ending it ends, unknown, by
+/// its run, and why: a record of its node's that couldn't be read, whose box it may serve. Only a node VM is ranked so,
+/// so it names a run, never a box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedRank {
+    pub run: NodeRun,
+    pub why: String,
+}
+
+impl LearnedRank {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            run: self.run,
+            why: copy_words(&self.why, "why a node VM ranks above every box")?,
+        })
+    }
+}
+
 impl RateHeld {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         Ok(match self {
@@ -1185,6 +1241,18 @@ impl RateHeld {
             },
         })
     }
+}
+
+/// A copy of `text`, the words `what` names, its room reserved fallibly.
+fn copy_words(text: &str, what: &'static str) -> Result<String, Refusal> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(text.len())
+        .map_err(|_| Refusal::Exhausted {
+            what,
+            bound: text.len(),
+        })?;
+    copy.push_str(text);
+    Ok(copy)
 }
 
 /// A copy of `why`, a rate's reason, its room reserved fallibly.
@@ -1289,6 +1357,31 @@ pub struct Learned {
     /// after the rates, so absent means none told (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<LearnedWindow>,
+    /// The running VMs its last window couldn't read, each counted whole at its receipt, and why (steps 14 and 39), as
+    /// many as the answer has room for once its rates and window are in. Added after the window, so absent means none
+    /// (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_unread"
+    )]
+    pub unread: Vec<LearnedUnread>,
+    /// The running VMs whose guests can't yet be held within their rooms, and what each awaits (C7), as many as the
+    /// answer has room for after the unread. Added after the unread, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_awaits"
+    )]
+    pub awaits: Vec<LearnedAwait>,
+    /// The node VMs ranked above every box, their bands unknown, and why (step 39), as many as the answer has room for
+    /// after the awaits. Added after the awaits, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_ranked"
+    )]
+    pub ranked: Vec<LearnedRank>,
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1315,6 +1408,39 @@ impl LearnedWindow {
 }
 
 impl Learned {
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_unread<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedUnread>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned unread VMs exceed a node's boxes",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_awaits<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedAwait>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned awaits exceed a node's boxes",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_ranked<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedRank>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned ranked VMs exceed a node's boxes",
+        )
+    }
+
     /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
     pub fn deserialize_rates<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -1485,8 +1611,37 @@ impl Learned {
             ended,
             ceilings: copy_capacity_values(&self.ceilings, "learned ceilings")?,
             rates,
+            unread: try_clones(
+                &self.unread,
+                "learned unread VMs",
+                LearnedUnread::try_clone,
+            )?,
+            awaits: try_clones(&self.awaits, "learned awaits", LearnedAwait::try_clone)?,
+            ranked: try_clones(
+                &self.ranked,
+                "learned ranked VMs",
+                LearnedRank::try_clone,
+            )?,
         })
     }
+}
+
+/// `values`, each cloned by `clone`, `what` naming them where room for them can't be had.
+fn try_clones<T>(
+    values: &[T],
+    what: &'static str,
+    clone: impl Fn(&T) -> Result<T, Refusal>,
+) -> Result<Vec<T>, Refusal> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(values.len())
+        .map_err(|_| Refusal::Exhausted {
+            what,
+            bound: values.len(),
+        })?;
+    for value in values {
+        out.push(clone(value)?);
+    }
+    Ok(out)
 }
 
 /// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
@@ -1565,6 +1720,12 @@ pub struct Capacity {
         deserialize_with = "Capacity::deserialize_node_vms"
     )]
     pub node_vms: Vec<NodeVmReceipt>,
+    /// Why its node's charge learner carries nothing learned for this class (joint plan step 14; ROOT, 2026-11-13,
+    /// A-3: what Hex decides on its own says why): its last window's refusal, in its words, the class's VMs booked whole
+    /// until a window passes. None where it learned, where no learner runs, and from an older answer. Added after
+    /// `node_vms`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlearned: Option<String>,
 }
 
 impl Capacity {
@@ -1680,6 +1841,11 @@ impl Capacity {
             learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
             own: self.own,
             node_vms: copy_capacity_values(&self.node_vms, "runtime capacity node VMs")?,
+            unlearned: self
+                .unlearned
+                .as_deref()
+                .map(|why| copy_words(why, "why a capacity's learner learned nothing"))
+                .transpose()?,
         })
     }
 
@@ -3028,6 +3194,7 @@ mod route_tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         }
     }
     /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own

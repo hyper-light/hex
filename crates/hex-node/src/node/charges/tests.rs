@@ -1336,3 +1336,63 @@ fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
         .ceilings;
     assert_eq!(ceilings[0].overhead.cpu_milli, Some(200));
 }
+
+/// Place 4 (ROOT, 2026-11-13: what Hex decides on its own says why; the module's "refused Awaits(GuestRoom)" told): Linux's
+/// learner names on a class's answer each of its VMs the window couldn't read, with its refusal's words, and what each
+/// guest's room awaits. Do run a window of two Shards VMs, the first read, the second's cgroup unreadable, and a
+/// Firecracker VM, each booked at 4 CPUs; then answer the Shards class and the Firecracker class. Expect the Shards answer
+/// to name the second unread with its words and the first awaiting GuestRoom; the Firecracker answer to name nothing.
+#[test]
+fn w39_a_linux_answer_names_each_unread_vm_and_what_each_guests_room_awaits() {
+    let io = Record::default();
+    let vms = running(&[("vm-1", 1), ("vm-2", 2), ("fc-1", 3)]);
+    io.set(vms[0].2.dir(), 0, GIB);
+    io.set(vms[2].2.dir(), 0, GIB);
+    let record = |id: &hex_api::LearnedHolder| -> Result<Option<Met>, Refusal> {
+        let class = if box_of(id).starts_with("fc-") {
+            Class::Firecracker
+        } else {
+            Class::Shards
+        };
+        Ok(met(class, whole().booked_at(res(4_000, 4 * GIB)), 0))
+    };
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner
+        .window(&io, vms, record, &[], machine(), Instant::now())
+        .unwrap();
+    let shards = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(
+        shards.unread,
+        [hex_api::LearnedUnread {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            why: Refusal::Broken("no such cgroup".into()).to_string(),
+        }]
+    );
+    assert_eq!(
+        shards.awaits,
+        [hex_api::LearnedAwait {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-1").unwrap()),
+            needs: Upstream::GuestRoom,
+        }]
+    );
+    let firecracker = learner
+        .learned(Class::Firecracker, &[cost()])
+        .unwrap()
+        .unwrap();
+    assert!(
+        firecracker.unread.is_empty() && firecracker.awaits.is_empty(),
+        "{firecracker:?}"
+    );
+}
+
+/// A-3 (ROOT's audit, 2026-11-13: a failed window was told nowhere): Linux's learner whose window failed says why for
+/// its classes' capacity answers. Do fail a learner's window, typed, as its node does where it can't list its VMs.
+/// Expect nothing learned for the Shards class, and the window's refusal in its words told for its answers.
+#[test]
+fn w14_a3_a_failed_linux_window_says_why_for_its_answers() {
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let why = Refusal::Broken("the node's VMs can't be listed".into());
+    learner.failed(why.clone());
+    assert!(learner.learned(Class::Shards, &[cost()]).unwrap().is_none());
+    assert_eq!(learner.unlearned(), Some(why.to_string()));
+}

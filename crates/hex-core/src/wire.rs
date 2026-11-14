@@ -1527,6 +1527,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "node VM receipts",
                     node_vm_receipt,
                 )?,
+                unlearned: None,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -2661,6 +2662,9 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         ceilings,
         rates,
         window,
+        unread: Vec::new(),
+        awaits: Vec::new(),
+        ranked: Vec::new(),
     })
 }
 

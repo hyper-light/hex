@@ -743,6 +743,11 @@ impl Learner {
         self.fault = Some(why);
     }
 
+    /// Why its classes' capacity answers carry nothing learned (A-3): its last window's refusal, in its words.
+    pub(super) fn unlearned(&self) -> Option<String> {
+        None
+    }
+
     /// What `class`'s capacity answer carries (C2, C5, C8): the priors of `costs` (its own and its routes'), the
     /// class's learned use, each of its running VMs' holdings, those most past their receipts first (memory, then CPU,
     /// then disk), and the VMs of the class the last resort ended and why, latest first. None after a failed window,

@@ -194,6 +194,12 @@ impl Managed for Record {
     }
 
     fn set_room(&self, holder: Holder<'_>, room: i64) -> Result<(), Refusal> {
+        // A managed Shards VM's guest has no room call from Hex, as the guest runtime answers it (C7).
+        if holder.managed() {
+            return Err(Refusal::Awaits {
+                needs: Upstream::GuestRoom,
+            });
+        }
         self.rooms.borrow_mut().push((named(holder), room));
         Ok(())
     }
@@ -1073,6 +1079,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     learner
         .answer(
@@ -2127,10 +2134,11 @@ fn w14_a_platform_caps_cycle_sets_the_window_only_for_the_vms_it_holds_and_is_to
     );
 }
 
-/// Joint plan step 39, place 3 (ROOT, 2026-11-13: a node VM's band is what ending it ends): do derive a node VM's band
-/// from its node's records of oci boxes in bands 1 and 3, one of band 7 whose run ended and a process box of band 9;
-/// then with a record that can't be read beside them; then from no record. Expect band 3, the highest of the boxes it
-/// runs; then the highest band there is, as a box it runs may be of any band; then band 0, as ending it ends no box.
+/// Joint plan step 39, place 3 (ROOT, 2026-11-13: a node VM's band is what ending it ends, and its unknown band told):
+/// do derive a node VM's band from its node's records of oci boxes in bands 1 and 3, one of band 7 whose run ended and a
+/// process box of band 9; then with a record that can't be read beside them; then from no record. Expect band 3, the
+/// highest of the boxes it runs, known; then the highest band there is, as a box it runs may be of any band, told why,
+/// naming the box whose record can't be read and its words; then band 0, as ending it ends no box.
 #[test]
 fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
     let boxed =
@@ -2164,16 +2172,34 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
             hosts: Vec::new(),
         }))
     };
-    let mut records = vec![
-        boxed("oci-1", oci(), 1, false),
-        boxed("oci-3", oci(), 3, false),
-        boxed("oci-7", oci(), 7, true),
-        boxed("proc-9", ClassSpec::Process, 9, false),
-    ];
-    assert_eq!(node_band(&records), 3);
-    records.push(Err("torn".to_owned()));
-    assert_eq!(node_band(&records), u8::MAX);
-    assert_eq!(node_band(&Vec::<Result<BoxRecord, String>>::new()), 0);
+    let mut records: BTreeMap<BoxId, Result<BoxRecord, String>> = [
+        ("oci-1", boxed("oci-1", oci(), 1, false)),
+        ("oci-3", boxed("oci-3", oci(), 3, false)),
+        ("oci-7", boxed("oci-7", oci(), 7, true)),
+        ("proc-9", boxed("proc-9", ClassSpec::Process, 9, false)),
+    ]
+    .into_iter()
+    .map(|(id, record)| (BoxId::new(id).unwrap(), record))
+    .collect();
+    assert_eq!(
+        node_band(records.iter()),
+        NodeBand {
+            band: 3,
+            unknown: None
+        }
+    );
+    records.insert(BoxId::new("torn-1").unwrap(), Err("its record is torn".to_owned()));
+    let unknown = node_band(records.iter());
+    assert_eq!(unknown.band, u8::MAX);
+    let why = unknown.unknown.unwrap_or_default();
+    assert!(
+        why.contains("torn-1") && why.contains("its record is torn"),
+        "{why:?}"
+    );
+    assert_eq!(
+        node_band(BTreeMap::<BoxId, Result<BoxRecord, String>>::new().iter()).band,
+        0
+    );
 }
 
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is capped through its run's rate, D247, told
@@ -2255,6 +2281,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     node.books
         .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
@@ -2297,7 +2324,11 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
     io.host
         .borrow_mut()
         .insert("node-7".to_owned(), held(0, 0, GIB));
-    let node = [Holder::Node { row: &row, band: 0 }];
+    let node = [Holder::Node {
+        row: &row,
+        band: 0,
+        unknown: None,
+    }];
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
@@ -2488,7 +2519,11 @@ fn w39_a_node_vm_learns_under_a_key_of_its_own() {
     row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
     row.started = Some(1);
     unused(&io, "node-7", 9 * GIB);
-    let node = [Holder::Node { row: &row, band: 0 }];
+    let node = [Holder::Node {
+        row: &row,
+        band: 0,
+        unknown: None,
+    }];
     let budget = res(24_000, 64 * GIB);
     let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     let start = Instant::now();
@@ -2543,4 +2578,125 @@ fn w39_an_intent_the_last_resort_couldnt_write_is_told_typed() {
         .map(|(id, _, end)| (box_of(&id).to_owned(), end.map(|end| end.held)))
         .collect();
     assert_eq!(kept, [("vm-2".to_owned(), Some(7 * GIB))]);
+}
+
+/// Place 4 (ROOT, 2026-11-13: what Hex decides on its own says why): a VM a learner's window couldn't read is counted
+/// whole, and its class's answer names it, a box and a node VM alike, with its refusal's words; and a guest whose room
+/// can't be told is named with what that awaits, as its runtime answers it. Do run a window of a managed Shards VM it
+/// reads, whose guest's room its runtime answers awaiting GuestRoom, an image VM whose run's period can't be read and a
+/// node VM whose host use can't be, then answer the Shards class. Expect the image VM and the node VM named unread, by
+/// their holders, each with its refusal's words, the managed VM not; and the managed VM named awaiting GuestRoom.
+#[test]
+fn w39_an_answer_names_each_vm_its_window_couldnt_read_and_why() {
+    let io = Record::default();
+    io.set("vm-1", 0, GIB);
+    let image = image_vm("img-1", 2);
+    unused(&io, "img-1", GIB);
+    io.unread_periods.borrow_mut().push("img-1".to_owned());
+    let mut row = node_row(7, hex_api::NodeVmPhase::Ready);
+    row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+    row.started = Some(3);
+    let vms = [vm("vm-1", 1), image];
+    let mut running = holders(&vms);
+    running.push(Holder::Node {
+        row: &row,
+        band: 0,
+        unknown: None,
+    });
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(&io, &running, res(24_000, 64 * GIB), Instant::now())
+        .unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &running)
+        .unwrap()
+        .unwrap();
+    let told: Vec<(String, String)> = learned
+        .unread
+        .iter()
+        .map(|unread| (holder_name(&unread.id), unread.why.clone()))
+        .collect();
+    assert_eq!(
+        told,
+        [
+            (
+                "img-1".to_owned(),
+                Refusal::Broken("its run's period unread".into()).to_string()
+            ),
+            (
+                "node-7".to_owned(),
+                Refusal::Broken("no such VM".into()).to_string()
+            ),
+        ]
+    );
+    let awaited: Vec<(String, Upstream)> = learned
+        .awaits
+        .iter()
+        .map(|awaited| (holder_name(&awaited.id), awaited.needs))
+        .collect();
+    assert_eq!(awaited, [("vm-1".to_owned(), Upstream::GuestRoom)]);
+}
+
+/// Place 4 with place 3's band (ROOT, 2026-11-13: "an unreadable record ranking the node VM above every box is safe,
+/// but untold"): do run a window of a node VM ranked above every box because a record of its node's can't be read, then
+/// answer the Shards class. Expect the node VM named ranked, by its run, with that reason.
+#[test]
+fn w39_an_answer_names_a_node_vm_ranked_above_every_box_and_why() {
+    let io = Record::default();
+    let mut row = node_row(7, hex_api::NodeVmPhase::Ready);
+    row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+    row.started = Some(1);
+    unused(&io, "node-7", GIB);
+    let why = "box torn-1's record can't be read: its record is torn";
+    let running = [Holder::Node {
+        row: &row,
+        band: u8::MAX,
+        unknown: Some(why),
+    }];
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(&io, &running, res(24_000, 64 * GIB), Instant::now())
+        .unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &running)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.ranked,
+        [hex_api::LearnedRank {
+            run: node_run(7),
+            why: why.to_owned(),
+        }]
+    );
+}
+
+/// A-3 (ROOT's audit, 2026-11-13: a failed window was told nowhere, its answers carrying nothing learned and no why):
+/// a capping learner whose window failed says why on its class's capacity answer. Do fail a learner's window, typed, as
+/// its node does where it can't read its records; then answer the Shards class. Expect nothing learned, and the answer
+/// naming the window's refusal in its words.
+#[test]
+fn w14_a3_a_failed_window_says_why_on_its_class_answer() {
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let why = Refusal::Broken("the node's records can't be read".into());
+    learner.failed(why.clone());
+    let mut capacity = hex_api::Capacity {
+        own: Default::default(),
+        id: "shards".into(),
+        total: res(32_000, 64 * GIB),
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    };
+    learner
+        .answer(Class::Shards, &mut capacity, std::iter::empty())
+        .unwrap();
+    assert!(capacity.learned.is_none(), "{:?}", capacity.learned);
+    assert_eq!(capacity.unlearned, Some(why.to_string()));
 }

@@ -24,7 +24,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
+    BoxId, BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
     LearnedWindow, MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::record::{BoxRecord, NodeVmRecord, Phase};
@@ -84,7 +84,12 @@ impl Lifetime {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Holder<'a> {
     Box(&'a BoxRecord),
-    Node { row: &'a NodeVmRecord, band: u8 },
+    /// A node VM's row, its band, and why its band is unknown, ranking it above every box, where it is ([`NodeBand`]).
+    Node {
+        row: &'a NodeVmRecord,
+        band: u8,
+        unknown: Option<&'a str>,
+    },
 }
 
 impl<'a> Holder<'a> {
@@ -188,17 +193,29 @@ impl<'a> Holder<'a> {
     }
 }
 
+/// A node VM's band, and why it is unknown where it is (ROOT, 2026-11-13: told, never silent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeBand {
+    pub(crate) band: u8,
+    pub(crate) unknown: Option<String>,
+}
+
 /// A node VM's band (joint plan step 39, place 3; ROOT, 2026-11-13): what ending it ends. It runs its node's `oci`
 /// class, so ending it ends every box of that class whose run hasn't ended, and its band is the highest of theirs among
 /// its node's `records`, none ranking it lowest (it ends no box). A record that can't be read may be of a box it runs,
 /// of any band, so then it ranks above every box: the highest band there is.
 pub(crate) fn node_band<'r>(
-    records: impl IntoIterator<Item = &'r Result<BoxRecord, String>>,
-) -> u8 {
+    records: impl IntoIterator<Item = (&'r BoxId, &'r Result<BoxRecord, String>)>,
+) -> NodeBand {
     let mut band = 0;
-    for record in records {
+    for (_, record) in records {
         match record {
-            Err(_) => return u8::MAX,
+            Err(_) => {
+                return NodeBand {
+                    band: u8::MAX,
+                    unknown: None,
+                };
+            }
             Ok(record)
                 if record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none() =>
             {
@@ -207,7 +224,10 @@ pub(crate) fn node_band<'r>(
             Ok(_) => {}
         }
     }
-    band
+    NodeBand {
+        band,
+        unknown: None,
+    }
 }
 
 /// What the node VMs among `rows` that boot (Booting, their runs not ended) book (ROOT, 2026-11-13): each its receipt's
@@ -226,7 +246,10 @@ pub(crate) fn booting(rows: &[NodeVmRecord]) -> Result<CapacityResources, Refusa
 }
 
 /// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
-pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, Refusal> {
+pub(crate) fn nodes<'a>(
+    rows: &'a [NodeVmRecord],
+    band: &'a NodeBand,
+) -> Result<Vec<Holder<'a>>, Refusal> {
     let mut holders = Vec::new();
     holders
         .try_reserve_exact(rows.len())
@@ -236,7 +259,11 @@ pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, 
         })?;
     holders.extend(
         rows.iter()
-            .map(|row| Holder::Node { row, band })
+            .map(|row| Holder::Node {
+                row,
+                band: band.band,
+                unknown: band.unknown.as_deref(),
+            })
             .filter(|holder| holder.image()),
     );
     Ok(holders)
@@ -1744,6 +1771,10 @@ pub(crate) fn learned(
         // What holds each VM's rate its learner tells (`Learner::learned`, D255); Linux's holds each by its cpu.max.
         rates: Vec::new(),
         window,
+        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells.
+        unread: Vec::new(),
+        awaits: Vec::new(),
+        ranked: Vec::new(),
     })
 }
 

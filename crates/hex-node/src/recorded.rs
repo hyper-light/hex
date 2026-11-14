@@ -2543,7 +2543,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             }
         };
         // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
-        let band = charges::node_band(records.values());
+        let band = charges::node_band(records.iter());
         let records: Vec<BoxRecord> = records.into_values().flatten().collect();
         let io = Managed {
             runtime: &self.runtime,
@@ -2579,7 +2579,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             return learner.next_window();
         }
         // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
-        let nodes = charges::nodes(&rows, band).and_then(|nodes| {
+        let nodes = charges::nodes(&rows, &band).and_then(|nodes| {
             sorted
                 .learned
                 .try_reserve(nodes.len())
@@ -2683,7 +2683,8 @@ impl Books {
         };
         // Its node VMs' holdings too, each by its run (joint plan step 39, place 3).
         let rows = self.store.all_node_vms()?;
-        let nodes = charges::nodes(&rows, charges::node_band(records.values()))?;
+        let band = charges::node_band(records.iter());
+        let nodes = charges::nodes(&rows, &band)?;
         learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
