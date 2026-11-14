@@ -1,11 +1,12 @@
 //! The Link through a node VM's run's endpoint (joint plan step 39; Shards D251, D252), on a real agent-control
-//! endpoint on loopback whose run host a test thread plays: each lane's ask connected to a real AF_UNIX listener in a
-//! test directory, as shards-init's relay connects one in `/run/hex/channel`; Hex's side the Link over it.
+//! endpoint on loopback whose run host a test thread plays: each lane's ask connected to the relay's listener in a
+//! test directory, as shards-init's relay connects one in `/run/hex/channel`; Hex's side the Link over it. On every
+//! OS (the review's D-4): on Unix the listener is a real AF_UNIX one; on Windows the run host's end of each lane is
+//! the plain pipe pair Shards' run host makes there, the relay holding the VM's end ([`lane_to`]).
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr};
 use std::num::NonZeroU16;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -72,14 +73,14 @@ impl Run {
     }
 }
 
-/// The run host as shards-init's relay plays it: each ask's name connected in `dir`, answered with the socket or its
-/// connect's errno as the guest's Linux numbers it ([`linux_errno`]), until the endpoint ends.
+/// The run host as shards-init's relay plays it: each ask's name connected in `dir` ([`lane_to`]), answered with its
+/// end or its connect's errno as the guest's Linux numbers it ([`linux_errno`]), until the endpoint ends.
 fn host(dir: PathBuf, asks: mpsc::Receiver<Connect>) -> JoinHandle<Vec<String>> {
     std::thread::spawn(move || {
         let mut asked = Vec::new();
         for ask in asks {
             asked.push(ask.name().to_owned());
-            let reply = match UnixStream::connect(dir.join(ask.name())) {
+            let reply = match lane_to(&dir.join(ask.name())) {
                 Ok(socket) => Reply::Connected(socket),
                 Err(e) => Reply::Unreached(linux_errno(&e)),
             };
@@ -105,15 +106,89 @@ fn socket_dir() -> TempDir {
     TempDir::new("lanes").unwrap()
 }
 
-fn listen(dir: &Path, port: u32) -> UnixListener {
-    UnixListener::bind(dir.join(stream::socket_name(port).unwrap())).unwrap()
+/// The relay's listener for `port`'s socket in `dir`, listening once this returns.
+fn listen(dir: &Path, port: u32) -> Listener {
+    Listener::bind(&dir.join(stream::socket_name(port).unwrap()))
+}
+
+/// A relay's listener in a run's socket directory: on Unix an AF_UNIX listener, std's, as shards-init's relay listens.
+#[cfg(unix)]
+struct Listener(std::os::unix::net::UnixListener);
+
+/// A relay's connection: on Unix the socket itself.
+#[cfg(unix)]
+type Relayed = std::os::unix::net::UnixStream;
+
+#[cfg(unix)]
+impl Listener {
+    fn bind(path: &Path) -> Listener {
+        Listener(std::os::unix::net::UnixListener::bind(path).unwrap())
+    }
+
+    /// Its next connection, waited for.
+    fn accept(&self) -> Relayed {
+        self.0.accept().unwrap().0
+    }
+}
+
+/// The run host's end of a lane to the relay's socket at `path` (D251): on Unix the socket itself, as shards-init's
+/// relay host connects it.
+#[cfg(unix)]
+fn lane_to(path: &Path) -> std::io::Result<Relayed> {
+    std::os::unix::net::UnixStream::connect(path)
+}
+
+/// A relay's listener on Windows: the lanes the run host hands it ([`lane_to`]), each the VM's end of the plain pipe
+/// pair Shards' run host makes there (`crates/shards/src/api_run.rs`'s `open_lane` and `handed_pair`, at 097ec0047),
+/// whose ends each say the end of their writes as a socket's half-close does. The guest's AF_UNIX socket is a Linux
+/// one, which no Windows host carries, and afunix.sys, which would stand in for it, now and then misses waking a read
+/// with its peer's end (HEX-SOCK-3, beaf22ee). Dropped, a lane to its path is refused, as a connect to a socket whose
+/// listener closed is.
+#[cfg(windows)]
+struct Listener(mpsc::Receiver<Relayed>);
+
+/// A relay's connection: on Windows the VM's end of a lane's plain pipe pair.
+#[cfg(windows)]
+type Relayed = shards_ipc::Stream;
+
+/// The relays listening in the runs' socket directories, by their sockets' paths: the guests' directories, as one map
+/// of this process's on Windows.
+#[cfg(windows)]
+static RELAYS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, mpsc::Sender<Relayed>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(windows)]
+impl Listener {
+    fn bind(path: &Path) -> Listener {
+        let (listening, lanes) = mpsc::channel();
+        RELAYS.lock().unwrap().insert(path.to_owned(), listening);
+        Listener(lanes)
+    }
+
+    /// Its next connection, waited for.
+    fn accept(&self) -> Relayed {
+        self.0.recv().unwrap()
+    }
+}
+
+/// The run host's end of a lane to the relay's socket at `path` (D251), the VM's end handed to that relay: a path no
+/// relay listens at is not found, and one whose listener has gone refused, as a connect to either would be.
+#[cfg(windows)]
+fn lane_to(path: &Path) -> std::io::Result<Relayed> {
+    let relays = RELAYS.lock().unwrap();
+    let relay = relays.get(path).ok_or(std::io::ErrorKind::NotFound)?;
+    let (ours, theirs) = shards_ipc::Stream::plain_pair()?;
+    relay
+        .send(theirs)
+        .map_err(|_| std::io::ErrorKind::ConnectionRefused)?;
+    Ok(ours)
 }
 
 /// The relay as far as these cases need it: reads its connection to its end, writes back what it read reversed,
 /// and ends its own half.
-fn echo_reversed(listener: UnixListener) -> JoinHandle<Vec<u8>> {
+fn echo_reversed(listener: Listener) -> JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
+        let mut conn = listener.accept();
         let mut got = Vec::new();
         conn.read_to_end(&mut got).unwrap();
         let back: Vec<u8> = got.iter().rev().copied().collect();
@@ -199,7 +274,7 @@ fn a_dial_past_the_lanes_its_run_admits_is_exhausted_naming_them() {
     let listener = listen(dir.path(), stream::CONTROL_PORT);
     let run = Run::new(dir, admission(1));
     let held = run.link.dial(stream::CONTROL_PORT).unwrap();
-    let _accepted = listener.accept().unwrap();
+    let _accepted = listener.accept();
     assert_eq!(
         run.link.dial(stream::CONTROL_PORT).map(drop),
         Err(Refusal::Exhausted {
@@ -237,7 +312,7 @@ fn a_lane_its_socket_cuts_short_reads_its_bytes_then_the_cut() {
     let dir = socket_dir();
     let listener = listen(dir.path(), stream::CONTROL_PORT);
     let relay = std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
+        let mut conn = listener.accept();
         conn.write_all(b"before the cut\n").unwrap();
         let mut one = [0u8];
         conn.read_exact(&mut one).unwrap();

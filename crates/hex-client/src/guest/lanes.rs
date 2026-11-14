@@ -290,5 +290,5 @@ fn downward(mut reader: SocketReader, mut to: Local, cut: &Cut) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;
