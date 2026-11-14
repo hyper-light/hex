@@ -28,11 +28,12 @@ CGROUP is its cgroup as `/proc/<pid>/cgroup` (or `systemctl show -p ControlGroup
 mount, or its directory under /sys/fs/cgroup. It moves no
 process and writes no cgroup file: it reads the cgroup's `cpu.stat` and `cgroup.events` each window, from the attach
 on, until the cgroup empties or is removed, and its memory: `memory.current` where its parent gives it the memory
-controller, else its processes' own, the sum over `cgroup.procs` of each one's resident set (`/proc/<pid>/smaps_rollup`'s
-Rss, or its `status`'s VmRSS where that can't be read), a process that ends within a window out of the sum (kiln's
-per-agent cgroups have cpu but no memory controller; ROOT, 2026-11-13). OUT's header names which (`memory: cgroup` or
-`memory: procs-rss`), so its replay knows what it holds: a cgroup's memory counts its page cache and kernel memory too,
-its processes' resident sets their own pages. A cgroup that has emptied, or a path that is no cgroup, is refused,
+controller, else its processes' own: the sum over the `cgroup.procs` of the cgroup and every cgroup below it (its CPU
+and its life are its subtree's too) of each one's proportional set (`/proc/<pid>/smaps_rollup`'s Pss: a page shared by
+n processes counted 1/n in each, so the sum counts it once; or its `status`'s VmRSS where that can't be read), a process
+that ends within a window out of the sum (kiln's per-agent cgroups have cpu but no memory controller; ROOT, 2026-11-13;
+the review's E-9). OUT's header names which (`memory: cgroup` or `memory: procs-pss`), so its replay knows what it holds:
+a cgroup's memory counts its page cache and kernel memory too, its processes' proportional sets their own pages. A cgroup that has emptied, or a path that is no cgroup, is refused,
 naming it. OUT's header names the cgroup, never a command line: a session's arguments are its own.
 
 Test: python3 -B -I bench/charge/record_trace_test.py
@@ -111,13 +112,14 @@ def kib(text, name):
     return None
 
 
-def process_rss(pid, proc="/proc"):
-    """What process `pid` holds resident, in bytes: its smaps_rollup's Rss, or its status's VmRSS where that can't be
-    read (no smaps_rollup, or not this reader's to read); none once it has ended."""
+def process_pss(pid, proc="/proc"):
+    """What process `pid` holds resident, its share of each page it shares, in bytes: its smaps_rollup's Pss, or its
+    status's VmRSS where that can't be read (no smaps_rollup, or not this reader's to read: its shared pages then counted
+    whole); none once it has ended."""
     try:
-        rss = kib(read(os.path.join(proc, str(pid), "smaps_rollup")), "Rss")
-        if rss is not None:
-            return rss
+        pss = kib(read(os.path.join(proc, str(pid), "smaps_rollup")), "Pss")
+        if pss is not None:
+            return pss
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         pass
     try:
@@ -126,11 +128,25 @@ def process_rss(pid, proc="/proc"):
         return None
 
 
+def subtree_procs(cgroup):
+    """The processes of `cgroup` and of every cgroup below it, as their `cgroup.procs` list them: a process is in one
+    cgroup, so none is listed twice; a cgroup removed while it is walked lists none."""
+    pids = []
+    for here, _, files in os.walk(cgroup):
+        if "cgroup.procs" not in files:
+            continue
+        try:
+            pids.extend(read(os.path.join(here, "cgroup.procs")).split())
+        except FileNotFoundError:
+            continue
+    return pids
+
+
 def procs_memory(cgroup, proc="/proc"):
-    """What the cgroup's processes hold resident, in bytes: the sum over its `cgroup.procs`, a process that ended since
-    its listing out of it."""
-    pids = read(os.path.join(cgroup, "cgroup.procs")).split()
-    return sum(rss for rss in (process_rss(pid, proc) for pid in pids) if rss is not None)
+    """What the cgroup's subtree's processes hold, in bytes: the sum over them of each one's proportional set, a process
+    that ended since its listing out of it (the review's E-9: the subtree, as its CPU is, and Pss, so a shared page is
+    counted once)."""
+    return sum(pss for pss in (process_pss(pid, proc) for pid in subtree_procs(cgroup)) if pss is not None)
 
 
 def populated(cgroup):
@@ -219,8 +235,8 @@ def attach(out, cgroup, root="/sys/fs/cgroup", now_ns=time.monotonic_ns, sleep_u
     else:
         memory = procs
         source = (
-            "procs-rss, the sum over its cgroup.procs of each one's smaps_rollup Rss (else status VmRSS): its parent "
-            "gives it no memory controller"
+            "procs-pss, the sum over its subtree's cgroup.procs of each one's smaps_rollup Pss (else status VmRSS): "
+            "its parent gives it no memory controller"
         )
     period = period_us(cgroup, root)
     if os.path.exists(out):
