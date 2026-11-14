@@ -336,6 +336,7 @@ impl Store {
     }
 
     fn changing_metadata(&self) -> Result<RwLockReadGuard<'_, ()>, Refusal> {
+        self.still_held()?;
         self.synced.pool_preparation.try_read().map_err(|error| {
             metadata_refusal(match error {
                 TryLockError::WouldBlock => {
@@ -347,6 +348,7 @@ impl Store {
     }
 
     fn preparing_metadata(&self) -> Result<RwLockWriteGuard<'_, ()>, Refusal> {
+        self.still_held()?;
         self.synced.pool_preparation.try_write().map_err(|error| {
             metadata_refusal(match error {
                 TryLockError::WouldBlock => {
@@ -355,6 +357,28 @@ impl Store {
                 TryLockError::Poisoned(_) => "the Store metadata preparation fence is poisoned",
             })
         })
+    }
+
+    /// Refused once a test's crash let the store's hold go ([`Store::end_as_a_crash`]): a store whose process ended writes
+    /// nothing, so the store opened after it is its directory's one writer. Every change of the store takes it first,
+    /// through [`Store::changing_metadata`] or [`Store::preparing_metadata`].
+    fn still_held(&self) -> Result<(), Refusal> {
+        #[cfg(all(debug_assertions, feature = "test-controls"))]
+        if self._hold.ended() {
+            return Err(Refusal::Broken(
+                "the record store's process ended (a test's crash): it writes nothing more"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Lets the store's hold of its directory go as its process's end would (T-T7.1.2: a test's crash in this process,
+    /// [`crate::Node::crash`]): a store opened after over the directory takes it, and this store, every clone of it,
+    /// writes nothing more ([`Store::still_held`]). A test control of debug builds alone.
+    #[cfg(all(debug_assertions, feature = "test-controls"))]
+    pub(crate) fn end_as_a_crash(&self) {
+        self._hold.end();
     }
 
     /// How many changes of a box's record have waited for a change of the same box to finish.

@@ -1534,7 +1534,8 @@ impl Touched {
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
 /// deleted, so A's idle slot holds a parked init; the node abandoned as a crash leaves it (none of its teardown
-/// runs: `ManuallyDrop`); a node opened again over the same box root and state, and its recovery run. Expect: the
+/// runs, its store's hold of the state let go as its process's end would: `Node::crash`); a node opened again over the
+/// same box root and state, and its recovery run. Expect: the
 /// idle slot is gone and the parked init has ended. With parked procs (root only), the init's proc was made at A's
 /// delete; its tree is the crashed node's descriptor, gone with that process, and its pid namespace with the init.
 fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path) {
@@ -1568,7 +1569,8 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
         assert_eq!(held.procs_held, 1, "its proc made with it: {held:?}");
     }
     let init = pidfd(parked[0]);
-    let _abandoned = std::mem::ManuallyDrop::new(node);
+    // Its process's end lets its store's hold of the state go, and nothing of it runs: no teardown (`Node::crash`).
+    node.crash();
     let node = open();
     node.recover().unwrap();
     assert!(!slot.exists(), "recovery removed the idle slot");

@@ -396,7 +396,10 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
         .expect("a run's record");
     }
 
-    // The restart: a fresh node on the same directories recovers.
+    // The restart: the agent's process ends (`Node::crash`: its store's hold of the state let go, as the kernel lets a
+    // dead process's lock go, and none of its code run; one store writes a state directory), and a fresh node on the
+    // same directories recovers.
+    node.crash();
     let restarted = Node::open(&box_root, state.path(), state.path()).expect("restart");
     let summary = restarted.recover().expect("recover");
 
