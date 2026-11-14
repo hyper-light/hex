@@ -30,7 +30,7 @@
 //! Each start prints (`NODE-GUEST`):
 //! - its start: from the node's spawn to its ready line (in the image form its node VM booted, ready and greeted by
 //!   then), in the kernel form then its shared guest's grant to Live, and on macOS and Windows its first create through
-//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's;
+//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's, and how its run started;
 //! - the memory of the VM's processes as their OS counts it, read once each is up and, at start 1 on macOS and Windows,
 //!   once the suite is done: macOS's physical footprint and its peak (proc_pid_rusage); Windows' private working set
 //!   (its perf counters) and its peak working set (Win32_Process, through PowerShell's CIM); Linux's anonymous resident
@@ -892,10 +892,11 @@ mod kvm {
             let began = Instant::now();
             let booted = runtime.class().boot_node(&vm).unwrap();
             println!(
-                "NODE-GUEST start={boot} form=image ready_us={} boot_node_us={} ready={:?}",
+                "NODE-GUEST start={boot} form=image ready_us={} boot_node_us={} ready={:?} started_from={:?}",
                 booted.took.as_micros(),
                 began.elapsed().as_micros(),
-                booted.ready
+                booted.ready,
+                booted.started_from
             );
             let used = runtime.class().host_use_node(vm.run).unwrap();
             println!(
