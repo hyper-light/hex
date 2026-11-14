@@ -502,6 +502,71 @@ mod tests {
         );
     }
 
+    /// C-1 (decision 9; AC-T7.1.3): a hold past W* is told where a person sees it, the node's log (its stderr), once,
+    /// naming the wait, its W*, how long it waited and its party, the holder it follows, with no census installed, as a
+    /// node runs. Do: in a process of its own, take box a's turn and let it go (W*, that hold, learned), take it again
+    /// and hold it while another thread's take waits until it has run out, then let go. Expect: one `hex.wait` line on
+    /// the process's stderr for the wait, its party the holder of box a's turn.
+    #[test]
+    fn a_hold_past_w_star_is_told_once_on_the_nodes_log_naming_its_holder() {
+        const CHILD: &str = "HEX_TEST_TURNS_TOLD_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let turns = Turns::new(
+                "op",
+                "turns under way",
+                2,
+                Patience::measuring("test.turns.told"),
+            );
+            drop(turns.take(&id("a")).unwrap());
+            let held = turns.take(&id("a")).unwrap();
+            std::thread::scope(|s| {
+                let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
+                let waits = Patience::measuring("test.turns.told.runs_out");
+                hex_testkit::waits::follow::until(
+                    &waits,
+                    "the second take running out",
+                    || {
+                        if waiter.is_finished() {
+                            hex_testkit::waits::follow::Party::Ended
+                        } else {
+                            hex_testkit::waits::follow::Party::Live
+                        }
+                    },
+                    || turns.patience().is_none(),
+                )
+                .unwrap();
+                drop(held);
+                waiter.join().unwrap().unwrap();
+            });
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "turns::tests::a_hold_past_w_star_is_told_once_on_the_nodes_log_naming_its_holder",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child failed: {stderr}");
+        let told: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.contains("wait=test.turns.told "))
+            .collect();
+        assert!(
+            matches!(
+                told.as_slice(),
+                [line] if line.starts_with("hex.wait event=ran_out wait=test.turns.told w_star_ns=")
+                    && line.contains(" waited_ns=")
+                    && line.ends_with(" party=\"the holder of box a's turn\"")
+            ),
+            "the run-out told once on stderr, naming its holder: {told:?}; stderr: {stderr}"
+        );
+    }
+
     /// AC-T7.4.1/T-T7.1.2: overlap refuses without waiting or taking another box's ownership.
     #[test]
     fn nonblocking_method_ownership_refuses_overlap_and_releases_exact_owner() {
