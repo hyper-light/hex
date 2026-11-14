@@ -1102,7 +1102,7 @@ impl Supervisor {
     }
 
     /// The supervising thread's pass over the inits and runs whose pidfds turned readable.
-    fn ready(&self, tokens: &[u64]) -> Result<(), Refusal> {
+    fn ready(self: &Arc<Self>, tokens: &[u64]) -> Result<(), Refusal> {
         let (owners, runs) = {
             let inits = self.inits()?;
             let mut owners = Vec::new();
