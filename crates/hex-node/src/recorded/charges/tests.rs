@@ -512,6 +512,7 @@ fn books(dir: &std::path::Path) -> crate::recorded::Books {
         adopted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         last_boot: None,
         charges: std::sync::OnceLock::new(),
+        node_vm_ends: std::sync::Mutex::new(Vec::new()),
     }
 }
 
@@ -1253,6 +1254,14 @@ impl hex_api::Runtime for Images {
 }
 
 impl crate::recorded::Recover for Images {
+    /// It keeps no native metadata of its own: nothing to cross-check against the retained cohort.
+    fn preflight_retained(
+        &self,
+        _: &hex_runtime::devices::Records,
+        _: &[hex_core::record::PoolRecord],
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
     fn trace(&self, _: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(None)
     }
@@ -1572,5 +1581,143 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
             ("vm-2", &hex_api::RateHeld::Platform(unsupported)),
             ("vm-1", &hex_api::RateHeld::Governor),
         ]
+    );
+}
+
+/// Node VM `n`'s run.
+fn node_run(n: u8) -> hex_api::NodeRun {
+    hex_api::NodeRun::from_bytes([n; 16])
+}
+
+/// Node VM `n`'s row in `phase`, sized at the Shards profile's admission, an Ended one with its exit.
+fn node_row(n: u8, phase: hex_api::NodeVmPhase) -> hex_core::record::NodeVmRecord {
+    hex_core::record::NodeVmRecord {
+        version: hex_core::record::RECORD_VERSION,
+        run: node_run(n),
+        image: "hex-node:rev@sha256:00".to_owned(),
+        allocation: cost().allocate(CapacityResources::default()).unwrap(),
+        phase,
+        diagnostics: None,
+        exit: if phase == hex_api::NodeVmPhase::Ended {
+            Some(hex_api::Exit::Signal(9))
+        } else {
+            None
+        },
+        last_resort: None,
+    }
+}
+
+/// Why a last resort ended node VM `n`: 3 GiB held of a 2 GiB budget in band 0, its fleet past its budget.
+fn node_end(n: u8) -> LearnedEnd {
+    LearnedEnd {
+        id: hex_api::LearnedHolder::Node(node_run(n)),
+        held: 3 * GIB,
+        budget: 2 * GIB,
+        band: 0,
+        fleet_held: 9 * GIB,
+        fleet_growth: GIB,
+        fleet_budget: 8 * GIB,
+        unmoved: Some(Upstream::LiveMove),
+    }
+}
+
+/// `row` as an earlier node process left it in the node state `dir`: its bytes in its place, its lock held by none.
+fn leave_node_row(dir: &std::path::Path, row: &hex_core::record::NodeVmRecord) {
+    let rows = dir.join(".node-vms");
+    std::fs::create_dir_all(&rows).unwrap();
+    let name: String = row.run.bytes().iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
+}
+
+/// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13: a node VM's last-resort end lives in its row): the
+/// last resort's intent for a node VM goes into its row, as a box's goes into its record. Do write why it is ending node
+/// VM 7 into its Ready row through the write the learner makes; withdraw it; write it under another lifetime's scope;
+/// and write one for a run with no row. Expect the end written and read back from the row, then gone; the other
+/// lifetime's and the rowless run's not written.
+#[test]
+fn w39_the_last_resorts_intent_for_a_node_vm_is_written_into_its_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path(), &dir.path().join("@records")).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    let holder = hex_api::LearnedHolder::Node(node_run(7));
+    let scope = Scope::Run(node_run(7));
+    let row = |store: &crate::store::Store| store.node_vm(&node_run(7)).unwrap().unwrap();
+    assert!(record_last_resort(&store, &holder, scope, Some(&node_end(7))).unwrap());
+    assert_eq!(row(&store).last_resort, Some(node_end(7)));
+    assert!(record_last_resort(&store, &holder, scope, None).unwrap());
+    assert_eq!(row(&store).last_resort, None);
+    assert!(
+        !record_last_resort(&store, &holder, Scope::Run(node_run(8)), Some(&node_end(7))).unwrap()
+    );
+    assert_eq!(row(&store).last_resort, None);
+    let rowless = hex_api::LearnedHolder::Node(node_run(9));
+    assert!(
+        !record_last_resort(
+            &store,
+            &rowless,
+            Scope::Run(node_run(9)),
+            Some(&node_end(9))
+        )
+        .unwrap()
+    );
+}
+
+/// Joint plan step 39, place 1 (AC-T7.4.1; ROOT, 2026-11-13): a node VM's last-resort end survives its node's restart in
+/// its row, and the next node's learner carries it, so its class's answers tell it as they told it before. Do leave
+/// node VM 4's row Ended and node VM 5's Ready with no process holding its lock, each with why the last resort ended
+/// it, as an earlier node would; then open a node over them, recover it and start its charge learner. Expect the
+/// recovery to say both ends on record, and the learner's Shards ends to name both node VMs, by their runs.
+#[test]
+fn w39_a_node_vms_last_resort_end_is_read_back_at_start_into_the_learners_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ended = node_row(4, hex_api::NodeVmPhase::Ended);
+    ended.last_resort = Some(node_end(4));
+    let mut unowned = node_row(5, hex_api::NodeVmPhase::Ready);
+    unowned.last_resort = Some(node_end(5));
+    leave_node_row(dir.path(), &ended);
+    leave_node_row(dir.path(), &unowned);
+    let node = std::sync::Arc::new(
+        crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap(),
+    );
+    let recovered = node.recover().unwrap();
+    assert_eq!(
+        recovered.node_vm_ends,
+        crate::store::NodeVmEnds::Carried(vec![node_end(4), node_end(5)])
+    );
+    node.start_charges().unwrap();
+    let (learner, _) = node.books.charges.get().unwrap();
+    let learned = learner
+        .lock()
+        .unwrap()
+        .learned(Class::Shards, &[cost()], &[])
+        .unwrap()
+        .unwrap();
+    let mut ended: Vec<LearnedEnd> = learned.ended;
+    ended.sort_by_key(|end| match &end.id {
+        hex_api::LearnedHolder::Node(run) => *run,
+        hex_api::LearnedHolder::Box(id) => panic!("a box's end, {id}"),
+    });
+    assert_eq!(ended, [node_end(4), node_end(5)]);
+}
+
+/// Joint plan step 39, place 1 (ROOT, 2026-11-13: a cold start is told, never covered by a guess): do open and recover
+/// a node over a state no node VM row lies in. Expect the recovery to say no node VM's last-resort end is on record.
+#[test]
+fn w39_a_node_with_no_node_vm_end_on_record_says_so_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap();
+    let recovered = node.recover().unwrap();
+    assert_eq!(
+        recovered.node_vm_ends,
+        crate::store::NodeVmEnds::NoneOnRecord
+    );
+    assert_eq!(
+        recovered.node_vm_ends.to_string(),
+        "node VM: no last-resort end on record"
     );
 }
