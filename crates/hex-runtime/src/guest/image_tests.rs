@@ -3030,6 +3030,14 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
         assert_eq!(shown.exit, Some(Exit::Signal(9)));
         assert!(shown.published.is_empty());
         assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
+        // Why it was stopped outlives the start that said it: the box's end keeps the grants' refusal.
+        assert!(
+            shown
+                .ended
+                .as_deref()
+                .is_some_and(|why| why.contains("grants[0].member harness codex")),
+            "{shown:?}"
+        );
     }
 }
 
@@ -3204,6 +3212,128 @@ fn w12_started_of_a_box_not_booting_answers_as_inspect_at_once() {
         Runtime::started(&runtime.images, &BoxId::new("image-started-none").unwrap()),
         Err(Refusal::NoSuchBox(_))
     ));
+}
+
+/// A box granted a publish of port 1455 to harness codex, which the model's image doesn't run, its port given to
+/// member 0 (none), so the run its boot starts breaks its grants (N6).
+fn granted_codex(name: &str) -> BoxSpec {
+    use hex_api::{Grant, Member, MemberKind, Proto};
+    let mut spec = spec(name, None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Publish {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            },
+            proto: Proto::Tcp,
+            port: 1455,
+            host: "127.0.0.1".parse().unwrap(),
+            host_port: None,
+        }];
+    }
+    spec
+}
+
+/// Each test's call under way over a run that breaks its grants: these tests' facts alone.
+static STARTED_HOLDS_GRANTS: Patience =
+    Patience::measuring("test.hex_runtime.image_started_holds_grants");
+static INSPECT_HOLDS_GRANTS: Patience =
+    Patience::measuring("test.hex_runtime.image_inspect_holds_grants");
+
+/// Joint plan step 15 (N6), a start past its boot's W* (the person's ruling of 2026-11-13): do start a VM granted a
+/// publish to a harness its image doesn't run, its boot held past a 1 ns W* so its start answers Pending, and ask
+/// `started` as the boot is held, its run then starting. Expect: `started` refused Invalid naming the grant's member,
+/// as a start answers such a run; its run stopped once; and the box ended with KILL's signal, nothing published, its
+/// end keeping why, so no port stays published for a member no grant names whichever call took the boot's answer.
+#[test]
+fn n6_started_over_a_pending_start_stops_a_run_that_breaks_its_grants() {
+    let images = ModelImages::new();
+    images.receive(1455, &[(0, 1455)]);
+    images.gate(Gate::Host);
+    let (runtime, owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_n6_started",
+            "test.hex_runtime.image_started_n6",
+        )),
+    );
+    let id = runtime
+        .create(granted_codex("image-n6-started"))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let refused = started_over_a_held_boot(&runtime, &images, &id, &STARTED_HOLDS_GRANTS);
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { what: "grants", why }) if why.contains("grants[0].member harness codex")),
+        "{refused:?}"
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Signal(9)))
+    );
+    assert!(shown.published.is_empty());
+    assert!(
+        shown
+            .ended
+            .as_deref()
+            .is_some_and(|why| why.contains("grants[0].member harness codex")),
+        "{shown:?}"
+    );
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
+}
+
+/// As above, the boot's answer taken by an inspect, a call that follows nothing. Expect: no look refused or showing it
+/// running free: it shows Running while its stop goes, then Empty with KILL's signal and nothing published, its end
+/// keeping why; its run stopped once; and a `started` asked after it answers its failure in those words.
+#[test]
+fn n6_an_inspect_that_takes_a_pending_boots_answer_stops_a_run_that_breaks_its_grants() {
+    let images = ModelImages::new();
+    images.receive(1455, &[(0, 1455)]);
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_n6_inspect",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, _owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(granted_codex("image-n6-inspect"))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    images.gate(Gate::Open);
+    let ended = shown(&runtime, &id, BoxState::Empty, &INSPECT_HOLDS_GRANTS);
+    assert_eq!(ended.exit, Some(Exit::Signal(9)));
+    assert!(ended.published.is_empty());
+    assert!(
+        ended
+            .ended
+            .as_deref()
+            .is_some_and(|why| why.contains("grants[0].member harness codex")),
+        "{ended:?}"
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+    let late = runtime.started(&id);
+    assert!(
+        matches!(&late, Err(Refusal::Failed { why, .. }) if why.contains("grants[0].member harness codex")),
+        "{late:?}"
+    );
 }
 
 /// Decision 9 (no record is read), joint plan step 12: do make the image waits. Expect: each following its party (no
