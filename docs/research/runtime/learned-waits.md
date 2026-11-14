@@ -217,9 +217,11 @@ Tests, waiting on a time rather than on their party:
    (6042219c, its waits following the relay), the process class's (df13d537: `DELETE_PATIENCE` in
    `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations), and
    `EMPTY_PATIENCE` in `box_run_cli.rs` and the bystander's 10 s in hex-runtime's `linux::oci::run` tests (each
-   following its party: the run's cgroup's threads, the bystander's life). Left: `PATIENCE` 60 s
+   following its party: the run's cgroup's threads, the bystander's life), and `macos_process_box.rs`'s measurement
+   windows (`SAMPLE_GUARD`, each sample now followed to its end; the CPU rate's 2 s, now one scheduling round) with
+   its end-seen check (the review's E-5: `Status::late_ends`, a count, 0 over its runs). Left: `PATIENCE` 60 s
    (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`, `windows_node_recovery.rs`;
-   `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s
+   `macos_pool_restart.rs` after goal 14's fix there), `RERUN_BOUND` 300 s
    (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD` (`windows_oci_box.rs`, a seeded test wait), and inline
    durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
    (`charge_fleet.rs`,
