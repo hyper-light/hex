@@ -237,6 +237,10 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.guest.answer", "shards", measuring),
 ];
 
+/// The relay's token on a guest's control connection whose caller gave no deadline (the review's D-2), learned as
+/// [`ANSWERS`] are.
+static RELAY_TOKEN: Patience = Patience::measuring("client.guest.relay.token");
+
 /// The learned waits a guest's protocol carries a client's calls under (decision 9; AC-T7.4.1): each transport that
 /// carries it learns its own, never another's record, so the type names whose tables a [`Stream`] times by.
 pub trait Waits: Send + Sync + 'static {
@@ -244,6 +248,9 @@ pub trait Waits: Send + Sync + 'static {
     fn answers() -> &'static [Patience; KINDS];
     /// A class's box kinds' waits ([`Transport::class_answers`]).
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS];
+    /// The wait for the relay's token on a control connection whose caller gave no deadline (the review's D-2): the
+    /// slowest token this transport has carried to this process.
+    fn token() -> &'static Patience;
 }
 
 /// A guest's node, over vsock or its stand-in: the tables above.
@@ -256,6 +263,10 @@ impl Waits for Guest {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &RELAY_TOKEN
     }
 }
 
@@ -296,6 +307,8 @@ static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.quic.answer", "shards", measuring),
 ];
 
+static QUIC_RELAY_TOKEN: Patience = Patience::measuring("client.quic.relay.token");
+
 impl Waits for Quic {
     fn answers() -> &'static [Patience; KINDS] {
         &QUIC_ANSWERS
@@ -303,6 +316,10 @@ impl Waits for Quic {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&QUIC_CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &QUIC_RELAY_TOKEN
     }
 }
 
