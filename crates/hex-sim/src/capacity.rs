@@ -468,6 +468,18 @@ fn oci_legs() -> &'static [Leg] {
     })
 }
 
+/// What kiln's runs ask, one after another in recorded order ([`kiln_legs`], none below its resolution): a holder's runs
+/// in the capacity view's tests on real machines (hex-cli's `capacity_view`; ROOT's ruling 7, 2026-11-14).
+pub fn kiln_needs() -> impl Iterator<Item = Amounts> {
+    kiln_legs().iter().map(|leg| leg.need)
+}
+
+/// What Hex's own boxes ask, one after another in recorded order ([`oci_legs`]): Hex's boxes in those tests, as in this
+/// simulator's (ROOT's rulings 2 and 7, 2026-11-14).
+pub fn oci_needs() -> impl Iterator<Item = Amounts> {
+    oci_legs().iter().map(|leg| leg.need)
+}
+
 /// The most reservations one runner holds (CV8): runs of the smallest charge recorded ([`kiln_legs`]), as many as the
 /// room holds in its dimension that holds fewest, but never more than one sync carries (`hex_core::capacity::most_held`):
 /// the protocol's own bound, which wins (ROOT, 2026-11-14; `a_runners_reservation_bound_is_the_protocols_own`).

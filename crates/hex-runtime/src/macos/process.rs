@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
+use hex_core::patience::Piece;
 use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
 
@@ -131,9 +132,6 @@ pub struct Shared {
     /// The fastest a box is taken to grow, as this node learns it: seeded by the caller (its machine class's
     /// record, hex_core::watch::seed), raised by any faster growth a watcher sees (watch::LearnedRates).
     rates: Arc<Mutex<watch::LearnedRates>>,
-    /// How long a killed group gets to empty, as this node learns it: the record's to start, raised by every
-    /// slower drain any box sees (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
-    drain: Arc<Mutex<hex_core::drain::Learned>>,
     /// How late the node's watchers act past their armed waits (a wake, its read and its stops), as it learns
     /// it: seeded by the caller (its machine class's record, hex_core::watch::lateness_seed), raised by any
     /// later act a watcher sees (watch::Lateness). What each box's hold reckons a member running across a
@@ -161,8 +159,6 @@ impl Shared {
                 processes: rate_processes,
             })))
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
-            drain: Arc::try_new(Mutex::new(hex_core::drain::Learned::default()))
-                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
             lateness: Arc::try_new(Mutex::new(watch::Lateness::new(lateness)))
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
             response: Arc::try_new(Mutex::new(None))
@@ -1022,8 +1018,6 @@ impl Members {
 pub struct ProcessBox {
     state: Arc<State>,
     watcher: Mutex<Option<JoinHandle<()>>>,
-    /// The node's learned drain bound, shared by every box ([`Shared`]).
-    drain: Arc<Mutex<hex_core::drain::Learned>>,
     /// The machine's timebase, for a live read's CPU.
     tb: Timebase,
     pub(super) controller: Mutex<super::managed::Controller>,
@@ -1102,7 +1096,6 @@ impl ProcessBox {
         Ok(Self {
             state,
             watcher: Mutex::new(None),
-            drain: Arc::clone(&shared.drain),
             tb: shared.tb,
             controller: Mutex::new(super::managed::Controller::Unsubmitted),
             identity: OnceLock::new(),
@@ -1645,8 +1638,8 @@ impl ProcessBox {
         }
     }
 
-    /// Ends the box: stops its watcher, kills every member (killpg KILL) and waits for them to die, leaving
-    /// each member's own waiter to reap it. Idempotent.
+    /// Ends the box: stops its watcher, kills every member (killpg KILL) and waits for the group to empty as decision 9
+    /// waits ([`end_followed`]), leaving each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
         if self.is_managed() {
             return Err(self
@@ -1670,37 +1663,14 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's group"))?
         {
-            let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
-            // The group's size sets how long it gets to empty: the measured kill-to-empty envelope, doubled,
-            // as this node has learned it (hex_core::drain). Past it the kill didn't take, a fault named
-            // (CLAUDE.md §4); a delete has no other box to try, so the caller gets it.
-            let members = alive_in(pgid, &mut pids)?;
-            let patience = self
-                .drain
-                .lock()
-                .map_err(|_| poisoned("the node's drain bound"))?
-                .bound(members);
-            let killed = Instant::now();
-            let _ = killpg(
+            end_followed(
                 pgid,
-                hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
-            );
-            let deadline = killed.checked_add(patience);
-            loop {
-                if alive_in(pgid, &mut pids)? == 0 {
-                    if let Ok(mut learned) = self.drain.lock() {
-                        learned.observe(members, killed.elapsed());
-                    }
-                    return Ok(());
-                }
-                if deadline.is_none_or(|d| Instant::now() >= d) {
-                    return Err(Refusal::os(
-                        "emptying a box",
-                        io::Error::other(format!("box {} still holds a live member", self.id()?)),
-                    ));
-                }
-                std::thread::yield_now();
-            }
+                &[
+                    Piece::Kind("the killed group of box "),
+                    Piece::Name(self.id()?.as_str()),
+                    Piece::Kind(", by its members' ends"),
+                ],
+            )?;
         }
         Ok(())
     }
@@ -1878,33 +1848,213 @@ pub fn owned(pgid: i32, started: u64) -> Result<bool, Refusal> {
     )
 }
 
-/// Ends what runs of box group `pgid` (its leader started at `started`), for a box its node's recovery
-/// removes: killpg KILL where the group is still the box's ([`owned`]), and its members waited out within
-/// the measured kill-to-empty envelope for the group's size (`hex_core::drain::bound`; a recovering node
-/// has learned none of its own yet). Past it the kill didn't take, a fault named (CLAUDE.md §4).
+/// Ends what runs of box group `pgid` (its leader started at `started`), for a box its node's recovery removes: killpg
+/// KILL where the group is still the box's ([`owned`]), and the group followed to its emptying as decision 9 waits
+/// ([`end_followed`]).
 pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
     if !owned(pgid, started)? {
         return Ok(());
     }
-    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
-    let members = alive_in(pgid, &mut pids)?;
-    let _ = killpg(
+    end_followed(
         pgid,
-        hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
-    );
-    let deadline = Instant::now().checked_add(hex_core::drain::bound(members));
-    loop {
-        if alive_in(pgid, &mut pids)? == 0 {
-            return Ok(());
-        }
-        if deadline.is_none_or(|d| Instant::now() >= d) {
-            return Err(Refusal::os(
-                "ending a box's group",
-                io::Error::other(format!("group {pgid} still holds a live member")),
-            ));
-        }
-        std::thread::yield_now();
+        &[
+            Piece::Kind("the killed process group "),
+            Piece::Pid(i64::from(pgid)),
+            Piece::Kind(" of a box recovery removes, by its members' ends"),
+        ],
+    )
+}
+
+/// Kills group `pgid` ([`kill_group`]), its running members watched first, and waits for it to empty as decision 9 waits
+/// on [`crate::emptying::EMPTYING`] (the review's E-12): within W*, the slowest emptying seen, its emptying; past it, its
+/// run-out told once, naming `party`, and the group followed by its members' own ends ([`Emptying`]) however late, never
+/// refused at a time.
+fn end_followed(pgid: i32, party: &[Piece<'_>]) -> Result<(), Refusal> {
+    let mut emptying = Emptying::watching(pgid)?;
+    let killed = Instant::now();
+    kill_group(pgid)?;
+    crate::emptying::followed(&crate::emptying::EMPTYING, killed, party, |slice| {
+        emptying.within(slice)
+    })
+}
+
+/// Sends group `pgid` KILL as far as this node may (killpg). XNU's `killpg1` (`bsd/kern/kern_sig.c`) passes a group's
+/// members but its zombies, counts those the caller may signal, and answers `EPERM` where it counted none: a group whose
+/// members have all ended and wait for their reap, as a group its watcher killed has by its delete, or one whose members
+/// are none of them this node's to signal (a member running a set-user-ID program). Either way the wait on its emptying
+/// follows what still runs by its own end, as it follows a group already gone (`ESRCH`); any other refusal is the
+/// caller's.
+fn kill_group(pgid: i32) -> Result<(), Refusal> {
+    let group = rustix::process::Pid::from_raw(pgid).ok_or(Refusal::Invalid {
+        what: "pgid",
+        why: format!("{pgid} isn't a process group"),
+    })?;
+    match rustix::process::kill_process_group(group, rustix::process::Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::PERM | rustix::io::Errno::SRCH) => Ok(()),
+        Err(e) => Err(Refusal::os("killpg", e)),
     }
+}
+
+/// A killed box's group as its emptying's wait follows it (decision 9; the review's E-12): each member running, watched
+/// for its end and its forks on a kqueue of the wait's own (`EVFILT_PROC` with `NOTE_EXIT | NOTE_FORK`, which XNU
+/// attaches to any process the caller sees), and the group listed again only once no watched member is left or one has
+/// forked: the wait rests on the members' own ends, never on a spin listing the group again and again.
+struct Emptying {
+    pgid: i32,
+    kq: Kqueue,
+    /// The members watched and not yet seen to end, in order.
+    watched: Vec<i32>,
+    /// A watched member forked since the group was last listed: its child is one more to end.
+    forked: bool,
+    /// The last listing found no member running: one more that finds none says the group is empty.
+    quiet: bool,
+    /// The group's listing, with room for every process the kernel holds.
+    pids: Vec<i32>,
+    events: Vec<Event>,
+}
+
+/// What one listing of a killed group found: how many members it read running, and whether any of them wasn't watched
+/// before.
+struct Listed {
+    running: usize,
+    new: bool,
+}
+
+impl Emptying {
+    /// Group `pgid`, each member running now watched, before its kill, so none ends unseen.
+    fn watching(pgid: i32) -> Result<Self, Refusal> {
+        let mut emptying = Self {
+            pgid,
+            kq: Kqueue::new().map_err(|e| Refusal::os("making a group's emptying kqueue", e))?,
+            watched: Vec::new(),
+            forked: false,
+            quiet: false,
+            pids: sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?,
+            events: Vec::new(),
+        };
+        emptying.watch_running()?;
+        Ok(emptying)
+    }
+
+    /// Lists the group and watches each member running that isn't watched yet. A member is watched once a read after
+    /// its watch's attach still finds it running in the group: XNU drains a process's references (`proc_refdrain`),
+    /// which the attach and the read take, before it posts `NOTE_EXIT` (`proc_exit`, `bsd/kern/kern_exit.c`), so a
+    /// member read running after its attach posts its end to the watch; one read ended, gone or out of the group by then
+    /// may have posted it before, and is left out.
+    fn watch_running(&mut self) -> Result<Listed, Refusal> {
+        sys::group(self.pgid, &mut self.pids)
+            .map_err(|e| Refusal::os("listing a box's group", e))?;
+        self.watched
+            .try_reserve(self.pids.len())
+            .map_err(|_| super::native_allocation(self.pids.len()))?;
+        let known = self.watched.len();
+        let mut listed = Listed {
+            running: 0,
+            new: false,
+        };
+        for &pid in &self.pids {
+            if !running(pid)? {
+                continue;
+            }
+            listed.running = listed.running.saturating_add(1);
+            if self
+                .watched
+                .get(..known)
+                .is_some_and(|watched| watched.binary_search(&pid).is_ok())
+            {
+                continue;
+            }
+            listed.new = true;
+            let gone = self
+                .kq
+                .watch_one(pid, 0, false)
+                .map_err(|e| Refusal::os("watching a killed group's member", e))?;
+            if gone {
+                continue;
+            }
+            let in_group = sys::group_of(pid)
+                .map_err(|e| Refusal::os("reading a killed group's member's group", e))?
+                == Some(self.pgid);
+            if running(pid)? && in_group {
+                self.watched.push(pid);
+            } else {
+                self.kq
+                    .unwatch(pid)
+                    .map_err(|e| Refusal::os("unwatching a killed group's member", e))?;
+            }
+        }
+        self.watched.sort_unstable();
+        Ok(listed)
+    }
+
+    /// Whether the group empties within `slice` (`Duration::MAX`: until it does): each watched member's end taken as the
+    /// kernel posts it, the group listed again once none is left watched or one forked, a member running that wasn't
+    /// watched before (forked as the group was killed, so no kill may have reached it) killed with the group again, and
+    /// the group empty once two listings in a row find no member running (a child forked as the first was read is in the
+    /// second).
+    fn within(&mut self, slice: Duration) -> Result<bool, Refusal> {
+        #[cfg(test)]
+        if !crate::emptying::hold::lets_empty(&self.pgid.to_string(), slice) {
+            return Ok(false);
+        }
+        let by = Instant::now().checked_add(slice);
+        loop {
+            if self.watched.is_empty() || self.forked {
+                self.forked = false;
+                let listed = self.watch_running()?;
+                if listed.running == 0 {
+                    if self.quiet {
+                        return Ok(true);
+                    }
+                    self.quiet = true;
+                    continue;
+                }
+                self.quiet = false;
+                if listed.new {
+                    kill_group(self.pgid)?;
+                }
+                if self.watched.is_empty() {
+                    continue;
+                }
+            }
+            let left = match by {
+                Some(by) => match by.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => Some(left),
+                    _ => return Ok(false),
+                },
+                None => None,
+            };
+            self.kq
+                .wait(None, left, &mut self.events)
+                .map_err(|e| Refusal::os("waiting on a killed group's members' ends", e))?;
+            for event in &self.events {
+                match *event {
+                    Event::Exit { pid, .. } => forget(&mut self.watched, pid),
+                    Event::Fork { pid, exited, .. } => {
+                        self.forked = true;
+                        if exited {
+                            forget(&mut self.watched, pid);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Takes member `pid` out of `watched`, its end posted.
+fn forget(watched: &mut Vec<i32>, pid: i32) {
+    if let Ok(at) = watched.binary_search(&pid) {
+        watched.remove(at);
+    }
+}
+
+/// Whether process `pid` runs: it is there and hasn't ended (a zombie waiting to be reaped has).
+fn running(pid: i32) -> Result<bool, Refusal> {
+    Ok(sys::rusage(pid)
+        .map_err(|e| Refusal::os("reading a member's rusage", e))?
+        .is_some_and(|r| !r.ended))
 }
 
 /// How many of process group `pgid`'s members are alive (not a zombie), by reading each one's rusage.
@@ -3174,6 +3324,33 @@ mod storage_tests {
         assert_eq!(hold.stopped.at(1).unwrap().pid, 17);
         assert!(hold.stopped.reserve(1).is_err());
         assert!(hold.stopped.contains(&11) && hold.stopped.contains(&17));
+    }
+}
+
+#[cfg(test)]
+mod emptying_tests {
+    use super::*;
+
+    /// The review's E-12 (decision 9), AC-T7.4.1: a killed group's emptying is followed by its members' own ends as the
+    /// kernel posts them (`NOTE_EXIT`), the wait ending at the last one, never at a time. Do: start `/bin/cat` in a
+    /// process group of its own, running until its stdin closes; watch the group; ask whether it empties within no time;
+    /// close cat's stdin and wait for the group with no bound. Expect: not within no time, cat still running; then
+    /// empty, once cat has ended, which exited 0.
+    #[test]
+    fn e12_a_groups_emptying_is_followed_by_its_members_ends() {
+        use std::os::unix::process::CommandExt;
+        let mut cat = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("start cat in a group of its own");
+        let pgid = i32::try_from(cat.id()).unwrap();
+        let mut emptying = Emptying::watching(pgid).expect("watch the group");
+        assert_eq!(emptying.within(Duration::ZERO), Ok(false));
+        drop(cat.stdin.take());
+        assert_eq!(emptying.within(Duration::MAX), Ok(true));
+        assert!(cat.wait().expect("cat's end").success());
     }
 }
 

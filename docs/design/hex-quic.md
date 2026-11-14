@@ -15,7 +15,7 @@ Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae
 links report (Q12; `09431b42`). HEX-QUIC-25 passed across Linux and macOS at `3045b824`, both its kill and its
 partition halves, and the QUIC conformance suite passed on Windows at `7e48ef7d`. Merged on Hex's main: one
 hyper-quic, from hyper-raft's main `045cf3ff` (Q1; `8aa7c028`), then `e0613f52` (Q1; `1314e5f2`), and the bridge shared
-with hex-client (`a8f6bfe4`).
+with hex-client (`a8f6bfe4`). Q13, the seal of a message that carries a secret, decided and built 2026-11-14.
 Owed: HEX-QUIC-27 on Windows, and the lanes raised on a live connection that Q8 asks of hyper-transport.
 
 Each decision says what it chose, its sources, the alternatives, and what would falsify it (CLAUDE.md §5, R02).
@@ -411,3 +411,66 @@ the TLS state. The report in one message: a node with more peers than it names c
 or listing one whose connection has ended (HEX-QUIC-28, -29); a node without `--quic` answering anything but the typed
 refusal (HEX-QUIC-29); a report longer than one message read back otherwise than whole, or a client gathering more
 links than the node's connections (HEX-QUIC-30); `hex node links` saying a link otherwise than its line (HEX-QUIC-31).
+
+## Q13. A message that carries a secret goes sealed
+
+The review's E-6 (2026-11-14): every copy Hex makes of a message that carries a secret, a lease's value or a sign-in's
+tokens (`wire::carries_secret`), is wiped as it goes (credential-grants.md C7). Over QUIC, buffers beneath hex-quic hold
+such a message where Hex can't wipe it: hyper-quic's stream send buffer keeps each frame until the peer acknowledges it,
+and hyper-transport's receive pool keeps the decrypted chunk. E-6's QUIC leg found the secret in six blocks they freed
+(Mac Studio, macOS, 2026-11-14; size and place of each: (84, 52), (151, 53), (71, 39), (556, 53), (65527, 10982),
+(65527, 18503)).
+
+**Chosen** (ROOT's plan, 2026-11-14, once the ask of hyper-raft was withdrawn with kiln's lead): each such message is
+sealed before hex-quic's lanes take it, so those buffers hold it as ciphertext alone.
+- The format (`hex_core::wire::seal`, `open`): the header in the clear, its kind marked by bit 14 (`wire::SEALED`, a bit
+  no kind has), bound to the body as AES-GCM's additional data; then a 96-bit nonce, the body sealed, and its 128-bit
+  tag. A connection that seals refuses, typed (`wire::SealFault`), a secret's kind that came unsealed, a sealed message
+  whose kind carries no secret, and a seal that doesn't open; one that seals nothing refuses a sealed message. Only the
+  four kinds that carry a secret go sealed, the rest as before. A sealed message is held to `MAX_MESSAGE` as any message
+  is, so a secret's message may be 28 bytes shorter over QUIC than on the node's socket, refused `Oversized` past it.
+- The keys (`hex_quic::seal`): AES-256-GCM through aws-lc-rs, the AWS-LC hyper-quic's TLS runs on; a key each way, each
+  the 32 bytes the connection's TLS exporter gives (RFC 8446 §7.5) under the label `EXPORTER-hex-wire-seal-v1` and that
+  way's context (`from the dialer`, `from the acceptor`), derived by the driver as it admits the connection. Both ends
+  derive each way's key alike, the two ways differ, and a key is its TLS session's alone. The way an end sends on is
+  whether it dialed, the fact by which the driver decides which end sends the Welcome (Q3). A connection whose keys
+  can't be derived is refused at once.
+- The nonces: each end counts its seals, its nonce the count big-endian, padded with zeros to 96 bits (RFC 8446 §5.3's
+  per-record nonce, without its mask, the key being the connection's alone), taken atomically, so no two seals made at
+  once share one, and refused `Spent` before the count would wrap, after 2^64 - 1 seals. The receiver opens with the
+  nonce the message carries, in whatever order messages come: their order and replay are the connection's TLS's (QUIC's
+  packet protection, RFC 9001 §5). The seal keeps a secret out of buffers Hex can't wipe; it is no second channel
+  security.
+- The limit: a key seals no more than AES-GCM's limit in RFC 8446 §5.5, 2^24.5 full records of 2^14 bytes, for a margin
+  of about 2^-57 of authenticated-encryption security, from Luykx and Paterson's AEBounds analysis: 2^34.5 AES blocks,
+  derived, never chosen. Each seal is charged its body's blocks and one more for its tag, atomically, and one that would
+  pass the limit is refused `Spent`, typed, as a spent nonce is. A connection whose key is spent carries no more secrets:
+  its client dials again, and the new connection's TLS session gives fresh keys.
+- Where: the node seals as its QUIC listener frames an answer (`hex-node` `quic.rs`, `send`) and opens as it deframes a
+  request; a client over QUIC seals before it frames (`Transport::seal`) and opens as it deframes, its keys its link's
+  (`guest::Link::sealing`, `hex_quic::link` asking `Endpoint::keys`). A copy in the clear is wiped as C7 says. The wire's
+  `IDENTITY` moves, so a peer of the wire before the seal is refused at its hello.
+
+Sources: RFC 8446 §7.5 (exporters), §5.3 (the per-record nonce) and §5.5 (AES-GCM's limit on one key); A. Luykx and
+K. G. Paterson, "Limits on Authenticated Encryption Use in TLS" (2017), the AEBounds analysis §5.5 rests on; RFC 5705 §4
+(an exporter's label); NIST SP 800-38D §5.2.1.1 and §5.2.1.2 (GCM's IV and tag lengths), §7.1 (the blocks GCM runs AES
+on) and §8 (an IV never repeated under one key); RFC 9001 §5 (QUIC's packet protection); FIPS 197 §5 (AES-256's key,
+AES's block).
+
+**Alternatives.**
+- Wiping in hyper-raft, hyper-quic's send buffer as a frame is acknowledged and hyper-transport's pool as a chunk is
+  released: a change to crates kiln and Hex hold at one revision (Q1), withdrawn (ROOT with kiln's lead, 2026-11-14).
+- Sealing in hex-quic's bridge: it carries every port's bytes as a stream, so it would deframe the control port's wire to
+  find a secret's kind, a second reader of the wire, and the client's socket pair would still hold the clear.
+- A key of its own per message or per lease, sent wrapped: a key exchange beside TLS's, where the exporter gives keys
+  bound to the session with nothing sent.
+- Random nonces: 96 random bits a seal (NIST SP 800-38D §8.2.2) hold a key to 2^32 seals; a counter has no collision to
+  bound.
+- ChaCha20-Poly1305: Hex's links take AES-256-GCM alone (Q5; Ada, 2026-11-11).
+
+**Falsified by** a block freed holding a secret the node carried over QUIC (`crates/hex-node/tests/wipes.rs`,
+`e6_no_block_freed_holds_a_secret_the_node_carried_over_quic`); a connection's two ends deriving keys that don't open each
+other's seals, or an end opening its own, or another connection's (HEX-QUIC-32, `seal::tests`); a nonce taken twice by
+seals made at once, or after its count is spent, or a key sealing past AES-GCM's limit (`seal::tests`); a node taking a
+secret unsealed, or a sealed message whose kind carries none (HEX-QUIC-33; `wire::tests`' `q13_` tests); a seal opened
+though its header, nonce, body or tag changed (`wire::tests`, `seal::tests`).

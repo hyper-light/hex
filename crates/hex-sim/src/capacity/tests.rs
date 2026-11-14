@@ -629,6 +629,31 @@ fn hex_boxes_are_the_recorded_fleets_oci_legs() {
     assert_eq!((high.cpu_milli, high.mem_bytes), (3_400, 4 << 30));
 }
 
+/// AC-T7.4.1, joint plan step 13 (ROOT's ruling 7, 2026-11-14): the capacity view's tests on real machines ask the
+/// recorded legs one after another. Do read them as those tests do; expect each list in the order its trace has it, every
+/// leg of it once, kiln's first leg (recorded below a milli-core) drawn as one unit of its resolution.
+#[test]
+fn the_recorded_legs_are_asked_in_recorded_order() {
+    let kiln: Vec<Amounts> = kiln_needs().collect();
+    assert_eq!(kiln.len(), 4_655);
+    let first = |cpu_milli, mem_bytes| Amounts {
+        cpu_milli,
+        mem_bytes,
+        ..Amounts::ZERO
+    };
+    assert_eq!(
+        kiln[..3],
+        [
+            first(1, 2_609_152),
+            first(5_422, 35_218_735_104),
+            first(371, 13_536_509_952)
+        ]
+    );
+    let oci: Vec<Amounts> = oci_needs().collect();
+    assert_eq!(oci.len(), 8_432);
+    assert_eq!(oci[..2], [first(600, 512 << 20), first(300, 128 << 20)]);
+}
+
 /// AC-T7.4.1, joint plan step 13 (ROOT, 2026-11-14: workload rates from the traces): kiln's runs arrive at the machine as
 /// they did at fedora, whose room it is. Do read kiln's export; expect fedora's legs, under the name it ran by until
 /// 2026-10-26 and the one it ran by from 2026-10-27 (one machine renamed: the first name's last leg ends before the
