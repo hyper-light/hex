@@ -323,6 +323,32 @@ pub(crate) fn nodes<'a>(
     Ok(holders)
 }
 
+/// The boxes whose records a window couldn't read, each with its store's words (the review's dropped records).
+pub(crate) type Unreadable = Vec<(BoxId, String)>;
+
+/// `records`, a node's records by box ([`Store::all`]), as the records its window reads and the boxes whose records it
+/// can't ([`Unreadable`]): none dropped.
+pub(crate) fn readable(
+    records: BTreeMap<BoxId, Result<BoxRecord, String>>,
+) -> Result<(Vec<BoxRecord>, Unreadable), Refusal> {
+    let unreadable = records.values().filter(|record| record.is_err()).count();
+    let mut read = Vec::new();
+    let mut unread = Vec::new();
+    read.try_reserve_exact(records.len().saturating_sub(unreadable))
+        .and_then(|()| unread.try_reserve_exact(unreadable))
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's records",
+            bound: records.len(),
+        })?;
+    for (id, record) in records {
+        match record {
+            Ok(record) => read.push(record),
+            Err(why) => unread.push((id, why)),
+        }
+    }
+    Ok((read, unread))
+}
+
 /// `records`, a node's boxes' records, as the holders a learner reads, each a box's.
 pub(crate) fn boxes(records: &[BoxRecord]) -> Result<Vec<Holder<'_>>, Refusal> {
     let mut holders = Vec::new();
@@ -1416,6 +1442,10 @@ pub(crate) struct Learner {
     unheld: Refusal,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
     unread: Vec<(LearnedHolder, Refusal)>,
+    /// The machine it runs on, which a box whose record can't be read is counted at ([`Learner::learn`]).
+    machine: CapacityResources,
+    /// The boxes whose records its last window couldn't read (ROOT, 2026-11-14), counted at its machine.
+    unrecorded: Unreadable,
     /// The managed VMs it asked their governors at first sight, on a platform with no window (D255), by their scopes.
     governors: BTreeMap<Scope, Governed>,
     /// The last resort (C5).
@@ -1476,6 +1506,8 @@ impl Learner {
             fault: None,
             last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unread: Vec::new(),
+            machine,
+            unrecorded: Vec::new(),
             governors: BTreeMap::new(),
             unheld: Refusal::Platform {
                 what: "memory_high",
@@ -1616,7 +1648,7 @@ impl Learner {
             .transpose()
     }
 
-    /// Runs a window as a node does ([`window`]), the learner held alone.
+    /// Runs a window as a node does ([`window`]), the learner held alone, every record read.
     #[cfg(test)]
     pub(crate) fn window(
         &mut self,
@@ -1625,7 +1657,7 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        window(self, io, running, budget, now)
+        window(self, io, running, Vec::new(), budget, now)
     }
 
     /// What a window asks of the VMs it learns among `running` (A-2): each one's reading, its life too where it holds no
@@ -1653,11 +1685,13 @@ impl Learner {
         Ok(asks)
     }
 
-    /// Learns a window's `answers` at `now` (C1 to C5, C7; under its lock, A-2), its VMs `running`, within the fleet's
-    /// `budget`: what it then acts on outside its lock ([`act`]).
+    /// Learns a window's `answers` at `now` (C1 to C5, C7; under its lock, A-2), its VMs `running` and the boxes whose
+    /// records its node couldn't read `unreadable`, within the fleet's `budget`: what it then acts on outside its lock
+    /// ([`act`]).
     fn learn<'h>(
         &mut self,
         running: &[Holder<'h>],
+        unreadable: Unreadable,
         answers: Vec<Answer<'h>>,
         budget: CapacityResources,
         now: Instant,
@@ -1810,6 +1844,21 @@ impl Learner {
             let intent = record.intent().map(LearnedEnd::try_clone).transpose()?;
             self.last.met(class, scope, intent)?;
         }
+        // A box whose record its node can't read is counted at its machine (the review's dropped records; ROOT,
+        // 2026-11-14): its class, caps and receipt are its record's alone, so nothing bounds it lower, as an unknown
+        // band ranks a node VM above every box ([`node_band`]). While one is, the fleet has no budget past the bookings
+        // it reads, each VM held at its booking (C3), and every VM class's answer names the box ([`Learner::learned`]).
+        // Interim: once A-10 (goal 4) makes the fleet's budget what is measured free, what such a box holds is outside
+        // that budget already, and this count gives way to it.
+        if !unreadable.is_empty() {
+            unread = unread
+                .checked_add(self.machine)
+                .ok_or_else(|| Refusal::Invalid {
+                    what: "a microVM's learned charge",
+                    why: "the unread VMs' receipts and the machine overflow".into(),
+                })?;
+        }
+        self.unrecorded = unreadable;
         // The fleet's budget this window, less what its unread VMs hold past their bookings.
         let budget = less(budget, unread);
         self.node.set_budget(budget);
@@ -2004,7 +2053,26 @@ impl Learner {
         learned.unread = self.unread_of(class, running)?;
         learned.awaits = self.awaits_of(class, running)?;
         learned.ranked = ranked(class, running)?;
+        learned.unrecorded = self.unrecorded_of()?;
         Ok(Some(learned))
+    }
+
+    /// The boxes whose records its last window couldn't read, in their ids' order, each with its store's words (the
+    /// review's dropped records; ROOT, 2026-11-14): told on every VM class's answer, as a box's class is its record's.
+    fn unrecorded_of(&self) -> Result<Vec<hex_api::LearnedUnrecorded>, Refusal> {
+        let mut told = Vec::new();
+        told.try_reserve_exact(self.unrecorded.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned unrecorded boxes",
+                bound: self.unrecorded.len(),
+            })?;
+        for (id, why) in &self.unrecorded {
+            told.push(hex_api::LearnedUnrecorded {
+                id: LearnedHolder::Box(id.try_clone()?),
+                why: format!("its record can't be read: {why}; counted at its machine"),
+            });
+        }
+        Ok(told)
     }
 
     /// The VMs of `class` among `running` its last window couldn't read, in their records' order, each with its
@@ -2187,21 +2255,25 @@ pub(crate) fn govern(
     Ok(())
 }
 
-/// One window (C1 to C5, C7) read at `now`: the VMs its learner learns `running` now (their records, [`sort`]), within
-/// the fleet's `budget`. Its learner is taken for each of the window's pure steps and let go while its VMs are asked and
-/// acted on (A-2; the review's, 2026-11-14), so a capacity answer, which takes it, never waits on a VM. Its node runs one
-/// window at a time, on its learner's thread, so nothing but the window moves its learner between its steps. A failure is
-/// kept until a window passes.
+/// One window (C1 to C5, C7) read at `now`: the VMs its learner learns `running` now (their records, [`sort`]) and the
+/// boxes whose records its node can't read (`unreadable`, [`readable`]), within the fleet's `budget`. Its learner is
+/// taken for each of the window's pure steps and let go while its VMs are asked and acted on (A-2; the review's,
+/// 2026-11-14), so a capacity answer, which takes it, never waits on a VM. Its node runs one window at a time, on its
+/// learner's thread, so nothing but the window moves its learner between its steps. A failure is kept until a window
+/// passes.
 pub(crate) fn window(
     mut learner: impl Lease<Learner>,
     io: &impl Managed,
     running: &[Holder<'_>],
+    unreadable: Unreadable,
     budget: CapacityResources,
     now: Instant,
 ) -> Result<(), Refusal> {
     let asks = learner.take()?.asks(running);
     let learned = match asks.and_then(|asks| ask(io, asks)) {
-        Ok(answers) => learner.take()?.learn(running, answers, budget, now),
+        Ok(answers) => learner
+            .take()?
+            .learn(running, unreadable, answers, budget, now),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, running, acts));

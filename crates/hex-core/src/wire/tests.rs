@@ -5044,8 +5044,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
     // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
-    // (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3).
-    let at = bytes.len() - (9 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
+    // (place 4), no unrecorded box's (the review's dropped records), its machine's time unread, no node VM's count, and
+    // no learner's why (A-3).
+    let at = bytes.len() - (10 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5141,9 +5142,10 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
     // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
-    // await's and no ranked VM's (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3):
-    // five counts and lengths before place 4's three.
-    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>();
+    // await's and no ranked VM's (place 4), no unrecorded box's (the review's dropped records), its machine's time
+    // unread, no node VM's count, and no learner's why (A-3): five counts and lengths besides place 4's three and the
+    // unrecorded boxes' one.
+    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>() + size_of::<u32>();
     let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
