@@ -712,6 +712,8 @@ mod tests {
         sim: SimRuntime,
         lie: Lie,
         ran: std::sync::Mutex<Vec<BoxId>>,
+        /// How often a program's end, once told, was asked for again ([`Lie::EndsOtherwise`]).
+        asked_again: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -724,6 +726,54 @@ mod tests {
         StuckRunning,
         /// Exec is refused in a box whose programs have all ended (macOS's first class did this).
         NoExecAfterEnd,
+        /// A program that exits 0 is told to have exited 7: a final reading, a program's end, that differs.
+        EndsOtherwise,
+    }
+
+    /// A program whose end is told otherwise ([`Lie::EndsOtherwise`]): exit 0 as 7. Each ask for its end once it has
+    /// been told is counted in `asked_again`: a final reading read again.
+    struct Misreported {
+        inner: Box<dyn Proc>,
+        told: bool,
+        asked_again: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Misreported {
+        fn tell(&mut self, end: Option<Exit>) -> Option<Exit> {
+            if self.told {
+                self.asked_again
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let end = end.map(|exit| {
+                if exit == Exit::Code(0) {
+                    Exit::Code(7)
+                } else {
+                    exit
+                }
+            });
+            self.told |= end.is_some();
+            end
+        }
+    }
+
+    impl Proc for Misreported {
+        fn pid(&self) -> u32 {
+            self.inner.pid()
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+            let end = self.inner.try_wait()?;
+            Ok(self.tell(end))
+        }
+        fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+            let end = self.inner.wait_for(timeout)?;
+            Ok(self.tell(end))
+        }
+        fn kill(&mut self) -> Result<(), Refusal> {
+            self.inner.kill()
+        }
+        fn streams(&mut self) -> Result<crate::Given, Refusal> {
+            self.inner.streams()
+        }
     }
 
     impl Runtime for Liar {
@@ -745,7 +795,15 @@ mod tests {
                 return Err(Refusal::os("spawning a program in a box", "EPERM"));
             }
             ran.push(id.clone());
-            self.sim.exec(id, p, s)
+            let proc = self.sim.exec(id, p, s)?;
+            Ok(match self.lie {
+                Lie::EndsOtherwise => Box::new(Misreported {
+                    inner: proc,
+                    told: false,
+                    asked_again: std::sync::Arc::clone(&self.asked_again),
+                }),
+                _ => proc,
+            })
         }
         fn run(
             &self,
@@ -801,6 +859,7 @@ mod tests {
                 sim: SimRuntime::new(),
                 lie,
                 ran: std::sync::Mutex::default(),
+                asked_again: std::sync::Arc::default(),
             };
             let s = SCENARIOS.iter().find(|s| s.id == scenario).unwrap();
             // A double's answers can't change: its party has ended, so each reading is its last, and the scenario
@@ -815,6 +874,44 @@ mod tests {
             .unwrap_err();
             assert!(why.contains(step), "{lie:?}: {why}");
         }
+    }
+
+    /// The review's E-4 (decision 9; AC-T7.4.1): a followed step's final reading that differs from the simulator's is
+    /// the step's verdict at once, as it was before the follow (565b2d335). A real fixture's runtime lives as long as its
+    /// test, so a follow that waits for its party's end to judge a program's end never judges it, and reads it again for
+    /// good. Do: run HEX-DIFF-1 on a runtime whose programs that exit 0 tell 7, its party alive until a program's told
+    /// end is asked for again. Expect: the scenario fails at its first Wait, naming it, and no told end asked again.
+    #[test]
+    fn e4_a_final_reading_that_differs_is_the_steps_verdict_at_once() {
+        let asked_again = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let liar = Liar {
+            sim: SimRuntime::new(),
+            lie: Lie::EndsOtherwise,
+            ran: std::sync::Mutex::default(),
+            asked_again: std::sync::Arc::clone(&asked_again),
+        };
+        let again = || asked_again.load(std::sync::atomic::Ordering::SeqCst);
+        let s = SCENARIOS.iter().find(|s| s.id == "HEX-DIFF-1").unwrap();
+        let why = differ(
+            &liar,
+            &SimFixture::Process,
+            &SimFixture::Process,
+            s,
+            &|| {
+                if again() == 0 {
+                    Party::Live
+                } else {
+                    Party::Ended
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(why.contains("at step 4 (Wait(0, Exact))"), "{why}");
+        assert_eq!(
+            again(),
+            0,
+            "a program's told end was asked for again while its runtime lived: {why}"
+        );
     }
 
     /// A fixture of the simulator's, its runtime a double whose answers can't change once given: its party has
