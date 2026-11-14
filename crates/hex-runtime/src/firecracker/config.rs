@@ -1086,6 +1086,24 @@ mod tests {
         assert!(!error.to_string().contains("private-invalid-pin"));
     }
 
+    /// A-13 (ROOT, 2026-11-14: no legacy kept; a field nothing reads is a lie in the config): a VM's and an observer's
+    /// stop is its managed scope's own measured wait (`managed.stop`), so `stop_ms` is read by nothing, and a
+    /// configuration naming it is refused as any unknown field is, so whoever still passes it hears of it. Do: parse the
+    /// configuration naming `stop_ms`, then without it. Expect: refused, then parsed.
+    #[test]
+    fn a13_a_configuration_naming_stop_ms_is_refused() {
+        let mut named = json();
+        named["stop_ms"] = serde_json::json!(1000);
+        assert!(
+            Config::parse(&serde_json::to_vec(&named).unwrap()).is_err(),
+            "a configuration naming stop_ms parsed"
+        );
+        let mut without = json();
+        without.as_object_mut().unwrap().remove("stop_ms");
+        let parsed = Config::parse(&serde_json::to_vec(&without).unwrap());
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
     /// AC-T7.4.1: configuration bytes are bounded and exact pinned inputs are checked before use.
     #[test]
     fn file_config_and_cost_inputs_refuse_changed_or_oversized_bytes() {
