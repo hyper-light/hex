@@ -922,6 +922,8 @@ fn books(dir: &std::path::Path) -> crate::recorded::Books {
         last_boot: None,
         charges: std::sync::OnceLock::new(),
         node_vm_ends: std::sync::Mutex::new(Vec::new()),
+        capacity_view: std::sync::atomic::AtomicBool::new(false),
+        reserved: std::sync::Mutex::new(None),
     }
 }
 
