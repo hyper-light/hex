@@ -13,7 +13,7 @@ use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::time::{Duration, Instant};
 
 use crate::conformance::{self, Act, Failure, Fixture};
-use crate::patience::Party;
+use crate::patience::{Party, Piece};
 use crate::sim::{SimFixture, SimRuntime};
 use crate::{
     Bounds, BoxId, BoxState, Class, ClassSpec, Exit, Proc, Refusal, Runtime, Signal, Stdio,
@@ -618,8 +618,15 @@ fn follow(
             && asked.elapsed() >= within
         {
             // Past W*: no sample (Karn's point), the run-out told once, and the runtime followed while it lives.
-            conformance::ENDS.ran_out(within);
             let (i, step) = at;
+            conformance::ENDS.ran_out(
+                within,
+                asked.elapsed(),
+                &[
+                    Piece::Kind("the runtime under test, at step "),
+                    Piece::Number(u64::try_from(i).unwrap_or(u64::MAX)),
+                ],
+            );
             fx.told(&format!(
                 "at step {i} ({step:?}) the simulator showed {want:?} and the runtime {seen:?}, past {within:?}: \
                  following the runtime while it lives"

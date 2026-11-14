@@ -840,10 +840,8 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
         open: input("HEX_GRANTS_OPEN"),
         command_port: port("HEX_GRANTS_COMMAND_PORT"),
     };
-    // A VM's start boots it, which the client's learned bounds (an OCI box's records) would refuse first: every wait
-    // measures, learned as the run goes, and each waits for its answer while its party lives (the person's rule of
-    // 2026-11-13), the run's whole with no deadline of its own.
-    hex_core::patience::measure_all();
+    // A VM's start boots it: each wait is learned as the run goes, and past its W* tells its run-out and waits for its
+    // answer while its party lives (the person's rule of 2026-11-13), the run's whole with no deadline of its own.
     assert!(
         hex_core::patience::census(step),
         "a census sink was installed before this one"
