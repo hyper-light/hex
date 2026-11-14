@@ -181,6 +181,14 @@ mod hosted {
         fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
             self.0.member(id, member)
         }
+        fn signal_member(
+            &self,
+            id: &BoxId,
+            member: &hex_api::Member,
+            signal: Signal,
+        ) -> Result<(), Refusal> {
+            self.0.signal_member(id, member, signal)
+        }
     }
 
     impl<R: Runtime> Host for Hosted<R> {
@@ -548,6 +556,57 @@ fn w2_a_member_handed_over_through_quic_is_killed_alone() {
     assert_eq!(
         vm.client.inspect(&vm.id).unwrap().state,
         hex_api::BoxState::Running
+    );
+    drop((member, given));
+    vm.client.delete(&vm.id).unwrap();
+}
+
+/// Goal 2's item 2 (ROOT, 2026-11-14): the node's wire carries a member's own signal (`Call::MemberSignal`, appended),
+/// so a caller through QUIC signals a member as one in process does, and its refusals come typed as they are made. Do:
+/// take a member of a running image VM through a simulator node served over QUIC, its streams held open; send it TERM;
+/// send it TERM again once it has ended; send TERM to a member its run declares not. Expect: the first done, the
+/// member's end Signal(15), as its echo keeps no handler, and its VM running on; the second refused NotRunning, "signal
+/// a member: it has ended"; the third refused Invalid, of the member.
+#[test]
+fn w2_a_members_signal_goes_through_quic() {
+    use hex_api::Runtime as _;
+    let vm = member_vm("node.member-signal.test", "member-signalled-over-quic");
+    let mut member = vm.client.member(&vm.id, &vm.claude).unwrap();
+    let given = member.streams().unwrap();
+    assert_eq!(
+        vm.client
+            .signal_member(&vm.id, &vm.claude, hex_api::Signal::TERM),
+        Ok(())
+    );
+    assert_eq!(
+        member.wait_for(std::time::Duration::MAX).unwrap(),
+        Some(hex_api::Exit::Signal(15))
+    );
+    assert_eq!(
+        vm.client.inspect(&vm.id).unwrap().state,
+        hex_api::BoxState::Running
+    );
+    assert_eq!(
+        vm.client
+            .signal_member(&vm.id, &vm.claude, hex_api::Signal::TERM),
+        Err(hex_api::Refusal::NotRunning(
+            vm.id.clone(),
+            "signal a member: it has ended"
+        ))
+    );
+    let helper = hex_api::Member {
+        kind: hex_api::MemberKind::Agent,
+        name: "helper".to_owned(),
+    };
+    let undeclared = vm
+        .client
+        .signal_member(&vm.id, &helper, hex_api::Signal::TERM);
+    assert!(
+        matches!(
+            &undeclared,
+            Err(hex_api::Refusal::Invalid { what: "member", .. })
+        ),
+        "{undeclared:?}"
     );
     drop((member, given));
     vm.client.delete(&vm.id).unwrap();

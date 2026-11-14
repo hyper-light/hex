@@ -1456,6 +1456,89 @@ fn item2_term_to_a_run_with_no_member_a_signal_reaches_is_refused_not_running() 
     }
 }
 
+/// Goal 2's item 2 (ROOT, 2026-11-14: the node's wire carries a member's signal, `Runtime::signal_member`): a signal to
+/// one member of a running VM rides that member's own lane on its run's agent-control endpoint alone, KILL among them:
+/// the member's, never its VM's, which runs on. Do: a run whose endpoint is Shards' own on loopback, its members a
+/// harness, an agent and files; send the agent TERM, then the harness KILL. Expect: each done; the agent's lane alone
+/// steered with 15, then the harness's with 9; no stop; the box Running.
+#[test]
+fn w2_a_members_signal_rides_its_own_lane_and_the_vm_runs_on() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((Vec::new(), Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-member-signal", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let member = |kind, name: &str| Member {
+        kind,
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "helper"), Signal::TERM),
+        Ok(())
+    );
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Harness, "claude"), Signal::KILL),
+        Ok(())
+    );
+    assert_eq!(*taken.lock().unwrap(), vec![(1, 15), (0, 9)]);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Goal 2's item 2: a member's own signal that reaches no program is refused, typed: NotRunning, "signal a member",
+/// before its run's start; NotRunning, "signal a member: it has ended", for a member that has ended, and "signal a
+/// member: it runs no program" for one of files alone; Invalid for a member its run declares not. Do: a run whose
+/// endpoint is Shards' own on loopback, its agent ended; TERM to the harness before the start, then, after it, TERM to
+/// the agent, the files and a harness the run declares not. Expect: each refused so, no signal taken, the box Running.
+#[test]
+fn w2_a_members_signal_that_reaches_no_program_is_refused_typed() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((vec![1], Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-member-unreached", None))
+        .unwrap()
+        .id;
+    let member = |kind, name: &str| Member {
+        kind,
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Harness, "claude"), Signal::TERM),
+        Err(Refusal::NotRunning(id.clone(), "signal a member"))
+    );
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "helper"), Signal::TERM),
+        Err(Refusal::NotRunning(
+            id.clone(),
+            "signal a member: it has ended"
+        ))
+    );
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "notes"), Signal::TERM),
+        Err(Refusal::NotRunning(
+            id.clone(),
+            "signal a member: it runs no program"
+        ))
+    );
+    let undeclared =
+        runtime.signal_member(&id, &member(MemberKind::Harness, "codex"), Signal::TERM);
+    assert!(
+        matches!(&undeclared, Err(Refusal::Invalid { what: "member", .. })),
+        "{undeclared:?}"
+    );
+    assert!(taken.lock().unwrap().is_empty());
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
 /// Goal 2's item 2 (D238; Shards' #72): a member's own kill rides its own lane on its run's agent-control endpoint,
 /// dialed as it goes, and the member ends killed, Signal(9), never a code. Do: take a harness its caller drives, of a run
 /// whose endpoint is Shards' own on loopback; kill it, its end then told as its run host tells it. Expect: the kill

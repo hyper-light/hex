@@ -274,6 +274,9 @@ impl Runtime for ImageRuntime {
     fn member(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
         self.class.member(id, member)
     }
+    fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
+        self.class.signal_member(id, member, signal)
+    }
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         self.class.room(id, room)
     }

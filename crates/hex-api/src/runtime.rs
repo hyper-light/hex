@@ -111,6 +111,27 @@ pub trait Runtime: Send + Sync {
         })
     }
 
+    /// Sends `signal` to member `member` of running Shards image box `id` alone, on its own lane of its run's
+    /// agent-control endpoint (goal 2's item 2; D238), KILL among them: the member's, never its VM's, which runs on.
+    /// Refused `NotRunning(id, "signal a member: it has ended")` where the member has ended, `NotRunning(id, "signal a
+    /// member: it runs no program")` where it is files alone, `NotRunning(id, "signal a member")` where its run isn't
+    /// running, `Invalid` for a member its run declares not, and, naming the class, by a class whose boxes have no
+    /// members.
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &crate::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        let _ = (member, signal);
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members a signal reaches"
+            ),
+        })
+    }
+
     /// Tells box `id`'s guest the room its caller's budget leaves it (D188; Shards' D241; joint plan step 14, C7): the
     /// caller's budget-left for the box, everything the VM holds coming out of it, in bytes past what the box holds now,
     /// negative where the budget is short of that (its guest then reclaims its file pages); none lifts the hold.
@@ -2588,7 +2609,10 @@ pub enum Upstream {
     /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
     /// first version, which owes `attach`.
     AttachAfterCrash,
-    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
+    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint. Given since Shards
+    /// 16451e19f (D238's member lanes, image channel v27): a member's signal rides its own lane, in process and over the
+    /// node's wire (`Runtime::signal_member`, goal 2's item 2), so no call awaits it now. Its tag stays, the wire being
+    /// append-only.
     MemberSignal,
     /// A microVM member's flows to an IPv6 address, or by UDP to any address: Shards' destinations
     /// (D236) reach an IPv4 address by TCP alone.
