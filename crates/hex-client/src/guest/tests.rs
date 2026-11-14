@@ -2177,6 +2177,39 @@ fn constructor_hello(trace: &ConnectTrace) -> ConstructorHello {
     }
 }
 
+/// `form`'s connect's cap as this host measures it, decision 9's W* (Ada's rule of 2026-11-13: no budget of a test's is
+/// fixed): the same connect carried to its answer under a cap no answer here comes near ([`crate::calls::MOST_ONE_WAIT`],
+/// so it takes the capped path, every deadline step of it), its token and its hello's answer there to read, run by a
+/// worker thread of its own; its time from that thread's spawn to its answer heard here is a sample of `steps`, and the
+/// cap is the slowest `steps` has seen, the first sample its cold start. The cap's value is coverage alone (ROOT,
+/// 2026-11-14): the verdict rests on what the connect armed and on its refusal never coming before its deadline.
+fn connect_cap(form: ConnectForm, steps: &'static hex_core::patience::Patience) -> Duration {
+    /// The measured connect's answer, heard from its worker.
+    static ANSWERED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_client.guest.connect_measured_answered");
+    let (socket, mut peer) = connect_pair();
+    peer.write_all(&TOKEN.to_le_bytes()).unwrap();
+    send_answer(&mut peer, 1, &Answer::Hello(agents_hello()));
+    let (link, _) = connect_link(Some(socket), None);
+    let began = Instant::now();
+    let (finished, answer) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let far = Instant::now()
+            .checked_add(crate::calls::MOST_ONE_WAIT)
+            .unwrap();
+        let _ = finished.send(connect_form(form, link, far).map(drop));
+    });
+    let connected = connected_by(&ANSWERED, &answer, &worker);
+    let took = began.elapsed();
+    worker.join().unwrap();
+    drop(peer);
+    connected.unwrap().unwrap();
+    hex_testkit::waits::answered(steps, took);
+    let cap = steps.deadline().unwrap_or(took);
+    eprintln!("client_budget_cap form={form:?} took={took:?} w_star={cap:?}");
+    cap
+}
+
 /// AC-T7.4.1: both public constructors reject expired/invalid authority before dial,
 /// preserve an exact absolute instant with no Link budget, and honor a smaller configured cap.
 #[test]
@@ -2232,28 +2265,38 @@ fn absolute_connect_rejects_before_dial_and_preserves_smaller_caps() {
 
 /// AC-T7.4.1: actual partial token reads and the hello send/wait consume the same
 /// original cap even when Link has no default budget. Both constructor forms are covered.
+/// Expect every wait each connect armed, in its own thread, at its one deadline, the dial's
+/// too, and its refusal its caller's, never before that deadline. Each form's cap is this
+/// host's own ([`connect_cap`]), taken in the connect's own worker as it starts; whether the
+/// host let it read its token's first byte (a partial token) or send its whole hello (a whole
+/// token) before its cap is told to the census.
 #[test]
 fn absolute_connect_caps_partial_token_and_unanswered_hello() {
+    use crate::calls::{armed, armed_at};
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
+    /// The same connect, answered.
+    static STEPS: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_client.guest.connect_steps");
+    static CAPPED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_client.guest.connect_capped");
 
     let mut observations = Vec::with_capacity(4);
     for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        let cap = connect_cap(form, &STEPS);
         for whole_token in [false, true] {
             let (socket, mut peer) = connect_pair();
             let token = TOKEN.to_le_bytes();
             let prefix = if whole_token { &token[..] } else { &token[..1] };
             peer.write_all(prefix).unwrap();
             let (link, trace) = connect_link(Some(socket), None);
-            let at = Instant::now().checked_add(CONNECT_CAP).unwrap();
             let (finished, answer) = mpsc::sync_channel(1);
             let worker = std::thread::spawn(move || {
+                let at = Instant::now().checked_add(cap).unwrap();
                 let result = connect_form(form, link, at).map(drop);
-                let _ = finished.send((Instant::now(), result));
+                let _ = finished.send((at, Instant::now(), result, armed()));
             });
             // No assertion may bypass this owned socket close and actor join.
-            static CAPPED: hex_core::patience::Patience =
-                hex_core::patience::Patience::measuring("test.hex_client.guest.connect_capped");
             let observed = connected_by(&CAPPED, &answer, &worker);
             let stopped = peer.shutdown(Shutdown::Both);
             drop(peer);
@@ -2262,7 +2305,7 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
             observations.push((
                 form,
                 whole_token,
-                at,
+                cap,
                 observed,
                 stopped,
                 joined.is_ok(),
@@ -2271,60 +2314,115 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
             ));
         }
     }
-    let mut uncommitted = Vec::with_capacity(2);
     // All four owned peers are closed and actors joined before any assertion.
-    for (form, whole_token, at, observed, stopped, joined, read, trace) in observations {
+    for (form, whole_token, cap, observed, stopped, joined, read, trace) in observations {
         let hello = constructor_hello(&trace);
         eprintln!(
-            "client_connect_absolute form={form:?} whole_token={whole_token} at={at:?} observed={observed:?} read={read} stopped={stopped:?} joined={joined} hello={hello:?}"
+            "client_connect_absolute form={form:?} whole_token={whole_token} cap={cap:?} observed={observed:?} read={read} stopped={stopped:?} joined={joined} hello={hello:?}"
         );
         assert!(joined);
-        let (returned, result) = observed.expect("constructor did not return before owned cleanup");
-        assert_eq!(
-            read,
-            if whole_token { stream::TOKEN_BYTES } else { 1 },
-            "missing actual read progress is a harness miss"
-        );
-        assert!(matches!(result, Err(Refusal::Os { .. })), "{result:?}");
-        assert_eq!(
-            *trace.dials.lock().unwrap(),
-            [(stream::CONTROL_PORT, Some(at))]
-        );
-        if whole_token {
-            if let Some(header) = hello.header {
-                assert_eq!(header.id, 1);
-                assert!(!hello.pending && hello.buffered == 0);
-                eprintln!(
-                    "client_connect_hello form={form:?} phase=committed_hello withheld_answer_proof=true"
-                );
+        let (at, returned, result, log) =
+            observed.expect("constructor did not return before owned cleanup");
+        // A partial token's path: its first byte read before its cap. A whole one's: its hello sent whole, its
+        // answer's wait armed.
+        let progressed = if whole_token {
+            log.iter().any(|armed| armed.what == "the answer")
+        } else {
+            read == 1
+        };
+        eprintln!(
+            "client_budget_path test=absolute_connect_caps_partial_token_and_unanswered_hello/{form:?}/{} path={}",
+            if whole_token {
+                "whole_token"
             } else {
-                let phase = if hello.written.is_empty() {
-                    "learned_before_send"
-                } else {
-                    "learned_during_incomplete_send"
-                };
-                eprintln!(
-                    "client_connect_hello form={form:?} phase={phase} withheld_answer_proof=false status=UNVERIFIED written={:02x?}",
-                    hello.written
+                "partial_token"
+            },
+            if progressed { "progressed" } else { "cut" }
+        );
+        assert!(
+            armed_at(&log, &["starting a client operation"], Some(at)),
+            "{log:?}"
+        );
+        let dials = trace.dials.lock().unwrap();
+        assert!(
+            dials.is_empty() || *dials == [(stream::CONTROL_PORT, Some(at))],
+            "{dials:?}"
+        );
+        assert!(
+            matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("absolute")),
+            "{result:?}"
+        );
+        assert!(
+            returned >= at,
+            "refused {:?} before its deadline",
+            at.saturating_duration_since(returned)
+        );
+        match (whole_token, progressed) {
+            (false, true) => {
+                // Its first byte read, the rest never come: its token's read waited at the one deadline, refused by it.
+                assert_eq!(*dials, [(stream::CONTROL_PORT, Some(at))]);
+                assert!(
+                    armed_at(
+                        &log,
+                        &["reading the relay's token for the connection"],
+                        Some(at)
+                    ),
+                    "{log:?}"
                 );
                 assert!(
-                    matches!(&result, Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")),
-                    "uncommitted Hello must be explained by its smaller learned send bound: {result:?}"
+                    matches!(
+                        &result,
+                        Err(Refusal::Os {
+                            op: "reading the relay's token for the connection",
+                            ..
+                        })
+                    ),
+                    "{result:?}"
                 );
-                uncommitted.push((form, phase));
+                assert!(hello.written.is_empty());
             }
-        } else {
-            assert!(hello.written.is_empty());
-            assert!(
-                matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("absolute"))
-                    && returned >= at
-            );
+            (true, true) => {
+                // Its token read, its hello sent whole, no answer: its answer's wait at the one deadline, refused by it.
+                assert_eq!(*dials, [(stream::CONTROL_PORT, Some(at))]);
+                assert_eq!(read, stream::TOKEN_BYTES);
+                let header = hello.header.expect("its hello went whole before its cap");
+                assert_eq!(header.id, 1);
+                assert!(!hello.pending && hello.buffered == 0);
+                assert!(
+                    armed_at(
+                        &log,
+                        &[
+                            "reading the relay's token for the connection",
+                            "sending",
+                            "the answer"
+                        ],
+                        Some(at)
+                    ),
+                    "{log:?}"
+                );
+                assert!(
+                    matches!(
+                        &result,
+                        Err(Refusal::Os {
+                            op: "waiting for the node agent's answer",
+                            ..
+                        })
+                    ),
+                    "{result:?}"
+                );
+            }
+            (false, false) => {
+                // Its cap passed before its token's first byte was read: nothing read, nothing sent.
+                assert_eq!(read, 0);
+                assert!(hello.written.is_empty());
+            }
+            (true, false) => {
+                // Its cap passed before its hello went whole: no answer's wait armed.
+                assert!(read <= stream::TOKEN_BYTES);
+                assert!(hello.header.is_none());
+            }
         }
     }
-    assert!(
-        uncommitted.is_empty(),
-        "UNVERIFIED withheld-answer phase: no complete actual Hello; harness witness miss, not a production timeout failure: {uncommitted:?}"
-    );
 }
 
 /// AC-T7.4.1: a complete real hello reaches both constructors; the event form keeps

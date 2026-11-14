@@ -139,7 +139,14 @@ impl WinRuntime {
             }
         };
         let Some(keeping) = self.holding.keeper.as_ref() else {
-            return if present || record.stage() == NativeStage::Prepared {
+            // With no keeper there is no keeper record: the answer below for a keeper that holds none, and macOS's
+            // without its helper. Prepared can have had no native effects, Released is checked later against its
+            // backend's exact terminal receipt, and preflight grants no authority: no native absence witness.
+            return if present
+                || matches!(
+                    record.stage(),
+                    NativeStage::Prepared | NativeStage::Released
+                ) {
                 Ok(())
             } else {
                 Err(bad(
