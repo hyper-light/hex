@@ -1273,6 +1273,25 @@ impl LearnedUnrecorded {
     }
 }
 
+/// A-7 (the review's, 2026-11-14; ROOT's ruling; AC-T7.4.1): a VM its learner's last window couldn't cap or tell its
+/// guest's room, by its holder, and why, in its runtime's words. Each VM's cap and room are its own, so its window went
+/// on, and the VM is held at what was last set and counted there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedUnacted {
+    pub id: LearnedHolder,
+    pub why: String,
+}
+
+impl LearnedUnacted {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            why: copy_words(&self.why, "why a window couldn't act on a VM")?,
+        })
+    }
+}
+
 impl RateHeld {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         Ok(match self {
@@ -1436,6 +1455,15 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_unrecorded"
     )]
     pub unrecorded: Vec<LearnedUnrecorded>,
+    /// The VMs its window couldn't cap or tell their room, held at what was last set, each once, and why (A-7; ROOT,
+    /// 2026-11-14), on their class's answer, as many as the answer has room for after the unrecorded boxes. Added after
+    /// the unrecorded boxes, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_unacted"
+    )]
+    pub unacted: Vec<LearnedUnacted>,
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1507,6 +1535,17 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_unacted<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedUnacted>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned unacted VMs exceed a node's VMs",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
     pub fn deserialize_rates<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<LearnedRate>, D::Error> {
@@ -1562,9 +1601,9 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits, ranked node VMs
-    /// and unrecorded boxes, no box unrecorded twice; at most [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope
-    /// twice.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits, ranked node
+    /// VMs, unrecorded boxes and unacted VMs, no box unrecorded twice and no VM unacted twice; at most
+    /// [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope twice.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.ceilings.len() > MAX_LEARNED_PRIORS {
             return Err(Refusal::Exhausted {
@@ -1594,6 +1633,7 @@ impl Learned {
             ("learned awaits", self.awaits.len()),
             ("learned ranked VMs", self.ranked.len()),
             ("learned unrecorded boxes", self.unrecorded.len()),
+            ("learned unacted VMs", self.unacted.len()),
         ] {
             if told > MAX_LEARNED_HOLDINGS {
                 return Err(Refusal::Exhausted {
@@ -1608,6 +1648,15 @@ impl Learned {
                 return Err(Refusal::Invalid {
                     what: "learned unrecorded boxes",
                     why: "a box repeats".to_owned(),
+                });
+            }
+        }
+        let mut unacted = std::collections::BTreeSet::new();
+        for told in &self.unacted {
+            if !unacted.insert(&told.id) {
+                return Err(Refusal::Invalid {
+                    what: "learned unacted VMs",
+                    why: "a VM repeats".to_owned(),
                 });
             }
         }
@@ -1701,6 +1750,11 @@ impl Learned {
                 &self.unrecorded,
                 "learned unrecorded boxes",
                 LearnedUnrecorded::try_clone,
+            )?,
+            unacted: try_clones(
+                &self.unacted,
+                "learned unacted VMs",
+                LearnedUnacted::try_clone,
             )?,
         })
     }
