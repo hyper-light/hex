@@ -1862,7 +1862,10 @@ impl GuestRuntime {
                 "its selected receipt has no scope",
             )?)?;
             plan = plan
-                .with_gpu_report(*scope.bytes(), managed::gpu_deadline(budget)?)
+                .with_gpu_report(
+                    *scope.bytes(),
+                    shards_api::Until::At(managed::gpu_deadline(budget)?),
+                )
                 .map_err(|why| refusal("preparing selected renderer report", &why))?;
         }
         budget.remaining()?;

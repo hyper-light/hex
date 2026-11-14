@@ -147,8 +147,11 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
         ] {
             let plan = boot(selected);
             let plan = if let Some(scope) = requested {
-                plan.with_gpu_report(scope, Instant::now() + Duration::from_secs(60))
-                    .unwrap()
+                plan.with_gpu_report(
+                    scope,
+                    shards_api::Until::At(Instant::now() + Duration::from_secs(60)),
+                )
+                .unwrap()
             } else {
                 plan
             };
@@ -166,7 +169,10 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
         let plan = boot(physical.to_vec())
-            .with_gpu_report(key.generation, Instant::now() + Duration::from_secs(60))
+            .with_gpu_report(
+                key.generation,
+                shards_api::Until::At(Instant::now() + Duration::from_secs(60)),
+            )
             .unwrap();
         assert!(matches!(
             tx.launch_managed(

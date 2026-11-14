@@ -587,7 +587,7 @@ impl GuestRuntime {
                 let plan = plan
                     .with_gpu_report(
                         *receipt.original.scope().bytes(),
-                        managed::gpu_deadline(budget)?,
+                        shards_api::Until::At(managed::gpu_deadline(budget)?),
                     )
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
                 pool::write(&definition.path, &receipt)?;
