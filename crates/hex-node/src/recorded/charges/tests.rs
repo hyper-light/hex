@@ -2093,8 +2093,9 @@ fn leave_node_row(dir: &std::path::Path, row: &hex_core::record::NodeVmRecord) {
 #[test]
 fn a9_a_node_vms_boot_wakes_its_learner() {
     let dir = tempfile::tempdir().unwrap();
-    let node =
-        std::sync::Arc::new(crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap());
+    let node = std::sync::Arc::new(
+        crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap(),
+    );
     let (waits, _, _) = node.set_charges().unwrap();
     let books: &dyn hex_runtime::devices::Books = &*node;
     books
