@@ -193,10 +193,14 @@ impl GuestConfig {
                         needs: hex_api::Upstream::NestedRuntime,
                     });
                 }
-                Boot::Image(image.into_string().map_err(|given| Refusal::Invalid {
+                let image = image.into_string().map_err(|given| Refusal::Invalid {
                     what: ENV_IMAGE,
                     why: format!("{given:?} is not UTF-8, as an image's reference is"),
-                })?)
+                })?;
+                // Pinned by its digest (§4; the review's C-17), so a tag that moved never boots another image as the
+                // node boots its guest again.
+                hex_api::check_pinned(ENV_IMAGE, &image)?;
+                Boot::Image(image)
             }
             None => Boot::Kernel {
                 kernel: path(ENV_KERNEL),
@@ -1014,7 +1018,7 @@ impl GuestRuntime {
         }
         let mut booted = self.lock()?;
         if let Some(b) = booted.as_ref() {
-            if self.still_runs(&b.guest) {
+            if self.still_runs(&b.guest)? {
                 return Ok(triomphe::Arc::clone(b));
             }
             *booted = None;
@@ -1097,13 +1101,15 @@ impl GuestRuntime {
     }
 
     /// Whether `guest` still runs: a Shards guest by its own word, the node VM under shards-init by its run's, which
-    /// is reaped through its stop where it ended on its own.
-    fn still_runs(&self, guest: &GuestHandle) -> bool {
+    /// is reaped through its stop where it ended on its own, its end kept in its row. A node VM whose end can't be read
+    /// or kept is refused, typed (the review's C-4): a guest booted beside it would leave its row Ready, locked and
+    /// booked, so the next ask tries its end again first.
+    fn still_runs(&self, guest: &GuestHandle) -> Result<bool, Refusal> {
         match guest {
-            GuestHandle::Node(run) => self.images.node_runs(*run).unwrap_or(false),
-            other => other
+            GuestHandle::Node(run) => self.images.node_runs(*run),
+            other => Ok(other
                 .shards()
-                .is_some_and(|guest| matches!(guest.wait_for(Duration::ZERO), Ok(None))),
+                .is_some_and(|guest| matches!(guest.wait_for(Duration::ZERO), Ok(None)))),
         }
     }
 

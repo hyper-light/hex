@@ -41,6 +41,8 @@ struct Owner {
     ending: Holding,
     /// Whether it refuses node VMs' Ready rows, as the test sets it: as a Store whose disk is full refuses a write.
     refuse_ready: AtomicBool,
+    /// Whether it refuses node VMs' Ended rows, as the test sets it, as a full disk refuses them.
+    refuse_ended: AtomicBool,
 }
 
 /// Where one of the owner's holds stands ([`Holding`]).
@@ -102,6 +104,7 @@ impl Owner {
             reading: Holding::default(),
             ending: Holding::default(),
             refuse_ready: AtomicBool::new(false),
+            refuse_ended: AtomicBool::new(false),
         }
     }
 
@@ -281,7 +284,12 @@ impl Books for Owner {
     }
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         record.check()?;
-        if record.phase == NodeVmPhase::Ready && self.refuse_ready.load(Ordering::SeqCst) {
+        let refused = match record.phase {
+            NodeVmPhase::Ready => self.refuse_ready.load(Ordering::SeqCst),
+            NodeVmPhase::Ended => self.refuse_ended.load(Ordering::SeqCst),
+            NodeVmPhase::Booting => false,
+        };
+        if refused {
             return Err(Refusal::Os {
                 op: "writing a node VM's row",
                 why: "no space left on the device, as the test asked".to_owned(),
@@ -4633,6 +4641,49 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
     // The same guest again: its run still runs.
     runtime.boot().unwrap();
     assert_eq!(images.asked.lock().unwrap().len(), 1);
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
+/// The review's C-4 (AC-T7.4.1; joint plan step 39): a node VM whose run ended on its own, its end not yet kept in its
+/// row, is no reason to boot another beside it while that row stays Ready, locked and booked. Do boot a node's guest
+/// under shards-init, end its run on its own, refuse its row's Ended write as a full disk refuses it, and ask the guest
+/// again. Expect the ask refused in the write's words, no second boot asked of Shards, and the row still Ready.
+#[test]
+fn c4_a_node_vm_whose_end_cant_be_kept_refuses_the_next_ask_rather_than_boot_beside_it() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), None);
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
+    owner.refuse_ended.store(true, Ordering::SeqCst);
+    let asked = runtime.boot();
+    assert!(
+        matches!(
+            &asked,
+            Err(Refusal::Os {
+                op: "writing a node VM's row",
+                ..
+            })
+        ),
+        "{asked:?}"
+    );
+    assert_eq!(
+        images.asked.lock().unwrap().len(),
+        1,
+        "a second node VM was booted beside the first"
+    );
+    let phases: Vec<NodeVmPhase> = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .values()
+        .map(|row| row.phase)
+        .collect();
+    assert_eq!(phases, [NodeVmPhase::Ready]);
     drop(runtime);
     assert!(relay.join().unwrap());
 }
