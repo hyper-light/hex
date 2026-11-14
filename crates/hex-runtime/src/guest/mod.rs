@@ -191,10 +191,14 @@ impl GuestConfig {
                         needs: hex_api::Upstream::NestedRuntime,
                     });
                 }
-                Boot::Image(image.into_string().map_err(|given| Refusal::Invalid {
+                let image = image.into_string().map_err(|given| Refusal::Invalid {
                     what: ENV_IMAGE,
                     why: format!("{given:?} is not UTF-8, as an image's reference is"),
-                })?)
+                })?;
+                // Pinned by its digest (§4; the review's C-17), so a tag that moved never boots another image as the
+                // node boots its guest again.
+                hex_api::check_pinned(ENV_IMAGE, &image)?;
+                Boot::Image(image)
             }
             None => Boot::Kernel {
                 kernel: path(ENV_KERNEL),
