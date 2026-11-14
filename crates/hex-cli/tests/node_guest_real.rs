@@ -412,6 +412,29 @@ fn ended(pids: &[u32]) {
     assert!(waited.success(), "Wait-Process: {waited}");
 }
 
+/// The keeper a Windows node starts as its own child to hold its boxes' jobs (hex-runtime's `windows::keeper`), named
+/// by `keeper.owner` in the `keeper` folder of the node's `--state` (hex-cli's `node.rs`): none where that names none,
+/// or where the process it names is gone.
+#[cfg(windows)]
+fn keeper(work: &Path) -> Option<hex_runtime::windows::keeper::NodeKeeper> {
+    use hex_runtime::windows::keeper::{NodeKeeper, keeper_file};
+    let keeping = work.join("state").join("keeper");
+    let owner = fs::read_to_string(keeper_file(&keeping)).ok()?;
+    let mut words = owner.split_whitespace();
+    let (Some(Ok(pid)), Some(Ok(created))) = (
+        words.next().map(str::parse::<u32>),
+        words.next().map(str::parse::<u64>),
+    ) else {
+        panic!("{:?} names no keeper: {owner:?}", keeper_file(&keeping));
+    };
+    match NodeKeeper::open(pid, created, &keeping) {
+        Ok(keeper) => Some(keeper),
+        // No process of its pid and creation time runs: it's gone.
+        Err(hex_api::Refusal::Invalid { .. }) => None,
+        Err(e) => panic!("opening the node's keeper, pid {pid}: {e}"),
+    }
+}
+
 /// Waits for each of `pids` to end, by its life: its pidfd, which reads ready once it has ended whoever reaps it; one
 /// already gone has none to open.
 #[cfg(target_os = "linux")]
@@ -658,11 +681,16 @@ mod suite {
         (node, client, shared)
     }
 
-    /// Ends a start's node, as a crash ends it, and waits for each process of its tree to end.
-    pub fn stop(node: Node) {
+    /// Ends a start's node, as a crash ends it: the processes its tree had, each still to be waited for.
+    pub fn end(node: Node, _work: &Path) -> Vec<u32> {
         let processes: Vec<u32> = tree(node.child.id()).iter().map(|held| held.pid).collect();
         drop(node);
-        ended(&processes);
+        processes
+    }
+
+    /// Ends a start's node ([`end`]) and waits for each process of its tree to end.
+    pub fn stop(node: Node, work: &Path) {
+        ended(&end(node, work));
     }
 }
 
@@ -712,7 +740,7 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         release_shared(&client, key);
     }
     drop(client);
-    suite::stop(node);
+    suite::stop(node, &work);
     assert!(
         failures.is_empty(),
         "oci boxes through hex node's socket, its guest's {} form: {failures:#?}",
@@ -723,8 +751,35 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         let (node, client, _) = suite::start(start, form, &work, &fixture, &set);
         say_census(start, &census, &mut seen);
         drop(client);
-        suite::stop(node);
+        suite::stop(node, &work);
     }
+}
+
+/// AC-T7.4.1, item 4 on Windows (joint plan step 39): a start's end leaves no process of its node running, so its wait
+/// for the processes of the node's tree ends, and the next start's measure carries none of them. A Windows node starts
+/// its keeper as its own child, which outlives a killed node by design and never ends on its own (hex-runtime's
+/// `windows::keeper`). Do start a node of this build, no guest given, and end it as a start ends; expect its keeper
+/// ended.
+#[cfg(windows)]
+#[test]
+#[ignore = "native Windows: a hex node of this build, no VM"]
+fn w39_a_starts_end_on_windows_ends_its_nodes_keeper() {
+    let work = PathBuf::from(input("HEX_NODE_GUEST_WORK"));
+    assert!(!work.exists(), "a run's own directory: {work:?} exists");
+    fs::create_dir_all(work.join("state")).unwrap();
+    let node = Node::start_with(&work, None, &[]);
+    let keeper = keeper(&work).expect("a Windows node's keeper, named by its state's keeper.owner");
+    let processes = suite::end(node, &work);
+    let running = keeper.alive();
+    // Asked to stop either way, so a run that fails leaves it no more running than one that passes.
+    keeper.stop();
+    assert!(
+        !running,
+        "the node's keeper, pid {}, runs on after its start's end, and it never ends on its own: the start's wait for \
+         its node's processes {processes:?} would never end",
+        keeper.pid()
+    );
+    ended(&processes);
 }
 
 /// Linux's half: each form's boot through its own production class, the oci class being native there.
