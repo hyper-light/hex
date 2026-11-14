@@ -1525,6 +1525,21 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Goal 2's item 3: an image VM's member's next MCP connection (D254); any other box's refused as the trait refuses
+    /// it.
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.mcp_image(record, member),
+            books::Routed::Other(_) => Err(Refusal::Invalid {
+                what: "mcp",
+                why: format!(
+                    "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+                ),
+            }),
+        }
+    }
+
     /// Goal 2's item 2: a signal to an image VM's member alone, on its own lane; any other box's refused as the trait
     /// refuses it.
     fn signal_member(
@@ -2317,6 +2332,10 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.member(id, member)
+    }
+
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.holder(id)?.mcp(id, member)
     }
 
     fn signal_member(
