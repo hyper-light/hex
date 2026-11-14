@@ -5,7 +5,7 @@ Hex's own PID 1 kept"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live ap
 `025aae6d`): **decided: Hex's own PID 1 is kept, and shards-init works with it, never replacing it**. Live:
 - init under shards-init (§2, §3; hex-cli `guest.rs`'s `Host` and `duties`; `7f4bda5b`);
 - the node image and its build (§4; `7f4bda5b`, `982f1a6b`);
-- the host's boot of it to READY (§6; hex-runtime `guest::hosted`; `b29e0bc3`), and Hex's PID-1 path booting again
+- the host's boot of it to READY (§6; hex-runtime `guest::image::node`; `b29e0bc3`), and Hex's PID-1 path booting again
   (`9590d4d4`).
 
 Merged on Hex's main, the form whole; its real-VM runs are ROOT's (§9):
@@ -59,8 +59,8 @@ Sources, read at the revisions named:
   - `runtime-architecture.md` decision 9, under the person's rule of 2026-11-13: "we do not tolerate arbitrary
     constants. learned and data-derived values. Period. Account for cold starts well in any such approach."
 - As built (§4 to §9), Hex at main `3eb841a2`, which vendors Shards `16451e19f` (since `59f7890f`):
-  - hex-runtime `guest::image::node` (the node VM's boot, stop, room and waits), `guest::GuestRuntime::boot_image`
-    and `add_node_vm_offers`, and `guest::hosted` (`node_hosted_real`'s boot);
+  - hex-runtime `guest::image::node` (the node VM's boot, stop, room and waits, which `node_hosted_real` measures:
+    the one boot path, the review's C-6), `guest::GuestRuntime::boot_image` and `add_node_vm_offers`;
   - hex-client `guest::lanes` (the channel) and hex-core `record::node_vm`;
   - hex-node `store::node_vm` (the rows and their owners), `recorded::charges` (the learner) and `placement`, and
     hex-sim `index::routes` (the scheduler's hold);
@@ -279,11 +279,10 @@ in its guest, the node there unchanged.
 
 The person's rule, 2026-11-13, applies to every wait: no record seeds, no chosen multiples. A cold start follows its
 party while that party lives, and after it the bound is the slowest answer seen (decision 9). The host's waits below are
-the node VM's, in hex-runtime's `guest::image::node` (`605c2e89`); `node_hosted_real`'s boot
-(`guest::hosted::Hosted::boot`) follows READY as it does (`follow_ready`). Each run-out past a W* is told once on the
-process's log (`hex.wait event=ran_out`), naming its wait, its W*, how long and its party (`7a524d20`). Inside the VM,
-init waits for its node's and its relay's ready lines by each child's life, with no deadline, as its run carries none
-(§4).
+the node VM's, in hex-runtime's `guest::image::node` (`605c2e89`), whose `boot_node` `node_hosted_real` measures
+(the review's C-6). Each run-out past a W* is told once on the process's log (`hex.wait event=ran_out`), naming its
+wait, its W*, how long and its party (`7a524d20`). Inside the VM, init waits for its node's and its relay's ready lines
+by each child's life, with no deadline, as its run carries none (§4).
 - **The boot** (`hex.image.boot`): the image boot runs on a thread of its own, as a box's does, its own patience
   `Duration::MAX`, until the run starts or its run host ends. Within the boot's W*, the image class's, which its boxes'
   boots share, its answer; past it, the run-out told and the boot followed by its thread's life. It is never answered

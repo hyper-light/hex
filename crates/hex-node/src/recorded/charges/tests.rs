@@ -976,6 +976,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
         .unwrap();
@@ -3752,4 +3753,64 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         Vec::<&str>::new(),
         "asked while the lock its capacity answers take was held"
     );
+}
+
+/// Batch 1114c's per-window reads, measured before any change (AC-T7.4.1): what one charge window's `Store::all` and
+/// `Store::all_node_vms` cost a node holding `n` image VMs' records and `n` Ended node VM rows, the reads every window
+/// makes. A measurement, not a verdict: run alone (`--ignored --exact --nocapture --test-threads=1`) with
+/// `HEX_WINDOW_READS_N`, the counts to measure at (comma-separated), and `HEX_WINDOW_READS_ROUNDS`, the reads of each;
+/// unset, it measures nothing. Prints one line a count: each read's n, p50, p90, p99 and max in nanoseconds (nearest
+/// rank), the files read from the page cache as a running node's are.
+#[test]
+#[ignore = "a measurement, run alone (its docs)"]
+fn measure_a_windows_record_reads() {
+    let (Ok(counts), Some(rounds)) = (
+        std::env::var("HEX_WINDOW_READS_N"),
+        std::env::var("HEX_WINDOW_READS_ROUNDS")
+            .ok()
+            .and_then(|r| r.parse::<usize>().ok()),
+    ) else {
+        return;
+    };
+    let rank = |sorted: &[u128], p: usize| sorted[(sorted.len() * p).div_ceil(100).max(1) - 1];
+    for n in counts
+        .split(',')
+        .map(|n| n.trim().parse::<usize>().unwrap())
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+        for i in 0..n {
+            store
+                .put(&image_vm(&format!("img-{i}"), u64::try_from(i).unwrap()))
+                .unwrap();
+            let mut run = [0u8; 16];
+            run[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+            let row = hex_core::record::NodeVmRecord {
+                run: hex_api::NodeRun::from_bytes(run),
+                ..node_row(0, hex_api::NodeVmPhase::Ended)
+            };
+            store.put_node_vm(&row).unwrap();
+        }
+        let time = |read: &dyn Fn() -> usize| {
+            let mut took: Vec<u128> = (0..rounds)
+                .map(|_| {
+                    let began = Instant::now();
+                    assert_eq!(read(), n);
+                    began.elapsed().as_nanos()
+                })
+                .collect();
+            took.sort_unstable();
+            let max = took.last().copied().unwrap_or_default();
+            format!(
+                "n={} p50={} p90={} p99={} max={max}",
+                took.len(),
+                rank(&took, 50),
+                rank(&took, 90),
+                rank(&took, 99)
+            )
+        };
+        let all = time(&|| store.all().unwrap().len());
+        let rows = time(&|| store.all_node_vms().unwrap().len());
+        eprintln!("WINDOW-READS records={n} all: {all}; all_node_vms: {rows}");
+    }
 }
