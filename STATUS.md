@@ -75,7 +75,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   HEX-QUIC-28 to -31). Closes with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
   and a waits census over QUIC to seed its measuring waits.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
-  Shards `097ec0047` (D231 with D234-D259, its boot's stop and D254's MCP bridge, image channel version 25). Linux, macOS and Windows boot image VMs, D231's
+  Shards `37ddeb080` (D231 with D234-D259, its boot's stop, D254's MCP bridge and D242's upstream roots, image channel version 26). Linux, macOS and Windows boot image VMs, D231's
   run host started holding only its stdio (D248, Hex's former 0001 upstream); its usage carries each vCPU's guest
   time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
   SHARDS_INIT aren't a pair serves none.
@@ -83,7 +83,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
   of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
-  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts at Shards `097ec0047` or later).
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts at Shards `37ddeb080` or later).
   A member asking an MCP bridge (D254) is refused by its field until the class asks its run an agent-control endpoint.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
