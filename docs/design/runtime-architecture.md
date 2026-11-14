@@ -2212,7 +2212,9 @@ wrapper each box keeps (f13).
   a delete that finds the run claimed waits under the box's turn for the claimer's word and answers as the removal
   went, where the box's record still names that run's program, and removes the box itself only where the claimer
   stopped without a word (its claim's drop says so). So a box is removed once, and never after another box has taken
-  its id.
+  its id. A signal waits for no one: it holds none of the box's turns, so a removal can take the cgroup it found, and
+  cgroup v2 removes only an empty cgroup. Found removed before its KILL's write or its list of processes, the box is
+  refused as not running; removed after the KILL's write, the kill took (`BoxCgroup::signal`).
 - **One record write.** The run writes its record once, after the clone, naming the program by pid and start
   time (`BoxRecord::run`, appended). The steps are `RUN_STEPS`: the cgroup, the program, the record. A crash
   before the record leaves a cgroup no record names, which recovery removes. After a restart, a run whose

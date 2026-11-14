@@ -111,6 +111,7 @@ fn process_boxes_hold_the_contract_and_recover() {
             exercise_recovery(&own, &cache, &exe);
             exercise_clone_into_cgroup(&own);
             exercise_a_delete_beside_a_runs_removal(&own, &cache, &exe);
+            exercise_a_signal_beside_a_runs_removal(&own, &cache, &exe);
         }
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
             let has_systemd = Command::new("systemd-run")
@@ -511,6 +512,62 @@ fn exercise_a_delete_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) 
         Ok(Some(Exit::Signal(Signal::KILL.number())))
     );
     assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
+}
+
+/// Runtime goal 7 (decision 7), AC-T7.4.1: a signal to a run's box whose removal is under way is refused typed, never
+/// with an OS error. A signal holds none of the box's turns, so the run's claimer can remove the cgroup a signal has
+/// found before the signal reads it. Do: run a waiting program; hold the node's run removals at their start; kill the
+/// program through its run, so the supervising thread claims the run and stops before it removes the box; take the
+/// box's cgroup as a signal finds it, its directory pinned (`Node::signal`'s lookup, `BoxRoot::child`); let the removal
+/// go and follow the run to its end, which it reports once the box is gone; then signal TERM and KILL through what was
+/// found. Expect: each refused as not running (cgroup v2 removes only an empty cgroup), and the node's own signal of the
+/// box, gone, refused as no such box.
+fn exercise_a_signal_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) {
+    let state = tempfile::Builder::new()
+        .prefix("runsig-")
+        .tempdir_in(cache)
+        .expect("state dir");
+    let root = own.join("hex-boxes-runsig");
+    let node = Node::open(&root, state.path(), state.path()).expect("open a node");
+    let fx = BinFixture {
+        exe: exe.to_owned(),
+    };
+    let id = BoxId::new("runsig").unwrap();
+    let mut run = node
+        .run(
+            fx.spec(id.clone(), Bounds::default()),
+            fx.wait(),
+            Stdio::null(),
+        )
+        .expect("run a waiting program");
+    let held = node.hold_run_removals().expect("hold the runs' removals");
+    run.kill().expect("kill the run's program");
+    until(
+        &STOPPED,
+        "the supervising thread's claim of the run, stopped at the hold",
+        || held.stopped().unwrap() == 1,
+    )
+    .unwrap();
+    let found = hex_runtime::linux::cgroup::BoxCgroup::observe_managed(root.join(id.as_str()))
+        .expect("the box's cgroup, looked up")
+        .expect("the box's cgroup, still there while its removal is held");
+    drop(held);
+    assert_eq!(
+        hex_api::conformance::end_of(&mut *run),
+        Ok(Exit::Signal(Signal::KILL.number())),
+        "the run's end, reported once its box is gone"
+    );
+    for signal in [Signal::TERM, Signal::KILL] {
+        assert_eq!(
+            found.signal(&id, signal),
+            Err(Refusal::NotRunning(id.clone(), "signal")),
+            "{signal:?} through the cgroup a signal found before the run's removal took it"
+        );
+    }
+    assert_eq!(
+        node.signal(&id, Signal::TERM),
+        Err(Refusal::NoSuchBox(id.clone()))
+    );
 }
 
 fn orphan_id() -> BoxId {
