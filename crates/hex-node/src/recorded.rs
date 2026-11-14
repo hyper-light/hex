@@ -703,7 +703,7 @@ pub(crate) fn check_single_consumer(
     for (other, row) in records {
         let row = row
             .as_ref()
-            .map_err(|_| uncertain(other, "a record beside it can't be read"))?;
+            .map_err(|why| uncertain(other, &format!("a record beside it can't be read: {why}")))?;
         if row.version != hex_core::record::RECORD_VERSION || row.spec.id != *other {
             return Err(uncertain(
                 other,
@@ -858,7 +858,7 @@ pub(crate) fn preflight_records(
     for (id, result) in records {
         let record = result
             .as_ref()
-            .map_err(|_| uncertain(id, "its record can't be read"))?;
+            .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
         if record.version != hex_core::record::RECORD_VERSION || record.spec.id != *id {
             return Err(uncertain(
                 id,
@@ -1452,7 +1452,7 @@ pub(crate) fn handoff_transaction(
         check_backing_reference(
             current
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?,
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?,
             &pool,
         )?;
     }
@@ -1607,7 +1607,7 @@ impl<R: Recover> Recorded<R> {
         for (id, record) in &records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             let handoff = preflight_handoff_turns(
                 &self.books.lifecycle,
                 &self.books.store,
@@ -1935,6 +1935,7 @@ mod projection_tests {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         }
     }
@@ -2873,7 +2874,12 @@ impl Books {
                 project_info(&mut info, &projection(record.spec)?)?;
                 abandoned
             }
-            Some(Err(_)) => return Err(uncertain(&info.id, "its record can't be read")),
+            Some(Err(why)) => {
+                return Err(uncertain(
+                    &info.id,
+                    &format!("its record can't be read: {why}"),
+                ));
+            }
             None => 0,
         };
         info.abandoned = recorded.saturating_add(self.abandoned.unrecorded(&info.id)?);

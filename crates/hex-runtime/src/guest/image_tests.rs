@@ -415,6 +415,8 @@ fn model_control() -> shards_api::image::ControlAt {
     shards_api::image::ControlAt {
         address: std::net::SocketAddr::from(([127, 0, 0, 1], 49_000)),
         vm: [7; 32],
+        waker: std::net::SocketAddr::from(([127, 0, 0, 1], 49_001)),
+        wake: std::net::SocketAddr::from(([127, 0, 0, 1], 49_002)),
     }
 }
 
@@ -2069,6 +2071,8 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
         control: Some(shards_api::image::ControlAt {
             address: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
             vm: [7; 32],
+            waker: std::net::SocketAddr::from(([127, 0, 0, 1], 10)),
+            wake: std::net::SocketAddr::from(([127, 0, 0, 1], 11)),
         }),
         rate_period: Duration::from_millis(100),
         from: StartedFrom::Booted,
@@ -4363,7 +4367,7 @@ fn serve_members(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let lanes = served.members.unwrap();
     let revoke = served.revoke;
@@ -4387,6 +4391,8 @@ fn serve_members(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -4414,7 +4420,7 @@ fn serve_mcp(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let starts = served.execs.unwrap();
     let revoke = served.revoke;
@@ -4435,6 +4441,8 @@ fn serve_mcp(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -4504,7 +4512,7 @@ fn serve_lanes(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let asks = served.sockets.unwrap();
     let revoke = served.revoke;
@@ -4525,6 +4533,8 @@ fn serve_lanes(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -6022,4 +6032,22 @@ fn c10_a_cold_ready_wait_is_told_as_it_starts() {
         })
         .collect();
     assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
+}
+
+/// The review's B-12 (AC-T7.4.1): a call on an image VM whose record can't be read is refused saying why it can't. Do
+/// keep an image box's record unreadable in its owner, with why, and inspect the box through the image class. Expect it
+/// refused as broken, in the record's own words.
+#[test]
+fn b12_an_image_vm_whose_record_cant_be_read_is_refused_in_its_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = BoxId::new("unreadable").unwrap();
+    owner.records.lock().unwrap().insert(
+        id.try_clone().unwrap(),
+        Err("its bytes end mid-field".to_owned()),
+    );
+    match Runtime::inspect(&runtime.images, &id) {
+        Err(Refusal::Broken(why)) => assert!(why.contains("its bytes end mid-field"), "{why}"),
+        other => panic!("an unreadable record inspected: {other:?}"),
+    }
 }

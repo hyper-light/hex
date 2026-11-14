@@ -472,19 +472,33 @@ impl Store {
         // later removal or substitution cannot authorize cleanup of a different native object.
         // Native process first-exec tracing uses Store::update and does not enter this VM seam.
         let introducing = current.phase == Phase::Creating && record.phase != Phase::Deleting;
-        let init = lifecycle_fact(current.init, record.init, introducing, &record.spec.id)?;
-        let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
-        let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
-        let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        let init = lifecycle_fact(
+            "init",
+            current.init,
+            record.init,
+            introducing,
+            &record.spec.id,
+        )?;
+        let slot = lifecycle_fact(
+            "slot",
+            current.slot,
+            record.slot,
+            introducing,
+            &record.spec.id,
+        )?;
+        let run = lifecycle_fact("run", current.run, record.run, introducing, &record.spec.id)?;
+        let exit = lifecycle_fact("exit", current.exit, record.exit, true, &record.spec.id)?;
         // A run's words where it failed (D249) and how its microVM started (D253) are facts as its exit is, a Shards
         // image VM's written through here (joint plan step 12).
         let ended = lifecycle_fact(
+            "ended",
             current.ended.take(),
             record.ended.clone(),
             true,
             &record.spec.id,
         )?;
         let started_from = lifecycle_fact(
+            "started_from",
             current.started_from,
             record.started_from,
             true,
@@ -492,6 +506,7 @@ impl Store {
         )?;
         // The file its run host's diagnostics are kept in (D258), named with its start's intent alone.
         let diagnostics = lifecycle_fact(
+            "diagnostics",
             current.diagnostics.take(),
             record.diagnostics.clone(),
             introducing,
@@ -500,6 +515,7 @@ impl Store {
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
+            "native_scope",
             current.native_scope,
             record.native_scope,
             false,
@@ -781,10 +797,10 @@ impl Store {
     /// rather than crash (T-T7.1.2).
     pub fn get(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
         for file in self.files(id) {
-            match fs::read(file) {
-                Ok(bytes) => return Ok(Some(BoxRecord::decode(&bytes))),
+            match File::open(file) {
+                Ok(file) => return Ok(Some(BoxRecord::decode(&read_record_bytes(file)?))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("reading a record", e)),
+                Err(e) => return Err(Refusal::os("opening a record", e)),
             }
         }
         Ok(None)
@@ -979,7 +995,9 @@ impl Store {
                         .map_err(|error| Refusal::os("opening a retained record", error))?;
                     Ok(read_record_bytes(file)?)
                 } else {
-                    fs::read(path)
+                    File::open(&path)
+                        .map_err(|error| Refusal::os("opening a record", error))
+                        .and_then(read_record_bytes)
                 };
                 let record = match bytes {
                     Ok(bytes) => BoxRecord::decode(&bytes),
@@ -1045,41 +1063,37 @@ impl Store {
     }
 }
 
-/// The same bounded file reader for scoped Pool rows and whole-owner retained Box preflight.
-/// Reserve before reading; a torn/oversized row remains a decoder refusal, never an absent owner.
-fn read_record_bytes(mut file: File) -> Result<Vec<u8>, Refusal> {
+/// Every record kind's one reader, for box records, node VM rows and pool records alike: a buffer the file's own length,
+/// read through `take(bound + 1)`, so a read costs the record's bytes and an oversized file is read only as far as its
+/// decoder needs to refuse it, past [`hex_core::record::MAX_RECORD_BYTES`] (the review's per-window reads). A torn or
+/// oversized row remains a decoder refusal, never an absent owner.
+fn read_record_bytes(file: File) -> Result<Vec<u8>, Refusal> {
     use std::io::Read;
     let bound = hex_core::record::MAX_RECORD_BYTES;
-    let room = bound.checked_add(1).ok_or(Refusal::Exhausted {
-        what: "retained record bytes",
+    let past = bound.checked_add(1).ok_or(Refusal::Exhausted {
+        what: "record bytes",
         bound,
     })?;
+    let length = file
+        .metadata()
+        .map_err(|error| Refusal::os("reading a record's length", error))?
+        .len();
+    // A length past what this host's `usize` holds is past the bound too.
+    let room = usize::try_from(length).map_or(past, |length| length.min(past));
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(room)
         .map_err(|_| Refusal::Exhausted {
-            what: "retained record bytes",
+            what: "record bytes",
             bound: room,
         })?;
-    bytes.resize(room, 0);
-    let mut used = 0usize;
-    while used < room {
-        let tail = bytes.get_mut(used..).ok_or(Refusal::Exhausted {
-            what: "retained record bytes",
-            bound: room,
-        })?;
-        let read = file
-            .read(tail)
-            .map_err(|error| Refusal::os("reading a retained record", error))?;
-        if read == 0 {
-            break;
-        }
-        used = used.checked_add(read).ok_or(Refusal::Exhausted {
-            what: "retained record bytes",
-            bound: room,
-        })?;
-    }
-    bytes.truncate(used);
+    let limit = u64::try_from(past).map_err(|_| Refusal::Exhausted {
+        what: "record bytes",
+        bound,
+    })?;
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Refusal::os("reading a record", error))?;
     Ok(bytes)
 }
 
@@ -1124,6 +1138,7 @@ fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
 
 /// A stale absence preserves an observed fact; two different positive facts are uncertainty.
 fn lifecycle_fact<T: PartialEq>(
+    fact: &str,
     current: Option<T>,
     proposed: Option<T>,
     introducing: bool,
@@ -1132,11 +1147,13 @@ fn lifecycle_fact<T: PartialEq>(
     match (current, proposed) {
         (Some(known), Some(other)) if known != other => Err(uncertain(
             id,
-            "its record holds another value of a fact once written",
+            &format!("its record's {fact} differs from the one put, a fact once written"),
         )),
         (None, Some(_)) if !introducing => Err(uncertain(
             id,
-            "a write would introduce a fact its record lacks outside the write that introduces it",
+            &format!(
+                "a write would introduce its {fact}, which its record lacks, outside the write that introduces it"
+            ),
         )),
         (Some(known), _) => Ok(Some(known)),
         (None, next) => Ok(next),
@@ -1407,6 +1424,28 @@ mod tests {
         assert_eq!(store.get(&first.spec.id).unwrap(), deleting);
     }
 
+    /// The review's B-12 (AC-T7.4.1; T-T7.1.2): a lifecycle write refused over a fact its record holds already says
+    /// which fact. Do record a box Ready with its exit, then put it with another exit. Expect it refused, naming its
+    /// exit.
+    #[test]
+    fn b12_a_lifecycle_write_refused_over_a_fact_names_the_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut kept = record("fact-box");
+        kept.phase = Phase::Creating;
+        store.put_lifecycle(&kept).unwrap();
+        kept.phase = Phase::Ready;
+        kept.exit = Some(hex_api::Exit::Code(0));
+        store.put_lifecycle(&kept).unwrap();
+        kept.exit = Some(hex_api::Exit::Code(1));
+        match store.put_lifecycle(&kept) {
+            Err(Refusal::Lifecycle { why: Some(why), .. }) => {
+                assert!(why.contains("exit"), "{why}");
+            }
+            other => panic!("another exit put: {other:?}"),
+        }
+    }
+
     /// AC-T7.4.1/T-T7.1.2: both VM adapters update the sole Store with unchanged payload/cleanup
     /// authority. Metadata written by the socket while native I/O runs survives publication.
     #[test]
@@ -1530,9 +1569,9 @@ mod tests {
             ..written.clone()
         }));
         assert!(
-            another
-                .to_string()
-                .ends_with(": its record holds another value of a fact once written"),
+            another.to_string().ends_with(
+                ": its record's started_from differs from the one put, a fact once written"
+            ),
             "{another}"
         );
         let versioned = said(store.put_lifecycle(&BoxRecord {
@@ -1998,6 +2037,60 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert!(all[&BoxId::new("a").unwrap()].is_ok());
         assert!(all[&BoxId::new("d").unwrap()].is_err());
+    }
+
+    /// The review's per-window reads (AC-T7.4.1): do read a box record's file, then a file twice the record bound, through
+    /// the store's record reader, which every node VM row, pool record and retained box record is read by. Expect: each
+    /// read's one allocation, its buffer, the file's own length, no more: never the bound's MiB for a record of a few
+    /// hundred bytes; the oversized file read to the bound and one byte, all its decoder needs to refuse it.
+    #[test]
+    fn a_records_read_allocates_its_files_length_never_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let small = dir.path().join("small.json");
+        let encoded = record("small").encode().unwrap();
+        fs::write(&small, &encoded).unwrap();
+        let read = read_record_bytes(File::open(&small).unwrap()).unwrap();
+        assert_eq!(read, encoded);
+        assert!(
+            read.capacity() <= encoded.len(),
+            "a {}-byte record's read allocated {} bytes",
+            encoded.len(),
+            read.capacity()
+        );
+        let large = dir.path().join("large.json");
+        fs::write(&large, vec![b' '; bound * 2]).unwrap();
+        let read = read_record_bytes(File::open(&large).unwrap()).unwrap();
+        assert_eq!(read.len(), bound + 1);
+        assert!(
+            read.capacity() <= bound + 1,
+            "a {}-byte file's read allocated {} bytes",
+            bound * 2,
+            read.capacity()
+        );
+    }
+
+    /// The review's per-window reads (AC-T7.4.1): do write a file twice the record bound where a box's record goes, then
+    /// get it, list every record, and list them as recovery does. Expect: each refuses it as damaged having read the
+    /// bound and one byte, never the rest of the file.
+    #[test]
+    fn an_oversized_box_record_is_read_no_further_than_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let id = BoxId::new("oversized").unwrap();
+        fs::write(
+            record_file(&dir.path().join("state"), &id),
+            vec![b' '; bound * 2],
+        )
+        .unwrap();
+        let refused = format!("{} bytes, over {bound}", bound + 1);
+        assert_eq!(store.get(&id).unwrap(), Some(Err(refused.clone())));
+        assert_eq!(store.all().unwrap().get(&id), Some(&Err(refused.clone())));
+        assert_eq!(
+            store.retained_records().unwrap().get(&id),
+            Some(&Err(refused))
+        );
     }
 
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each

@@ -997,6 +997,7 @@ fn unread_info(id: BoxId) -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }
@@ -1022,6 +1023,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),
@@ -1155,14 +1157,16 @@ const ECONNRESET: std::num::NonZeroU16 = match std::num::NonZeroU16::new(104) {
 /// the caller's ends of a pipe each way, given once ([`Proc::streams`]), and no stderr; its end the connection's
 /// ([`ExecControl::wait`]), told once the harness's output has finished.
 ///
-/// Two threads of its own pump it, one each way, each lasting as long as the connection does: Shards' MCP lane gives no
-/// read or write that doesn't wait (9f5b1f754's `try_read` is its socket lanes' alone; ROOT's ask of g121 for `Output`
-/// and `Input`, 2026-11-14), so the cost of a connection is two threads, as a stream's copy is one (the review's D-10).
+/// Two threads of its own pump it, one each way, each lasting as long as the connection does, through the reads and
+/// writes of Shards' MCP lane that wait (its forms that don't, `Output::try_next_record` and `Input::try_write`, came at
+/// Shards 5142c6a7 and aren't used here yet), so the cost of a connection is two threads, as a stream's copy is one (the
+/// review's D-10).
 /// What the harness sends goes to the caller's stdout record by record (a caller that lets its stdout go has the rest
 /// read and let go, the connection ending as its stdin does); what the caller writes goes to the harness as it comes, its
-/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset Shards gives an MCP
-/// lane at this pin, which has no hangup of its own (ROOT's ask of g121, 2026-11-14): a kill made while a record waits for
-/// the harness to take it goes once it is taken, or the run ends.
+/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset its lane's `Input`
+/// gives (`ExecControl::hangup`, Shards 5142c6a7, isn't used here yet): a kill made while a record waits for the harness
+/// to take it goes once it is taken, or the run ends. Its output's pump keeps the connection's `ExecControl` until it has
+/// read the exit, since one let go before that hangs the connection up.
 struct McpProc {
     /// What the caller's bytes go to the harness through, until its input ends: taken by its pump as the caller's end
     /// of input ends it, or by its kill.
@@ -1347,27 +1351,44 @@ impl Proc for McpProc {
         }
     }
 
-    /// Aborts what the harness is sent (ECONNRESET), so its bridge's connection resets: its end then reads `Signal(9)`.
-    /// One that has ended, or whose input has ended already (its caller's close, which ends it as its harness closes),
-    /// has nothing more to send: answered at once.
+    /// Aborts what the harness is sent ([`abort_mcp`]).
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.ended.is_some()
-            || !matches!(self.end.told_within(Some(Duration::ZERO))?, Told::NotYet)
-        {
+        if self.ended.is_some() {
             return Ok(());
         }
-        let taken = self.to.lock().map_err(poisoned)?.take();
-        if let Some(mut to) = taken {
-            self.killed.store(true, Ordering::Release);
-            // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
-            let _ = to.abort(ECONNRESET);
-        }
-        Ok(())
+        abort_mcp(&self.to, &self.killed, &self.end)
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
         Ok(self.given.take().unwrap_or_default())
     }
+
+    /// Its kill, apart from it, for a node that holds it for a remote caller ([`abort_mcp`]).
+    fn killer(&mut self) -> Option<hex_api::Killer> {
+        let (to, killed, end) = (
+            Arc::clone(&self.to),
+            Arc::clone(&self.killed),
+            Arc::clone(&self.end),
+        );
+        Some(Box::new(move || abort_mcp(&to, &killed, &end)))
+    }
+}
+
+/// An MCP connection's kill: aborts what the harness is sent (ECONNRESET), so its bridge's connection resets, its end then
+/// reading `Signal(9)`; it waits while a record in flight to the harness is taken, and for the abort's answer, both on the
+/// run's connection's life. One that has ended, or whose input has ended already (its caller's close, which ends it as its
+/// harness closes), has nothing more to send: answered at once.
+fn abort_mcp(to: &Mutex<Option<Input>>, killed: &AtomicBool, end: &McpEnd) -> Result<(), Refusal> {
+    if !matches!(end.told_within(Some(Duration::ZERO))?, Told::NotYet) {
+        return Ok(());
+    }
+    let taken = to.lock().map_err(poisoned)?.take();
+    if let Some(mut to) = taken {
+        killed.store(true, Ordering::Release);
+        // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
+        let _ = to.abort(ECONNRESET);
+    }
+    Ok(())
 }
 
 fn pending(id: &BoxId) -> Result<Refusal, Refusal> {
@@ -1813,8 +1834,9 @@ impl ImageClass {
             .records()?
             .remove(id)
             .map(|record| {
-                record
-                    .map_err(|_| Refusal::Broken("a Shards image VM's record is unreadable".into()))
+                record.map_err(|why| {
+                    Refusal::Broken(format!("a Shards image VM's record is unreadable: {why}"))
+                })
             })
             .transpose()
     }
@@ -2464,9 +2486,14 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
-                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
-                // from a socket no grant made.
+                // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake
+                // (Shards' D252 amended, image channel v30), so a reading of the host tells each from a socket no grant
+                // made.
                 shown.control = guest.control().map(|at| at.address);
+                shown.control_wake = guest.control().map(|at| hex_api::ControlWake {
+                    waker: at.waker,
+                    wake: at.wake,
+                });
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),

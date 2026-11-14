@@ -49,17 +49,17 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
-    DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
-    GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
-    IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
-    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedReservations, LearnedUnacted,
-    LearnedUnread, LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
-    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
-    Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials,
-    check_grants, check_published, check_sign_ins,
+    ConnectFailure, ConnectPhase, ConnectReply, ControlWake, CredentialGrant, Destination,
+    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit,
+    GpuEligibility, Grant, GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs,
+    ImagePlatform, IoKind, IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
+    LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
+    LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
+    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
+    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -200,6 +200,7 @@ mod kind {
     pub const MEMBER_SIGNAL: u16 = 0x001e;
     pub const START_FOLLOWED: u16 = 0x001f;
     pub const RESERVED: u16 = 0x0020;
+    pub const MCP: u16 = 0x0021;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -340,6 +341,17 @@ pub enum Call {
     /// reserved through its keeper, which the node's charge learner takes off its fleet's budget; answered
     /// [`Answer::Done`], or refused by type. Appended (ROOT, 2026-11-14).
     Reserved(hex_api::Reserved),
+    /// The next connection member `member`'s harness makes to its MCP bridge in running Shards image box `id`
+    /// (`Runtime::mcp`; goal 2's item 3, D254), handed over as [`Call::Member`] hands its member: the streams `streams`
+    /// names travel with it, each joined to the connection's own, and those `ask` names the node gives with its answer.
+    /// Answered once the harness connects, as an exec is ([`Answer::Started`] or [`Answer::Given`]), then
+    /// [`Answer::Exited`] with its end; or refused by type. Appended (ROOT, 2026-11-14).
+    Mcp {
+        id: BoxId,
+        member: Member,
+        streams: Streams,
+        ask: Streams,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1537,6 +1549,18 @@ fn parse_request(
             keeper: r.u64().map_err(bad)?,
             reserved: resources(&mut r).map_err(bad)?,
         })),
+        kind::MCP => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::Mcp {
+                id,
+                member,
+                streams,
+                ask,
+            })
+        }
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1628,7 +1652,8 @@ fn parse_request(
             Call::Exec { streams, .. }
             | Call::ExecStreams { streams, .. }
             | Call::Run { streams, .. }
-            | Call::Member { streams, .. },
+            | Call::Member { streams, .. }
+            | Call::Mcp { streams, .. },
         ) if carried => streams.count(),
         _ => 0,
     };
@@ -1953,6 +1978,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::MEMBER_SIGNAL => "a member's signal",
         kind::START_FOLLOWED => "a start followed",
         kind::RESERVED => "a keeper's word",
+        kind::MCP => "an MCP connection",
         _ => "a request",
     }
 }
@@ -1978,6 +2004,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             ask,
         } => {
             w.header(kind::MEMBER, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
+            Ok(())
+        }
+        Call::Mcp {
+            id: b,
+            member,
+            streams,
+            ask,
+        } => {
+            w.header(kind::MCP, id);
             w.string(b.as_str())?;
             put_member(w, member)?;
             w.u8(streams.bits());
@@ -4035,6 +4074,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         put_address(w, at.ip());
         w.u16(at.port());
     });
+    // Shards' D252 amended (image channel v30): that endpoint's waker and wake, after every older field.
+    w.option(info.control_wake, |w, held| {
+        for at in [held.waker, held.wake] {
+            put_address(w, at.ip());
+            w.u16(at.port());
+        }
+    });
     Ok(())
 }
 
@@ -4080,10 +4126,23 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     };
     info.credentials = credentials(r, &info.grants)?;
     info.control = r.option(|r| Ok(SocketAddr::new(address(r)?, r.u16()?)))?;
+    info.control_wake = r.option(|r| {
+        Ok(ControlWake {
+            waker: SocketAddr::new(address(r)?, r.u16()?),
+            wake: SocketAddr::new(address(r)?, r.u16()?),
+        })
+    })?;
+    if info.control.is_none() && info.control_wake.is_some() {
+        return Err(Fault::value(
+            "control_wake",
+            "an agent-control endpoint's waker and wake told without the endpoint",
+        ));
+    }
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)
         .map_err(|e| Fault::value("published", e.to_string()))?;

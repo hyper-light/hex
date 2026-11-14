@@ -35,6 +35,7 @@ fn info(record: &BoxRecord) -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }
