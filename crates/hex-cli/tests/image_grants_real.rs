@@ -624,11 +624,20 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
 
 /// The probe's arguments for three targets: a listener of this test's, a port nothing holds and a name RFC 6761 §6.4
 /// reserves as never resolving, the probe listening at the host's loopback on a port the OS picks.
-fn three_targets(open: &TcpListener) -> Vec<std::ffi::OsString> {
-    let closed = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
+/// A port of the host's loopback this test holds bound and never listens on, so a connection to it is refused by the
+/// host's own stack for as long as the socket lives: no other socket (the probe's own listener among them) can take the
+/// port, and no connection can take it as its own source port and meet itself. A port bound and let go at once gave
+/// both a chance (goal 5's r878: the closed target answered connected).
+fn held_closed_port() -> socket2::Socket {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
         .unwrap();
+    socket
+}
+
+fn three_targets(open: &TcpListener, closed: &socket2::Socket) -> Vec<std::ffi::OsString> {
+    let closed = closed.local_addr().unwrap().as_socket().unwrap();
     [
         "--address".to_owned(),
         "127.0.0.1".to_owned(),
@@ -653,7 +662,8 @@ fn three_targets(open: &TcpListener) -> Vec<std::ffi::OsString> {
 #[test]
 fn the_probe_answers_each_connection_with_its_targets_outcomes() {
     let open = TcpListener::bind("127.0.0.1:0").unwrap();
-    let told = probe::Told::read(&three_targets(&open)).unwrap();
+    let closed = held_closed_port();
+    let told = probe::Told::read(&three_targets(&open, &closed)).unwrap();
     let started = probe::start(&told).unwrap();
     let [at] = started.at.as_slice() else {
         panic!("{:?}", started.at);
@@ -742,7 +752,8 @@ fn a_members_hand_over_is_asked_again_while_its_box_settles() {
 #[test]
 fn the_probe_answers_each_line_on_its_stdin_with_its_targets_outcomes() {
     let open = TcpListener::bind("127.0.0.1:0").unwrap();
-    let told = probe::Told::read(&three_targets(&open)).unwrap();
+    let closed = held_closed_port();
+    let told = probe::Told::read(&three_targets(&open, &closed)).unwrap();
     let mut out = Vec::new();
     probe::answer("\nagain\n".as_bytes(), &mut out, &told.targets).unwrap();
     let text = String::from_utf8(out).unwrap();
