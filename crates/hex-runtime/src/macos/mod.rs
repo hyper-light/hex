@@ -290,6 +290,12 @@ impl MacRuntime {
             .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
     }
 
+    /// Joint plan step 14 (D260): how long the process that started at `started` has run, a managed VM's VM process by
+    /// its record's `init` ([`process_life`]).
+    pub fn managed_life(&self, started: u64) -> Result<std::time::Duration, Refusal> {
+        process_life(started)
+    }
+
     /// Joint plan step 14 (C4 on macOS): the managed scope's CPU rate becomes `rate` milli-CPU, its share as the node's
     /// charge learner water-fills it, through its persistent native owner.
     pub fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
@@ -913,4 +919,22 @@ fn c_string(s: &str) -> Result<CString, Refusal> {
 fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
     rustix::fs::open("/dev/null", flags | OFlags::CLOEXEC, Mode::empty())
         .map_err(|e| Refusal::os("opening /dev/null", e))
+}
+
+/// Joint plan step 14 (D260): how long the process that started at `started` has run: from its start, as `proc_pid_rusage`
+/// reads it (`ri_proc_start_abstime`, Mach absolute time: a managed VM's `init`, Shards' `Identity::started`), to now on
+/// the same clock (`CLOCK_UPTIME_RAW`, Mach absolute time in nanoseconds). Refused where a clock can't be read, or where
+/// the start is past now, which no process's is.
+pub fn process_life(started: u64) -> Result<std::time::Duration, Refusal> {
+    let timebase = sys::Timebase::get()
+        .map_err(|why| Refusal::os("reading Mach absolute time's units", why))?;
+    let now = sys::uptime_raw().map_err(|why| Refusal::Os {
+        op: "reading the clock a process's life is reckoned on",
+        why: why.to_string(),
+    })?;
+    now.checked_sub(std::time::Duration::from_nanos(timebase.nanos(started)))
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a process's start",
+            why: format!("{started} Mach ticks is past now on its own clock"),
+        })
 }
