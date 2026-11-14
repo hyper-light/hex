@@ -1157,14 +1157,16 @@ const ECONNRESET: std::num::NonZeroU16 = match std::num::NonZeroU16::new(104) {
 /// the caller's ends of a pipe each way, given once ([`Proc::streams`]), and no stderr; its end the connection's
 /// ([`ExecControl::wait`]), told once the harness's output has finished.
 ///
-/// Two threads of its own pump it, one each way, each lasting as long as the connection does: Shards' MCP lane gives no
-/// read or write that doesn't wait (9f5b1f754's `try_read` is its socket lanes' alone; ROOT's ask of g121 for `Output`
-/// and `Input`, 2026-11-14), so the cost of a connection is two threads, as a stream's copy is one (the review's D-10).
+/// Two threads of its own pump it, one each way, each lasting as long as the connection does, through the reads and
+/// writes of Shards' MCP lane that wait (its forms that don't, `Output::try_next_record` and `Input::try_write`, came at
+/// Shards 5142c6a7 and aren't used here yet), so the cost of a connection is two threads, as a stream's copy is one (the
+/// review's D-10).
 /// What the harness sends goes to the caller's stdout record by record (a caller that lets its stdout go has the rest
 /// read and let go, the connection ending as its stdin does); what the caller writes goes to the harness as it comes, its
-/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset Shards gives an MCP
-/// lane at this pin, which has no hangup of its own (ROOT's ask of g121, 2026-11-14): a kill made while a record waits for
-/// the harness to take it goes once it is taken, or the run ends.
+/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset its lane's `Input`
+/// gives (`ExecControl::hangup`, Shards 5142c6a7, isn't used here yet): a kill made while a record waits for the harness
+/// to take it goes once it is taken, or the run ends. Its output's pump keeps the connection's `ExecControl` until it has
+/// read the exit, since one let go before that hangs the connection up.
 struct McpProc {
     /// What the caller's bytes go to the harness through, until its input ends: taken by its pump as the caller's end
     /// of input ends it, or by its kill.

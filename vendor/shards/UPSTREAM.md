@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `2246a88294a1df85e63fae9ef2e1c59ec41ea7e9` (main).
+Revision: `d7ff8a094c872f2a64479e86948a15ba8404e2c7` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -107,7 +107,10 @@ D-10, 9f5b1f75); a killed managed VM's AppContainer profiles released (D141, 16b
 `release_app_containers`, `Refusal::Release`), which Hex calls nowhere yet; and a stream shared without
 an inheritable duplicate (D215, Hex's D-5, a168c2a3: `Stream::read_shared`, `write_shared` and
 `into_socket`, `&dyn Stream`'s `Read` and `Write`, a `try_clone` no child inherits), which Hex's test
-streams implement;
+streams implement; and a member's stdio read and written without waiting, on the controller's one
+wake, and an exec's hangup (Hex's asks after D-10, 5142c6a7: `Output::try_next_record`,
+`Input::try_write`, `ExecControl::hangup`; an `ExecControl` let go before its exit was heard now hangs
+its exec or MCP connection up), Hex's MCP connections keeping theirs until they read their exit;
 a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
