@@ -1327,6 +1327,41 @@ fn a_guest_programs_kill_goes_to_its_guest() {
     assert!(lab.os.lock().proc_killed.is_empty());
 }
 
+/// HEX-SOCK-7 (the core), goal 2's item 2 (AC-T7.4.1): a remote member's kill is answered whatever becomes of it, as
+/// `Remote::kill` promises, so its caller's call and its place in flight are never left waiting. Do: poison the node's
+/// job queue, then kill a member handed over through the wire, whose kill rides a worker. Expect: `done` told before
+/// `kill` returns, refused in the queue's words, never dropped with the job the queue couldn't take.
+#[test]
+fn w2_a_members_kill_the_queue_cannot_take_is_refused_never_dropped() {
+    let lab = Lab::new();
+    let shared = Arc::clone(&lab.server.shared);
+    let poisoning = Arc::clone(&shared);
+    let _ = std::thread::spawn(move || {
+        let _held = poisoning.jobs.lock().unwrap();
+        panic!("poisons the node's job queue");
+    })
+    .join();
+    assert!(shared.jobs.is_poisoned());
+    let end = MemberEnd {
+        shared: Arc::downgrade(&shared),
+        token: FIRST_TOKEN,
+        id: b(),
+        member: hex_api::Member {
+            kind: hex_api::MemberKind::Harness,
+            name: "claude".to_owned(),
+        },
+        released: Mutex::new(false),
+    };
+    let (tell, told) = std::sync::mpsc::channel();
+    end.kill(Box::new(move |sent| tell.send(sent).unwrap()));
+    assert_eq!(
+        told.try_recv(),
+        Ok(Err(Refusal::Broken(
+            "a socket lock was poisoned".to_owned()
+        )))
+    );
+}
+
 /// HEX-SOCK-6 (the core), native plan step 8 (1), the disconnect rule for a guest program: its client goes,
 /// so it is killed through its guest, and its end is counted in its box, not sent.
 #[test]

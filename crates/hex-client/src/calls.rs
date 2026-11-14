@@ -191,7 +191,8 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::ExecStreams { .. }
             | Call::Run { .. }
             | Call::Capacity(_)
-            | Call::Member { .. } => return None,
+            | Call::Member { .. }
+            | Call::MemberSignal { .. } => return None,
         },
         Request::Release
         | Request::Taken
@@ -230,6 +231,7 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::Run { spec, .. } => (BoxKind::Run, Timed::Class(spec.class.class())),
         Call::Capacity(class) => (BoxKind::Capacity, Timed::Class(*class)),
         Call::Member { id, .. } => (BoxKind::Member, Timed::Box(id)),
+        Call::MemberSignal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -3170,6 +3172,23 @@ impl<T: Transport> Runtime for Core<T> {
                 signal,
             },
             "signal",
+        )
+    }
+
+    /// Goal 2's item 2: a member's own signal, carried by the node's wire's appended call (`Call::MemberSignal`).
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        self.done(
+            Call::MemberSignal {
+                id: id.clone(),
+                member: member.clone(),
+                signal,
+            },
+            "member signal",
         )
     }
 

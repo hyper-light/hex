@@ -1230,6 +1230,18 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
             }),
             BoxKind::Member,
         ),
+        // Goal 2's item 2: a member's own signal is timed as its box's signal is, by the box's class.
+        (
+            Request::Call(Call::MemberSignal {
+                id: b.clone(),
+                member: hex_api::Member {
+                    kind: hex_api::MemberKind::Harness,
+                    name: "claude".to_owned(),
+                },
+                signal: hex_api::Signal::TERM,
+            }),
+            BoxKind::Signal,
+        ),
     ] {
         assert!(kind_of(waits, &request).is_none(), "{request:?}");
         assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));

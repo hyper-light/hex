@@ -86,6 +86,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `16451e19f` or later).
   Every run asks its agent-control endpoint of the class's own key (D238, D252): a signal but KILL reaches each member
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
+  One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
+  (`Call::MemberSignal`, appended), which a remote member's kill rides too.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

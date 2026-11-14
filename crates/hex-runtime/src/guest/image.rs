@@ -200,6 +200,10 @@ impl Control {
 impl Steering {
     /// `signal` to member `index` of box `id`'s run, on the member's own lane (D238): `true` where it took it, `false`
     /// where the member had ended, which takes none; a lane refused or lost refused in its words.
+    ///
+    /// Its two waits, for the lane and for the signal's answer, follow the run's connection by its life alone:
+    /// decision 9's follow, but untold, with no W* to tell a run-out by, since Shards' `Execs::member` and
+    /// `MemberSteering::signal` take no patience (Hex's ask of Shards, through ROOT, 2026-11-14).
     fn signal(&self, id: &BoxId, index: u32, signal: u32) -> Result<bool, Refusal> {
         let refused = |fault: Fault| Refusal::Os {
             op: "signalling a member of a Shards image VM",
@@ -1907,6 +1911,54 @@ impl ImageClass {
         Ok(())
     }
 
+    /// `signal` to member `member` of image box `record` alone, on its own lane of its run's agent-control endpoint
+    /// (goal 2's item 2; D238), KILL among them: the member's, never its VM's. Refused Invalid for a member its run
+    /// declares not; NotRunning where it runs no program or has ended, and as a box's own signal is where its run isn't
+    /// running; Pending while it boots.
+    pub(super) fn signal_member_image(
+        &self,
+        record: BoxRecord,
+        member: &Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id, "signal a member"));
+            }
+        };
+        let name = member_name(member);
+        let Some(declared) = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+        else {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s run declares no {member}"),
+            });
+        };
+        if !declared.runs {
+            return Err(Refusal::NotRunning(
+                id,
+                "signal a member: it runs no program",
+            ));
+        }
+        let index = declared.index;
+        let taken = self.image()?.control.steering(&id, &guest)?.signal(
+            &id,
+            index,
+            signal_number(signal)?,
+        )?;
+        if !taken {
+            return Err(Refusal::NotRunning(id, "signal a member: it has ended"));
+        }
+        Ok(())
+    }
+
     pub(super) fn signal_image(&self, record: BoxRecord, signal: Signal) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let state = self.settle(&record)?;
@@ -2451,6 +2503,10 @@ impl hex_api::Runtime for ImageClass {
 
     fn member(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
         self.member_image(self.called(id)?, member)
+    }
+
+    fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
+        self.signal_member_image(self.called(id)?, member, signal)
     }
 
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
