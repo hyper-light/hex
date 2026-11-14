@@ -196,6 +196,29 @@ impl GuestRuntime {
         })
     }
 
+    /// The boxes its node retired with their node VM (A-6; ROOT, 2026-11-13), each as its inspect answers it, from its
+    /// record alone, with no guest left to ask; none where it keeps no books.
+    pub(super) fn retired_infos(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        if !self.uses_books() {
+            return Ok(Vec::new());
+        }
+        let mut infos = Vec::new();
+        for record in self.authority()?.records()?.into_values() {
+            let Ok(record) = record else {
+                continue;
+            };
+            if !record.retired || record.retired_for != Some(hex_api::LifecycleCause::NodeVmEnded) {
+                continue;
+            }
+            infos.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "the boxes retired with their node VM",
+                bound: crate::MAX_BOXES,
+            })?;
+            infos.push(record.retired_info()?);
+        }
+        Ok(infos)
+    }
+
     /// Deletes a retired box (joint plan step 14): its backing or VM went with its retirement, so its record is all
     /// there is to remove, in its turn.
     pub(super) fn delete_retired(&self, record: &BoxRecord) -> Result<(), Refusal> {
@@ -722,6 +745,7 @@ mod tests {
                 unavailable: Vec::new(),
                 learned: None,
                 node_vms: Vec::new(),
+                unlearned: None,
             })
         }
         fn with_transaction(

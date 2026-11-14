@@ -3810,6 +3810,7 @@ fn guest_pool() -> Capacity {
         learned: None,
         own: Default::default(),
         node_vms: Vec::new(),
+        unlearned: None,
     }
 }
 
