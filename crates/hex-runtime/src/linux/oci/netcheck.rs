@@ -227,12 +227,14 @@ impl Fresh {
     }
 }
 
+/// What a settle's notices are for, as its failures say.
+const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
+
 /// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read again at
 /// each of the namespace's IPv6 address notices, until [`SETTLES`]'s bound, unbounded while it is measuring. The
 /// socket the notices come to is bound before the first read, so none is missed. Each settle seen is recorded; one
 /// not seen within the bound is refused, no sample (Karn's point).
 fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
-    const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
     let notices = rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -245,19 +247,31 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         &rustix::net::netlink::SocketAddrNetlink::new(0, RTMGRP_IPV6_IFADDR),
     )
     .map_err(|e| OciError::os(WAITING, e))?;
-    let mut notice = vec![0u8; READ_BYTES];
     let socket = dump_socket()
         .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))?;
+    settle(&notices, &socket, scratch, &SETTLES, &ANSWERS)
+}
+
+/// [`settled`]'s wait, on `notices`, the namespace's IPv6 address notices, and its dumps through `socket`: each settle
+/// recorded in `settles`, each dump's reads in `answers`.
+fn settle(
+    notices: &OwnedFd,
+    socket: &OwnedFd,
+    scratch: &mut Scratch,
+    settles: &Patience,
+    answers: &Patience,
+) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
+    let mut notice = vec![0u8; READ_BYTES];
     let began = Instant::now();
-    let bound = SETTLES.deadline();
+    let bound = settles.deadline();
     // Ends at the bound: each pass waits on a notice for what is left of it, or ends. Measuring, with no bound, it
     // waits on notices until the address settles.
     loop {
-        let seen = dumps(&socket, scratch, &ANSWERS).map_err(|why| {
+        let seen = dumps(socket, scratch, answers).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
-            SETTLES.answered(began.elapsed());
+            settles.answered(began.elapsed());
             return Ok(seen);
         }
         let left = bound.map(|b| b.saturating_sub(began.elapsed()));
@@ -266,7 +280,7 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         {
             // No sample (Karn's point): the namespace is refused, and the checker reads another. The census is told the
             // settle took longer than its bound.
-            SETTLES.ran_out(
+            settles.ran_out(
                 bound,
                 began.elapsed(),
                 &[Piece::Kind(
@@ -279,12 +293,12 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
             )));
         }
         rustix::net::sockopt::set_socket_timeout(
-            &notices,
+            notices,
             rustix::net::sockopt::Timeout::Recv,
             receive_wait(left),
         )
         .map_err(|e| OciError::os(WAITING, e))?;
-        match rustix::net::recv(&notices, &mut notice, RecvFlags::empty()) {
+        match rustix::net::recv(notices, &mut notice, RecvFlags::empty()) {
             Ok(_) | Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
             Err(e) => return Err(OciError::os(WAITING, e)),
         }
