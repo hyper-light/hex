@@ -1830,7 +1830,13 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         self.books.store.node_vm(run)
     }
     fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
-        self.books.store.put_node_vm(record)
+        self.books.store.put_node_vm(record)?;
+        // A node VM Ready is a VM to learn: a learner holding no cap reads it now, not at the next box's beginning
+        // (A-9).
+        if record.phase == hex_api::NodeVmPhase::Ready {
+            self.begun();
+        }
+        Ok(())
     }
     fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
         self.books.store.all_node_vms()
@@ -1970,9 +1976,9 @@ impl Drop for ForwardTurn {
 }
 
 impl<R: Recover> Recorded<R> {
-    /// Tells the charge learner a box has begun (joint plan step 14, C1): one waiting for a box, with no window of its
-    /// platform's and no image VM held, runs a window; one waiting out its window reads it at the window's end. Nothing
-    /// where no learner runs.
+    /// Tells the charge learner a box has begun, or a node VM has booted (joint plan step 14, C1; A-9): one holding no
+    /// cap runs a window at once; one waiting out its window reads it at the window's end. Nothing where no learner
+    /// runs.
     fn begun(&self) {
         if let Some((_, begun)) = self.books.charges.get()
             && let Ok(begun) = begun.lock()
@@ -2468,17 +2474,50 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
     }
 }
 
+/// A node's charge learner as it is set ([`Recorded::start_charges`]): the receiver its thread waits on, its window, and
+/// what of the rule it can't hold.
+type Charges = (
+    hex_wait::mpsc::Receiver<()>,
+    Option<std::time::Duration>,
+    Vec<Refusal>,
+);
+
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's VMs, a thread that runs a window each
     /// time its window passes, until the node is gone, and says its window and what of the rule it can't hold, typed: a
     /// managed VM's memory budget, or, where the platform's cap derives no cycle (`Recover::cap_cycle`), why its managed
     /// VMs are learned over their governors' periods alone. Its window is the longest period of the caps it holds,
     /// re-read each window: each image VM's its run's own (`Recover::image_rate_period`), each governed managed VM's its
-    /// governor's, and each VM its platform's cap holds that cap's cycle at its share; with none, it waits for a box to
-    /// begin (`charges::wait`).
+    /// governor's, and each VM its platform's cap holds that cap's cycle at its share. Its first window runs as it
+    /// starts, so what its node holds then (the VMs its recovery took back, its node VM) is read, capped and told at
+    /// once (A-9); holding no cap, it then waits for a box to begin or a node VM to boot (`charges::learn`).
     pub fn start_charges(
         self: &Arc<Self>,
     ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
+        let (waits, window, unheld) = self.set_charges()?;
+        let node = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("hex-charges".to_owned())
+            .spawn(move || {
+                let learned =
+                    charges::learn(&waits, || node.upgrade().map(|node| node.learn_window()));
+                // It can't wait for a window: it says so where its failures are kept, and stops.
+                if let Err(why) = learned
+                    && let Some(node) = node.upgrade()
+                    && let Some((learner, _)) = node.books.charges.get()
+                    && let Ok(mut learner) = learner.lock()
+                {
+                    learner.failed(why);
+                }
+            })
+            .map_err(|e| Refusal::os("starting the charge learner", e))?;
+        Ok((window, unheld))
+    }
+
+    /// The charge learner of the node's VMs, kept where its capacity answers read it ([`Recorded::start_charges`]),
+    /// with the receiver its thread waits on, told each box's beginning ([`Recorded::begun`]), its window and what of the
+    /// rule it can't hold.
+    fn set_charges(&self) -> Result<Charges, Refusal> {
         // Whether its platform's cap derives a cycle at all, asked at its least.
         let managed = self.runtime.cap_cycle(self.runtime.managed_least());
         let mut learner = charges::Learner::new(managed.is_ok(), self.machine()?)?;
@@ -2509,34 +2548,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             .charges
             .set((Mutex::new(learner), Mutex::new(begun)))
             .map_err(|_| broken("the charge learner is started already"))?;
-        let node = Arc::downgrade(self);
-        std::thread::Builder::new()
-            .name("hex-charges".to_owned())
-            .spawn(move || {
-                let mut next = window;
-                loop {
-                    match charges::wait(&waits, next) {
-                        Ok(charges::Waited::Look) => {}
-                        Ok(charges::Waited::Gone) => return,
-                        Err(why) => {
-                            // It can't wait for a window: it says so where its failures are kept, and stops.
-                            if let Some(node) = node.upgrade()
-                                && let Some((learner, _)) = node.books.charges.get()
-                                && let Ok(mut learner) = learner.lock()
-                            {
-                                learner.failed(why);
-                            }
-                            return;
-                        }
-                    }
-                    let Some(node) = node.upgrade() else {
-                        return;
-                    };
-                    next = node.learn_window();
-                }
-            })
-            .map_err(|e| Refusal::os("starting the charge learner", e))?;
-        Ok((window, unheld))
+        Ok((waits, window, unheld))
     }
 
     /// The machine's resources, as its facts say them.

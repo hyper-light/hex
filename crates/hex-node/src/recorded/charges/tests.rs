@@ -1352,6 +1352,24 @@ fn w14_the_learners_thread_waits_out_its_window_and_with_none_for_a_box_to_begin
     assert_eq!(wait(&waits, Some(window)).unwrap(), Waited::Gone);
 }
 
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a learner whose platform holds no window waited for a box to begin before
+/// its first window, so the VMs its node's recovery took back and its node VM went unread, uncapped and untold on an
+/// idle node until one did. Its thread runs a window as it starts, before it waits. Do run the learner's thread with
+/// nothing ever to tell it (its wake's sender gone before it starts), counting its windows. Expect one window, its
+/// start's, then its end.
+#[test]
+fn a9_the_learners_thread_runs_a_window_at_its_start_before_it_waits() {
+    let (begun, waits) = hex_wait::mpsc::sync_channel(1).unwrap();
+    drop(begun);
+    let mut windows = 0;
+    learn(&waits, || {
+        windows += 1;
+        Some(None)
+    })
+    .unwrap();
+    assert_eq!(windows, 1, "its start's window, then its end");
+}
+
 /// A native owner with no window of its own, as Windows' is (its job's hard cap holds per an undocumented interval),
 /// over the simulated runtime: its Shards image VMs' runs each say the period the test sets for its box, answer their
 /// rooms and rates as told and read as using nothing, and it counts the learner's reads of a period.
@@ -2069,6 +2087,97 @@ fn leave_node_row(dir: &std::path::Path, row: &hex_core::record::NodeVmRecord) {
     std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
 }
 
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a node VM's boot tells its node's learner, as a box's create and start
+/// do, so a learner holding no cap reads it as it boots, never at the next box's beginning. Do set the charge learner of
+/// a node whose platform holds no window, then write a node VM's row through the node's books as the image class's boot
+/// does: Booting, then Ready. Expect no wake told while it boots, and one once it is Ready.
+#[test]
+fn a9_a_node_vms_boot_wakes_its_learner() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = std::sync::Arc::new(
+        crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap(),
+    );
+    let (waits, _, _) = node.set_charges().unwrap();
+    let books: &dyn hex_runtime::devices::Books = &*node;
+    books
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    assert!(
+        matches!(waits.try_recv(), Err(hex_wait::mpsc::TryRecvError::Empty)),
+        "a booting node VM is no VM to learn yet"
+    );
+    books
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    assert!(
+        matches!(waits.try_recv(), Ok(())),
+        "its Ready row wakes the learner"
+    );
+}
+
+/// The learner's start window, read from the stand-in's asks: a fact no recorded operation makes, so it measures, for
+/// its fact alone (hex_testkit::waits).
+static STARTED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.charges_started");
+
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a node's learner reads what its node holds as it starts, with no box
+/// begun, its own thread's first window reading, capping and telling each VM then held. Do keep, on a node whose
+/// platform holds no window, a Shards image VM and a node VM's row Ready, each run saying 70 ms; then start its charge
+/// learner and begin no box. Expect each VM's use read, its rate held and its guest told its room.
+#[test]
+fn a9_a_learner_reads_what_its_node_holds_at_its_start_with_no_box_begun() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    store.put(&image_vm("img-1", 1)).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    node.start_charges().unwrap();
+    let wanted = [
+        "host_use",
+        "rate",
+        "room",
+        "node_vm_host_use",
+        "node_vm_rate",
+        "node_vm_room",
+    ];
+    // A look: the stand-in tells no event as the learner asks it. Its party, the learner, ends where it has failed: its
+    // thread, detached, records why on the learner.
+    hex_testkit::waits::follow::until(
+        &STARTED,
+        "the learner's start window",
+        || match node.books.charges.get() {
+            Some((learner, _)) if learner.lock().is_ok_and(|learner| learner.fault.is_none()) => {
+                hex_testkit::waits::follow::Party::Live
+            }
+            _ => hex_testkit::waits::follow::Party::Ended,
+        },
+        || {
+            let asked = images.0.asked.lock().unwrap();
+            wanted.iter().all(|what| asked.contains(what))
+        },
+    )
+    .unwrap();
+}
+
 /// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13: a node VM's last-resort end lives in its row): the
 /// last resort's intent for a node VM goes into its row, as a box's goes into its record. Do write why it is ending node
 /// VM 7 into its Ready row through the write the learner makes; withdraw it; write it under another lifetime's scope;
@@ -2344,9 +2453,9 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
 /// Governor): a node whose guest is a node VM under shards-init learns that VM as it learns an image VM, over its run's
 /// period, and holds it through its run's rate. Do open a node whose platform holds no window, keep its node VM's row
 /// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, and a process box capped at all but 6 CPUs of the
-/// machine; start its charge learner, run a window, and answer the Shards class. Expect the node VM's host use read, its
-/// run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer naming its holding and its
-/// rate held by its governor, by its run.
+/// machine; set its charge learner, with no thread of its own, run a window, and answer the Shards class. Expect the
+/// node VM's host use read, its run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer
+/// naming its holding and its rate held by its governor, by its run.
 #[test]
 fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rate() {
     let dir = tempfile::tempdir().unwrap();
@@ -2391,7 +2500,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         Vec::new(),
     );
     store.put(&capped).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
     assert!(
         images
@@ -2488,8 +2597,8 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
 
 /// Joint plan step 39 (ROOT, 2026-11-13; D188): a node whose guest is a node VM under shards-init tells that VM's guest its
 /// room through its run, as it tells an image VM's. Do open a node whose platform holds no window, keep its node VM's row
-/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, start its charge learner and run a window.
-/// Expect its guest told a room through its run, and only its.
+/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, set its charge learner, with no thread of its
+/// own, and run a window. Expect its guest told a room through its run, and only its.
 #[test]
 fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -2514,7 +2623,7 @@ fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
     store
         .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
         .unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     let told: Vec<hex_api::NodeRun> = images
         .0
@@ -2576,7 +2685,7 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
     let mut booting = node_row(8, hex_api::NodeVmPhase::Booting);
     booting.allocation = booting.allocation.booked_at(booking);
     store.put_node_vm(&booting).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     assert_eq!(
         *images.0.box_rates.lock().unwrap(),
@@ -2639,7 +2748,7 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         image
     };
     store.put(&booked("img-1", 1)).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     assert_eq!(
         *images.0.box_rates.lock().unwrap(),
@@ -3112,10 +3221,10 @@ fn w39_a6_an_oci_box_its_node_vm_ended_is_kept_with_why_across_a_restart() {
 
 /// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
 /// stalled every capacity answer; AC-T7.4.1): a window asks its VMs with the lock its capacity answers take let go. Do
-/// start the charge learner of a node whose platform holds no window, before any VM is on record, so its own thread waits
-/// for a box to begin and runs no window beside this one; then keep a Shards image VM and a node VM's row Ready, each run
-/// saying 70 ms, and run a window, noting at each ask of either whether that lock is held. Expect each VM asked its
-/// period, its use, its rate and its room, and none of those asked while that lock is held.
+/// set the charge learner of a node whose platform holds no window, with no thread of its own, so no window runs beside
+/// this one; then keep a Shards image VM and a node VM's row Ready, each run saying 70 ms, and run a window, noting at
+/// each ask of either whether that lock is held. Expect each VM asked its period, its use, its rate and its room, and
+/// none of those asked while that lock is held.
 #[test]
 fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
     let dir = tempfile::tempdir().unwrap();
@@ -3132,7 +3241,7 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         })
     }));
     assert!(watching.is_ok(), "the lock watched once");
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     images
         .0
         .periods
