@@ -305,6 +305,13 @@ person removing it from the holder's configuration returns the holder to admitti
   ledger read whole from its records (every reservation it granted, CV2), every holder away and every
   earlier fence closed (CV4). Each holder says hello again and syncs (CV5): the keeper releases what the
   holder no longer lists and adopts what it lacks, and the counts agree again before the holder reserves.
+- **A stop is a restart** (crash-only; the review's E-10): where the keeper or its node's placement core can't go
+  on (a record it couldn't write, a record no keeper wrote: `Stop`), `hex schedule serve` ends its server and exits 1,
+  naming the stop, and its next start is the restart above, from its records; until 2026-11-14 it refused every
+  placement for the rest of its life instead, telling no one. Nothing restarts the scheduler's process today: Hex's
+  installers set up `hex node` alone, and kiln's fleet bench and the two-machine tests (HEX-CV-2K) start it by hand, so
+  running it under a supervisor that restarts it on an unsuccessful exit is its operator's to do until Hex installs
+  one.
 
 - **Lag**: the view counts a VM's growth past its holding from the next refresh that rebooks it, so it
   lags that growth by up to one refresh; goal 14's contention rule holds the growth physically meanwhile
