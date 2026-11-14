@@ -483,7 +483,10 @@ fitted places, its two control connections and four for each place (a program's 
 connection; `serve::fit::lanes`), counted among the node's own with its controller's two descriptors. A lane holds
 two on the node's side, its socket pair's ends, which its two copiers share, as a control connection's handles share
 the owner's end: no duplicate, which Windows makes inheritable (the review's D-5). `hex_client::guest::lanes::FDS_A_LANE`
-counts them, and its tests hold it to the descriptors the process's own table shows (the review's D-6).
+counts them, and its tests hold it to the descriptors the process's own table shows (the review's D-6). A guest's Shards
+connection is shared so too, its handles reading and writing it through Shards' `&dyn Stream`, and an exec's stream
+goes to its caller as its connection's own socket, moved, never a duplicate (`Link::dial_handoff_before`: a Shards
+stream's socket, a bridged connection's owner end).
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of

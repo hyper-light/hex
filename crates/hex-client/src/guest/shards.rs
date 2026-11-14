@@ -15,7 +15,7 @@ use hex_api::{
 };
 use hex_core::patience::{Patience, Piece};
 
-use super::{Duplex, DuplexOwner, Link, own_duplex};
+use super::{Duplex, DuplexOwner, Handoff, Link, own_duplex};
 
 /// The slowest recorded value of each guest wait, by host class (bench/native/guest/records.tsv): read by no production
 /// wait since a GPU create's budget followed its guest (the review's C-9, (c2)), its last reader hex-cli's measuring
@@ -88,32 +88,57 @@ pub fn recorded_boot() -> Result<Duration, Refusal> {
     recorded("boot_ready")
 }
 
-/// A connection to one of the guest's ports, as Shards gives it.
-pub struct ShardsStream(pub(crate) Box<dyn shards_api::Stream>);
+/// A connection to one of the guest's ports, as Shards gives it. Its handles share it: each reads and writes it through
+/// `&dyn Stream` (Shards' `read_shared`, `write_shared`), never a duplicate socket, which on Windows passes to a process
+/// another thread starts until its inheritance is cleared (the review's D-5); and its caller's end is its own socket,
+/// moved ([`ShardsStream::into_end`]).
+pub struct ShardsStream(triomphe::Arc<Box<dyn shards_api::Stream>>);
+
+impl ShardsStream {
+    /// `stream`, its one handle until another shares it.
+    pub(crate) fn new(stream: Box<dyn shards_api::Stream>) -> Result<Self, Refusal> {
+        let owner = triomphe::UniqueArc::try_new(stream).map_err(|_| Refusal::Exhausted {
+            what: "guest stream owner",
+            bound: std::mem::size_of::<Box<dyn shards_api::Stream>>(),
+        })?;
+        Ok(Self(owner.shareable()))
+    }
+
+    /// Its socket, its caller's from here (HEX-RT-17): moved, never duplicated, so no copy of it is open to pass to a
+    /// process (the review's D-5), and left waiting, as a caller's file does. Refused while another handle shares it.
+    pub(crate) fn into_end(self) -> Result<hex_api::End, Refusal> {
+        let stream = triomphe::Arc::try_unwrap(self.0).map_err(|_| {
+            Refusal::Broken(
+                "a guest stream another handle shares can't be handed to its caller whole"
+                    .to_owned(),
+            )
+        })?;
+        super::waiting_end(stream.into_socket())
+    }
+}
 
 impl Read for ShardsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+        self.0.read_shared(buf)
     }
 }
 
 impl Write for ShardsStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        self.0.write_shared(buf)
     }
 
+    /// Nothing waits: Shards' stream writes straight to its socket, as its own `flush` says.
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        Ok(())
     }
 }
 
 impl Duplex for ShardsStream {
+    /// Another handle on the same stream, shared, never a duplicate (the review's D-5).
     fn try_clone(&self) -> io::Result<DuplexOwner> {
-        let clone = self.0.try_clone()?;
-        // Winsock's duplicate is inheritable (hex_afunix::no_inherit).
-        #[cfg(windows)]
-        hex_afunix::no_inherit(clone.handle())?;
-        own_duplex(Self(clone)).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+        own_duplex(Self(triomphe::Arc::clone(&self.0)))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -213,7 +238,7 @@ impl ShardsLink {
     ///   Shards' own (Part B, the VM's liveness), never at a bound of Hex's. No attempt is given up and made again past
     ///   it: each one closed unanswered is a connection the guest takes for nothing.
     /// - **With no W*** it follows from its start, told once as it starts.
-    fn dial_following(&self, port: u32) -> Result<DuplexOwner, Refusal> {
+    fn dial_following(&self, port: u32) -> Result<Box<dyn shards_api::Stream>, Refusal> {
         let began = Instant::now();
         let guest = self.guest.guest();
         let party = [
@@ -233,7 +258,7 @@ impl ShardsLink {
                     guest.connect_before(port, at)
                 };
                 match dialed {
-                    Ok(stream) => return self.answered(stream, began),
+                    Ok(stream) => return Ok(self.answered(stream, began)),
                     Err(why) if Instant::now() < at || gone(&why) => {
                         return Err(refusal("connecting to the guest", &why));
                     }
@@ -247,7 +272,7 @@ impl ShardsLink {
         let stream = guest
             .connect_while_runs(port)
             .map_err(|why| refusal("connecting to the guest", &why))?;
-        self.answered(stream, began)
+        Ok(self.answered(stream, began))
     }
 
     /// The W* of a dial with no caller deadline ([`ShardsLink::dial_following`]): its bound, refused by type where that is
@@ -266,10 +291,31 @@ impl ShardsLink {
         &self,
         stream: Box<dyn shards_api::Stream>,
         began: Instant,
-    ) -> Result<DuplexOwner, Refusal> {
+    ) -> Box<dyn shards_api::Stream> {
         self.listened.store(true, Ordering::Release);
         FOLLOWED.answered(began.elapsed());
-        own_duplex(ShardsStream(stream))
+        stream
+    }
+
+    /// A stream to port `port`, within `deadline` where the caller gives one ([`Link::dial_before`]), else waiting
+    /// within W* and past it following the guest ([`ShardsLink::dial_following`]).
+    fn stream_before(&self, port: u32, deadline: Option<Instant>) -> Result<ShardsStream, Refusal> {
+        let Some(at) = deadline else {
+            return ShardsStream::new(self.dial_following(port)?);
+        };
+        let cap = crate::calls::ReplyDeadline::caller_before(at)?;
+        cap.remaining("connecting to the guest within the original operation deadline")?;
+        let guest = self.guest.guest();
+        let stream = if self.listened.load(Ordering::Acquire) {
+            guest.connect_once_before(port, at)
+        } else {
+            guest.connect_before(port, at)
+        }
+        .map_err(|why| refusal("connecting to the guest", &why))?;
+        self.listened.store(true, Ordering::Release);
+        let stream = ShardsStream::new(stream)?;
+        cap.remaining("retaining the guest connection within the original operation deadline")?;
+        Ok(stream)
     }
 }
 
@@ -324,22 +370,16 @@ impl Link for ShardsLink {
     }
 
     fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
-        let Some(at) = deadline else {
-            return self.dial_following(port);
-        };
-        let cap = crate::calls::ReplyDeadline::caller_before(at)?;
-        cap.remaining("connecting to the guest within the original operation deadline")?;
-        let guest = self.guest.guest();
-        let stream = if self.listened.load(Ordering::Acquire) {
-            guest.connect_once_before(port, at)
-        } else {
-            guest.connect_before(port, at)
-        }
-        .map_err(|why| refusal("connecting to the guest", &why))?;
-        self.listened.store(true, Ordering::Release);
-        let stream = own_duplex(ShardsStream(stream))?;
-        cap.remaining("retaining the guest connection within the original operation deadline")?;
-        Ok(stream)
+        own_duplex(self.stream_before(port, deadline)?)
+    }
+
+    /// A Shards stream is handed to its caller as its own socket (the review's D-5).
+    fn dial_handoff_before(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Option<Result<Handoff, Refusal>> {
+        Some(self.stream_before(port, deadline).map(Handoff::Shards))
     }
 }
 

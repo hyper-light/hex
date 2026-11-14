@@ -1739,6 +1739,292 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
     assert_eq!(output, "round trip\n");
 }
 
+/// A socket's own number in this process: a file descriptor on Unix, a Winsock socket on Windows. A duplicate is
+/// another number, made while the original is open.
+#[cfg(unix)]
+type RawNumber = std::os::fd::RawFd;
+#[cfg(windows)]
+type RawNumber = std::os::windows::io::RawSocket;
+
+#[cfg(unix)]
+fn raw_number(handle: shards_api::Handle<'_>) -> RawNumber {
+    std::os::fd::AsRawFd::as_raw_fd(&handle)
+}
+
+#[cfg(windows)]
+fn raw_number(handle: shards_api::Handle<'_>) -> RawNumber {
+    std::os::windows::io::AsRawSocket::as_raw_socket(&handle)
+}
+
+#[cfg(unix)]
+fn end_number(end: &hex_api::End) -> RawNumber {
+    std::os::fd::AsRawFd::as_raw_fd(end)
+}
+
+#[cfg(windows)]
+fn end_number(end: &hex_api::End) -> RawNumber {
+    std::os::windows::io::AsRawSocket::as_raw_socket(&end.socket().unwrap())
+}
+
+/// A Shards guest that hands out its connections as they are dialed, each recorded by its socket's own number and
+/// counted at each clone of it (the review's D-5).
+struct RecordingGuest {
+    guest: Box<dyn shards_api::Guest>,
+    dialed: Arc<std::sync::Mutex<Vec<RawNumber>>>,
+    clones: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RecordingGuest {
+    fn record(
+        &self,
+        stream: Result<Box<dyn shards_api::Stream>, shards_api::Refusal>,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let stream = stream?;
+        self.dialed
+            .lock()
+            .unwrap()
+            .push(raw_number(stream.handle()));
+        Ok(Box::new(Cloned {
+            stream,
+            clones: Arc::clone(&self.clones),
+        }))
+    }
+}
+
+impl shards_api::Guest for RecordingGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        self.guest.process_exited()
+    }
+
+    fn connect(
+        &self,
+        port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.record(self.guest.connect(port, patience))
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.record(self.guest.connect_before(port, at))
+    }
+
+    fn connect_once_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.record(self.guest.connect_once_before(port, at))
+    }
+
+    fn connect_while_runs(
+        &self,
+        port: u32,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.record(self.guest.connect_while_runs(port))
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.guest.stop()
+    }
+
+    fn wait_for(&self, timeout: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        self.guest.wait_for(timeout)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        self.guest.identity()
+    }
+}
+
+/// A Shards connection whose clones are counted.
+struct Cloned {
+    stream: Box<dyn shards_api::Stream>,
+    clones: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Read for Cloned {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Cloned {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+impl shards_api::Stream for Cloned {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        self.clones
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(Cloned {
+            stream: self.stream.try_clone()?,
+            clones: Arc::clone(&self.clones),
+        }))
+    }
+
+    fn read_shared(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.read_shared(buf)
+    }
+
+    fn write_shared(&self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write_shared(buf)
+    }
+
+    fn into_socket(self: Box<Self>) -> shards_api::OwnedSocket {
+        self.stream.into_socket()
+    }
+
+    fn handle(&self) -> shards_api::Handle<'_> {
+        self.stream.handle()
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.stream.set_nonblocking(on)
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.stream.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.stream.set_write_timeout(timeout)
+    }
+
+    fn buffer_sizes(&self) -> std::io::Result<(usize, usize)> {
+        self.stream.buffer_sizes()
+    }
+}
+
+/// A Shards simulator guest whose relay hands out its token, then echoes an exec's stdin to its stdout, booted, as
+/// [`RecordingGuest`] sees it: what it dialed and how often a connection was cloned.
+fn recorded_echo() -> (
+    RecordingGuest,
+    Arc<std::sync::Mutex<Vec<RawNumber>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use shards_api::Guests;
+
+    let guests = shards_api::sim::SimGuests::new(|host| {
+        host.listen(stream::CONTROL_PORT);
+        host.listen(stream::STDIO_PORT);
+        let (port, mut control) = host.accept().unwrap();
+        assert_eq!(port, stream::CONTROL_PORT);
+        control.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let mut named = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let Some((_, mut conn)) = host.accept() else {
+                return shards_api::End::PowerOff;
+            };
+            let mut name = [0u8; stream::NAME_BYTES];
+            conn.read_exact(&mut name).unwrap();
+            named.insert(stream::read_name(&name).unwrap().stream, conn);
+        }
+        let mut stdin = named.remove(&stream::Stdio::In).unwrap();
+        let mut stdout = named.remove(&stream::Stdio::Out).unwrap();
+        std::io::copy(&mut stdin, &mut stdout).unwrap();
+        shards_api::End::PowerOff
+    });
+    let guest = guests
+        .boot(&shards_api::GuestSpec {
+            kernel: "kernel".into(),
+            init: shards_api::Init::Executable("init".into()),
+            cmdline: String::new(),
+            vcpus: 1,
+            gpu: false,
+            gpu_devices: Vec::new(),
+            memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+            disks: vec![],
+            shares: vec![],
+            ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT],
+            binary: None,
+        })
+        .unwrap();
+    let dialed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let clones = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    (
+        RecordingGuest {
+            guest,
+            dialed: Arc::clone(&dialed),
+            clones: Arc::clone(&clones),
+        },
+        dialed,
+        clones,
+    )
+}
+
+/// The review's D-5 (part 2), AC-T7.4.1: a Shards guest's control connection is read, written and waited on through
+/// one socket, never a clone of it: on Windows a duplicate socket is inheritable until it is cleared, so a process
+/// another thread starts then would hold the connection. Do: dial a node's control connection over a Shards link.
+/// Expect: no clone of the dialed connection.
+#[test]
+fn d5_a_shards_control_connection_is_shared_never_cloned() {
+    let (guest, dialed, clones) = recorded_echo();
+    let transport =
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::new(guest), None)).unwrap()).unwrap();
+    assert_eq!(dialed.lock().unwrap().len(), 1, "one control connection");
+    assert_eq!(
+        clones.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the control connection was cloned"
+    );
+    drop(transport);
+}
+
+/// The review's D-5 (part 2), AC-T7.4.1: an exec's stream asked over a Shards link is handed to its caller as its
+/// connection's own socket, moved, never a duplicate (Shards' `Stream::into_socket`). Do: ask stdin and stdout over a
+/// Shards link, and echo through the caller's ends. Expect: each end is the socket dialed for it, by its number, and
+/// the echo comes back whole.
+#[test]
+fn d5_an_asked_shards_stream_is_its_connections_own_socket() {
+    let (guest, dialed, _) = recorded_echo();
+    let transport =
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::new(guest), None)).unwrap()).unwrap();
+    let given = transport
+        .asks(
+            1,
+            hex_api::Ask {
+                stdin: true,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .unwrap();
+    let (stdin, stdout) = (given.stdin.unwrap(), given.stdout.unwrap());
+    let dialed = dialed.lock().unwrap().clone();
+    assert_eq!(
+        dialed.len(),
+        3,
+        "the control connection, then stdin's, then stdout's"
+    );
+    assert_eq!(
+        (end_number(&stdin), end_number(&stdout)),
+        (dialed[1], dialed[2]),
+        "a caller's end is a duplicate of its connection, not the connection's own socket"
+    );
+    let mut stdin = hex_api::OwnedStream::from(stdin);
+    stdin.write_all(b"handed over\n").unwrap();
+    drop(stdin);
+    let mut output = String::new();
+    hex_api::OwnedStream::from(stdout)
+        .read_to_string(&mut output)
+        .unwrap();
+    assert_eq!(output, "handed over\n");
+}
+
 /// AC-T7.4.1: do hand a guest stdio connection's end to its caller and take a connection's handle as the guest stream
 /// holds its control's, over TCP; expect neither to pass to a process this one starts with every inheritable handle
 /// (std's `Command`). A socket duplicated for this process comes back inheritable (std's `try_clone` and

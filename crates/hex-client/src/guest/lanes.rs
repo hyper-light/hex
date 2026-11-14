@@ -108,8 +108,17 @@ impl Link for Lanes {
 
     /// A lane to the socket `port` names ([`Lanes::connect`]), bridged to a local socket.
     fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
-        let socket = self.connect(port, deadline)?;
-        own_duplex(bridge(socket).map_err(|e| Refusal::os("bridging a lane to a local socket", e))?)
+        own_duplex(self.bridged(port, deadline)?)
+    }
+
+    /// A bridged lane is handed to its caller as the owner's end of its socket pair (the review's D-5); on Windows an
+    /// exec's stream goes on a pipe of its own first ([`Link::dial_piped`]).
+    fn dial_handoff_before(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Option<Result<super::Handoff, Refusal>> {
+        Some(self.bridged(port, deadline).map(super::Handoff::Bridged))
     }
 
     fn carries_half_close(&self) -> bool {
@@ -133,6 +142,16 @@ impl Link for Lanes {
 }
 
 impl Lanes {
+    /// A lane to the socket `port` names ([`Lanes::connect`]), bridged to a local socket.
+    fn bridged(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Result<super::bridge::Bridged, Refusal> {
+        let socket = self.connect(port, deadline)?;
+        bridge(socket).map_err(|e| Refusal::os("bridging a lane to a local socket", e))
+    }
+
     /// A lane to the socket `port` names. Its answer (connected, the endpoint's refusal, its run host's errno) is
     /// waited for by the connection's life, and within `deadline` where the caller gives one: past it the dial is
     /// refused, expired, and a lane that connects after it is let go, aborted.
