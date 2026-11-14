@@ -4420,7 +4420,7 @@ fn serve_mcp(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let starts = served.execs.unwrap();
     let revoke = served.revoke;
@@ -4441,6 +4441,8 @@ fn serve_mcp(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
