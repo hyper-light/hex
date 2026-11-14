@@ -2323,7 +2323,7 @@ impl<R: Recover> Recorded<R> {
 /// The charge learner's reads and writes of the node's managed VMs, through their native owner, and of their records.
 struct Managed<'a, R> {
     runtime: &'a R,
-    store: &'a Store,
+    books: &'a Books,
 }
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
@@ -2383,6 +2383,27 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
             charges::Holder::Box(record) => self.runtime.host_use(&record.spec.id),
             charges::Holder::Node { row, .. } => self.runtime.node_vm_host_use(row.run),
         }
+    }
+
+    fn taken(&self, holder: charges::Holder<'_>) -> Result<u64, Refusal> {
+        match holder {
+            charges::Holder::Box(record) if charges::running(record) => self
+                .runtime
+                .managed_usage(NativeRecord::Box(record))
+                .map(|usage| usage.memory_bytes),
+            charges::Holder::Box(record) => self
+                .runtime
+                .usage(&record.spec.id)
+                .map(|usage| usage.memory_bytes),
+            charges::Holder::Node { row, .. } => self
+                .runtime
+                .node_vm_host_use(row.run)
+                .map(|host| host.footprint_bytes),
+        }
+    }
+
+    fn free(&self) -> Result<hex_api::CapacityResources, Refusal> {
+        Ok(crate::facts::capacity(self.books.store.directory(), self.books.authority_id()?)?.free)
     }
 
     fn rate_period(
@@ -2470,7 +2491,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         scope: charges::Scope,
         end: &hex_api::LearnedEnd,
     ) -> Result<bool, Refusal> {
-        charges::record_last_resort(self.store, id, scope, Some(end))
+        charges::record_last_resort(&self.books.store, id, scope, Some(end))
     }
 }
 
@@ -2588,7 +2609,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         let io = Managed {
             runtime: &self.runtime,
-            store: &self.books.store,
+            books: &self.books,
         };
         // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
         if let Err(why) =
@@ -2609,14 +2630,15 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             Err(why) => return fail(why),
         };
         // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
-        if let Err(why) = charges::booting(&rows).and_then(|booking| {
-            sorted.whole = sorted
-                .whole
-                .checked_add(booking)
-                .ok_or_else(|| Refusal::Invalid {
-                    what: "a node's boxes' bookings",
-                    why: "they overflow".into(),
+        if let Err(why) = charges::booting(&rows, &band).and_then(|booting| {
+            sorted
+                .booked
+                .try_reserve(booting.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "a window's holders",
+                    bound: booting.len(),
                 })?;
+            sorted.booked.extend(booting);
             Ok(())
         }) {
             return fail(why);
@@ -2636,21 +2658,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             Ok(nodes) => sorted.learned.extend(nodes),
             Err(why) => return fail(why),
         }
-        let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
-            dim(&sorted.native).saturating_add(dim(&sorted.whole))
-        };
-        let budget = hex_api::CapacityResources {
-            cpu_milli: machine.cpu_milli.saturating_sub(booked(|c| c.cpu_milli)),
-            mem_bytes: machine.mem_bytes.saturating_sub(booked(|c| c.mem_bytes)),
-            disk_bytes: machine.disk_bytes,
-        };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
         let _ = charges::window(
             shared,
             &io,
             &sorted.learned,
             unreadable,
-            budget,
+            |held| charges::measured(&io, machine, &sorted.booked, held),
             std::time::Instant::now(),
         );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
