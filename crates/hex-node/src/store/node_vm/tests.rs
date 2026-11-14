@@ -111,8 +111,8 @@ fn a_node_vms_row_is_kept_apart_from_box_and_pool_rows() {
 
 /// Joint plan step 39 (ROOT, 2026-11-13: a node VM's row is its receipt's one source): do keep three node VMs' rows,
 /// written out of their runs' order, beside a box's, and list them; then put a record file in their directory whose
-/// name is no run's. Expect the three listed whole, in their runs' order, the box not among them; then the listing
-/// refused for the file whose name is no run's.
+/// name is no run's, and open the store again. Expect the three listed whole, in their runs' order, the box not among
+/// them; then the next open refused for the file whose name is no run's.
 #[test]
 fn every_node_vms_row_is_listed_in_its_runs_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -134,8 +134,13 @@ fn every_node_vms_row_is_listed_in_its_runs_order() {
             placed(&rows[0], 1)
         ]
     );
+    // A file put behind the store's back is out of its contract: the next store's open reads it, and refuses.
     std::fs::write(store.node_vm_directory().join("a-box.json"), b"{}\n").unwrap();
-    assert!(matches!(store.all_node_vms(), Err(Refusal::Invalid { .. })));
+    drop(store);
+    assert!(matches!(
+        Store::open(&dir.path().join("state"), &dir.path().join("run")),
+        Err(Refusal::Invalid { .. })
+    ));
 }
 
 /// Each wait of these cases on a fact of another process's: its word, its end, a row let go.
@@ -176,8 +181,9 @@ fn role(role: &str, dir: &Path) -> std::process::Command {
 /// - `owner`, a node that runs node VM 7: it writes its row Booting, so it holds its lock, then ends;
 /// - `ending owner`, the same, its row then Ready, saying so; once its stdin says `end`, it puts why its last resort
 ///   ends the VM into the row and writes it Ended, letting its lock go, then ends;
-/// - `locking owner`, a node between its first write's lock and its row: it takes node VM 6's lock with no row, says
-///   so, and ends when its stdin ends;
+/// - `locking owner`, a process holding node VM 6's lock with no row and no store of the directory, as a dead owner's
+///   lock may be held after its directory's is let go (Windows lets each go as its handle's close is done): it takes
+///   the lock, says so, and ends when its stdin ends;
 /// - `holding owner`, the same, then starts a child of its own that outlives it, which holds its lock file as its
 ///   stdin: on Unix a descriptor of its open file description, as a child forked without an exec would, and on Windows
 ///   a handle of its file object, as a child that inherited it would (the review's C-13); then reads its row back, as
@@ -209,10 +215,10 @@ fn node_vm_role() {
         let _ = std::fs::write(dir.join("bye"), b"");
         return;
     }
-    let store = store_in(&dir);
     if role == "locking owner" {
-        std::fs::create_dir_all(store.node_vm_directory()).unwrap();
-        let lock = open_lock(&store.node_vm_directory(), &run(6)).unwrap();
+        let directory = dir.join("state").join(".node-vms");
+        std::fs::create_dir_all(&directory).unwrap();
+        let lock = open_lock(&directory, &run(6)).unwrap();
         assert!(try_own(&lock).unwrap());
         let mut out = std::io::stdout().lock();
         out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
@@ -222,6 +228,7 @@ fn node_vm_role() {
         drop(lock);
         return;
     }
+    let store = store_in(&dir);
     let row = diagnosed(&dir, 7, NodeVmPhase::Booting);
     store.put_node_vm(&row).unwrap();
     if role == "owner" {
@@ -285,16 +292,9 @@ fn role_child(dir: &Path) -> std::process::Command {
 #[test]
 fn w39_a_node_vm_row_of_an_earlier_boot_is_let_go_at_start() {
     let dir = tempfile::tempdir().unwrap();
-    let store = store_in(dir.path());
     let row = diagnosed(dir.path(), 7, NodeVmPhase::Ready);
-    std::fs::create_dir_all(store.node_vm_directory()).unwrap();
-    std::fs::write(
-        store
-            .node_vm_directory()
-            .join(format!("{}.json", name(&row.run).unwrap())),
-        row.encode().unwrap(),
-    )
-    .unwrap();
+    left(dir.path(), &row);
+    let store = store_in(dir.path());
     assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
     assert_eq!(
         store.settle_node_vms().unwrap().rows,
@@ -332,15 +332,16 @@ fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
     assert!(!dir.path().join("node-7.log").exists());
 }
 
-/// Joint plan step 39 (ROOT, 2026-11-13: a row whose run still lives is followed; the lock is its owner's alone, never
-/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it holding its
-/// lock file (on Unix sharing its open file description, as a child forked without an exec would, and on Windows its
-/// file object, as a child that inherited it would: the review's C-13), and reads its row back; start another node
-/// while it runs; then end the first. Expect the row followed, its receipt still Booting while its
-/// owner runs, its lock outliving the owner's reads of its row; then, the owner ended and its child still running, the
-/// row let go with its lock file and its diagnostics.
+/// Joint plan step 39 (ROOT, 2026-11-13: the lock is its owner's alone, never a child's), the store its directory's one
+/// writer (batch 1114d's reads2; ROOT, 2026-11-14: an owner that runs holds its directory, so a start follows no row):
+/// do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it holding its lock file
+/// (on Unix sharing its open file description, as a child forked without an exec would, and on Windows its file object,
+/// as a child that inherited it would: the review's C-13), and reads its row back; open a store over its directory
+/// while it runs; then end it and open one again. Expect the open refused while the owner runs, naming the directory;
+/// then, the owner ended and its child still running, the next open's settle letting the row go, its owner ended, with
+/// its lock file and its diagnostics.
 #[test]
-fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_lock() {
+fn w39_a_live_owner_holds_its_directory_and_no_child_of_it_keeps_its_lock() {
     use std::io::{BufRead, Write};
     let dir = tempfile::tempdir().unwrap();
     eprintln!("node VM rows test directory: {}", dir.path().display());
@@ -361,29 +362,22 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
             break;
         }
     }
-    let store = store_in(dir.path());
-    assert_eq!(
-        store.settle_node_vms().unwrap().rows,
-        [(run(7), NodeVmSettled::Followed)]
-    );
-    assert_eq!(
-        store.node_vm(&run(7)).unwrap().map(|row| row.phase),
-        Some(NodeVmPhase::Booting),
-        "booked while its owner runs"
+    let state = dir.path().join("state");
+    let refused = Store::open(&state, &dir.path().join("run"));
+    assert!(
+        matches!(&refused, Err(Refusal::Broken(why)) if why.contains(&state.display().to_string())),
+        "a store opened beside a live owner: {refused:?}"
     );
     let mut ends = owner.stdin.take().unwrap();
     ends.write_all(b"end\n").unwrap();
     drop(ends);
     assert!(owner.wait().unwrap().success());
-    // A look: the store tells no event as a row is let go, its row read. Its party, the follow of the owner's end, is
-    // a thread the store keeps to itself; one refused leaves the row and says why (`node_vm_unfollowed`).
-    hex_testkit::waits::follow::until(
-        &FACT,
-        "the row let go",
-        || hex_testkit::waits::follow::Party::Live,
-        || store.node_vm(&run(7)).unwrap().is_none(),
-    )
-    .unwrap();
+    let store = opened_once_let_go(dir.path());
+    assert_eq!(
+        store.settle_node_vms().unwrap().rows,
+        [(run(7), NodeVmSettled::OwnerEnded)]
+    );
+    assert_eq!(store.node_vm(&run(7)).unwrap(), None);
     assert!(
         !dir.path().join("bye").exists(),
         "the owner's child still runs, its lock file's description open where it shares it"
@@ -406,6 +400,26 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
         || dir.path().join("bye").exists(),
     )
     .unwrap();
+}
+
+/// A store over `dir` once an owner that held it has ended: its hold is let go as its process ends, on Windows once its
+/// handle's close is done. A look: the end tells no event here, the open's answer read.
+fn opened_once_let_go(dir: &Path) -> Store {
+    let opened = std::cell::RefCell::new(None);
+    hex_testkit::waits::follow::until(
+        &FACT,
+        "the ended owner's directory let go",
+        || hex_testkit::waits::follow::Party::Live,
+        || match Store::open(&dir.join("state"), &dir.join("run")) {
+            Ok(store) => {
+                *opened.borrow_mut() = Some(store);
+                true
+            }
+            Err(_) => false,
+        },
+    )
+    .unwrap();
+    opened.into_inner().unwrap()
 }
 
 /// The owner `role` names, started in `dir` and followed until it says it is ready: its stdin the test's to write, and
@@ -441,26 +455,29 @@ fn owner_ready(
     }
 }
 
-/// The review's C-11 (AC-T7.4.1; joint plan step 39, place 1): a node's start lets a row go from what it reads under the
-/// row's lock, so an end its owner kept between the start's read of the rows and its taking of that lock is carried,
-/// never dropped. Do run a node that writes node VM 7's row Ready; start another, which reads the rows; then, before it
-/// takes the row's lock, have the first put why its last resort ends the VM into the row, write it Ended and end. Expect
-/// the row let go as Ended, its last-resort end read back, and the row gone.
+/// The review's C-11 (AC-T7.4.1; joint plan step 39, place 1), the store its directory's one writer (batch 1114d's
+/// reads2; ROOT, 2026-11-14): an end its owner keeps as it ends is carried by the next node's start, which reads the
+/// rows only once their owner has ended. Do run a node that writes node VM 7's row Ready; open a store over its
+/// directory; then have the node put why its last resort ends the VM into the row, write it Ended and end; then open a
+/// store again and settle its rows. Expect the first open refused while the owner runs, naming the directory; then the
+/// row let go as Ended, its last-resort end read back, and the row gone.
 #[test]
-fn c11_a_row_its_owner_ended_after_the_starts_read_is_let_go_as_ended_its_end_carried() {
+fn c11_a_row_its_owner_ended_is_let_go_as_ended_its_end_carried() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let (mut owner, said) = owner_ready("ending owner", dir.path());
+    let state = dir.path().join("state");
+    let refused = Store::open(&state, &dir.path().join("run"));
+    assert!(
+        matches!(&refused, Err(Refusal::Broken(why)) if why.contains(&state.display().to_string())),
+        "a store opened beside a live owner: {refused:?}"
+    );
     let mut ends = owner.stdin.take().unwrap();
-    SETTLE_READ.with(|then| {
-        *then.borrow_mut() = Some(Box::new(move || {
-            ends.write_all(b"end\n").unwrap();
-            drop(ends);
-            assert!(owner.wait().unwrap().success());
-            drop(said);
-        }));
-    });
-    let store = store_in(dir.path());
+    ends.write_all(b"end\n").unwrap();
+    drop(ends);
+    assert!(owner.wait().unwrap().success());
+    drop(said);
+    let store = opened_once_let_go(dir.path());
     let settled = store.settle_node_vms().unwrap();
     assert_eq!(
         (settled.rows, settled.ends),
@@ -512,13 +529,13 @@ fn end_of(run: &NodeRun) -> LearnedEnd {
     }
 }
 
-/// `row` as an earlier node process left it: its bytes in its place, its lock held by no process.
-fn left(store: &Store, row: &NodeVmRecord) {
-    std::fs::create_dir_all(store.node_vm_directory()).unwrap();
+/// `row` as an earlier node process left it in `dir`'s rows, before a store over `dir` opens: its bytes in its place, its
+/// lock held by no process.
+fn left(dir: &Path, row: &NodeVmRecord) {
+    let rows = dir.join("state").join(".node-vms");
+    std::fs::create_dir_all(&rows).unwrap();
     std::fs::write(
-        store
-            .node_vm_directory()
-            .join(format!("{}.json", name(&row.run).unwrap())),
+        rows.join(format!("{}.json", name(&row.run).unwrap())),
         row.encode().unwrap(),
     )
     .unwrap();
@@ -526,8 +543,8 @@ fn left(store: &Store, row: &NodeVmRecord) {
 
 /// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13): a node VM row's last-resort end is its learner's
 /// to write, and a phase write made from a read before it keeps it, so a reap racing the intent never drops it. Do
-/// write node VM 7's row Booting, then Ready; put why the last resort is ending it into the row; then write it Ended
-/// from the Ready record read before that end was. Expect the row Ended with its exit, its end kept.
+/// write node VM 7's row Booting, then Ready; put why the last resort is ending it into the row, as the learner does;
+/// then write it Ended from the Ready record read before that end was. Expect the row Ended with its exit, its end kept.
 #[test]
 fn w39_a_node_vm_rows_phase_write_keeps_its_last_resort() {
     let dir = tempfile::tempdir().unwrap();
@@ -536,12 +553,13 @@ fn w39_a_node_vm_rows_phase_write_keeps_its_last_resort() {
     let ready = record(7, NodeVmPhase::Ready);
     store.put_node_vm(&ready).unwrap();
     let end = end_of(&run(7));
-    left(
-        &store,
-        &NodeVmRecord {
-            last_resort: Some(end.clone()),
-            ..ready.clone()
-        },
+    assert!(
+        store
+            .update_node_vm(&run(7), |row| {
+                row.last_resort = Some(end.clone());
+                true
+            })
+            .unwrap()
     );
     let ended = NodeVmRecord {
         phase: NodeVmPhase::Ended,
@@ -563,14 +581,14 @@ fn w39_a_node_vm_rows_phase_write_keeps_its_last_resort() {
 #[test]
 fn w39_a_nodes_start_reads_back_each_let_go_rows_last_resort_end() {
     let dir = tempfile::tempdir().unwrap();
-    let store = store_in(dir.path());
     let mut ended = record(4, NodeVmPhase::Ended);
     ended.last_resort = Some(end_of(&run(4)));
     let mut unowned = record(5, NodeVmPhase::Ready);
     unowned.last_resort = Some(end_of(&run(5)));
     for row in [&ended, &unowned, &record(6, NodeVmPhase::Ended)] {
-        left(&store, row);
+        left(dir.path(), row);
     }
+    let store = store_in(dir.path());
     let settled = store.settle_node_vms().unwrap();
     assert_eq!(
         settled.rows,
@@ -663,7 +681,7 @@ fn c12_a_row_write_that_fails_leaves_no_temporary_file() {
     let bytes = record(7, NodeVmPhase::Booting).encode().unwrap();
     assert!(
         store
-            .publish_durable(&directory, &temporary, &place, &bytes)
+            .publish_durable(&directory, &temporary, &place, &bytes, || ())
             .is_err()
     );
     assert!(!temporary.exists(), "its temporary file left");

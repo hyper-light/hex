@@ -33,6 +33,15 @@
 //! other, so one box's fsync never holds up another box's create (goal 5 plan step 2). Nor do they wait on
 //! one directory's lock: the runtime directory's records are spread over [`SHARDS`] subdirectories by
 //! their box's id (goal 5 extended, step 6).
+//!
+//! A store is its state directory's one writer: it holds the directory from its open until its last clone drops, and a
+//! second store over it, in this process or another, is refused at its open, naming it ([`lock`]). So the store keeps
+//! every box record and node VM row in memory, its index ([`index`]): read once by its open's scan, and changed by each
+//! write in the write's own turn, once the file holds it, so every read of a record is the index's and none reads a
+//! file (the review's per-window reads, step 2). The index is no cache of the directory: nothing else writes a record,
+//! so it is the directory's state. A file changed behind the store's back is outside that contract and is seen by the
+//! next store's open, as recovery reads it now. Its memory is the records', within the store's bounds: at most
+//! [`TURNS`] box records and as many rows, each within the record bound, held decoded, about their size on disk.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -49,8 +58,11 @@ use hex_core::record::{BootSession, BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
 
+mod index;
+mod lock;
 mod node_vm;
 mod pool;
+pub use index::{Entry, Snapshot};
 pub use node_vm::{NodeVmEnds, NodeVmSettled, NodeVmsSettled};
 use pool::scoped_paths;
 
@@ -188,6 +200,10 @@ pub struct Store {
     /// The node VMs this process runs (joint plan step 39), each by its run with the one handle of its lock file, whose
     /// owner-only lock it holds from its row's Booting write until its Ended one ([`node_vm`]). Shared by clones.
     node_vm_owners: Arc<Mutex<BTreeMap<hex_api::NodeRun, File>>>,
+    /// Every record and row the directory holds ([`index`]), changed by each write in its turn. Shared by clones.
+    index: Arc<index::Index>,
+    /// The store's hold of its directory, its one writer's ([`lock`]): let go as its last clone drops.
+    _hold: Arc<lock::Hold>,
 }
 
 #[derive(Debug, Default)]
@@ -200,6 +216,19 @@ struct Synced {
     dirs: AtomicU64,
     /// Record files read: box records, node VM rows and pool rows.
     reads: AtomicU64,
+}
+
+/// How far a write of a box's record got ([`Store::write_encoded`]).
+#[derive(Debug, Clone, Copy)]
+enum Wrote {
+    /// Its file is as it was.
+    Nothing,
+    /// Its file may hold part of the bytes: a first write in its place, cut short (Linux's, where a record that
+    /// needn't outlive the host is written in place once).
+    #[cfg(target_os = "linux")]
+    Part,
+    /// Its file holds the bytes written.
+    Whole,
 }
 
 /// The fsyncs a store has made since it opened: of record files and of its directory, one of each per
@@ -232,6 +261,9 @@ impl Store {
                 .and_then(|()| owner_only(&shard))
                 .map_err(|e| Refusal::os("making a shard of the runtime record directory", e))?;
         }
+        // Before any record is read: the records this store holds in memory are its directory's only while it is the
+        // directory's one writer.
+        let hold = lock::Hold::take(disk)?;
         let store = Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
@@ -259,9 +291,24 @@ impl Store {
             boot: host_boot().as_ref().ok().cloned().flatten(),
             begun: Arc::new(AtomicU64::new(1)),
             node_vm_owners: Arc::default(),
+            index: Arc::default(),
+            _hold: Arc::new(hold),
         };
+        store.load()?;
         store.count_starts()?;
         Ok(store)
+    }
+
+    /// Reads every box record and node VM row into the store's index as it opens: the one scan of its records, after
+    /// which every read is the index's (the review's per-window reads, step 2). Refused past the store's box bound, as
+    /// its records past it could never be recovered ([`Store::retained_records`]).
+    fn load(&self) -> Result<(), Refusal> {
+        let boxes = self.scan_records(false)?;
+        if boxes.len() > TURNS {
+            return Err(Refusal::Full(TURNS));
+        }
+        let rows = self.scan_node_vms()?;
+        self.index.load(boxes, rows)
     }
 
     /// Arms this store's one crash point ([`Store::crash_before_write`]): a debug build's node ends its
@@ -625,10 +672,10 @@ impl Store {
     /// a create. A record of an earlier boot names nothing that runs and is recovery's to remove, so it is left as that
     /// boot wrote it, as is a torn one.
     fn count_starts(&self) -> Result<(), Refusal> {
-        let records = self.all()?;
+        let records = self.snapshot()?;
         let most = records
             .values()
-            .filter_map(|record| record.as_ref().ok()?.started)
+            .filter_map(|record| record.as_ref().as_ref().ok()?.started)
             .chain(self.all_node_vms()?.iter().filter_map(|row| row.started))
             .max()
             .unwrap_or(0);
@@ -637,8 +684,8 @@ impl Store {
             bound: usize::MAX,
         })?;
         self.begun.store(next, Ordering::Relaxed);
-        for (id, record) in &records {
-            let Ok(record) = record else {
+        for (id, record) in records.iter() {
+            let Ok(record) = record.as_ref() else {
                 continue;
             };
             let unplaced = record.native_scope.is_some()
@@ -679,11 +726,42 @@ impl Store {
         )
     }
 
+    /// Writes `bytes`, `record` encoded, as its box's record, and holds what its file then holds in the index, in the
+    /// same turn: the bytes written once they are its file's, what a write cut short left in its place read back. A new
+    /// box's first write takes a place under the box bound first, refused past it.
     fn write_encoded(
         &self,
         record: &BoxRecord,
         bytes: Vec<u8>,
         scoped: bool,
+    ) -> Result<(), Refusal> {
+        let id = &record.spec.id;
+        let mut place = self.index.admit(id)?;
+        let mut wrote = Wrote::Nothing;
+        let written = self.write_file(record, &bytes, scoped, &mut wrote);
+        match wrote {
+            Wrote::Nothing => {}
+            Wrote::Whole => self
+                .index
+                .publish(id, BoxRecord::decode(&bytes), &mut place)?,
+            // A record's first write cut short in its place: what it left there is the record, as a restart reads it.
+            #[cfg(target_os = "linux")]
+            Wrote::Part => {
+                if let Ok(left) = self.read_files(id) {
+                    self.index.reset(id, left)?;
+                }
+            }
+        }
+        written
+    }
+
+    /// Writes `bytes` as `record`'s file, saying in `wrote` how far it got.
+    fn write_file(
+        &self,
+        record: &BoxRecord,
+        bytes: &[u8],
+        scoped: bool,
+        wrote: &mut Wrote,
     ) -> Result<(), Refusal> {
         let (dir, durable) = if scoped {
             (self.disk.as_path(), true)
@@ -692,7 +770,9 @@ impl Store {
         };
         if scoped {
             let (temporary, final_path) = scoped_paths(dir, record.spec.id.as_str())?;
-            return self.publish_durable(dir, &temporary, &final_path, &bytes);
+            return self.publish_durable(dir, &temporary, &final_path, bytes, || {
+                *wrote = Wrote::Whole;
+            });
         }
         #[cfg(target_os = "linux")]
         let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
@@ -731,6 +811,7 @@ impl Store {
             ) {
                 Ok(fd) => {
                     let mut file = File::from(fd);
+                    *wrote = Wrote::Part;
                     // T-T7.1.2's crash test kills the node here, after the record's file is open and
                     // before it is written, to leave a torn (empty) record recovery must discard (goal
                     // 5 extended step 5, criterion 3). Debug builds only, and only once the node's
@@ -742,9 +823,10 @@ impl Store {
                             rustix::process::Signal::KILL,
                         );
                     }
-                    return file
-                        .write_all(&bytes)
-                        .map_err(|e| Refusal::os("writing a record", e));
+                    file.write_all(bytes)
+                        .map_err(|e| Refusal::os("writing a record", e))?;
+                    *wrote = Wrote::Whole;
+                    return Ok(());
                 }
                 Err(rustix::io::Errno::EXIST) => {}
                 Err(e) => return Err(Refusal::os("making a record file", e)),
@@ -767,7 +849,7 @@ impl Store {
             #[cfg(not(target_os = "linux"))]
             let mut f =
                 File::create(&tmp).map_err(|e| Refusal::os("making a record temp file", e))?;
-            f.write_all(&bytes)
+            f.write_all(bytes)
                 .map_err(|e| Refusal::os("writing a record", e))?;
             if durable {
                 f.sync_all()
@@ -783,33 +865,25 @@ impl Store {
             final_path.as_str(),
         )
         .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        #[cfg(all(not(target_os = "linux"), not(windows)))]
+        #[cfg(not(target_os = "linux"))]
         fs::rename(&tmp, &final_path)
             .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        #[cfg(windows)]
-        if scoped {
-            hex_runtime::windows::sys::replace_durable(&tmp, &final_path)
-                .map_err(|e| Refusal::os("publishing the scoped record with write-through", e))?;
-        } else {
-            fs::rename(&tmp, &final_path)
-                .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        }
+        *wrote = Wrote::Whole;
         if durable {
-            #[cfg(windows)]
-            if scoped {
-                // The scoped Windows path has already requested write-through publication. It did
-                // not fsync a directory; leave that counter unchanged and retain native fault proof.
-                return Ok(());
-            }
             self.sync_dir(dir)?;
         }
         Ok(())
     }
 
-    /// The record for `id`, if the store holds one: the runtime directory's, else the state
-    /// directory's. An unreadable file is returned as its reason, so recovery can clean the box up
-    /// rather than crash (T-T7.1.2).
+    /// The record for `id`, if the store holds one, from its index: an unreadable file is returned as its reason, so
+    /// recovery can clean the box up rather than crash (T-T7.1.2).
     pub fn get(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
+        Ok(self.index.entry(id)?.map(|entry| Entry::clone(&entry)))
+    }
+
+    /// What box `id`'s files hold now: the runtime directory's, else the state directory's. Read back after a change
+    /// of them cut short, as the next open reads them.
+    fn read_files(&self, id: &BoxId) -> Result<Option<Entry>, Refusal> {
         for file in self.files(id) {
             match File::open(file) {
                 Ok(file) => return Ok(Some(BoxRecord::decode(&self.read_bytes(file)?))),
@@ -829,7 +903,22 @@ impl Store {
         self.unlink(id)
     }
 
+    /// Removes box `id`'s files and lets its record go from the index; where a removal is cut short, the index holds
+    /// what is left.
     fn unlink(&self, id: &BoxId) -> Result<(), Refusal> {
+        let removed = self.remove_files(id);
+        match &removed {
+            Ok(()) => self.index.forget(id)?,
+            Err(_) => {
+                if let Ok(left) = self.read_files(id) {
+                    self.index.reset(id, left)?;
+                }
+            }
+        }
+        removed
+    }
+
+    fn remove_files(&self, id: &BoxId) -> Result<(), Refusal> {
         for file in self.files(id) {
             match fs::remove_file(file) {
                 Ok(()) => {}
@@ -840,10 +929,21 @@ impl Store {
         Ok(())
     }
 
-    /// Every record the store holds, by box id; an id whose file can't be read is included with its
-    /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed.
+    /// Every record the store holds, by box id, a copy of its index's; an id whose file can't be read is included with
+    /// its reason. A reader of every record that needs no copy of its own reads [`Store::snapshot`].
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
-        self.scan_records(false)
+        let snapshot = self.snapshot()?;
+        let mut all = BTreeMap::new();
+        for (id, entry) in snapshot.iter() {
+            all.insert(id.try_clone()?, Entry::clone(entry));
+        }
+        Ok(all)
+    }
+
+    /// Every record the store holds, by box id, shared: pointers into its index, never a copy (the review's per-window
+    /// reads). A write made while it is held leaves it as it was.
+    pub fn snapshot(&self) -> Result<Snapshot, Refusal> {
+        self.index.snapshot()
     }
 
     /// Recovery must see every retained canonical name, including a conflicting duplicate in
@@ -950,11 +1050,24 @@ impl Store {
     /// unknown the marker goes, so no later node takes a record of this boot for an earlier one's.
     pub(crate) fn take_boot_marker(&self) -> Result<Option<BootSession>, Refusal> {
         let path = self.disk.join(BOOT_MARKER);
-        let was = match fs::read(&path) {
-            Ok(bytes) if bytes.len() <= BootSession::MAX_BYTES + 1 => std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(|text| BootSession::new(text).ok()),
-            Ok(_) => None,
+        // Its session and a newline at most: read no further than one byte past it, whatever its file holds.
+        let bound = BootSession::MAX_BYTES
+            .checked_add(1)
+            .ok_or(Refusal::Exhausted {
+                what: "boot session marker bytes",
+                bound: BootSession::MAX_BYTES,
+            })?;
+        let was = match File::open(&path) {
+            Ok(file) => {
+                let bytes = read_bounded(file, bound)?;
+                if bytes.len() <= bound {
+                    std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(|text| BootSession::new(text).ok())
+                } else {
+                    None
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(Refusal::os("reading the boot session marker", e)),
         };
@@ -1082,8 +1195,13 @@ impl Store {
 /// decoder needs to refuse it, past [`hex_core::record::MAX_RECORD_BYTES`] (the review's per-window reads). A torn or
 /// oversized row remains a decoder refusal, never an absent owner.
 fn read_record_bytes(file: File) -> Result<Vec<u8>, Refusal> {
+    read_bounded(file, hex_core::record::MAX_RECORD_BYTES)
+}
+
+/// `file` read by the one bounded reader ([`read_record_bytes`]) to `bound` and one byte past it: a buffer its own length,
+/// so a read past the bound says the file is over it, having read no more.
+fn read_bounded(file: File, bound: usize) -> Result<Vec<u8>, Refusal> {
     use std::io::Read;
-    let bound = hex_core::record::MAX_RECORD_BYTES;
     let past = bound.checked_add(1).ok_or(Refusal::Exhausted {
         what: "record bytes",
         bound,
@@ -1777,7 +1895,7 @@ mod tests {
                 sharded(&dir.path().join("run"))
             ),
             (
-                vec!["d.json".to_owned()],
+                vec!["@lock".to_owned(), "d.json".to_owned()],
                 vec!["p.json".to_owned(), "t.json".to_owned()]
             ),
             "each record in its place: the durable one in the state directory, the rest beside the runtime state"
@@ -1812,7 +1930,10 @@ mod tests {
         };
         assert_eq!(store.update(&kept.spec.id, bump), Ok(true));
         assert_eq!(store.syncs(), Syncs { files: 2, dirs: 2 });
-        assert_eq!(names(&dir.path().join("state")), vec!["d.json".to_owned()]);
+        assert_eq!(
+            names(&dir.path().join("state")),
+            vec!["@lock".to_owned(), "d.json".to_owned()]
+        );
     }
 
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
@@ -2031,23 +2152,27 @@ mod tests {
             "the runtime directory holds its shards and the notes: {:?}",
             names(&run)
         );
-        assert_eq!(names(&state), [".notes"]);
+        assert_eq!(names(&state), [".notes", "@lock"]);
         assert_eq!(store.remove_strays().unwrap(), 0);
     }
 
+    /// A store's open reads every record in both places, a damaged one with why, and nothing else: do write two records,
+    /// leave a stray temp file, an unrelated file and a damaged record beside them, then open the store again. Expect
+    /// the three records listed, the damaged one with why.
     #[test]
     fn all_reads_every_record_in_both_places_and_ignores_strays() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
         store.put(&record("a")).unwrap();
         store.put(&record("b")).unwrap();
+        drop(store);
         let state = dir.path().join("state");
         // A stray temp file (a crash mid-write) and an unrelated file are not records.
         fs::write(state.join(".c.tmp"), b"{}").unwrap();
         fs::write(state.join("notes.txt"), b"hi").unwrap();
         // A damaged record is reported, not skipped.
         fs::write(state.join("d.json"), b"{ not json").unwrap();
-        let all = store.all().unwrap();
+        let all = store_in(dir.path()).all().unwrap();
         assert_eq!(all.len(), 3);
         assert!(all[&BoxId::new("a").unwrap()].is_ok());
         assert!(all[&BoxId::new("d").unwrap()].is_err());
@@ -2085,19 +2210,20 @@ mod tests {
     }
 
     /// The review's per-window reads (AC-T7.4.1): do write a file twice the record bound where a box's record goes, then
-    /// get it, list every record, and list them as recovery does. Expect: each refuses it as damaged having read the
-    /// bound and one byte, never the rest of the file.
+    /// open a store, get it, list every record, and list them as recovery does. Expect: each refuses it as damaged having
+    /// read the bound and one byte, never the rest of the file.
     #[test]
     fn an_oversized_box_record_is_read_no_further_than_its_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
         let bound = hex_core::record::MAX_RECORD_BYTES;
         let id = BoxId::new("oversized").unwrap();
+        fs::create_dir_all(dir.path().join("state")).unwrap();
         fs::write(
             record_file(&dir.path().join("state"), &id),
             vec![b' '; bound * 2],
         )
         .unwrap();
+        let store = store_in(dir.path());
         let refused = format!("{} bytes, over {bound}", bound + 1);
         assert_eq!(store.get(&id).unwrap(), Some(Err(refused.clone())));
         assert_eq!(store.all().unwrap().get(&id), Some(&Err(refused.clone())));
@@ -2233,10 +2359,14 @@ mod tests {
         };
         assert!(store.update(&carried.spec.id, bump).unwrap());
         assert_eq!(read(&carried.spec.id).boot, boot);
+        // One an earlier boot wrote, read by the store's next open, as a node's start reads it.
+        drop(store);
         let mut earlier = record("earlier");
         earlier.boot = Some(BootSession::new("00000000-0000-0000-0000-000000000000").unwrap());
         let path = runtime_record(&dir.path().join("run"), &earlier.spec.id);
         fs::write(&path, earlier.encode().unwrap()).unwrap();
+        let store = store_in(dir.path());
+        let read = |id: &BoxId| store.get(id).unwrap().unwrap().unwrap();
         assert_eq!(read(&earlier.spec.id).boot, earlier.boot);
         assert_eq!(store.earlier_boot(&read(&earlier.spec.id)), boot.is_some());
         assert!(store.update(&earlier.spec.id, bump).unwrap());
@@ -2371,7 +2501,7 @@ mod tests {
         String::from_utf8(ran.stdout)
             .unwrap()
             .lines()
-            .find_map(|line| line.strip_prefix(ROLE_SAID).map(str::to_owned))
+            .find_map(|line| line.split_once(ROLE_SAID).map(|(_, said)| said.to_owned()))
             .unwrap_or_default()
     }
 
@@ -2451,5 +2581,44 @@ mod tests {
             written < offered,
             "the marker's read took all {written} bytes its writer offered"
         );
+    }
+
+    /// The review's per-window reads, step 2 (batch 1114d's reads2; ROOT, 2026-11-14: a snapshot copies pointers only;
+    /// AC-T7.4.1): a write made while a reader holds every record leaves the reader's as it was and copies no record. Do
+    /// write 100 records; take every record, as a window does; write one more and change another; take every record
+    /// again. Expect the first taking as it was; the second holding the new record and the change; every other record the
+    /// same one in memory in both, neither copied nor decoded again; and no record file read.
+    #[test]
+    fn reads2_a_write_while_a_snapshot_is_held_copies_pointers_never_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        for n in 0..100 {
+            store.put(&record(&format!("b{n}"))).unwrap();
+        }
+        let before = store.snapshot().unwrap();
+        let read = store.reads();
+        store.put(&record("new")).unwrap();
+        let changed = BoxId::new("b7").unwrap();
+        assert!(
+            store
+                .update(&changed, |record| {
+                    record.abandoned = 1;
+                    true
+                })
+                .unwrap()
+        );
+        let after = store.snapshot().unwrap();
+        assert_eq!((before.len(), after.len()), (100, 101));
+        assert!(!before.contains_key(&BoxId::new("new").unwrap()));
+        for (id, held) in before.iter() {
+            let now = &after[&**id];
+            if **id == changed {
+                assert_eq!(held.as_ref().as_ref().unwrap().abandoned, 0);
+                assert_eq!(now.as_ref().as_ref().unwrap().abandoned, 1);
+            } else {
+                assert!(Arc::ptr_eq(held, now), "box {id}'s record copied");
+            }
+        }
+        assert_eq!(store.reads(), read, "a record file read");
     }
 }

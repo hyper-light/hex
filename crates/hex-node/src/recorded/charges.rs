@@ -340,12 +340,23 @@ pub(crate) fn nodes<'a>(
 /// The boxes whose records a window couldn't read, each with its store's words (the review's dropped records).
 pub(crate) type Unreadable = Vec<(BoxId, String)>;
 
-/// `records`, a node's records by box ([`Store::all`]), as the records its window reads and the boxes whose records it
-/// can't ([`Unreadable`]): none dropped.
+/// `records`, a node's records as its store holds them ([`Store::snapshot`]), each by its box: what [`node_band`] and
+/// [`retire_with_node_vms`] read.
+pub(crate) fn entries(
+    records: &crate::store::Snapshot,
+) -> impl Iterator<Item = (&BoxId, &Result<BoxRecord, String>)> {
+    records.iter().map(|(id, record)| (&**id, &**record))
+}
+
+/// `records`, a node's records as its store holds them ([`Store::snapshot`]), as the records its window reads, borrowed,
+/// and the boxes whose records it can't ([`Unreadable`]): none dropped.
 pub(crate) fn readable(
-    records: BTreeMap<BoxId, Result<BoxRecord, String>>,
-) -> Result<(Vec<BoxRecord>, Unreadable), Refusal> {
-    let unreadable = records.values().filter(|record| record.is_err()).count();
+    records: &crate::store::Snapshot,
+) -> Result<(Vec<&BoxRecord>, Unreadable), Refusal> {
+    let unreadable = records
+        .values()
+        .filter(|record| record.as_ref().is_err())
+        .count();
     let mut read = Vec::new();
     let mut unread = Vec::new();
     read.try_reserve_exact(records.len().saturating_sub(unreadable))
@@ -354,17 +365,19 @@ pub(crate) fn readable(
             what: "a window's records",
             bound: records.len(),
         })?;
-    for (id, record) in records {
-        match record {
+    for (id, record) in records.iter() {
+        match record.as_ref() {
             Ok(record) => read.push(record),
-            Err(why) => unread.push((id, why)),
+            Err(why) => unread.push((id.try_clone()?, why.clone())),
         }
     }
     Ok((read, unread))
 }
 
 /// `records`, a node's boxes' records, as the holders a learner reads, each a box's.
-pub(crate) fn boxes(records: &[BoxRecord]) -> Result<Vec<Holder<'_>>, Refusal> {
+pub(crate) fn boxes<R: std::borrow::Borrow<BoxRecord>>(
+    records: &[R],
+) -> Result<Vec<Holder<'_>>, Refusal> {
     let mut holders = Vec::new();
     holders
         .try_reserve_exact(records.len())
@@ -372,7 +385,7 @@ pub(crate) fn boxes(records: &[BoxRecord]) -> Result<Vec<Holder<'_>>, Refusal> {
             what: "a window's VMs",
             bound: records.len(),
         })?;
-    holders.extend(records.iter().map(Holder::Box));
+    holders.extend(records.iter().map(|record| Holder::Box(record.borrow())));
     Ok(holders)
 }
 
@@ -526,8 +539,8 @@ pub(crate) struct Sorted<'a> {
 /// record (`rows`) runs the node's oci class (A-5; ROOT, 2026-11-13): a node VM holds the boxes it runs, in its
 /// footprint while it runs and its booking while it boots, and nothing holds them once it has ended, so their caps are
 /// never counted beside it.
-pub(crate) fn sort<'a>(
-    records: &'a [BoxRecord],
+pub(crate) fn sort<'a, R: std::borrow::Borrow<BoxRecord>>(
+    records: &'a [R],
     rows: &[NodeVmRecord],
     learns: impl Fn(Holder<'_>) -> bool,
 ) -> Result<Sorted<'a>, Refusal> {
@@ -539,6 +552,7 @@ pub(crate) fn sort<'a>(
     let hosted = !rows.is_empty();
     let mut sorted = Sorted::default();
     for record in records {
+        let record: &'a BoxRecord = record.borrow();
         let kind = if running(record) {
             Some(learns(Holder::Box(record)))
         } else if running_image(record) {
@@ -1242,19 +1256,19 @@ fn hosted_ends(
             .as_ref()
             .is_some_and(|said| said.id == node)
     };
-    for (id, record) in store.all()? {
-        let Ok(record) = record else {
+    for (id, record) in store.snapshot()?.iter() {
+        let Ok(record) = record.as_ref() else {
             continue;
         };
         let due = match end {
-            Some(_) => runs_in_node_vm(&record) && !record.retired,
-            None => names(&record),
+            Some(_) => runs_in_node_vm(record) && !record.retired,
+            None => names(record),
         };
         if !due {
             continue;
         }
         let end = end.map(LearnedEnd::try_clone).transpose()?;
-        store.update(&id, |record| {
+        store.update(id, |record| {
             let still = match &end {
                 Some(_) => runs_in_node_vm(record) && !record.retired,
                 None => names(record),
@@ -1272,9 +1286,9 @@ fn hosted_ends(
 /// among `records` whose record names a node VM's last-resort end once that node VM's run has ended, its row among
 /// `rows` Ended or gone, for `NodeVmEnded`: kept, Ready, its end unknown and why on its record, until its owner's
 /// delete. Answers the boxes it retired.
-pub(crate) fn retire_with_node_vms(
+pub(crate) fn retire_with_node_vms<'r>(
     store: &Store,
-    records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
+    records: impl IntoIterator<Item = (&'r BoxId, &'r Result<BoxRecord, String>)>,
     rows: &[NodeVmRecord],
 ) -> Result<Vec<BoxId>, Refusal> {
     let mut retired = Vec::new();
@@ -1299,7 +1313,7 @@ pub(crate) fn retire_with_node_vms(
         if done {
             retired.try_reserve(1).map_err(|_| Refusal::Exhausted {
                 what: "the boxes retired with their node VMs",
-                bound: records.len(),
+                bound: crate::store::TURNS,
             })?;
             retired.push(id.try_clone()?);
         }

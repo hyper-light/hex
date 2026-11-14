@@ -33,14 +33,6 @@ use hex_core::record::NodeVmRecord;
 
 use super::{Store, TURNS, scoped_paths};
 
-#[cfg(test)]
-thread_local! {
-    /// What a test does once a node's start on this thread has read the node VM rows, before it takes any row's lock: an
-    /// earlier node process ending a row meanwhile, as one may (the review's C-11).
-    static SETTLE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// `store.node_vm_owner`, W*: the slowest end of a node VM's owner this process has followed, from its start's look at
 /// its row (decision 9): past it the run-out is told, and the wait follows the owner by its life to its end.
 static OWNER_END: Patience = Patience::measuring("store.node_vm_owner");
@@ -379,23 +371,25 @@ impl Store {
         fs::create_dir_all(&directory)
             .map_err(|e| Refusal::os("making the node VM records' directory", e))?;
         let (temporary, final_path) = scoped_paths(&directory, &name(&record.run)?)?;
-        if !path_exists(&final_path)? && self.all_node_vms()?.len() >= TURNS {
+        let mut owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
+        let kept = self.node_vm(&record.run)?;
+        // Counted from the rows the store holds, no row read (the review's side finding: N rows cost N² reads).
+        if kept.is_none() && self.index.row_count()? >= TURNS {
             return Err(allocation(TURNS));
         }
-        let mut owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
         if record.phase == NodeVmPhase::Ready {
             self.one_ready(&owners, &record.run)?;
         }
-        let (last_resort, started) = match self.node_vm(&record.run)? {
+        let (last_resort, started) = match kept {
             Some(row) => (row.last_resort, row.started),
             None => (None, Some(self.next_start()?)),
         };
-        let bytes = NodeVmRecord {
+        let row = NodeVmRecord {
             last_resort,
             started,
             ..record.clone()
-        }
-        .encode()?;
+        };
+        let bytes = row.encode()?;
         let taken = if record.phase != NodeVmPhase::Ended && !owners.contains_key(&record.run) {
             let file = open_lock(&directory, &record.run)?;
             if !try_own(&file)? {
@@ -407,7 +401,14 @@ impl Store {
         } else {
             None
         };
-        if let Err(why) = self.publish_durable(&directory, &temporary, &final_path, &bytes) {
+        let mut renamed = false;
+        let published = self.publish_durable(&directory, &temporary, &final_path, &bytes, || {
+            renamed = true
+        });
+        if renamed {
+            self.index.set_row(row)?;
+        }
+        if let Err(why) = published {
             // Its row unwritten, a lock just taken holds nothing: its file goes, and the lock with its handle.
             if let Some(file) = taken {
                 remove_if_there(
@@ -462,24 +463,33 @@ impl Store {
         if !change(&mut record) {
             return Ok(false);
         }
-        self.publish_durable(&directory, &temporary, &final_path, &record.encode()?)?;
+        let bytes = record.encode()?;
+        let mut renamed = false;
+        let published = self.publish_durable(&directory, &temporary, &final_path, &bytes, || {
+            renamed = true
+        });
+        if renamed {
+            self.index.set_row(record)?;
+        }
+        published?;
         Ok(true)
     }
 
-    /// Node VM `run`'s record, `None` where it keeps none.
+    /// Node VM `run`'s record, `None` where it keeps none: its index's, no file read.
     pub(crate) fn node_vm(&self, run: &NodeRun) -> Result<Option<NodeVmRecord>, Refusal> {
-        let (_, path) = scoped_paths(&self.node_vm_directory(), &name(run)?)?;
-        match File::open(path) {
-            Ok(file) => read_row(&self.read_bytes(file)?, run).map(Some),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Refusal::os("opening a node VM's record", e)),
-        }
+        self.index.row(run)
     }
 
-    /// Every node VM's record it keeps, in its runs' order: their receipts' one source (joint plan step 39). Within the
+    /// Every node VM's record it keeps, in its runs' order: their receipts' one source (joint plan step 39), its index's,
+    /// no file read.
+    pub(crate) fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+        self.index.rows()
+    }
+
+    /// Every node VM row its directory holds, read as the store opens ([`Store::load`]), in its runs' order. Within the
     /// store's scan bound for a kind of row, as its pool rows are: a row past it, or a record file whose name is no
     /// run's, is refused, never passed over.
-    pub(crate) fn all_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
+    pub(super) fn scan_node_vms(&self) -> Result<Vec<NodeVmRecord>, Refusal> {
         let directory = self.node_vm_directory();
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -533,10 +543,6 @@ impl Store {
     pub(crate) fn settle_node_vms(&self) -> Result<NodeVmsSettled, Refusal> {
         self.remove_node_vm_strays()?;
         let records = self.all_node_vms()?;
-        #[cfg(test)]
-        if let Some(then) = SETTLE_READ.with(|then| then.borrow_mut().take()) {
-            then();
-        }
         let mut settled = Vec::new();
         settled
             .try_reserve_exact(records.len())
@@ -563,8 +569,9 @@ impl Store {
             }
             let file = open_lock(&directory, &record.run)?;
             if try_own(&file)? {
-                // Its row read again under its lock (the review's C-11), as the follow path reads it: its owner may have
-                // kept its end and written it Ended since the read above, then let the lock go as it ended.
+                // Its row read again under its lock (the review's C-11), as the follow path reads it. The directory held
+                // by this store alone, no other process writes the row since the read above (the review's per-window
+                // reads, step 2), so this reads the row as the index holds it.
                 let Some(mut row) = self.node_vm(&record.run)? else {
                     remove_if_there(
                         &lock_path(&directory, &record.run)?,
@@ -713,8 +720,8 @@ impl Store {
         let directory = self.node_vm_directory();
         let (_, path) = scoped_paths(&directory, &name(run)?)?;
         match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(()) => self.index.drop_row(run)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return self.index.drop_row(run),
             Err(e) => return Err(Refusal::os("removing a node VM's record", e)),
         }
         self.flush_pool_directory(&directory)

@@ -376,7 +376,7 @@ impl Store {
             .open(&path)
             .map_err(|error| Refusal::os("claiming a fresh native backing record", error))?;
         drop(file);
-        self.publish_durable(&directory, &temporary, &path, &bytes)?;
+        self.publish_durable(&directory, &temporary, &path, &bytes, || ())?;
         #[cfg(not(windows))]
         self.sync_dir(&self.disk)?;
         Ok(record)
@@ -464,7 +464,7 @@ impl Store {
         let bytes = record.encode()?;
         let directory = self.pool_directory()?;
         let (temporary, final_path) = scoped_paths(&directory, &name(&record.key.pool)?)?;
-        self.publish_durable(&directory, &temporary, &final_path, &bytes)
+        self.publish_durable(&directory, &temporary, &final_path, &bytes, || ())
     }
 
     /// A strict bounded SAME-Store snapshot, not a reference cache. Unknown/incomplete rows
@@ -592,13 +592,15 @@ impl Store {
 
     /// Shared scoped Box/Pool publication. The caller has encoded/reserved all bytes and paths. A write that fails
     /// before its rename removes its temporary file (the review's C-12), so no stray of it counts against its directory's
-    /// scan bound; a crash's are its directory's recovery's.
+    /// scan bound; a crash's are its directory's recovery's. `renamed` is told once the record's file holds `bytes`,
+    /// before its directory's flush, which may still fail: what the store's index then holds.
     pub(super) fn publish_durable(
         &self,
         directory: &Path,
         temporary: &Path,
         final_path: &Path,
         bytes: &[u8],
+        renamed: impl FnOnce(),
     ) -> Result<(), Refusal> {
         if let Err(why) = self.publish_temporary(temporary, final_path, bytes) {
             return Err(match fs::remove_file(temporary) {
@@ -610,6 +612,7 @@ impl Store {
                 },
             });
         }
+        renamed();
         self.flush_pool_directory(directory)
     }
 

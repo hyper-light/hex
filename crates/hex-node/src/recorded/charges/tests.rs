@@ -2865,7 +2865,11 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let learned = capacity.learned.unwrap();
     assert!(
@@ -3093,11 +3097,19 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
     );
     images.0.box_rates.lock().unwrap().clear();
     store.remove(&BoxId::new("img-1").unwrap()).unwrap();
-    std::fs::write(store.runtime_place(&capped.spec.id), b"{\"version\":").unwrap();
+    // A record damaged behind its store's back is out of the store's contract: the next node's open reads it (ROOT,
+    // 2026-11-14), so the node restarts over it.
+    let place = store.runtime_place(&capped.spec.id);
+    drop(node);
+    std::fs::write(place, b"{\"version\":").unwrap();
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
     let Some(Err(why)) = store.get(&capped.spec.id).unwrap() else {
         panic!("the process box's record still reads");
     };
     store.put(&booked("img-2", 2)).unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     let mut capacity = hex_api::Capacity {
         own: Default::default(),
@@ -3115,7 +3127,11 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let told: Vec<(String, String)> = capacity
         .learned
@@ -3192,7 +3208,7 @@ fn told_reservations(
         .attach_learned(
             hex_api::Class::Shards,
             &mut capacity,
-            &node.books.store.all().unwrap(),
+            &node.books.store.snapshot().unwrap(),
         )
         .unwrap();
     capacity.learned.and_then(|learned| learned.reservations)
@@ -3916,6 +3932,9 @@ fn reads2_a_windows_reads_read_no_record_file_at_10_100_and_1000() {
             assert!(store.node_vm(run).unwrap().is_some());
         }
         let read = store.reads() - opened;
-        assert_eq!(read, 0, "at {n} records and rows, a window's reads read {read} files");
+        assert_eq!(
+            read, 0,
+            "at {n} records and rows, a window's reads read {read} files"
+        );
     }
 }

@@ -560,7 +560,10 @@ fn reads2_b8_an_image_vms_calls_read_no_record_file() {
     assert_eq!(images.started(&id).unwrap().state, BoxState::Running);
     images.delete(&id).unwrap();
     let read = images.store.reads() - before;
-    assert_eq!(read, 0, "an inspect, a started and a delete read {read} record files");
+    assert_eq!(
+        read, 0,
+        "an inspect, a started and a delete read {read} record files"
+    );
 }
 
 /// The review's B-14 (batch 1114d's reads2; AC-T7.4.1): one image box's transaction holds its own box's turn alone, so
@@ -580,5 +583,9 @@ fn reads2_b14_one_boxs_transaction_leaves_anothers_turn_free() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(b_free, Some(true), "box b's turn taken while box a's transaction held");
+    assert_eq!(
+        b_free,
+        Some(true),
+        "box b's turn taken while box a's transaction held"
+    );
 }
