@@ -1155,13 +1155,13 @@ mod release_frame {
 /// AC-T7.4.1: the plain kinds' waits keep their order, the scheduler's and a physical report's after a hello, a list
 /// and the network namespaces' counts; a call naming a box or a class is no plain kind's, its box kind's wait its
 /// class's ([`BoxKind`]), a member's hand-over (joint plan step 17) appended last among them. Do: map each plain kind
-/// and each box kind's request. Expect: each plain kind at its place in a table of 20, the person's release of a
-/// capacity holder appended, then the node's links, then a connection's lessors last (docs/design/credential-grants.md
-/// C7); each box kind's none there, and its own kind and class.
+/// and each box kind's request. Expect: each plain kind at its place in a table of 21, the person's release of a
+/// capacity holder appended, then the node's links, then a connection's lessors (docs/design/credential-grants.md C7),
+/// then the capacity view keeper's word last (the review's A-10); each box kind's none there, and its own kind and class.
 #[test]
 fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!((KINDS, BOX_KINDS, CLASSES), (20, 13, 4));
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (21, 13, 4));
     for (request, index) in [
         (
             Request::Hello {
@@ -1203,6 +1203,13 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
         ),
         (Request::Call(Call::Links), 18),
         (Request::Call(Call::Lessors), 19),
+        (
+            Request::Call(Call::Reserved(hex_api::Reserved {
+                keeper: 1,
+                reserved: hex_api::CapacityResources::default(),
+            })),
+            20,
+        ),
     ] {
         assert!(
             std::ptr::eq(kind_of(waits, &request).unwrap(), &waits[index]),

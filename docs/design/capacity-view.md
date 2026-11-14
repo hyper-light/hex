@@ -295,6 +295,19 @@ holds there from then on: no admission there without a sync. A keeper that stops
 taken for no keeper (that would double-book against the reservations it still holds, CV5); only the
 person removing it from the holder's configuration returns the holder to admitting on its own there.
 
+Hex's node agent learns of the keeper the same configured way (the review's A-10; ROOT, 2026-11-14): the node runs
+with `--capacity-view` where a scheduler's capacity lane keeps its machine's room, the person setting it beside that
+lane's `capacity` configuration, since a scheduler is only a client of the node's socket and its hello names no lane.
+The keeper's word reaches the node as a call of the node's wire (`Call::Reserved`, `Runtime::reserved`): what every
+holder has reserved (`Keeper::foreign`) and the keeper's epoch, said by a thread of the scheduler's own at its start, at
+each change of what the holders hold and after each refresh, off the holders' path; the node keeps the latest keeper's
+word and refuses an older keeper's, typed. Its charge learner takes it off the fleet's budget, and every VM class's
+capacity answer says which of three states holds (`Learned::reservations`): with no `--capacity-view`, no holder
+reserves room there and none is counted; with it and no word since the node started, kiln's reservations are not yet
+heard, so the node's VMs are booked whole, none learned, until the word comes; with a word, what it says is counted, told
+unconfigured where it came to a node run without `--capacity-view`. So a misconfiguration is exposed only until the
+first word, and told.
+
 ### CV11. A keeper that is down, and one that restarts
 
 - **Down**: a holder whose keeper doesn't answer admits nothing new on that machine; its deciders see no
@@ -466,7 +479,11 @@ owns the room and the combined view. Agreed through ROOT (2026-11-12, `learned-c
   ledger can't be given less than it books: the node admits nothing of its own until they fit, refused
   typed (`local admission`), and every holder is owed the view (CV7), so both sides back off.
 - **Hex's budget** on a machine (goal 14's fleet budget, each guest's D188 room) is the view's room for
-  Hex, `Keeper::room_for_local()`: the machine's room less every holder's reservations.
+  Hex, `Keeper::room_for_local()`: the machine's room less every holder's reservations. The node measures the room
+  each window itself (`learned-charge.md` C7) and takes off what the keeper last told it the holders reserve (CV10's
+  `Call::Reserved`). A holder's runs' use is missing from what the node reads free too, so it is counted twice, an
+  under-count and never a credit (CV12), until kiln's holder reports what its runs use, so it can be given back as
+  Hex's own boxes' use is: an open item.
 - **A holder's reservation** keeps its amount for its life; a holder releases it and reserves anew to
   change it.
 

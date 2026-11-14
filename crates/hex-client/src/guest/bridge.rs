@@ -83,7 +83,13 @@ impl Read for Bridged {
 }
 
 impl Write for Bridged {
+    /// On Windows a cut connection's writes fail here, with the cut: its bridge never shuts the pair's receiving, whose
+    /// reset would drop what the owner hasn't read ([`end`]). On Unix the pair's other end stops reading.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        if let Some(cut) = self.cut.error() {
+            return Err(cut);
+        }
         self.sock.write(bytes)
     }
 
@@ -127,10 +133,14 @@ impl Duplex for Bridged {
     }
 }
 
-/// Ends the pair's other end one way at a time, writing first, so the owner reads its end whichever side half-closed
-/// first: macOS refuses `SHUT_RDWR` on a socket whose reading has ended (ENOTCONN) and shuts nothing (Shards M236,
-/// D175).
+/// Ends the pair's other end so the owner reads its end, after every byte that came before it. On Unix one way at a
+/// time, writing first, so the owner reads its end whichever side half-closed first: macOS refuses `SHUT_RDWR` on a
+/// socket whose reading has ended (ENOTCONN) and shuts nothing (Shards M236, D175); its reading shut, the owner's
+/// writes fail. On Windows its writing alone: Winsock resets a TCP connection whose receiving is shut while bytes wait
+/// or come (`shutdown`'s `SD_RECEIVE`), and the reset drops what the owner hasn't read yet (the review's D-4), so a cut
+/// connection's writes fail at [`Bridged`]'s write instead.
 pub fn end(to: &Local) {
     let _ = to.shutdown(Shutdown::Write);
+    #[cfg(unix)]
     let _ = to.shutdown(Shutdown::Read);
 }
