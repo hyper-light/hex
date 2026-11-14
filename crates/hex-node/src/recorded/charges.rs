@@ -374,6 +374,7 @@ pub(crate) struct Sorted<'a> {
 /// ([`crate::recorded::Recover::image_rate_period`]).
 pub(crate) fn sort<'a>(
     records: impl IntoIterator<Item = &'a BoxRecord>,
+    _rows: &[NodeVmRecord],
     learns: impl Fn(Holder<'_>) -> bool,
 ) -> Result<Sorted<'a>, Refusal> {
     let overflow = || Refusal::Invalid {

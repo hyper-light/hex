@@ -2531,7 +2531,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let mut sorted = match charges::sort(&records, |holder| learner.learns(holder)) {
+        let mut sorted = match charges::sort(&records, &rows, |holder| learner.learns(holder)) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
