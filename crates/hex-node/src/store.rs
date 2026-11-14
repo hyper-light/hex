@@ -1327,7 +1327,7 @@ mod tests {
     use super::*;
     use hex_api::{Bounds, BoxSpec, ClassSpec};
     use hex_core::record::Phase;
-    use hex_testkit::waits::{STORE_TURN, until};
+    use hex_testkit::waits::follow::{self, Party};
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
@@ -1764,31 +1764,48 @@ mod tests {
 
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
-    /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by the
-    /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
-    /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
-    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half.
+    /// from 31 threads at once, none of them waiting, as the store counts its waits; a second write of the held box
+    /// waits, its record not written, until the turn is let go, and then is. Each wait follows the threads that write
+    /// (the review's C-5), never a time: the store's own count says whether a write waited.
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
-        let write = STORE_TURN;
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
         let held = record("held");
         let turn = store.claim(&held.spec.id).unwrap();
-        // Hex's channel: std's receive comes late on macOS by the thread's QoS leeway (docs/design/deadline-waits.md).
-        let (done, written) = hex_wait::mpsc::sync_channel(31).unwrap();
         std::thread::scope(|s| {
-            for n in 0..31 {
-                let (store, done) = (&store, done.clone());
-                s.spawn(move || {
-                    done.try_send(store.put(&record(&format!("b{n}")))).unwrap();
-                });
-            }
+            // Hex's channel: std's receive comes late on macOS by the thread's QoS leeway (docs/design/deadline-waits.md).
+            let (done, written) = hex_wait::mpsc::sync_channel(31).unwrap();
+            let writers: Vec<_> = (0..31)
+                .map(|n| {
+                    let (store, done) = (&store, done.clone());
+                    s.spawn(move || {
+                        done.try_send(store.put(&record(&format!("b{n}")))).unwrap();
+                    })
+                })
+                .collect();
+            // Each writer holds a sender: once all have ended, the channel ends too.
+            drop(done);
+            let writes = Patience::measuring("test.store.other_boxes_writes");
             for _ in 0..31 {
-                let put = written
-                    .recv_timeout(write)
-                    .expect("a write waited on the held box's turn");
+                let put = follow::within(
+                    &writes,
+                    "another box's write answered",
+                    || {
+                        if writers.iter().all(|writer| writer.is_finished()) {
+                            Party::Ended
+                        } else {
+                            Party::Live
+                        }
+                    },
+                    |by| match by {
+                        Some(at) => written
+                            .recv_timeout(at.saturating_duration_since(std::time::Instant::now()))
+                            .ok(),
+                        None => written.recv().ok(),
+                    },
+                )
+                .unwrap();
                 put.unwrap();
             }
         });
@@ -1799,11 +1816,20 @@ mod tests {
         let turn = store.claim(&held.spec.id).unwrap();
         std::thread::scope(|s| {
             let second = s.spawn(|| store.put(&held));
-            // The second write's wait starts within its own call: its record bounds it.
-            let waits = Patience::seeded("test.store.second_write_waits", STORE_TURN);
-            until(&waits, "the second write of the held box waiting", || {
-                store.waited() == 1
-            })
+            // A look: the store tells no event as a write starts waiting, its count read.
+            let waits = Patience::measuring("test.store.second_write_waits");
+            follow::until(
+                &waits,
+                "the second write of the held box waiting",
+                || {
+                    if second.is_finished() {
+                        Party::Ended
+                    } else {
+                        Party::Live
+                    }
+                },
+                || store.waited() == 1,
+            )
             .unwrap();
             assert!(
                 !second.is_finished(),
