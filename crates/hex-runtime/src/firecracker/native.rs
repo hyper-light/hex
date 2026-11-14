@@ -1741,17 +1741,17 @@ mod io_tests {
             gate.write_all(b"\n").unwrap();
             drop(gate);
             let pid = self.pid();
-            hex_testkit::waits::until(&STAND_IN_ENDS, "the stand-in VMM's end", || {
-                rustix::process::waitid(
-                    rustix::process::WaitId::Pid(pid),
-                    rustix::process::WaitIdOptions::EXITED
-                        | rustix::process::WaitIdOptions::NOWAIT
-                        | rustix::process::WaitIdOptions::NOHANG,
-                )
-                .unwrap()
-                .is_some()
-            })
-            .unwrap();
+            // Its end, waited for on the child's own end (the review's C-5): waitid blocks until it, and NOWAIT leaves
+            // it a zombie.
+            let ended =
+                hex_testkit::waits::follow::whole(&STAND_IN_ENDS, "the stand-in VMM's end", || {
+                    rustix::process::waitid(
+                        rustix::process::WaitId::Pid(pid),
+                        rustix::process::WaitIdOptions::EXITED
+                            | rustix::process::WaitIdOptions::NOWAIT,
+                    )
+                });
+            assert!(ended.unwrap().is_some(), "the stand-in VMM's end");
         }
 
         /// Has its receipt collect its end, as the node's supervisor collects an ended VMM's at once
