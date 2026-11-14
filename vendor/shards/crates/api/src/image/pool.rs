@@ -56,6 +56,8 @@ struct Key {
 /// Why a warm host did not take a run.
 #[derive(Debug)]
 pub(super) enum Taken {
+    /// The host ended before CREATE was attempted; it certainly never received this run.
+    Untaken,
     /// Its microVM is another request's (`wire::Cause::Unfit`): the run gets a host of its
     /// own.
     Unfit,
@@ -367,6 +369,9 @@ impl<H: Hosts> Pooling<H> {
 
     /// The run `request` of `spec`: on a warm host of its pool where one is ready and takes
     /// it, else on a host of its own; its pool told of it, and of its end as its guest drops.
+    /// A run that asks for its GPU report (D233) is no pool's: a warm host's VM process starts
+    /// before its run names the report's scope, which that process frames its report with as
+    /// its renderer is made, so the run gets a host of its own and its pool hears nothing.
     pub(super) fn boot(
         &self,
         spec: &ImageSpec,
@@ -374,6 +379,9 @@ impl<H: Hosts> Pooling<H> {
         patience: Duration,
         stop: &BootStop,
     ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+        if request.gpu_report.is_some() {
+            return self.hosts.fresh(spec, request, patience, stop);
+        }
         let host = HostOf::of(spec);
         let exemplar = request.exemplar();
         let key = Key {
@@ -394,7 +402,9 @@ impl<H: Hosts> Pooling<H> {
         let guest = match warm.map(|w| self.hosts.take(w, spec, request, patience, stop)) {
             Some(Ok(guest)) => Ok(guest),
             Some(Err(Taken::Refused(refused))) => Err(refused),
-            Some(Err(Taken::Unfit)) | None => self.hosts.fresh(spec, request, patience, stop),
+            Some(Err(Taken::Untaken | Taken::Unfit)) | None => {
+                self.hosts.fresh(spec, request, patience, stop)
+            }
         };
         match guest {
             Ok(guest) => Ok(Box::new(Pooled {
@@ -477,6 +487,15 @@ impl<W: Send> ImageGuest for Pooled<W> {
         self.guest.wait_member(member, timeout)
     }
 
+    fn wait_channel(
+        &self,
+        member: &super::MemberName,
+        channel: wire::Channel,
+        timeout: Duration,
+    ) -> Result<Option<super::ChannelEnd>, ImageRefusal> {
+        self.guest.wait_channel(member, channel, timeout)
+    }
+
     fn stats(&self, scope: wire::StatsScope, patience: Duration) -> Result<wire::Stats, ImageRefusal> {
         self.guest.stats(scope, patience)
     }
@@ -542,12 +561,16 @@ impl<W: Send> ImageGuest for Pooled<W> {
         self.guest.stop()
     }
 
-    fn wait_for(&self, timeout: Duration) -> Result<Option<wire::RunEnd>, ImageRefusal> {
+    fn wait_for(&self, timeout: Duration) -> Result<Option<wire::RunEnded>, ImageRefusal> {
         self.guest.wait_for(timeout)
     }
 
     fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
         self.guest.keep_diagnostics(to)
+    }
+
+    fn take_gpu_report(&self, patience: Duration) -> Result<crate::physical::GpuReport, ImageRefusal> {
+        self.guest.take_gpu_report(patience)
     }
 }
 
@@ -579,6 +602,8 @@ mod tests {
         failed: usize,
         /// Its warm hosts refuse their runs as another microVM's.
         unfit: bool,
+        /// One spare ended before its CREATE.
+        untaken: bool,
     }
 
     #[derive(Debug, Default)]
@@ -664,6 +689,14 @@ mod tests {
         ) -> Result<Option<super::super::MemberEnd>, ImageRefusal> {
             none()
         }
+        fn wait_channel(
+            &self,
+            _: &super::super::MemberName,
+            _: wire::Channel,
+            _: Duration,
+        ) -> Result<Option<super::super::ChannelEnd>, ImageRefusal> {
+            none()
+        }
         fn stats(&self, _: wire::StatsScope, _: Duration) -> Result<wire::Stats, ImageRefusal> {
             none()
         }
@@ -718,10 +751,13 @@ mod tests {
         fn stop(&self) -> Result<(), ImageRefusal> {
             Ok(())
         }
-        fn wait_for(&self, _: Duration) -> Result<Option<wire::RunEnd>, ImageRefusal> {
+        fn wait_for(&self, _: Duration) -> Result<Option<wire::RunEnded>, ImageRefusal> {
             Ok(None)
         }
         fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+            none()
+        }
+        fn take_gpu_report(&self, _: Duration) -> Result<crate::physical::GpuReport, ImageRefusal> {
             none()
         }
     }
@@ -766,6 +802,9 @@ mod tests {
             _: &BootStop,
         ) -> Result<Box<dyn ImageGuest>, Taken> {
             drop(warm);
+            if std::mem::take(&mut self.log().untaken) {
+                return Err(Taken::Untaken);
+            }
             if self.log().unfit {
                 return Err(Taken::Unfit);
             }
@@ -805,6 +844,7 @@ mod tests {
             gpu_devices: Vec::new(),
             sign_ins: Vec::new(),
             upstream_roots: Vec::new(),
+            gpu_report: None,
         }
     }
 
@@ -825,6 +865,7 @@ mod tests {
             gpu_devices: Vec::new(),
             sign_ins: Vec::new(),
             upstream_roots: Vec::new(),
+            gpu_report: None,
         }
     }
 
@@ -857,6 +898,25 @@ mod tests {
         hosted.until("every run's end told", |l| l.ended_runs == 3);
         drop(pools);
         hosted.until("every warm host ended with its pools", |l| l.warm == 0);
+    }
+
+    #[test]
+    fn a_definitely_untaken_spare_leaves_its_run_a_fresh_host() {
+        let hosted = Hosted::default();
+        let pools = Pooling::new(hosted.clone(), 1, KEEP_TEST).unwrap();
+        drop(
+            pools
+                .boot(&spec(), &request(1, None), PATIENCE, &BootStop::new())
+                .unwrap(),
+        );
+        until_ready(&pools, 1);
+        hosted.tell(|l| l.untaken = true);
+        let guest = pools
+            .boot(&spec(), &request(1, None), PATIENCE, &BootStop::new())
+            .unwrap();
+        assert_eq!(hosted.log().fresh, 2);
+        assert_eq!(hosted.log().taken, 0);
+        drop(guest);
     }
 
     /// D253's pools: a warm host that finds its run another microVM's (`Unfit`) gives the run
@@ -937,6 +997,42 @@ mod tests {
         assert_eq!(hosted.log().warm, 1, "a pool whose run goes on keeps its host");
         drop(run);
         hosted.until("its warm host ended past its keep-alive", |l| l.warm == 0);
+        drop(pools);
+    }
+
+    /// D233 through D253's pools: a run that asks for its GPU report gets a host of its own and
+    /// starts no warm one, as a warm host's VM starts before its run names the report's scope;
+    /// the same run asking none is pooled as every run is.
+    #[test]
+    fn a_run_asking_its_gpu_report_gets_a_host_of_its_own_and_no_pool() {
+        let hosted = Hosted::default();
+        let pools = Pooling::new(hosted.clone(), 4, KEEP_TEST).unwrap();
+        let gpus = vec![crate::PhysicalGpu::MetalRegistry(7)];
+        let scoped = wire::Request {
+            gpu_devices: gpus.clone(),
+            gpu_report: Some([3; 16]),
+            ..request(1, None)
+        };
+        let run = pools.boot(&spec(), &scoped, PATIENCE, &BootStop::new()).unwrap();
+        let other = pools.boot(&spec(), &scoped, PATIENCE, &BootStop::new()).unwrap();
+        assert_eq!(hosted.log().fresh, 2);
+        drop((run, other));
+        assert_eq!(
+            hosted.log().begun,
+            0,
+            "no warm host for a run that asks its report"
+        );
+        let unscoped = wire::Request {
+            gpu_devices: gpus,
+            ..request(1, None)
+        };
+        let pooled = pools
+            .boot(&spec(), &unscoped, PATIENCE, &BootStop::new())
+            .unwrap();
+        hosted.until("the unscoped run's pool warms a host", |l| {
+            l.fresh == 3 && l.begun == 1
+        });
+        drop(pooled);
         drop(pools);
     }
 

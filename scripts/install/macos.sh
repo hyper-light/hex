@@ -47,11 +47,11 @@ FIRST_ID=
 PGREP=/usr/bin/pgrep
 PKILL=/usr/bin/pkill
 # How long a user's processes get to end after SIGKILL: the measured kill-to-empty envelope, doubled, for the
-# user's size, the same bound as hex_core::drain::bound: 0.883 ms for one member and 0.298 ms for each past
-# it (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt; the x2 is the lead's margin).
-# The helper and the process class start from this bound and raise it as they see slower drains
-# (hex_core::drain::Learned); uninstall drains once, and a bound learned across installs would have to
-# outlive the uninstall that removes everything, so it keeps the record's.
+# user's size: 0.883 ms for one member and 0.298 ms for each past it
+# (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt; the x2 is the lead's margin). Uninstall
+# drains once, and a bound learned across installs would have to outlive the uninstall that removes everything,
+# so it keeps the record's. The helper and the process class keep no such bound: they learn their wait and
+# follow a box past it (decision 9; the review's E-12).
 DRAIN_FIXED_S=0.000883
 DRAIN_PER_MEMBER_S=0.000298
 # The directory tool, by absolute path. A write is made once: any failure is refused naming dscl's own

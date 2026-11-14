@@ -5,8 +5,8 @@ use std::sync::{Condvar, Mutex};
 
 use hex_api::{Allocation, Bounds, BoxState, ClassSpec, ShardsImage};
 use shards_api::image::{
-    Bound, Channel, ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberInfo, MemberName, Ready,
-    RunEnd, StartedFrom, Stats, StatsScope,
+    Bound, Channel, ChannelEnd, ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberInfo,
+    MemberName, Ready, RunEnd, RunEnded, StartedFrom, Stats, StatsScope, Unused,
 };
 
 use super::*;
@@ -125,11 +125,30 @@ impl ImageGuest for Held {
         self.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         Ok(())
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.end.lock().unwrap().clone())
+    fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
+        Ok(self
+            .end
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|end| RunEnded::unused(end, Unused::Killed)))
     }
     fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
         Ok(())
+    }
+    fn wait_channel(
+        &self,
+        _: &MemberName,
+        _: Channel,
+        _: Duration,
+    ) -> Result<Option<ChannelEnd>, ImageRefusal> {
+        Err(unasked())
+    }
+    fn take_gpu_report(
+        &self,
+        _: Duration,
+    ) -> Result<shards_api::physical::GpuReport, ImageRefusal> {
+        Err(unasked())
     }
 }
 
