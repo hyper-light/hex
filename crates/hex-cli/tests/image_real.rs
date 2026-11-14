@@ -20,7 +20,8 @@
 //!   `HEX_IMAGE_CONTEXT`, an Agentfile image's build context (a harness image, which no registry need serve), built
 //!   there and pinned by the manifest digest its build says, as Shards' store finds a pinned image by content
 //!   (`Store::holding`): `crates/hex-cli/tests/image_harness` is one any arch builds, its base pinned by its digest
-//!   and its one harness `/bin/sh -c cat`, so a run of its members alone has a member on every host; or else
+//!   and its one harness `cat` and then a sleep until a signal ends it, so a run of its members alone has a member that
+//!   runs on every host (HEX-IMG-5's TERM reaches it); or else
 //!   `HEX_IMAGE`, `NAME@sha256:...`, pulled there by its digest;
 //! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's or build's; `SHARDS_KERNEL` and `SHARDS_INIT`: the
 //!   kernel the run hosts boot (D231's own, as `shards run` takes it), so no first boot downloads one, and the

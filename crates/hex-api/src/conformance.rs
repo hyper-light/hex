@@ -1243,7 +1243,9 @@ fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             ),
             || format!("exec in a VM: {:?}", exec.as_ref().err()),
         )?;
-        // A signal but KILL is its run's members' (goal 2's item 2): taken, each member's lane given it.
+        // A signal but KILL is its run's members' (goal 2's item 2): taken, each member's lane given it. The fixture's
+        // image has a member that runs until a signal ends it, as image_real's harness does: one that had ended already
+        // takes none, and a VM whose members all had is refused NotRunning, as `Runtime::signal` says.
         let term = rt.signal(&id, Signal::TERM);
         ensure(term == Ok(()), || format!("TERM to a VM: {term:?}"))?;
         let info = rt.inspect(&id).map_err(|e| e.to_string())?;
