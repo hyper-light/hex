@@ -976,6 +976,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
         .unwrap();
