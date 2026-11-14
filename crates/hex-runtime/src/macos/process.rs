@@ -1687,7 +1687,7 @@ impl ProcessBox {
             );
             let deadline = killed.checked_add(patience);
             loop {
-                if alive_in(pgid, &mut pids)? == 0 {
+                if alive_in(pgid, &mut pids)? == 0 && !emptying_held(pgid) {
                     if let Ok(mut learned) = self.drain.lock() {
                         learned.observe(members, killed.elapsed());
                     }
@@ -1894,7 +1894,7 @@ pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
     );
     let deadline = Instant::now().checked_add(hex_core::drain::bound(members));
     loop {
-        if alive_in(pgid, &mut pids)? == 0 {
+        if alive_in(pgid, &mut pids)? == 0 && !emptying_held(pgid) {
             return Ok(());
         }
         if deadline.is_none_or(|d| Instant::now() >= d) {
@@ -1904,6 +1904,20 @@ pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
             ));
         }
         std::thread::yield_now();
+    }
+}
+
+/// Whether group `pgid`'s emptying is held by a test ([`crate::emptying::hold`]): while it is, the group reads as not
+/// yet empty. Never in production.
+fn emptying_held(pgid: i32) -> bool {
+    #[cfg(test)]
+    {
+        crate::emptying::hold::held(&pgid.to_string())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = pgid;
+        false
     }
 }
 
