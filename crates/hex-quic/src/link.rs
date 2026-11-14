@@ -33,6 +33,11 @@ fn refusal(op: &'static str) -> impl Fn(Refused) -> Refusal {
 }
 
 impl guest::Link for Link {
+    /// A node's ports over QUIC take this node's own connection alone: no caller in another process opens them.
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let conn = self
             .endpoint

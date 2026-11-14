@@ -2048,19 +2048,31 @@ impl GuestRuntime {
         let Some(booted) = booted else {
             return Ok(None);
         };
+        self.evented_of(&booted)
+    }
+
+    /// `booted`'s evented connection, joined to the node's loop where it isn't yet.
+    fn evented_of(&self, booted: &Booted) -> Result<Option<EventedClient>, Refusal> {
         let cached = booted.evented.lock().map_err(poisoned)?.clone();
         if let Some(client) = cached.filter(|client| !client.closed()) {
             return Ok(Some(client));
         }
-        self.join(&booted)?;
+        self.join(booted)?;
         Ok(booted.evented.lock().map_err(poisoned)?.clone())
     }
 
-    pub fn program_client_for(&self, id: &BoxId) -> Result<Option<EventedClient>, Refusal> {
-        let booted = self.booted_for(id)?;
-        let Some(booted) = booted else {
+    /// The client a forwarded exec into box `id`'s guest goes through, from one read of its record (HEX-RT-17): where
+    /// its caller would `offer` the exec's streams (a Windows node's exec with streams) and the guest's link lends its
+    /// VM's identity, a control connection of the exec's own, whose streams the caller opens itself; else the guest's
+    /// evented connection, which makes the exec's asked streams here: a node VM's lanes lend none (the review's D-10).
+    /// None: no guest holds `id`.
+    pub fn exec_client_for(&self, id: &BoxId, offer: bool) -> Result<Option<ExecClient>, Refusal> {
+        let Some(booted) = self.booted_for(id)? else {
             return Ok(None);
         };
+        if !(offer && booted.link.lends_identity()) {
+            return Ok(self.evented_of(&booted)?.map(ExecClient::Evented));
+        }
         let joins = self
             .joins
             .lock()
@@ -2071,6 +2083,14 @@ impl GuestRuntime {
         let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&booted.link), room)?;
         let client = evented_owner(client)?;
         joins.join(token, pump)?;
-        Ok(Some(client))
+        Ok(Some(ExecClient::Offered(client)))
     }
+}
+
+/// How a forwarded exec reaches its guest ([`GuestRuntime::exec_client_for`]).
+pub enum ExecClient {
+    /// A control connection of the exec's own: its streams offered to its caller, which opens them itself.
+    Offered(EventedClient),
+    /// The guest's evented connection: its asked streams made by this node, their ends handed to the caller.
+    Evented(EventedClient),
 }

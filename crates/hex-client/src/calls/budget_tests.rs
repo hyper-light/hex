@@ -364,6 +364,10 @@ struct TokenLink {
 }
 
 impl Link for TokenLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         Some(self.budget)
     }
@@ -531,6 +535,10 @@ struct NoDial {
 }
 
 impl Link for NoDial {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         Some(self.budget)
     }
@@ -1337,6 +1345,10 @@ struct RecordedLink {
 }
 
 impl Link for RecordedLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         self.budget
     }
@@ -2601,6 +2613,10 @@ struct AbsoluteNamedLink {
 }
 
 impl Link for AbsoluteNamedLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, None)
     }

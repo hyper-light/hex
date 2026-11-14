@@ -1670,6 +1670,10 @@ fn a_node_that_stops_its_guest_leaves_no_record() {
 
 struct CapacityLink(Option<hex_api::Capacity>);
 impl Link for CapacityLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         assert_eq!(port, stream::CONTROL_PORT);
         hex_client::guest::own_duplex(ready_relay_with_answer(Some(

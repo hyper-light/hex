@@ -164,6 +164,30 @@ pub trait Link: Send + Sync + 'static {
             why: "this link has no lendable VM identity".to_owned(),
         })
     }
+    /// Whether this link lends its VM's identity ([`Link::identity`]) to a caller in another process, which then opens
+    /// an exec's streams itself (HEX-RT-17): a Shards guest's vsock does; a node VM's lanes, which its run's endpoint
+    /// opens to this node's key alone, don't. Each link says which: none is taken for either.
+    fn lends_identity(&self) -> bool;
+    /// An exec's stream named `named`, for a caller in another process, on Windows, where the node hands such a caller
+    /// handles alone, never sockets (HEX-RT-17): a link that lends no identity carries the stream on a pipe of its own,
+    /// whose end is the caller's ([`Piped`]); `None` where the link's own connection is that end.
+    #[cfg(windows)]
+    fn dial_piped(
+        &self,
+        named: Named,
+        deadline: Option<Instant>,
+    ) -> Option<Result<Piped, Refusal>> {
+        let _ = (named, deadline);
+        None
+    }
+}
+
+/// An exec's stream a link carries on a pipe of its own ([`Link::dial_piped`]): the caller's end, and, for an output
+/// stream, what tells its cut to its program's end.
+#[cfg(windows)]
+pub struct Piped {
+    pub end: hex_api::End,
+    pub cut: Option<Cut>,
 }
 
 /// The same fallibly allocated link retained by every stream on a connection.
@@ -556,7 +580,16 @@ impl<W: Waits> Stream<W> {
             if !on {
                 return Ok(None);
             }
-            let conn = self.dial_named_before(Named { exec, stream }, deadline)?;
+            let named = Named { exec, stream };
+            #[cfg(windows)]
+            if let Some(piped) = self.link.dial_piped(named, deadline.map(ReplyDeadline::at)) {
+                let Piped { end, cut } = piped?;
+                if let (Some(name), Some(cut)) = (output(stream), cut) {
+                    self.watch(exec.id, name, cut)?;
+                }
+                return Ok(Some(end));
+            }
+            let conn = self.dial_named_before(named, deadline)?;
             if let (Some(name), Some(cut)) = (output(stream), conn.cut()) {
                 self.watch(exec.id, name, cut)?;
             }

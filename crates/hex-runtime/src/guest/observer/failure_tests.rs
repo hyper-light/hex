@@ -22,6 +22,10 @@ struct LocalLink {
 }
 
 impl Link for LocalLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let stream = match port {
             stream::CONTROL_PORT => self.control.lock().unwrap().take(),
