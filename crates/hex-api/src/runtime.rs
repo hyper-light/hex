@@ -1141,17 +1141,27 @@ impl LearnedEnd {
     }
 }
 
-/// Joint plan step 14 (D255; ROOT, 2026-11-13): what holds a managed microVM's CPU to the rate its node's learner set.
+/// Joint plan step 14 (D255, D260; ROOT, 2026-11-13): what holds a microVM's CPU to the share its node's learner set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RateHeld {
-    /// Its VM's governor (Shards' D191, D255): its vCPUs held to the rate over its VM process's own period.
+    /// Its VM's governor (Shards' D191, D247, D255): its vCPUs held to its share less its VMM's own CPU over its last
+    /// window (D260), so the two together keep to the share; on Windows its job's CPU rate at the share beside, the hard
+    /// ceiling.
     Governor,
-    /// Its VM's governor, under its job's CPU rate at the same rate as the hard ceiling (Windows). The job covers its
-    /// VMM's own CPU too, so it binds first: the learner holds no VMM CPU apart for a managed VM, a known limit owed on
-    /// Shards (a managed guest's per-vCPU guest time).
+    /// Its VM's governor at its whole share, under its job's CPU rate at the same share, the hard ceiling (Windows),
+    /// while its VMM's own CPU isn't read apart from its vCPUs' (D260: from its boot to its VM process's first use
+    /// answer, or a process that answers none): the job covers the VMM's own too, so it binds first.
     GovernorUnderJob,
     /// Its platform's cap (macOS's CPU control, Windows' job), its VM process taking no rate: why, in its words.
     Platform(String),
+    /// Its VM's governor at its whole share while its VMM's own CPU isn't read apart from its vCPUs' (D260: from its
+    /// boot to its VM process's first use answer, or a process that answers none), where nothing holds the VMM's own
+    /// at the share (macOS, and an image VM on every OS): it runs past the share by its own. Why, in its words.
+    GovernorOwnUnheld(String),
+    /// Its VMM's own CPU over its last window, `own` milli-CPU, took its whole share, `share` (D260): its governor
+    /// holds its vCPUs at the least rate a governor takes, 1 milli-CPU, and what holds the VMM is its platform's (on
+    /// Windows its job at the share; on macOS nothing at the share). A finding, never a quiet floor.
+    OwnTakesShare { own: u64, share: u64 },
 }
 
 /// Joint plan step 14 (D255): how one running managed microVM's CPU is held to its rate, by its holder.
@@ -1167,18 +1177,26 @@ impl RateHeld {
         Ok(match self {
             Self::Governor => Self::Governor,
             Self::GovernorUnderJob => Self::GovernorUnderJob,
-            Self::Platform(why) => {
-                let mut copy = String::new();
-                copy.try_reserve_exact(why.len())
-                    .map_err(|_| Refusal::Exhausted {
-                        what: "a managed VM's rate's reason",
-                        bound: why.len(),
-                    })?;
-                copy.push_str(why);
-                Self::Platform(copy)
-            }
+            Self::Platform(why) => Self::Platform(reason(why)?),
+            Self::GovernorOwnUnheld(why) => Self::GovernorOwnUnheld(reason(why)?),
+            Self::OwnTakesShare { own, share } => Self::OwnTakesShare {
+                own: *own,
+                share: *share,
+            },
         })
     }
+}
+
+/// A copy of `why`, a rate's reason, its room reserved fallibly.
+fn reason(why: &str) -> Result<String, Refusal> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(why.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a managed VM's rate's reason",
+            bound: why.len(),
+        })?;
+    copy.push_str(why);
+    Ok(copy)
 }
 
 impl LearnedRate {

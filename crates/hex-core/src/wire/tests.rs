@@ -4927,6 +4927,42 @@ fn w14_d255_what_holds_each_managed_vms_rate_crosses_the_wire() {
     assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
 }
 
+/// Joint plan step 14 (D260; ROOT, 2026-11-13): a VM whose VMM's own CPU isn't read apart from its vCPUs', told why, and
+/// one whose VMM's own took its whole share cross the wire on its class's capacity answer, appended after D255's. Do
+/// encode a capacity whose learned rates name each, beside one its governor holds; read it back, and write and read it
+/// as JSON. Expect it back exactly each way.
+#[test]
+fn w14_d260_a_vms_own_unheld_and_its_own_taking_its_share_cross_the_wire() {
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.rates = vec![
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-7").unwrap()),
+                held: hex_api::RateHeld::OwnTakesShare {
+                    own: 4_200,
+                    share: 4_000,
+                },
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Box(BoxId::new("hex-place-a-1-0-8").unwrap()),
+                held: hex_api::RateHeld::GovernorOwnUnheld("the microVM has not started".into()),
+            },
+            hex_api::LearnedRate {
+                id: LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16])),
+                held: hex_api::RateHeld::Governor,
+            },
+        ];
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let json = serde_json::to_value(&capacity).unwrap();
+    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
+}
+
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with
 /// a prior more than a class has profiles, a prior booked past its ceiling, and a box's holding twice; then read one
 /// whose holdings' count says one more than a node's boxes. Expect each refused, the last before any holding is read.

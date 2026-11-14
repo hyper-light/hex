@@ -82,6 +82,9 @@ fn vm(name: &str, n: u8) -> BoxRecord {
     record
 }
 
+/// A cap as the learner told it (D260): the VM, its share, and its VMM's own as read or why not.
+type Told = (String, u64, Result<u64, String>);
+
 /// The managed VMs as a record: each one's CPU and memory as the test sets them, every cap set and every VM stopped,
 /// in order.
 #[derive(Default)]
@@ -99,7 +102,15 @@ struct Record {
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
     rooms: RefCell<Vec<(String, i64)>>,
+    /// Each VM's share as it was capped, in order.
     rates: RefCell<Vec<(String, u64)>>,
+    /// Each managed VM's guest time as its VM process answers its use (D260), as the test sets it: none apart for a VM
+    /// it sets none for.
+    guest: RefCell<BTreeMap<String, ManagedGuestTime>>,
+    /// Each managed VM's life so far, as the test sets it.
+    lives: RefCell<BTreeMap<String, Duration>>,
+    /// Each cap as the learner told it (D260), in order.
+    caps: RefCell<Vec<Told>>,
     refuse_rates: std::cell::Cell<bool>,
     stops: RefCell<Vec<String>>,
     /// The node's records, where the test keeps them: an intent is written there, as the node writes it.
@@ -116,6 +127,25 @@ impl Managed for Record {
             .get(record.spec.id.as_str())
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
+    }
+
+    fn guest_time(&self, holder: Holder<'_>) -> Result<ManagedGuestTime, Refusal> {
+        let Holder::Box(record) = holder;
+        Ok(self
+            .guest
+            .borrow()
+            .get(record.spec.id.as_str())
+            .cloned()
+            .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
+    }
+
+    fn life(&self, holder: Holder<'_>) -> Result<Duration, Refusal> {
+        let Holder::Box(record) = holder;
+        self.lives
+            .borrow()
+            .get(record.spec.id.as_str())
+            .copied()
+            .ok_or_else(|| Refusal::Broken("no life set".into()))
     }
 
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal> {
@@ -157,14 +187,18 @@ impl Managed for Record {
         Ok(())
     }
 
-    fn set_rate(&self, holder: Holder<'_>, rate: u64) -> Result<hex_api::RateHeld, Refusal> {
+    fn set_rate(&self, holder: Holder<'_>, cap: Cap<'_>) -> Result<hex_api::RateHeld, Refusal> {
         let Holder::Box(record) = holder;
         if self.refuse_rates.get() {
             return Err(Refusal::Broken("the rate was refused".into()));
         }
-        self.rates
-            .borrow_mut()
-            .push((record.spec.id.as_str().to_owned(), rate));
+        let name = record.spec.id.as_str().to_owned();
+        self.rates.borrow_mut().push((name.clone(), cap.share));
+        let own = match cap.own {
+            Own::Read(own) => Ok(own),
+            Own::Unheld(why) => Err(why.to_owned()),
+        };
+        self.caps.borrow_mut().push((name, cap.share, own));
         Ok(self
             .held
             .borrow()
@@ -851,9 +885,11 @@ fn image_vm(name: &str, started: u64) -> BoxRecord {
 /// D188). Do run a window of an image VM of 16 vCPUs, booked at 4 CPUs and 4 GiB, in a 24-CPU fleet budget; then one in
 /// which its VM process ran 3.2 s of CPU in 300 ms, 2.4 s of it its vCPUs' guest time, holding 3 GiB; then one whose
 /// run host told 15 vCPUs' guest time. Expect it read through its host use, its lifetime its place in the start order;
-/// held at its ceiling's 16 CPUs until it has run, then capped through its rate at the 10.667 CPUs it was charged; its
-/// guest told its room, its budget less what it holds, as it moves (64 GiB, then 61 GiB); and the third window refused,
-/// typed, its guest time naming a vCPU count other than its reading before's.
+/// held at its ceiling's 16 CPUs until it has run, told so from its first window with its VMM's own unheld (D260: its
+/// run here tells no span to reckon it over), then capped through its rate at the 10.667 CPUs it was charged, its
+/// governor's rate leaving out its VMM's own over the window, 2.666 CPUs; its guest told its room, its budget less what
+/// it holds, as it moves (64 GiB, then 61 GiB); and the third window refused, typed, its guest time naming a vCPU count
+/// other than its reading before's.
 #[test]
 fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     let io = Record::default();
@@ -875,8 +911,12 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
         .unwrap();
     assert_eq!(
-        *io.rates.borrow(),
-        Vec::<(String, u64)>::new(),
+        *io.caps.borrow(),
+        vec![(
+            "img-1".to_owned(),
+            16_000,
+            Err("its life so far reads none".to_owned())
+        )],
         "held at its 16-CPU ceiling until it has run"
     );
     io.host.borrow_mut().insert(
@@ -891,7 +931,10 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
             start + WINDOW,
         )
         .unwrap();
-    assert_eq!(*io.rates.borrow(), vec![("img-1".to_owned(), 10_667)]);
+    assert_eq!(
+        io.caps.borrow().last(),
+        Some(&("img-1".to_owned(), 10_667, Ok(2_666)))
+    );
     assert_eq!(
         *io.rooms.borrow(),
         vec![
@@ -1581,6 +1624,188 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
             ("vm-2", &hex_api::RateHeld::Platform(unsupported)),
             ("vm-1", &hex_api::RateHeld::Governor),
         ]
+    );
+}
+
+/// A managed Shards VM's guest time as its VM process answers its use (D260): each of its 16 vCPUs at `each_ns`.
+fn sixteen(each_ns: u64) -> ManagedGuestTime {
+    ManagedGuestTime::PerVcpu(vec![each_ns; 16])
+}
+
+/// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): a managed VM is held split from its VM process's first use
+/// answer, its governor at its share less its VMM's own: over its life so far at that first answer, then over each
+/// window. Do run a capping learner's first window over a managed Shards VM of 16 vCPUs, booked at 4 CPUs in a 24-CPU
+/// budget, whose VM process answers its first use as the window reads it: its 16 vCPUs ran 2.5 s of its guest and its
+/// scope 3 s of CPU in the 10 s it has run; then a window 300 ms on, in which its scope ran 360 ms of CPU, 300 ms of it
+/// its vCPUs'. Expect it capped in its first window at its 16-CPU share with its VMM's own over its life, 50 milli-CPU,
+/// left out of its governor's rate; then at its 4-CPU booking with its VMM's own over the window, 200 milli-CPU.
+#[test]
+fn w14_d260_a_managed_vm_is_held_split_from_its_first_use_answer() {
+    let io = Record::default();
+    let vm = vm("vm-1", 1);
+    io.set("vm-1", 3_000_000, GIB);
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), sixteen(156_250_000));
+    io.lives
+        .borrow_mut()
+        .insert("vm-1".to_owned(), Duration::from_secs(10));
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
+        .unwrap();
+    assert_eq!(*io.caps.borrow(), vec![("vm-1".to_owned(), 16_000, Ok(50))]);
+    io.set("vm-1", 3_360_000, GIB);
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), sixteen(175_000_000));
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&vm)),
+            budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(
+        io.caps.borrow().last(),
+        Some(&("vm-1".to_owned(), 4_000, Ok(200)))
+    );
+}
+
+/// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): until its VM process's first use answer a managed VM's VMM's
+/// own isn't read apart, and its cap says why; its first answer, whenever it comes, splits it over its life so far. Do
+/// run a window over a managed Shards VM of 16 vCPUs, booked at 4 CPUs, whose process answers its microVM hasn't
+/// started, its scope having run 2.94 s of CPU; then one 300 ms on whose answer tells its 16 vCPUs ran 2.5 s of its
+/// guest in the 10 s it has run, its scope 3 s. Expect its first cap at its 16-CPU share, its VMM's own unheld in its
+/// process's words; its second at its 4-CPU booking, its VMM's own over its life, 50 milli-CPU.
+#[test]
+fn w14_d260_until_its_first_use_answer_a_vms_own_is_unheld_and_told() {
+    let io = Record::default();
+    let vm = vm("vm-1", 1);
+    io.set("vm-1", 2_940_000, GIB);
+    io.guest.borrow_mut().insert(
+        "vm-1".to_owned(),
+        ManagedGuestTime::Unheld("the microVM has not started".to_owned()),
+    );
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
+        .unwrap();
+    assert_eq!(
+        *io.caps.borrow(),
+        vec![(
+            "vm-1".to_owned(),
+            16_000,
+            Err("the microVM has not started".to_owned())
+        )]
+    );
+    io.set("vm-1", 3_000_000, GIB);
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), sixteen(156_250_000));
+    io.lives
+        .borrow_mut()
+        .insert("vm-1".to_owned(), Duration::from_secs(10));
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&vm)),
+            budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(
+        io.caps.borrow().last(),
+        Some(&("vm-1".to_owned(), 4_000, Ok(50)))
+    );
+}
+
+/// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): a VM's governor is told its share less its VMM's own, never
+/// none, and what holds it says so. Do take its governor's rate and what holds it, on a platform whose job holds its
+/// share and on one with none, for a 4-CPU share whose VMM's own is 300 milli-CPU; is the whole share; is past it; and
+/// isn't read. Expect 3,700, held by its governor; the least rate a governor takes, 1 milli-CPU (`RATE`'s unit, Shards'
+/// D247 and D255 taking milli-CPU and none letting the vCPUs be), told as its VMM's own taking its share on either
+/// platform, a finding; and while unread its whole share, under its job where it has one, else its VMM's own unheld,
+/// why told.
+#[test]
+fn w14_d260_a_vms_governor_is_its_share_less_its_vmms_own_never_none_and_says_so() {
+    assert_eq!(GOVERNOR_LEAST, NonZeroU64::MIN);
+    let cap = |own| Cap { share: 4_000, own };
+    let read = cap(Own::Read(300));
+    assert_eq!(read.governor().get(), 3_700);
+    for job in [true, false] {
+        assert_eq!(read.held(job), hex_api::RateHeld::Governor);
+    }
+    for own in [4_000, 5_000] {
+        let eaten = cap(Own::Read(own));
+        assert_eq!(eaten.governor(), GOVERNOR_LEAST);
+        for job in [true, false] {
+            assert_eq!(
+                eaten.held(job),
+                hex_api::RateHeld::OwnTakesShare { own, share: 4_000 }
+            );
+        }
+    }
+    let unheld = cap(Own::Unheld("the microVM has not started"));
+    assert_eq!(unheld.governor().get(), 4_000);
+    assert_eq!(unheld.held(true), hex_api::RateHeld::GovernorUnderJob);
+    assert_eq!(
+        unheld.held(false),
+        hex_api::RateHeld::GovernorOwnUnheld("the microVM has not started".to_owned())
+    );
+}
+
+/// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): an image VM's governor takes its share less its VMM's own
+/// too, split from its run's first answer: Σown past the fleet's budget is what D260 closes. Do run a window of an image
+/// VM of 16 vCPUs whose run host says its VM process ran 3 s of CPU, 2.5 s of it its vCPUs' guest time, in the 10 s since
+/// its run started; then one 300 ms on, in which it ran 360 ms, 300 ms of it its vCPUs'. Expect its first cap at its
+/// 16-CPU share, its VMM's own over its run, 50 milli-CPU; its second at its 4-CPU booking, its VMM's own over the
+/// window, 200 milli-CPU.
+#[test]
+fn w14_d260_an_image_vms_governor_takes_its_share_less_its_vmms_own() {
+    let io = Record::default();
+    let vm = image_vm("img-1", 1);
+    let use_at = |cpu_ns: u64, each_ns: u64, window: Duration| HostUse {
+        cpu_ns,
+        footprint_bytes: GIB,
+        resident_bytes: GIB,
+        guest_ns: vec![each_ns; 16],
+        window,
+    };
+    io.host.borrow_mut().insert(
+        "img-1".to_owned(),
+        use_at(3_000_000_000, 156_250_000, Duration::from_secs(10)),
+    );
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, &holders(std::slice::from_ref(&vm)), budget, start)
+        .unwrap();
+    assert_eq!(
+        *io.caps.borrow(),
+        vec![("img-1".to_owned(), 16_000, Ok(50))]
+    );
+    io.host.borrow_mut().insert(
+        "img-1".to_owned(),
+        use_at(3_360_000_000, 175_000_000, Duration::from_millis(10_300)),
+    );
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&vm)),
+            budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(
+        io.caps.borrow().last(),
+        Some(&("img-1".to_owned(), 4_000, Ok(200)))
     );
 }
 
