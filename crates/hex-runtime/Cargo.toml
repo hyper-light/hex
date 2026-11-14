@@ -17,6 +17,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 shards-api.workspace = true
+# The most a boot's request carries (shards_abi::run::MAX_PAYLOAD), which bounds the destinations a box's grants name
+# (src/grants.rs; the review's D-9); and, in the tests, a vCPU's typed unread cause (shards_abi::guest_time::Unread),
+# which the image class's usage test reads as its run host says it (src/guest/image_tests.rs). shards-api names neither
+# without re-exporting it.
+shards-abi = { path = "../../vendor/shards/crates/abi" }
 socket2.workspace = true
 thiserror.workspace = true
 triomphe.workspace = true
@@ -50,9 +55,6 @@ native-trusted-entry-measurement = []
 [dev-dependencies]
 # The image class's tests wait on their own facts' patiences (src/guest/image_tests.rs).
 hex-testkit.workspace = true
-# A vCPU's typed unread cause (shards_abi::guest_time::Unread), which the image class's usage test reads as its run
-# host says it (src/guest/image_tests.rs); shards-api names the type without re-exporting it.
-shards-abi = { path = "../../vendor/shards/crates/abi" }
 proptest = "1.12.0"
 tempfile.workspace = true
 # src/guest/image_tests.rs: a node VM's run's real agent-control endpoint (D251, D252) on loopback, its run host the
