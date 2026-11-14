@@ -34,12 +34,23 @@ fn os(op: &'static str) -> impl Fn(io::Error) -> Refused {
 struct Writer {
     conn: Conn,
     frame: Mutex<()>,
+    /// The thread that said each message on the link, and whether it was a hint: a test's look at who writes (the
+    /// review's E-1).
+    #[cfg(test)]
+    said_by: Mutex<Vec<(std::thread::ThreadId, bool)>>,
 }
 
 impl Writer {
     fn say(&self, msg: &ToHolder) -> Result<(), Refused> {
         let bytes = codec::encode(msg).map_err(Refused::Message)?;
         let _whole = self.frame.lock().map_err(|_| Refused::Ended)?;
+        #[cfg(test)]
+        if let Ok(mut said) = self.said_by.lock() {
+            said.push((
+                std::thread::current().id(),
+                matches!(msg, ToHolder::Hint { .. }),
+            ));
+        }
         self.conn
             .write_all(&bytes, None)
             .map_err(os("saying a capacity message"))
@@ -137,6 +148,8 @@ impl<V: CapacityView + Send + 'static> Server<V> {
         let writer = Arc::new(Writer {
             conn,
             frame: Mutex::new(()),
+            #[cfg(test)]
+            said_by: Mutex::new(Vec::new()),
         });
         match self.links.lock() {
             Ok(mut links) => {

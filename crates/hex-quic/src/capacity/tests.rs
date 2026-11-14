@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use hex_api::capacity::sim::SimView;
 use hex_api::capacity::{
-    Amounts, Budget, Close, Event, Holder, Out, ReservationId, ToHolder, ToKeeper, Why,
+    Amounts, Budget, Close, Event, Holder, Host, Out, ReservationId, ToHolder, ToKeeper, Why,
 };
 use hex_core::patience::Patience;
 use hex_testkit::waits::follow::{self, Party};
@@ -361,5 +361,52 @@ fn only_the_holders_its_host_authorizes_are_served() {
                 .iter()
                 .any(|line| line.contains("holder=\"kiln-a.capacity.test\"")),
         "{lines:?}"
+    );
+}
+
+/// The review's E-1, CV7, AC-T7.4.1: a hint is said on the link it is owed to by that link's own writer, never on the
+/// thread of the host that owes it, so a holder that stops reading stalls no host and no other holder. Do: a holder
+/// joins; its host changes its own admissions and says the hints owed (`Server::hint`) on the test's thread; the holder
+/// hears its hint. Expect: the hint said on a thread of the link's own, never the host's.
+#[test]
+fn e1_a_hint_is_said_by_its_links_own_writer_never_on_its_hosts_thread() {
+    let ca = SimCa::new().unwrap();
+    // The name `linked` dials.
+    let node = endpoint(&ca, "keeper-auth.capacity.test", true);
+    let (log, _) = kept();
+    let budget = Budget {
+        holders: 1,
+        reservations: 8,
+        name_bytes: 64,
+    };
+    let server = Server::new(
+        SimView::new(budget, cpu(4_000)).unwrap(),
+        &named(&["b.e1.test"]),
+        log,
+    );
+    let serving = Arc::clone(&server);
+    let acceptor = node.acceptor(CAPACITY_PORT);
+    std::thread::spawn(move || serving.serve(acceptor));
+    let (_b_end, mut b_link) = linked(&ca, &node, "b.e1.test");
+    let mut b = Holder::start("b.e1.test".into(), 1, 8, &[]).unwrap();
+    join(&mut b_link, &mut b);
+    server.view().lock().unwrap().set_local(cpu(1)).unwrap();
+    server.hint().unwrap();
+    assert!(matches!(heard(&mut b_link), ToHolder::Hint { .. }));
+    let host = std::thread::current().id();
+    let said: Vec<(std::thread::ThreadId, bool)> = server
+        .links
+        .lock()
+        .unwrap()
+        .values()
+        .flat_map(|writer| writer.said_by.lock().unwrap().clone())
+        .collect();
+    assert!(
+        said.iter().any(|(_, hint)| *hint),
+        "no hint said on the link: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|(thread, hint)| *hint && *thread == host),
+        "a hint said on its host's thread: {said:?}"
     );
 }
