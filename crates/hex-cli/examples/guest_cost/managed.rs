@@ -825,7 +825,13 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
-        assert!(!text.contains("\ndisk_left "), "{text}");
+        // Its native owner released each guest's AppContainer profiles with its scope, the window's guest's too: no
+        // record of one is left in its cache.
+        let records = out.join("runtime").join("cache").join("containers");
+        let left: Vec<_> = std::fs::read_dir(&records)
+            .map(|dir| dir.flatten().map(|entry| entry.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "{left:?} left in {records:?}");
         println!("{}\n{text}", made.summary);
     }
 }
