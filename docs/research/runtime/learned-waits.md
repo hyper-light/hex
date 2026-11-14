@@ -57,8 +57,10 @@ it.
 
 ## The sites the API serves (2026-11-13)
 
-Each production wait is `Patience::measuring`; where it has no bound it follows its party. What each follows, and what
-is wired:
+Each production wait is `Patience::measuring`; where it has no bound it follows its party. Its name is the `wait=` of
+the line its run-out is told by on the process's log, `hex.wait event=ran_out wait=<name> w_star_ns=<W*>
+waited_ns=<how long> party=<a JSON string>`, integers in nanoseconds, which kiln counts by wait (ROOT and kiln's metrics
+owner, 2026-11-14): the names below are stable. What each follows, and what is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
@@ -69,6 +71,7 @@ is wired:
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W*, the run-out told as W* passes; on the supervising thread, which every box shares, within W* alone, a run's box past it followed on a thread of its own (the review's E-3) |
 | `node.run_said` (hex-node `supervise::run`) | the claimer removing a run's box | its word, which comes on every path, its drop saying it stopped where it unwound | none: a local site | liveness alone past W* (the review's E-3) |
+| `runtime.run_made`, `runtime.run_said` (hex-runtime `run`, macOS and Windows) | a run's setup making its box; the claimer removing it | the setup's move or the claimer's word, each coming on every path, a drop saying its holder stopped where it unwound | none: a local site | liveness alone past W* (the review's E-11) |
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
 | `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
@@ -81,6 +84,9 @@ is wired:
 | `oci.delete.exit`, `oci.delete.emptying`, `oci.shim.exit` (hex-runtime `linux::oci::run`) | a killed init with no cgroup; a killed container's cgroup; a create's shim once its container is ready | the init's pidfd; the cgroup's `cgroup.events`; the shim's pidfd, which it exits by itself, never killed at a time | none: a local site | liveness alone past W* (the review's (c): each was 10 s) |
 | `boxrun.emptying` (hex-cli `box_run`) | a `hex box run` box whose strays it killed | its `cgroup.events` | none: a local site | liveness alone past W*, only after a kill that went (the review's (c): it was 10 s) |
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)); a Firecracker VM's and observer's stop too (`guest::wait_stopped`; A-13, 2026-11-14: they waited the configured `stop_ms`, so census retirement failed past it), an observer's under a caller's deadline to that deadline |
+| `client.guest.link.dial` (hex-client `guest::shards::ShardsLink::dial_following`) | the guest's VM, a dial to one of its ports with no caller's deadline | Shards' connector's look at its VM before each CONNECT and after | none | liveness alone past W*; each attempt still cut at the link's bound, a later answer discarded (the review's D-3, owed) |
+| `client.guest.offered.connect` (hex-client `guest::connect_following`, Windows) | a borrowed guest's stdio CONNECT, waiting for its OK, with no caller's deadline | Shards' borrowed CONNECT's own deadline passing, made again | none | liveness alone past W*; each attempt cut at the link's setup bound (the review's D-3, owed) |
+| `store.node_vm_owner` (hex-node `store::node_vm::follow_owner`) | a node VM row's owner, a node process | its lock, which a thread of its own takes as the owner ends | none: a local site | liveness alone past W*, the run-out told |
 | `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
@@ -208,13 +214,16 @@ Tests, waiting on a time rather than on their party:
    `absolute_connect_completes_and_evented_retains_the_same_link`: each failed only under load on adacachy2 (their
    runs 12 s against 2.5 s quiet), so each waits on a time, not on its party. Owed.
 9. **A fixed duration as a test's wait** (hex-cli's tests): `FIXTURE`'s 30 s in `guest_boot_deadline.rs` went
-   (6042219c, its waits following the relay), and the process class's (df13d537: `DELETE_PATIENCE` in
-   `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations). Left:
-   `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`,
-   `windows_node.rs`, `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD`
-   (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
-   (`windows_oci_box.rs`, a seeded test wait), the bystander's 10 s in hex-runtime's `linux::oci::run` tests, and
-   inline durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
+   (6042219c, its waits following the relay), the process class's (df13d537: `DELETE_PATIENCE` in
+   `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations), and
+   `EMPTY_PATIENCE` in `box_run_cli.rs` and the bystander's 10 s in hex-runtime's `linux::oci::run` tests (each
+   following its party: the run's cgroup's threads, the bystander's life), and `macos_process_box.rs`'s measurement
+   windows (`SAMPLE_GUARD`, each sample now followed to its end; the CPU rate's 2 s, now one scheduling round) with
+   its end-seen check (the review's E-5: `Status::late_ends`, a count, 0 over its runs). Left: `PATIENCE` 60 s
+   (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`, `windows_node_recovery.rs`;
+   `macos_pool_restart.rs` after goal 14's fix there), `RERUN_BOUND` 300 s
+   (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD` (`windows_oci_box.rs`, a seeded test wait), and inline
+   durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
    (`charge_fleet.rs`,
    `guest_boot_record.rs`, `image_real.rs`, `image_record.rs`, `native_firecracker_smoke.rs`,
    `native_windows_hcs_compute.rs`, `node_hosted_real.rs`) after goal 12's batch, built and linted here, run by the

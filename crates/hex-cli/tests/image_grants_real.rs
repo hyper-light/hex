@@ -210,9 +210,12 @@ fn handed_over<P>(
     mut shown: impl FnMut() -> Result<(BoxState, Option<Exit>, Option<String>), Refusal>,
 ) -> Result<(P, u64), String> {
     let mut answer = None;
-    let asks = hex_testkit::waits::until(
+    // A look: the node tells no event as a member is handed over, asked again. Its party, the box, ends the wait in
+    // the fact itself (a box that ends first, or any other refusal).
+    let asks = hex_testkit::waits::follow::until(
         &MEMBER_HANDED_OVER,
         &format!("{id}'s member handed over"),
+        || hex_testkit::waits::follow::Party::Live,
         || {
             answer = Some(match ask() {
                 Err(Refusal::Lifecycle {
@@ -361,9 +364,11 @@ fn outcome_of(report: &Report, label: &str) -> Outcome {
 /// answering party while that lives); says the answer and how many looks it took.
 fn answered_at(client: &Client, id: &BoxId, at: SocketAddr) -> (String, u64) {
     let mut answer = String::new();
-    let looks = hex_testkit::waits::until(
+    // A look: each is one connection read to its end. Its party, the VM, ends the wait in the fact itself.
+    let looks = hex_testkit::waits::follow::until(
         &MEMBER_ANSWERED,
         &format!("the probe's answer at {at}"),
+        || hex_testkit::waits::follow::Party::Live,
         || {
             answer.clear();
             if TcpStream::connect(at)
@@ -840,10 +845,8 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
         open: input("HEX_GRANTS_OPEN"),
         command_port: port("HEX_GRANTS_COMMAND_PORT"),
     };
-    // A VM's start boots it, which the client's learned bounds (an OCI box's records) would refuse first: every wait
-    // measures, learned as the run goes, and each waits for its answer while its party lives (the person's rule of
-    // 2026-11-13), the run's whole with no deadline of its own.
-    hex_core::patience::measure_all();
+    // A VM's start boots it: each wait is learned as the run goes, and past its W* tells its run-out and waits for its
+    // answer while its party lives (the person's rule of 2026-11-13), the run's whole with no deadline of its own.
     assert!(
         hex_core::patience::census(step),
         "a census sink was installed before this one"

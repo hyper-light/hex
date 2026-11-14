@@ -60,6 +60,8 @@ pub struct Rusage {
     /// (`bsd/kern/kern_exit.c:2075-2080`), and reads a live one's exit time as 0
     /// (`bsd/kern/kern_resource.c:3455-3462`).
     pub ended: bool,
+    /// When it ended, its exit's own time (`ri_proc_exit_abstime`): 0 while it runs.
+    pub exited: u64,
     pub footprint: u64,
     /// The highest footprint it reached.
     pub peak: u64,
@@ -99,6 +101,7 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
     Ok(Some(Rusage {
         started: ri.ri_proc_start_abstime,
         ended: ri.ri_proc_exit_abstime != 0,
+        exited: ri.ri_proc_exit_abstime,
         footprint: ri.ri_phys_footprint,
         peak: ri.ri_lifetime_max_phys_footprint,
         cpu: ri.ri_user_time.saturating_add(ri.ri_system_time),

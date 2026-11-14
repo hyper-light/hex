@@ -216,17 +216,23 @@ impl StandIn {
 
     /// The keeper's next word, checked and given to the core; what the core says back is said in turn. The events.
     fn hear_one(&mut self) -> Result<(ToHolder, Vec<Event>), Lost> {
+        // By the life of the keeper's link, as this end lists it (the review's C-5), and its end, which the read says
+        // itself; a link gone before the read said so is lost as one that said so.
+        let (end, keeper) = (self.end.as_ref(), self.keeper.as_str());
         let link = self.link.as_mut().unwrap();
         let heard = follow::within(
             &HEAR,
             "the keeper's next word",
-            || Party::Live,
+            || match end.map(Endpoint::links) {
+                Some(Ok(links)) if links.iter().any(|link| link.peer == keeper) => Party::Live,
+                _ => Party::Ended,
+            },
             |by| match link.hear(by) {
                 Err(Refused::Deadline { .. }) => None,
                 heard => Some(heard),
             },
         )
-        .unwrap();
+        .unwrap_or(Err(Refused::Closed { refusal: None }));
         let msg = heard.map_err(|why| self.lose(why))?;
         if let Some(view) = view_of(&msg) {
             self.tally.views += 1;

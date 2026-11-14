@@ -58,6 +58,7 @@ fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     }
 }
 
@@ -89,10 +90,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
-    // C7), and no node VM's receipt (joint plan step 39); a spec ends with one route option and its band, 0 here
-    // (joint plan step 14).
+    // C7), no node VM's receipt (joint plan step 39) and no learner's why (A-3); a spec ends with one route option and
+    // its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>()
+        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1
     } else {
         3
     };
@@ -209,11 +210,12 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 11..],
-        [0; 11],
-        "the empty list's count, then no learned use, its machine's time unread and no node VM's count, ends it"
+        cut[cut.len() - 12..],
+        [0; 12],
+        "the empty list's count, then no learned use, its machine's time unread, no node VM's count and no learner's \
+         why, ends it"
     );
-    cut.truncate(cut.len() - 11);
+    cut.truncate(cut.len() - 12);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -492,6 +494,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);
@@ -1683,6 +1686,7 @@ fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
             Some("its record names another native scope".to_owned()),
         ),
         (LifecycleCause::Busy, None),
+        (LifecycleCause::NodeVmEnded, None),
     ] {
         let worded = why.is_some();
         let refused = Answer::Refused(Refusal::Lifecycle {
@@ -1698,9 +1702,9 @@ fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
         if worded {
             continue;
         }
-        // 3 is Retired (joint plan step 14); the next tag is unknown. The cause is the byte before its reason's
-        // option, a 0 where it gives none (joint plan step 12).
-        for tag in [4, u8::MAX] {
+        // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); the next tag is unknown. The
+        // cause is the byte before its reason's option, a 0 where it gives none (joint plan step 12).
+        for tag in [5, u8::MAX] {
             let mut invalid = bytes.clone();
             let at = invalid.len() - 2;
             invalid[at] = tag;
@@ -2814,7 +2818,7 @@ fn route_wire_route(execution: Execution) -> RouteOffer {
             execution,
             gpu: match execution {
                 Execution::ShardsDedicated => GpuEligibility::Required,
-                Execution::ShardsShared => GpuEligibility::None,
+                Execution::ShardsShared | Execution::NodeVm => GpuEligibility::None,
                 _ => GpuEligibility::Any,
             },
         },
@@ -2825,7 +2829,7 @@ fn route_wire_route(execution: Execution) -> RouteOffer {
         backing: match execution {
             Execution::ShardsShared => Some(route_wire_shared_key()),
             Execution::ShardsDedicated => Some(route_wire_key()),
-            Execution::Native | Execution::Firecracker => None,
+            Execution::Native | Execution::Firecracker | Execution::NodeVm => None,
         },
     }
 }
@@ -2910,8 +2914,8 @@ fn route_wire_capacity_bytes(
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
+    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2928,10 +2932,12 @@ fn route_wire_capacity_bytes(
     }
     w.u32(0);
     w.u8(0);
-    // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39).
+    // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39), then no
+    // learner's why (A-3).
     w.u8(0);
     w.u8(0);
     w.u32(0);
+    w.u8(0);
     w.done().unwrap()
 }
 
@@ -3387,8 +3393,8 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
+    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -3451,9 +3457,10 @@ fn route_wire_hostile_route_and_backing_tags_are_redacted() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // 3 is Retired (joint plan step 14); 4 is no cause. The cause is the byte before its reason's option tag.
+    // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); 5 is no cause. The cause is the byte
+    // before its reason's option tag.
     let cause = bytes.len() - 2;
-    bytes[cause] = 4;
+    bytes[cause] = 5;
     let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
     assert!(matches!(
         fault,
@@ -4247,9 +4254,9 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
         ));
     }
     assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
-    // 3 is Retired (joint plan step 14); the next cause is unknown. The cause is the byte before its reason's option
-    // tag, an entry's last (joint plan step 14, (B)).
-    for cause in [4, u8::MAX] {
+    // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); the next cause is unknown. The
+    // cause is the byte before its reason's option tag, an entry's last (joint plan step 14, (B)).
+    for cause in [5, u8::MAX] {
         let mut raw = bytes.clone();
         raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 2] = cause;
         assert!(matches!(
@@ -4766,6 +4773,9 @@ fn learned_capacity() -> Capacity {
         }],
         rates: Vec::new(),
         window: None,
+        unread: Vec::new(),
+        awaits: Vec::new(),
+        ranked: Vec::new(),
     });
     capacity
 }
@@ -4793,9 +4803,9 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 7..],
-        [0; 7],
-        "no learned use, its machine's time unread, then no node VM's count, ends it"
+        cut[cut.len() - 8..],
+        [0; 8],
+        "no learned use, its machine's time unread, then no node VM's count and no learner's why, ends it"
     );
     cut.truncate(cut.len() - 1);
     assert!(matches!(
@@ -4845,6 +4855,7 @@ fn node_vm_receipt(run: u8, phase: NodeVmPhase) -> NodeVmReceipt {
         run: hex_api::NodeRun::from_bytes([run; 16]),
         booking: learned_resources(2_000, 4),
         phase,
+        guest: learned_resources(1_500, 3),
     }
 }
 
@@ -4878,8 +4889,10 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
     let mut twice = capacity.try_clone().unwrap();
     twice.node_vms[1].run = twice.node_vms[0].run;
     assert!(twice.check().is_err());
-    // The receipts' count, then each receipt: its run, its booking and its phase, the last of which ends it.
-    let at = bytes.len() - (size_of::<u32>() + 3 * (16 + 3 * size_of::<u64>() + 1));
+    // The receipts' count, then each receipt: its run, its booking, its phase and its guest's room (V2), the last of
+    // which comes just before the learner's why, none here (A-3), which ends it.
+    let receipt = 16 + 3 * size_of::<u64>() + 1 + 3 * size_of::<u64>();
+    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1);
     let mut past = bytes.clone();
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -4888,7 +4901,9 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
         Err(Fault::Value { .. })
     ));
     let mut unknown = bytes;
-    *unknown.last_mut().unwrap() = 3;
+    // The last receipt's phase: before its guest's room and the learner's why.
+    let phase = unknown.len() - 2 - 3 * size_of::<u64>();
+    unknown[phase] = 3;
     assert!(matches!(
         read_answer(&received(&unknown, 0), MAX_MESSAGE),
         Err(Fault::Value { .. })
@@ -5027,8 +5042,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
-    // end's count, no ceiling's and no rate's, its machine's time unread, and no node VM's count.
-    let at = bytes.len() - (6 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 2);
+    // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
+    // (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3).
+    let at = bytes.len() - (9 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5123,9 +5139,11 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
-    // capability's option and tag; then no ceiling's count and no rate's, its machine's time unread, and no node VM's
-    // count.
-    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 2);
+    // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
+    // await's and no ranked VM's (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3):
+    // five counts and lengths before place 4's three.
+    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>();
+    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -6033,4 +6051,194 @@ fn s33_a_lease_answer_of_no_defined_kind_is_refused() {
             other => panic!("kind {kind:#06x} body {body:?}: {other:?}"),
         }
     }
+}
+
+/// Place 4 (ROOT, 2026-11-13: what Hex decides on its own says why): what a learner couldn't read and why, what each
+/// guest's room awaits, and each node VM ranked above every box and why cross the wire on a class's capacity answer,
+/// last, after its window, a box and a node VM alike. Do encode a learned capacity naming a box and a node VM unread, a box
+/// awaiting `GuestRoom` and a node VM ranked, and read it back; then its JSON without the three. Expect it back exactly,
+/// and the JSON read as none of them.
+#[test]
+fn w39_what_a_learner_couldnt_read_awaits_and_ranks_crosses_the_wire_last() {
+    let run = LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16]));
+    let boxed = LearnedHolder::Box(BoxId::new("hex-place-a-1-0-9").unwrap());
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.unread = vec![
+            hex_api::LearnedUnread {
+                id: boxed.clone(),
+                why: "its cgroup's use can't be read".to_owned(),
+            },
+            hex_api::LearnedUnread {
+                id: run.clone(),
+                why: "its run isn't running here".to_owned(),
+            },
+        ];
+        learned.awaits = vec![hex_api::LearnedAwait {
+            id: boxed,
+            needs: Upstream::GuestRoom,
+        }];
+        learned.ranked = vec![hex_api::LearnedRank {
+            run: hex_api::NodeRun::from_bytes([5; 16]),
+            why: "box torn-1's record can't be read: its record is torn".to_owned(),
+        }];
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(39, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let mut json = serde_json::to_value(&capacity).unwrap();
+    for field in ["unread", "awaits", "ranked"] {
+        json["learned"].as_object_mut().unwrap().remove(field);
+    }
+    let older = serde_json::from_value::<Capacity>(json)
+        .unwrap()
+        .learned
+        .unwrap();
+    assert!(older.unread.is_empty() && older.awaits.is_empty() && older.ranked.is_empty());
+}
+
+/// Place 4 (ROOT, 2026-11-13: neither exceeds its bound under the most holders): what a learner couldn't read, what each
+/// guest's room awaits and each node VM it ranks are each held to a node's boxes, one for each running VM, and fitted to
+/// one message after its holdings, ends and rates, in their order. Do check learned uses naming one past a node's boxes of each; then fit a
+/// capacity naming a node's boxes of each, and encode it. Expect each refused, typed, naming what passed its bound; the
+/// fitted capacity within one message, each list a prefix of what it named, the first cut, and refused with one more.
+#[test]
+fn w39_what_a_learner_couldnt_read_awaits_and_ranks_is_held_to_a_nodes_boxes() {
+    let holder =
+        |n: usize| LearnedHolder::Box(BoxId::new(&format!("hex-place-a-1-0-{n}")).unwrap());
+    let unread: Vec<hex_api::LearnedUnread> = (0..=MAX_LEARNED_HOLDINGS)
+        .map(|n| hex_api::LearnedUnread {
+            id: holder(n),
+            why: "its cgroup's use can't be read".to_owned(),
+        })
+        .collect();
+    let awaits: Vec<hex_api::LearnedAwait> = (0..=MAX_LEARNED_HOLDINGS)
+        .map(|n| hex_api::LearnedAwait {
+            id: holder(n),
+            needs: Upstream::GuestRoom,
+        })
+        .collect();
+    let ranked: Vec<hex_api::LearnedRank> = (0..=MAX_LEARNED_HOLDINGS)
+        .map(|n| hex_api::LearnedRank {
+            run: hex_api::NodeRun::from_bytes(u128::try_from(n).unwrap().to_le_bytes()),
+            why: "box torn-1's record can't be read: its record is torn".to_owned(),
+        })
+        .collect();
+    let learned = || learned_capacity().learned.unwrap();
+    for (what, past) in [
+        (
+            "learned unread VMs",
+            Learned {
+                unread: unread.clone(),
+                ..learned()
+            },
+        ),
+        (
+            "learned awaits",
+            Learned {
+                awaits: awaits.clone(),
+                ..learned()
+            },
+        ),
+        (
+            "learned ranked VMs",
+            Learned {
+                ranked: ranked.clone(),
+                ..learned()
+            },
+        ),
+    ] {
+        assert!(
+            matches!(past.check(), Err(Refusal::Exhausted { what: named, bound }) if named == what && bound == MAX_LEARNED_HOLDINGS),
+            "{what}: {:?}",
+            past.check()
+        );
+    }
+    let mut capacity = learned_capacity();
+    capacity.learned = Some(Learned {
+        unread: unread[..MAX_LEARNED_HOLDINGS].to_vec(),
+        awaits: awaits[..MAX_LEARNED_HOLDINGS].to_vec(),
+        ranked: ranked[..MAX_LEARNED_HOLDINGS].to_vec(),
+        ..learned()
+    });
+    fit_learned(&mut capacity).unwrap();
+    let fitted = capacity.learned.as_ref().unwrap();
+    assert!(fitted.check().is_ok(), "{:?}", fitted.check());
+    assert!(
+        !fitted.unread.is_empty() && fitted.unread.len() < MAX_LEARNED_HOLDINGS,
+        "{} of a node's boxes",
+        fitted.unread.len()
+    );
+    assert_eq!(fitted.unread, unread[..fitted.unread.len()]);
+    assert_eq!(fitted.awaits, awaits[..fitted.awaits.len()]);
+    assert_eq!(fitted.ranked, ranked[..fitted.ranked.len()]);
+    let bytes = answer(
+        39,
+        &Answer::Capacity(Some(capacity.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let mut more = capacity;
+    if let Some(learned) = more.learned.as_mut() {
+        let next = learned.unread.len();
+        learned.unread.push(unread[next].clone());
+    }
+    assert!(answer(39, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
+}
+
+/// A-3 (ROOT's audit, 2026-11-13: a failed window was told nowhere): why a node's learner learned nothing for a class
+/// crosses the wire on its capacity answer, last. Do encode a capacity naming why, and one naming none, and read both
+/// back; then read the first's JSON without the field. Expect both back exactly, and the JSON read as naming none.
+#[test]
+fn w14_a3_why_a_learner_learned_nothing_crosses_the_wire_last() {
+    let mut capacity = device_capacity(Vec::new());
+    capacity.unlearned =
+        Some(Refusal::Broken("the node's records can't be read".into()).to_string());
+    for offered in [capacity.try_clone().unwrap(), device_capacity(Vec::new())] {
+        let offered = Answer::Capacity(Some(offered));
+        let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            offered
+        );
+    }
+    let mut json = serde_json::to_value(&capacity).unwrap();
+    json.as_object_mut().unwrap().remove("unlearned");
+    assert_eq!(
+        serde_json::from_value::<Capacity>(json).unwrap().unlearned,
+        None
+    );
+}
+
+/// V2 (ROOT, 2026-11-13: a node VM's route's room is its guest): a node VM's receipt carries what its guest is admitted
+/// at, after its phase, and a route naming NodeVm crosses the wire by its own tag. Do encode a capacity answer naming a
+/// node VM whose guest is admitted at 1.5 CPUs and 3 GiB, and a route offer naming NodeVm, and read both back. Expect
+/// each back exactly.
+#[test]
+fn v2_a_node_vms_receipt_carries_its_guests_room_and_its_route_its_own_tag() {
+    let mut capacity = device_capacity(Vec::new());
+    capacity.node_vms = vec![node_vm_receipt(7, NodeVmPhase::Ready)];
+    capacity.routes = vec![RouteOffer {
+        key: RouteKey {
+            class: Class::Oci,
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Arm64,
+            },
+            execution: Execution::NodeVm,
+            gpu: GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    }];
+    let offered = Answer::Capacity(Some(capacity));
+    let bytes = answer(39, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
 }

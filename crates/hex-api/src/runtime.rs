@@ -77,7 +77,12 @@ pub trait Runtime: Send + Sync {
     /// refuses the run as [`Refusal::Platform`], naming its platform.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
 
-    /// Sends `signal` to every process in the box.
+    /// Sends `signal` to every process in the box. A Shards image VM's processes are its run's members (goal 2's item
+    /// 2): KILL stops the whole VM; any other signal goes to each member of its run that runs, on the member's own lane
+    /// of the run's agent-control endpoint, the VM running on and a member that has ended skipped. Where no member of
+    /// its run can take one (each runs no program, or has ended), it is refused
+    /// `NotRunning(id, "signal: its run has no member a signal reaches")`: nothing in the run takes a signal, which says
+    /// nothing of whether the VM runs.
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal>;
 
     /// The box as it is now.
@@ -144,8 +149,11 @@ pub trait Runtime: Send + Sync {
     /// whose boxes run no VM process of their own, naming the class.
     /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run, read as its
     /// run ended (goal 54's change 3: a Shards image VM's final [`HostUse`], its window the whole run): `None` where the
-    /// box has no VM process of its own, or where none could be read at its end (its run had ended before its delete, or
-    /// its last read failed). A box already gone is refused `NoSuchBox`, never answered with a use made up.
+    /// box has no VM process of its own or its run never started (docs/design/shards-image-class.md §3: kiln charges
+    /// nothing then). A run that started answers its use or is refused, typed, the box left as it was (the review's
+    /// B-5): its read's own refusal where that read is refused, and [`Refusal::NotRunning`] where its run had ended, or
+    /// was being stopped, before its delete, a run's use being read only as it runs. A box already gone is refused
+    /// `NoSuchBox`, never answered with a use made up.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
         self.delete(id).map(|()| None)
     }
@@ -280,6 +288,10 @@ pub enum Execution {
     ShardsShared,
     ShardsDedicated,
     Firecracker,
+    /// An oci box in its node's node VM, the guest under shards-init that runs the node's oci class (joint plan step 39;
+    /// ROOT, 2026-11-13, V2): its node VM's receipt, booked beside it, pays the host envelope once, as a shared backing's
+    /// grant does, and its room is that node VM's guest. Appended (wire append-only).
+    NodeVm,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -315,7 +327,7 @@ pub struct RouteKey {
 impl RouteKey {
     pub fn backend_class(self) -> crate::Class {
         match self.execution {
-            Execution::Native => self.class,
+            Execution::Native | Execution::NodeVm => self.class,
             Execution::ShardsShared | Execution::ShardsDedicated => crate::Class::Shards,
             Execution::Firecracker => crate::Class::Firecracker,
         }
@@ -330,6 +342,10 @@ impl RouteKey {
             }
             (crate::Class::Oci, Execution::ShardsDedicated) => {
                 self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::Required
+            }
+            // V2: an oci box of a Linux image in its node's node VM, which passes no device through.
+            (crate::Class::Oci, Execution::NodeVm) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::None
             }
             (crate::Class::Shards, Execution::ShardsDedicated)
             | (crate::Class::Firecracker, Execution::Firecracker) => {
@@ -387,6 +403,10 @@ pub struct NodeVmReceipt {
     pub run: NodeRun,
     pub booking: CapacityResources,
     pub phase: NodeVmPhase,
+    /// What its guest is admitted at ([`Allocation::guest`]; V2): the room its node's `NodeVm` routes admit within
+    /// while it is Ready, as a shared backing's guest is its routes'. Added after its phase (append-only).
+    #[serde(default)]
+    pub guest: CapacityResources,
 }
 
 /// Pool configuration identity and the Store-generated native incarnation; neither PID nor path
@@ -686,7 +706,8 @@ impl RouteOffer {
     pub fn check(self) -> Result<(), Refusal> {
         self.key.check()?;
         match (self.key.execution, self.cost, self.backing) {
-            (Execution::Native, None, None) | (Execution::ShardsShared, None, Some(_)) => Ok(()),
+            (Execution::Native | Execution::NodeVm, None, None)
+            | (Execution::ShardsShared, None, Some(_)) => Ok(()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(cost), _) => cost.check(),
             _ => Err(invalid_route(
                 "route charge differs from its actual execution topology",
@@ -792,6 +813,9 @@ impl RouteReceipt {
             (Execution::ShardsShared, None) if self.backing.is_some() => {
                 Ok(CapacityResources::default())
             }
+            // V2: its node VM's receipt, booked beside it, pays the host envelope once; its room is that node VM's
+            // guest's, which the scheduler holds it to.
+            (Execution::NodeVm, None) if self.backing.is_none() => Ok(CapacityResources::default()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
                 allocation.check(workload)?;
                 Ok(allocation.booking())
@@ -810,9 +834,11 @@ impl RouteReceipt {
             ));
         }
         match (self.key.execution, self.backing) {
-            (Execution::Native, Some(_)) | (Execution::ShardsShared, None) => Err(invalid_route(
-                "committed route has an invalid backing relationship",
-            )),
+            (Execution::Native | Execution::NodeVm, Some(_)) | (Execution::ShardsShared, None) => {
+                Err(invalid_route(
+                    "committed route has an invalid backing relationship",
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -1172,6 +1198,62 @@ pub struct LearnedRate {
     pub held: RateHeld,
 }
 
+/// Joint plans step 14 and 39 (ROOT, 2026-11-13: what Hex decides on its own says why): a running VM its learner
+/// couldn't read in its last window, counted whole at its receipt against its fleet's budget, by its holder, and why,
+/// in its refusal's words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedUnread {
+    pub id: LearnedHolder,
+    pub why: String,
+}
+
+impl LearnedUnread {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            why: copy_words(&self.why, "why a learner couldn't read a VM")?,
+        })
+    }
+}
+
+/// Joint plan step 14 (C7): a running VM whose guest can't yet be held within its room, by its holder, and the
+/// capability that holding awaits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedAwait {
+    pub id: LearnedHolder,
+    pub needs: Upstream,
+}
+
+impl LearnedAwait {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            needs: self.needs,
+        })
+    }
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13): a node VM ranked above every box, its band, what ending it ends, unknown, by
+/// its run, and why: a record of its node's that couldn't be read, whose box it may serve. Only a node VM is ranked so,
+/// so it names a run, never a box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedRank {
+    pub run: NodeRun,
+    pub why: String,
+}
+
+impl LearnedRank {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            run: self.run,
+            why: copy_words(&self.why, "why a node VM ranks above every box")?,
+        })
+    }
+}
+
 impl RateHeld {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         Ok(match self {
@@ -1185,6 +1267,18 @@ impl RateHeld {
             },
         })
     }
+}
+
+/// A copy of `text`, the words `what` names, its room reserved fallibly.
+fn copy_words(text: &str, what: &'static str) -> Result<String, Refusal> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(text.len())
+        .map_err(|_| Refusal::Exhausted {
+            what,
+            bound: text.len(),
+        })?;
+    copy.push_str(text);
+    Ok(copy)
 }
 
 /// A copy of `why`, a rate's reason, its room reserved fallibly.
@@ -1289,6 +1383,31 @@ pub struct Learned {
     /// after the rates, so absent means none told (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<LearnedWindow>,
+    /// The running VMs its last window couldn't read, each counted whole at its receipt, and why (steps 14 and 39), as
+    /// many as the answer has room for once its rates and window are in. Added after the window, so absent means none
+    /// (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_unread"
+    )]
+    pub unread: Vec<LearnedUnread>,
+    /// The running VMs whose guests can't yet be held within their rooms, and what each awaits (C7), as many as the
+    /// answer has room for after the unread. Added after the unread, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_awaits"
+    )]
+    pub awaits: Vec<LearnedAwait>,
+    /// The node VMs ranked above every box, their bands unknown, and why (step 39), as many as the answer has room for
+    /// after the awaits. Added after the awaits, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_ranked"
+    )]
+    pub ranked: Vec<LearnedRank>,
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1315,6 +1434,39 @@ impl LearnedWindow {
 }
 
 impl Learned {
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_unread<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedUnread>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned unread VMs exceed a node's boxes",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_awaits<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedAwait>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned awaits exceed a node's boxes",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
+    pub fn deserialize_ranked<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedRank>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned ranked VMs exceed a node's boxes",
+        )
+    }
+
     /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
     pub fn deserialize_rates<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -1371,8 +1523,8 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends; at most [`MAX_LEARNED_PRIORS`]
-    /// ceilings, no profile and envelope twice.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits and ranked
+    /// node VMs; at most [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope twice.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.ceilings.len() > MAX_LEARNED_PRIORS {
             return Err(Refusal::Exhausted {
@@ -1396,11 +1548,18 @@ impl Learned {
                 bound: MAX_LEARNED_HOLDINGS,
             });
         }
-        if self.rates.len() > MAX_LEARNED_HOLDINGS {
-            return Err(Refusal::Exhausted {
-                what: "learned rates",
-                bound: MAX_LEARNED_HOLDINGS,
-            });
+        for (what, told) in [
+            ("learned rates", self.rates.len()),
+            ("learned unread VMs", self.unread.len()),
+            ("learned awaits", self.awaits.len()),
+            ("learned ranked VMs", self.ranked.len()),
+        ] {
+            if told > MAX_LEARNED_HOLDINGS {
+                return Err(Refusal::Exhausted {
+                    what,
+                    bound: MAX_LEARNED_HOLDINGS,
+                });
+            }
         }
         if self.holdings.len() > MAX_LEARNED_HOLDINGS {
             return Err(Refusal::Exhausted {
@@ -1485,8 +1644,29 @@ impl Learned {
             ended,
             ceilings: copy_capacity_values(&self.ceilings, "learned ceilings")?,
             rates,
+            unread: try_clones(&self.unread, "learned unread VMs", LearnedUnread::try_clone)?,
+            awaits: try_clones(&self.awaits, "learned awaits", LearnedAwait::try_clone)?,
+            ranked: try_clones(&self.ranked, "learned ranked VMs", LearnedRank::try_clone)?,
         })
     }
+}
+
+/// `values`, each cloned by `clone`, `what` naming them where room for them can't be had.
+fn try_clones<T>(
+    values: &[T],
+    what: &'static str,
+    clone: impl Fn(&T) -> Result<T, Refusal>,
+) -> Result<Vec<T>, Refusal> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(values.len())
+        .map_err(|_| Refusal::Exhausted {
+            what,
+            bound: values.len(),
+        })?;
+    for value in values {
+        out.push(clone(value)?);
+    }
+    Ok(out)
 }
 
 /// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
@@ -1565,6 +1745,12 @@ pub struct Capacity {
         deserialize_with = "Capacity::deserialize_node_vms"
     )]
     pub node_vms: Vec<NodeVmReceipt>,
+    /// Why its node's charge learner carries nothing learned for this class (joint plan step 14; ROOT, 2026-11-13,
+    /// A-3: what Hex decides on its own says why): its last window's refusal, in its words, the class's VMs booked whole
+    /// until a window passes. None where it learned, where no learner runs, and from an older answer. Added after
+    /// `node_vms`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlearned: Option<String>,
 }
 
 impl Capacity {
@@ -1680,6 +1866,11 @@ impl Capacity {
             learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
             own: self.own,
             node_vms: copy_capacity_values(&self.node_vms, "runtime capacity node VMs")?,
+            unlearned: self
+                .unlearned
+                .as_deref()
+                .map(|why| copy_words(why, "why a capacity's learner learned nothing"))
+                .transpose()?,
         })
     }
 
@@ -2177,8 +2368,9 @@ pub struct BoxInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published: Vec<crate::Published>,
     /// Why its node's last resort ended it, where it did (joint plan step 14, C5): what it held past its own memory
-    /// budget while its fleet's VMs held more than the fleet's budget. Kept in its record, so a restarted node's
-    /// inspect says it too. After `published`, so absent means none (append-only).
+    /// budget while its fleet's VMs held more than the fleet's budget; an oci box's, its node VM's end, which ended it,
+    /// by that node VM's run (joint plan step 39, A-6). Kept in its record, so a restarted node's inspect says it too.
+    /// After `published`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<LearnedEnd>,
     /// Why its run ended where it failed, in its runtime's words (joint plan step 12): a Shards image VM's whose VM, run
@@ -2526,6 +2718,11 @@ pub enum LifecycleCause {
     /// delete. Appended (wire append-only).
     #[error("its backing's identity changed with decision 9's census-free cost")]
     Retired,
+    /// Its node VM, the guest that ran it, was ended by its node's last resort, and with it every oci box it ran (joint
+    /// plan step 39; ROOT, 2026-11-13, A-6): the box keeps its record, ready, its end and why, until its owner's delete.
+    /// Appended (wire append-only).
+    #[error("its node VM was ended by its node's last resort, and every oci box it ran with it")]
+    NodeVmEnded,
 }
 
 /// Why a CONNECT handshake failed: the phase it failed in and what it saw.
@@ -2983,6 +3180,80 @@ mod route_tests {
             arch: ImageArch::Arm64,
         }
     }
+    /// V2 (ROOT, 2026-11-13: a node VM's oci boxes were counted at its host beside its receipt): an oci box in its node's
+    /// node VM is routed `NodeVm`, charged nothing at its host, the node VM's receipt paying the host envelope once, as a
+    /// shared backing's grant does. Do check route keys naming NodeVm, offers naming it, receipts committing to it, and
+    /// charge a box's workload through one; then name it in JSON. Expect a key for an oci box of a Linux image with no
+    /// GPU accepted and any other refused; an offer with no cost and no backing accepted and one with either refused; a
+    /// receipt with no backing accepted and one with a backing refused; its backend class the oci class's own; its charge
+    /// nothing, and an allocation refused; and its name "node-vm".
+    #[test]
+    fn v2_a_node_vms_route_is_charged_nothing_at_its_host() {
+        let linux = key(ImageOs::Linux, Execution::NodeVm, GpuEligibility::None);
+        assert!(linux.check().is_ok(), "{:?}", linux.check());
+        for bad in [
+            key(ImageOs::Windows, Execution::NodeVm, GpuEligibility::None),
+            key(ImageOs::Linux, Execution::NodeVm, GpuEligibility::Required),
+            RouteKey {
+                class: crate::Class::Process,
+                ..linux
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        let offer = RouteOffer {
+            key: linux,
+            cost: None,
+            backing: None,
+        };
+        assert!(offer.check().is_ok(), "{:?}", offer.check());
+        let backing = BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        };
+        for bad in [
+            RouteOffer {
+                cost: Some(cost()),
+                ..offer
+            },
+            RouteOffer {
+                backing: Some(backing),
+                ..offer
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        let receipt = RouteReceipt {
+            key: linux,
+            backing: None,
+        };
+        assert!(receipt.check(crate::Class::Oci, false).is_ok());
+        assert!(
+            RouteReceipt {
+                backing: Some(backing),
+                ..receipt
+            }
+            .check(crate::Class::Oci, false)
+            .is_err()
+        );
+        assert_eq!(linux.backend_class(), crate::Class::Oci);
+        let workload = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        assert_eq!(
+            receipt.charged(workload, None),
+            Ok(CapacityResources::default())
+        );
+        let allocation = cost().allocate(CapacityResources::default()).unwrap();
+        assert!(receipt.charged(workload, Some(allocation)).is_err());
+        assert_eq!(
+            serde_json::to_value(Execution::NodeVm).unwrap(),
+            serde_json::json!("node-vm")
+        );
+    }
+
     fn key(os: ImageOs, execution: Execution, gpu: GpuEligibility) -> RouteKey {
         RouteKey {
             class: crate::Class::Oci,
@@ -3028,6 +3299,7 @@ mod route_tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         }
     }
     /// Joint plan step 14 (C7; ROOT, 2026-11-13): a shared backing's payload fits its envelope with the guest's own

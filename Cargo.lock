@@ -701,7 +701,9 @@ name = "hex-sim"
 version = "0.1.0"
 dependencies = [
  "cap",
+ "flate2",
  "hex-api",
+ "hex-core",
  "hex-health",
  "hyper-swim",
  "hyper-timing",
@@ -717,6 +719,7 @@ name = "hex-testkit"
 version = "0.1.0"
 dependencies = [
  "hex-core",
+ "hex-wait",
  "libc",
  "tempfile",
 ]

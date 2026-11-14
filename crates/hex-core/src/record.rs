@@ -63,8 +63,9 @@ pub struct BoxRecord {
     /// recovery's other rules (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<BootSession>,
-    /// Why the node's last resort ended this VM, where it did (joint plan step 14, C5), which its inspect reports
-    /// across the node's restarts. Outside the spec, so no native commitment covers it. Added within version 1, so a
+    /// Why the node's last resort ended this VM, where it did (joint plan step 14, C5), or an oci box's node VM, which
+    /// ended the box with it, by that node VM's run (joint plan step 39, A-6), which its inspect reports across the
+    /// node's restarts. Outside the spec, so no native commitment covers it. Added within version 1, so a
     /// record without it reads as `None` (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<hex_api::LearnedEnd>,
@@ -81,9 +82,9 @@ pub struct BoxRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
     /// Its backing was retired at its node's start, its identity no longer its node's profile's (joint plan step 14;
-    /// `hex_api::LifecycleCause::Retired`): the box is kept, ready, until its owner's delete, every other call refused
-    /// with why. Outside the spec, so no native commitment covers it. Added within version 1, so a record without it
-    /// reads as not retired (append-only).
+    /// `hex_api::LifecycleCause::Retired`), or its node VM was ended by its node's last resort (`retired_for`, A-6):
+    /// the box is kept, ready, until its owner's delete, every other call refused with why. Outside the spec, so no
+    /// native commitment covers it. Added within version 1, so a record without it reads as not retired (append-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
     /// How its Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started
@@ -98,6 +99,12 @@ pub struct BoxRecord {
     /// so a record without it reads as `None` (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<PathBuf>,
+    /// What it was retired for where it isn't its backing's retirement (`retired`): its node VM's end by its node's last
+    /// resort, which ended it (joint plan step 39; ROOT, 2026-11-13, A-6), `last_resort` saying why. None for a box its
+    /// node retired with its backing (`hex_api::LifecycleCause::Retired`). Outside the spec, so no native commitment
+    /// covers it. Added within version 1, so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_for: Option<hex_api::LifecycleCause>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -204,17 +211,27 @@ impl BoxRecord {
         self.ended = Some(hex_api::LifecycleCause::Retired.to_string());
     }
 
-    /// What every call on a retired box but its inspect and its delete answers: its backing's refusal, `Retired`.
+    /// Marks the box retired for `cause` (A-6: `NodeVmEnded`, its node VM ended by its node's last resort), as
+    /// [`BoxRecord::retire`] does, why in its `ended` that cause's own words.
+    pub fn retire_for(&mut self, cause: hex_api::LifecycleCause) {
+        self.retire();
+        self.ended = Some(cause.to_string());
+        self.retired_for = Some(cause);
+    }
+
+    /// What every call on a retired box but its inspect and its delete answers: its backing's refusal, `Retired`, or
+    /// what else it was retired for (A-6: `NodeVmEnded`).
     pub fn retired_refusal(&self) -> Result<Refusal, Refusal> {
+        let cause = self.retired_for.unwrap_or(hex_api::LifecycleCause::Retired);
         Ok(match self.spec.route.and_then(|route| route.backing) {
             Some(key) => Refusal::Backing {
                 key,
-                cause: hex_api::LifecycleCause::Retired,
+                cause,
                 why: None,
             },
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,
-                cause: hex_api::LifecycleCause::Retired,
+                cause,
                 why: None,
             },
         })
@@ -271,6 +288,7 @@ impl BoxRecord {
             retired: false,
             started_from: None,
             diagnostics: None,
+            retired_for: None,
         }
     }
 
@@ -637,6 +655,44 @@ mod tests {
         let text = String::from_utf8(r.encode().unwrap()).unwrap();
         assert!(text.contains(r#""last_resort":{"id":"r1","#), "{text}");
         assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap(), r);
+    }
+
+    /// A-6 (ROOT's audit, 2026-11-13: an oci box its node VM's last-resort end ended said nothing): a box retired with
+    /// its node VM says so in every refusal and in its inspect, from its record alone, across its node's restarts. Do
+    /// retire a record for `NodeVmEnded`, write it and read it back, and read a retired record written without the
+    /// field. Expect it kept retired and Ready, its end unknown, its `ended` and every refusal naming `NodeVmEnded`, its
+    /// inspect saying the cause's words; and the older record's refusal naming `Retired`.
+    #[test]
+    fn a6_a_box_retired_with_its_node_vm_says_so_in_every_refusal_and_its_inspect() {
+        let mut r = record();
+        r.retire_for(hex_api::LifecycleCause::NodeVmEnded);
+        let r = BoxRecord::decode(&r.encode().unwrap()).unwrap();
+        assert!(r.retired && r.phase == Phase::Ready, "{r:?}");
+        assert_eq!(r.exit, Some(Exit::Unknown));
+        let words = hex_api::LifecycleCause::NodeVmEnded.to_string();
+        assert_eq!(r.ended.as_deref(), Some(words.as_str()));
+        assert!(
+            matches!(
+                r.retired_refusal().unwrap(),
+                Refusal::Lifecycle {
+                    cause: hex_api::LifecycleCause::NodeVmEnded,
+                    ..
+                }
+            ),
+            "{:?}",
+            r.retired_refusal()
+        );
+        assert_eq!(r.retired_info().unwrap().ended, Some(words));
+        let mut older = record();
+        older.retire();
+        let older = BoxRecord::decode(&older.encode().unwrap()).unwrap();
+        assert!(matches!(
+            older.retired_refusal().unwrap(),
+            Refusal::Lifecycle {
+                cause: hex_api::LifecycleCause::Retired,
+                ..
+            }
+        ));
     }
 
     /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record

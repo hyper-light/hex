@@ -29,7 +29,12 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime
 use hex_core::patience::Patience;
 use hex_node::Node;
 use hex_testkit::waits::follow::{self, Party};
-use hex_testkit::waits::until;
+
+/// The in-process node this test holds, as the party of a wait on what its own threads do (its supervision, its
+/// removals): it lives while held, and its threads are its own (the review's C-5). A look reads its state.
+fn held_node() -> Party {
+    Party::Live
+}
 
 struct BinFixture {
     exe: String,
@@ -415,9 +420,10 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
     running.kill().expect("end the run's program");
     // Its party is the restarted node, whose supervision removes the box and which lives while this test holds it: the
     // wait follows the fact alone, its run-out past W* told (decision 9).
-    until(
+    follow::until(
         &REMOVED,
         "the taken-back run's box removed once its program ended",
+        held_node,
         || restarted.inspect(&ran_live) == Err(hex_api::Refusal::NoSuchBox(ran_live.clone())),
     )
     .expect("the taken-back run's box removed");
@@ -503,17 +509,25 @@ fn exercise_a_delete_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) 
         .expect("run a waiting program");
     let held = node.hold_run_removals().expect("hold the runs' removals");
     run.kill().expect("kill the run's program");
-    until(
+    follow::until(
         &STOPPED,
         "the supervising thread's claim of the run, stopped at the hold",
+        held_node,
         || held.stopped().unwrap() == 1,
     )
     .unwrap();
     std::thread::scope(|s| {
         let deleting = s.spawn(|| node.delete(&id));
-        until(
+        follow::until(
             &BESIDE,
             "the delete's wait on the removal, or its answer",
+            || {
+                if deleting.is_finished() {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
             || held.waiting().unwrap() == 1 || deleting.is_finished(),
         )
         .unwrap();
@@ -563,9 +577,10 @@ fn exercise_a_signal_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) 
         .expect("run a waiting program");
     let held = node.hold_run_removals().expect("hold the runs' removals");
     run.kill().expect("kill the run's program");
-    until(
+    follow::until(
         &STOPPED,
         "the supervising thread's claim of the run, stopped at the hold",
+        held_node,
         || held.stopped().unwrap() == 1,
     )
     .unwrap();

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{Allocation, Exit, HostUse, NodeRun, NodeVmPhase, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{NodeVmRecord, RECORD_VERSION};
 use shards_api::image::{
     BootStop, ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep,
@@ -110,7 +110,16 @@ impl ImageClass {
         let bound = waits.boot.deadline();
         let mut told = slot.told_within(bound)?;
         if let (Told::NotYet, Some(bound)) = (&told, bound) {
-            waits.boot.ran_out(bound);
+            let run = run_name(&vm.run);
+            waits.boot.ran_out(
+                bound,
+                bound,
+                &[
+                    Piece::Kind("the boot of node VM "),
+                    Piece::Name(&run),
+                    Piece::Kind(", by its boot's thread"),
+                ],
+            );
             told = slot.told_within(None)?;
         }
         if !matches!(told, Told::Came) {
@@ -189,17 +198,28 @@ impl ImageClass {
             }
             Settled::None => return Err(not_running(&run)),
         };
+        // The stop's thread followed as its party (B-1, C-3): its answer seen given though another call took it first,
+        // and its end with none refusing the stop, never waited for forever.
         let bound = waits.stop.deadline();
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
-            }
-            if !matches!(slot.told_within(None)?, Told::Came) {
-                return Err(Refusal::Broken(format!(
-                    "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
-                    run_name(&run)
-                )));
-            }
+        let mut told = slot.told_within(bound)?;
+        if let (Told::NotYet, Some(bound)) = (&told, bound) {
+            let name = run_name(&run);
+            waits.stop.ran_out(
+                bound,
+                bound,
+                &[
+                    Piece::Kind("the stop of node VM "),
+                    Piece::Name(&name),
+                    Piece::Kind(", by its stop's thread"),
+                ],
+            );
+            told = slot.told_within(None)?;
+        }
+        if !matches!(told, Told::Came) {
+            return Err(Refusal::Broken(format!(
+                "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
+                run_name(&run)
+            )));
         }
         match image.runs.settle(run, Some(waits))? {
             Settled::Ends(end) => self.ended_node(books.as_ref(), run, &end),
@@ -417,7 +437,13 @@ pub(in crate::guest) fn follow_ready(
     if let Some(said) = wait_to(guest, &mut seen, window.saturating_sub(began.elapsed()))? {
         return Ok(said);
     }
-    ready.ran_out(window);
+    ready.ran_out(
+        window,
+        began.elapsed(),
+        &[Piece::Kind(
+            "the node VM's run, by its READY and its VM process's CPU time",
+        )],
+    );
     let mut last = progress(guest, window)?;
     // Ends at READY, the run's end, or a whole window with its progress standing: the run's progress is its bound.
     loop {
