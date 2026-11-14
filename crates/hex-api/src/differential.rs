@@ -5,9 +5,10 @@
 //! step (a refusal's kind, a box's state and exit, a program's end and output) is what the simulator
 //! shows for the same class. A step that reads the runtime follows it for the oracle's answer as decision 9 waits
 //! ([`follow`]): within the suite's W* ([`conformance::ENDS`]), and past it, its run-out told, while the runtime's
-//! party lives, the life that can still change its answer. So a runtime that reports a fact late passes; one that
-//! differs fails at its party's end, naming the step; and a real runtime that differs and stays alive is followed, its
-//! run-out told, until its caller's own deadline. Each scenario cites `HEX-DIFF-n`.
+//! party lives, the life that can still change its answer. So a runtime that reports a fact late passes; one whose
+//! reading can't change any more and differs (a program's end) fails at once, naming the step; one that differs
+//! otherwise fails at its party's end; and a real runtime that differs so and stays alive is followed while it lives,
+//! its run-out told. Each scenario cites `HEX-DIFF-n`.
 
 use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::time::{Duration, Instant};
@@ -107,6 +108,24 @@ pub enum Seen {
     Out(String),
     Listed(bool),
     Killed(bool),
+}
+
+impl Seen {
+    /// Whether no later reading can differ unless a step of the scenario's changes it, so one that differs from the
+    /// simulator's is the step's verdict at once (the review's E-4): a program's end; an `oci` box whose init has ended
+    /// ([`crate::BoxInfo::exit`]) with nothing left running in it; a memory kill counted, a count that only grows. The
+    /// runtime's own work may still change every other reading (a program still running, a box's state settling, a
+    /// refusal), so that one is followed while the runtime lives.
+    fn last(&self) -> bool {
+        matches!(
+            self,
+            Seen::Exit(_)
+                | Seen::Ok(_)
+                | Seen::Signalled(_)
+                | Seen::Box(BoxState::Empty, Some(_))
+                | Seen::Killed(true)
+        )
+    }
 }
 
 /// A script of calls, played on the class under test and on the simulator.
@@ -580,9 +599,10 @@ enum Reads {
 /// says, waiting at most the slice it is given for one (`None`: until its own next event); within W*
 /// ([`conformance::ENDS`]) a slice is what is left of W*, and past it the run-out is told once, to the census and to
 /// the test ([`Fixture::told`]), naming the step, the simulator's answer and the runtime's last, and slices have no
-/// end. `party` is looked at before each reading: once it has ended, nothing can change the runtime's answer, so that
-/// reading is the last, and what it shows is the step's, the difference the scenario then fails at. The answer, however
-/// long it took, is the sample W* rises to.
+/// end. A reading that can't change any more ([`Seen::last`]) is the step's at once, the difference the scenario then
+/// fails at where it differs (the review's E-4). `party` is looked at before each reading: once it has ended, nothing
+/// can change the runtime's answer, so that reading is the last, and what it shows is the step's. An answer or a
+/// reading that can't change, however long it took, is the sample W* rises to.
 fn follow(
     fx: &dyn Fixture,
     at: (usize, &Step),
@@ -606,7 +626,7 @@ fn follow(
         let reading = Instant::now();
         let seen = read(slice)?;
         let took = reading.elapsed();
-        if seen == *want {
+        if seen == *want || seen.last() {
             conformance::ENDS.answered(asked.elapsed());
             return Ok(seen);
         }
@@ -912,6 +932,49 @@ mod tests {
             0,
             "a program's told end was asked for again while its runtime lived: {why}"
         );
+    }
+
+    /// The review's E-4, on the polled reads: what can't change is judged at once there too. Do: follow a Look whose
+    /// runtime shows its `oci` box's init ended otherwise than the simulator's, and a Killed whose runtime counted a
+    /// memory kill the simulator didn't, each party alive until a second read. Expect: each the step's reading after one
+    /// read.
+    #[test]
+    fn e4_a_box_ended_or_killed_otherwise_is_judged_at_one_read() {
+        let cases = [
+            (
+                Step::Look(0),
+                Seen::Box(BoxState::Empty, Some(Exit::Code(0))),
+                Seen::Box(BoxState::Empty, Some(Exit::Code(7))),
+            ),
+            (Step::Killed(0), Seen::Killed(false), Seen::Killed(true)),
+        ];
+        for (step, want, shown) in cases {
+            let reads = std::cell::Cell::new(0u32);
+            let party = || {
+                if reads.get() > 1 {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            };
+            let got = follow(
+                &SimFixture::Bundle,
+                (0, &step),
+                &want,
+                &party,
+                Reads::Polled,
+                |_| {
+                    reads.set(reads.get() + 1);
+                    Ok(shown.clone())
+                },
+            );
+            assert_eq!(got, Ok(shown.clone()), "{step:?}");
+            assert_eq!(
+                reads.get(),
+                1,
+                "{step:?} was read again while its runtime lived"
+            );
+        }
     }
 
     /// A fixture of the simulator's, its runtime a double whose answers can't change once given: its party has
