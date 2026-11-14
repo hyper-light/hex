@@ -4765,6 +4765,7 @@ fn learned_capacity() -> Capacity {
             },
         }],
         rates: Vec::new(),
+        window: None,
     });
     capacity
 }
@@ -4925,6 +4926,34 @@ fn w14_d255_what_holds_each_managed_vms_rate_crosses_the_wire() {
     );
     let json = serde_json::to_value(&capacity).unwrap();
     assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): the learner's window crosses the wire on a class's capacity answer, after
+/// the rates, and the VM whose platform cap's cycle sets it where one does. Do encode a capacity whose learned window is
+/// 2 s, set by a node VM's cap, then one whose window no VM's cap sets; read each back, and write and read each as JSON.
+/// Expect each back exactly each way.
+#[test]
+fn w14_the_learners_window_and_the_vm_that_sets_it_cross_the_wire() {
+    for slowed_by in [
+        Some(LearnedHolder::Node(hex_api::NodeRun::from_bytes([5; 16]))),
+        None,
+    ] {
+        let mut capacity = learned_capacity();
+        if let Some(learned) = capacity.learned.as_mut() {
+            learned.window = Some(hex_api::LearnedWindow {
+                window_ns: 2_000_000_000,
+                slowed_by,
+            });
+        }
+        let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+        let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            offered
+        );
+        let json = serde_json::to_value(&capacity).unwrap();
+        assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), capacity);
+    }
 }
 
 /// Joint plan step 14 (D260; ROOT, 2026-11-13): a VM whose VMM's own CPU isn't read apart from its vCPUs', told why, and
