@@ -306,4 +306,4 @@ impl Runtime for ImageRuntime {
 
 #[cfg(test)]
 #[path = "images/tests.rs"]
-mod tests;
+pub(crate) mod tests;

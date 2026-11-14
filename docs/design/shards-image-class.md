@@ -241,8 +241,9 @@ boot's time is no sample of the boot's W*: it is the time to its stop, no boot's
 W* with `Runtime::started` rather than polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed
 to its boot's answer as a delete follows it, by a wait of its own, `hex.image.started` (refused only where the boot's
 thread ends with no answer, the boot it follows still under way), then answered as inspect answers it, Running, or as
-its run's own failure in its runtime's words (`Refusal::Failed`), as `start` answers a run that failed; a box not
-booting is answered at once. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among
+its run's own failure in its runtime's words (`Refusal::Failed`), as `start` answers a run that failed, or, for a run
+whose publishes break its grants, which the call that took its boot's answer stops (network-grants.md N6), the grants'
+refusal once that stop has ended, as `start` answers it; a box not booting is answered at once. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among
 them, and is listed running: Hex can't prove it isn't.
 
 ## 4. Usage

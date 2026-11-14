@@ -94,6 +94,8 @@ static MEMBER_ANSWERED: Patience = Patience::measuring("test.hex_cli.image_grant
 /// The probe's hand-over to its caller, while its box settles ([`handed_over`]): measuring alike.
 static MEMBER_HANDED_OVER: Patience =
     Patience::measuring("test.hex_cli.image_grants_member_handed_over");
+/// A box's end after a KILL whose stop outlasted its W* ([`stop_and_delete`]): measuring alike.
+static KILLED: Patience = Patience::measuring("test.hex_cli.image_grants_killed");
 
 /// The name the probe image is tagged with where this test builds it into the node's Shards home.
 const BUILT: &str = "hex-image-grants/probe";
@@ -151,10 +153,46 @@ fn publish(probe: &Probe, port: u16) -> Grant {
     }
 }
 
-/// Stops box `id` with KILL, Hex's stop of an image VM, and deletes it; expects it ended by that signal.
+/// Starts box `id`, its boot followed to its answer: a start past its boot's W* answers `Lifecycle { Pending }`, the
+/// boot going on, and `Runtime::started` follows it to its run (decision 9, the person's ruling of 2026-11-13; kiln's
+/// HexVms adapter waits the same way). Says the start's refusal, or `started`'s.
+fn start(client: &Client, id: &BoxId) -> Result<(), Refusal> {
+    match client.start(id) {
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        }) => client.started(id).map(drop),
+        started => started,
+    }
+}
+
+/// Stops box `id` with KILL, Hex's stop of an image VM, and deletes it; expects it ended by that signal. A KILL whose
+/// stop outlasts its W* answers `Lifecycle { Pending }`, the stop going on (the person's ruling of 2026-11-13): the box
+/// is then looked at, each look the node's own answer, until it shows its end.
 fn stop_and_delete(client: &Client, id: &BoxId) {
-    client.signal(id, Signal::KILL).unwrap();
-    let ended = client.inspect(id).unwrap();
+    match client.signal(id, Signal::KILL) {
+        Ok(())
+        | Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        }) => {}
+        Err(why) => panic!("{id}'s KILL: {why:?}"),
+    }
+    let mut ended = None;
+    // A look: the node tells no event as a stop ends. Its party, the box, ends the wait in the fact itself.
+    hex_testkit::waits::follow::until(
+        &KILLED,
+        &format!("{id} ended by its KILL"),
+        || hex_testkit::waits::follow::Party::Live,
+        || {
+            let shown = client.inspect(id).unwrap();
+            let reached = shown.state == BoxState::Empty;
+            ended = Some(shown);
+            reached
+        },
+    )
+    .unwrap();
+    let ended = ended.unwrap();
     assert_eq!(
         (ended.state, ended.exit),
         (BoxState::Empty, Some(Exit::Signal(9)))
@@ -187,6 +225,7 @@ fn a_destination_its_image_grants_not_refuses_the_boot(
     );
     let id = spec.id.clone();
     client.create(spec).unwrap();
+    // The node's first boot: its start follows the boot to its answer, no W* learned yet (decision 9).
     let refused = client.start(&id);
     eprintln!("GRANTS-CHECK-1 {id} start: {refused:?}");
     assert!(
@@ -287,7 +326,7 @@ fn no_grant_lets_nothing_past(client: &Client, node: u32, probe: &Probe, allocat
     }
     let id = spec.id.clone();
     client.create(spec).unwrap();
-    client.start(&id).unwrap();
+    start(client, &id).unwrap();
     let shown = client.inspect(&id).unwrap();
     assert!(
         shown.grants.is_empty() && shown.published.is_empty(),
@@ -411,7 +450,7 @@ fn one_publish_published_alone(client: &Client, node: u32, probe: &Probe, alloca
     );
     let id = spec.id.clone();
     client.create(spec).unwrap();
-    client.start(&id).unwrap();
+    start(client, &id).unwrap();
     let shown = client.inspect(&id).unwrap();
     eprintln!(
         "GRANTS-CHECK-3 {id} granted {:?}, published {:?}",
@@ -500,7 +539,7 @@ fn granted_destinations_are_reached_alone(client: &Client, probe: &Probe, alloca
     );
     let id = spec.id.clone();
     client.create(spec).unwrap();
-    client.start(&id).unwrap();
+    start(client, &id).unwrap();
     let shown = client.inspect(&id).unwrap();
     eprintln!(
         "GRANTS-CHECK-4 {id} granted {:?}, published {:?}",
@@ -567,7 +606,7 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
     );
     let id = spec.id.clone();
     client.create(spec).unwrap();
-    let refused = client.start(&id);
+    let refused = start(client, &id);
     eprintln!("GRANTS-CHECK-5 {id} start: {refused:?}");
     assert!(
         matches!(&refused, Err(Refusal::Invalid { what: "grants", why }) if why.contains("the run's own command")),

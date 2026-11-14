@@ -325,12 +325,14 @@ enum Run {
 }
 
 /// Why a run is stopping, so that a call that finds it so says which (goal 15's finding, 2026-11-13): its owner's stop
-/// (a signal or a delete, whose own call answers the run's end), or its run's own end, read as it came, its host reaped
-/// through the stop.
+/// (a signal or a delete, whose own call answers the run's end), its run's own end, read as it came, its host reaped
+/// through the stop, or its publishes breaking its box's grants, as the call that took its boot's answer found them
+/// (joint plan step 15, N6), the grants' refusal kept in its end.
 #[derive(Clone)]
 enum Stop {
     Asked,
     Ended(End),
+    Grants(Refusal),
 }
 
 /// One answer a thread of its own gives, a boot's or a stop's, with how long it took: from the slot's making, as its
@@ -546,6 +548,16 @@ impl End {
                 RunEnd::Exited(_) | RunEnd::Stopped => None,
             },
         }
+    }
+
+    /// A stopped run's end, `end` as its run host told it, with the grants' refusal as why where its run was stopped for
+    /// breaking them (N6): the why outlives the call that found it (ROOT, 2026-11-14).
+    fn stopped(end: &RunEnd, stop: &Stop) -> Self {
+        let mut stopped = Self::of(end);
+        if let Stop::Grants(why) = stop {
+            stopped.why = Some(why.to_string());
+        }
+        stopped
     }
 
     /// An end Hex can't read the exit of, with why where its runtime said it.
@@ -1094,7 +1106,7 @@ impl Runs {
                     if let Some(waits) = waits {
                         waits.stop.answered(took);
                     }
-                    let end = End::of(&end);
+                    let end = End::stopped(&end, stop);
                     *run = Run::Ended(end.clone());
                     Settled::Ends(end)
                 }
@@ -1145,8 +1157,9 @@ impl Runs {
         Ok(())
     }
 
-    /// `key`'s stop under way in `slot`, its run having ended on its own (`reached`), where it still runs: another
-    /// call may have moved it on first, and then its stop is that call's.
+    /// `key`'s stop under way in `slot` for `reached`, what the call that found it reached: its run's own end, or its
+    /// grants broken (N6). Where it still runs: another call may have moved it on first, and then its stop is that
+    /// call's.
     fn stop_reached<'k>(
         &self,
         key: impl Into<Key<'k>>,
@@ -1497,7 +1510,7 @@ impl ImageClass {
     fn record_end(&self, id: &BoxId, end: &End) -> Result<End, Refusal> {
         let bound = end.why.as_ref().map(|_| self.quote_bound());
         let mut recorded = None;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1548,7 +1561,7 @@ impl ImageClass {
         }
         let from = started_from(guest.started_from());
         let id = &record.spec.id;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut current = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1592,7 +1605,11 @@ impl ImageClass {
             // by its start, never Running.
             Settled::Started(guest) => {
                 self.keep_started(record, guest.as_ref())?;
-                self.settle_running(image, id, guest)
+                match self.settle_running(image, id, guest)? {
+                    // Held to its grants by whichever call took its boot's answer, as by its start (N6).
+                    State::Running(guest) => self.hold_grants(image, &record.spec, guest),
+                    state => Ok(state),
+                }
             }
             Settled::Running(guest) => {
                 self.keep_started(record, guest.as_ref())?;
@@ -1603,11 +1620,70 @@ impl ImageClass {
                 image.runs.forget(id)?;
                 Ok(State::Ended(end))
             }
-            Settled::None if image.earlier_boot(record) => {
+            Settled::None => self.settle_unheld(image, id),
+        }
+    }
+
+    /// Box `id`, which no run of this process holds, as its record says now, read under its turn (the review's B-2): a
+    /// run is let go of only once its end is recorded, so a record read before another call recorded that end and let
+    /// go of the run would show this process's own run as an earlier one's, held. Ended where its record has its end,
+    /// or where an earlier boot of the host wrote it (T-T7.1.2); else held.
+    fn settle_unheld(&self, image: &ImageBoot, id: &BoxId) -> Result<State, Refusal> {
+        let now = devices::with_record_transaction(self.image_books()?, id, |t| t.read(id))?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        match now.exit {
+            Some(exit) => Ok(State::Ended(End {
+                exit,
+                why: now.ended,
+            })),
+            None if image.earlier_boot(&now) => {
                 Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
             }
-            Settled::None => Ok(State::Held),
+            None => Ok(State::Held),
         }
+    }
+
+    /// A run held to box `spec`'s grants as its boot's answer is taken, whichever call takes it (joint plan step 15, N6):
+    /// one whose publishes break them has its stop begun, the grants' refusal beside it and kept in its end, which the
+    /// start or `started` following it answers; any other runs on.
+    fn hold_grants(
+        &self,
+        image: &ImageBoot,
+        spec: &BoxSpec,
+        guest: Arc<dyn ImageGuest>,
+    ) -> Result<State, Refusal> {
+        let ClassSpec::ShardsImage(shards) = &spec.class else {
+            return Ok(State::Running(guest));
+        };
+        let Err(why) = crate::grants::bound(&shards.grants, guest.members(), guest.published())
+        else {
+            return Ok(State::Running(guest));
+        };
+        let broke = Stop::Grants(why);
+        let slot = image.stop(guest, None)?;
+        image.runs.stop_reached(&spec.id, &slot, broke.clone())?;
+        Ok(State::Stopping(slot, broke))
+    }
+
+    /// What a start or `started` answers of box `id`'s run stopped for breaking its grants (N6), `slot` its stop: the
+    /// grants' refusal `why` once the stop has ended (`past` saying how far it is followed), or, where it couldn't be
+    /// followed to its end, `why` with the stop's own refusal beside it.
+    fn grants_stopped(
+        &self,
+        id: &BoxId,
+        slot: Arc<Slot<RunEnd>>,
+        why: Refusal,
+        past: Past,
+    ) -> Result<Refusal, Refusal> {
+        let stopping = State::Stopping(slot, Stop::Grants(why.clone()));
+        Ok(match self.stop_image(id, stopping, past) {
+            Ok(_) => why,
+            Err(cleanup) => Refusal::Uncertain {
+                id: id.try_clone()?,
+                refusal: Box::new(why),
+                cleanup: Box::new(cleanup),
+            },
+        })
     }
 
     /// A running VM whose run may have ended on its own: its host is then reaped through its stop, so no
@@ -1647,7 +1723,7 @@ impl ImageClass {
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
         let made = info(&spec, BoxState::Created, None)?;
-        devices::with_transaction(books, &id, &[], |transaction| {
+        devices::with_record_transaction(books, &id, |transaction| {
             if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
@@ -1688,7 +1764,7 @@ impl ImageClass {
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
         // The boot's intent, durable before any effect: a crash from here on holds the box.
-        devices::with_transaction(self.image_books()?, &id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, &id, |transaction| {
             let mut current = transaction
                 .read(&id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1757,27 +1833,17 @@ impl ImageClass {
         // The answer, taken here unless another call took it first, and its time the sample.
         match image.runs.booted(&id, &slot, waits)? {
             Ok(()) => {
-                match self.settle(&record_now(self, &id)?)? {
-                    // What the run published is held to the box's grants (joint plan step 15, N6): a run
-                    // that breaks them is stopped, and the start says why.
-                    State::Running(guest) => {
-                        match crate::grants::bound(
-                            &shards.grants,
-                            guest.members(),
-                            guest.published(),
-                        ) {
-                            Ok(_) => Ok(()),
-                            Err(why) => {
-                                match self.stop_image(&id, State::Running(guest), Past::Pending) {
-                                    Ok(_) => Err(why),
-                                    Err(cleanup) => Err(Refusal::Uncertain {
-                                        id,
-                                        refusal: Box::new(why),
-                                        cleanup: Box::new(cleanup),
-                                    }),
-                                }
-                            }
-                        }
+                // What the run published is held to the box's grants (joint plan step 15, N6), here or by the call
+                // that took its boot's answer first: a run that breaks them is stopped, and the start says why once
+                // its stop has ended, as the box's end keeps it.
+                let state = match self.settle(&record_now(self, &id)?)? {
+                    State::Running(guest) => self.hold_grants(image, &record.spec, guest)?,
+                    state => state,
+                };
+                match state {
+                    State::Running(_) => Ok(()),
+                    State::Stopping(slot, Stop::Grants(why)) => {
+                        Err(self.grants_stopped(&id, slot, why, Past::Pending)?)
                     }
                     // Its owner's own stop under way (a signal or a delete), whose call answers the run's end: this
                     // start succeeded.
@@ -1951,7 +2017,7 @@ impl ImageClass {
             State::Ended(_) => Err(Refusal::NotRunning(id, "signal")),
             _ if signal != Signal::KILL => self.signal_members(&id, state, signal),
             // Ended before it booted: no run, and its end its record's.
-            State::Created => devices::with_transaction(self.image_books()?, &id, &[], |t| {
+            State::Created => devices::with_record_transaction(self.image_books()?, &id, |t| {
                 let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                 if current.phase != Phase::Creating || current.exit.is_some() {
                     return Err(super::books::uncertain(
@@ -2166,7 +2232,7 @@ impl ImageClass {
             }
             State::Created | State::Ended(_) => None,
         };
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if let Some(exit) = stopped {
                 current.exit = Some(exit);
@@ -2232,7 +2298,13 @@ impl ImageClass {
             state => state,
         };
         match state {
-            // Its run failed, as it started or since (D249), its end reached or recorded (the review's B-3).
+            // Its run stopped for breaking its grants as its boot's answer was taken (N6): the grants' refusal, as its
+            // start would answer it, once its stop has been followed to its end.
+            State::Stopping(slot, Stop::Grants(why)) => {
+                Err(self.grants_stopped(&id, slot, why, Past::Follow)?)
+            }
+            // Its run failed, as it started or since (D249), its end reached or recorded (the review's B-3); or was
+            // stopped for its grants, its end keeping why (N6).
             State::Stopping(_, Stop::Ended(End { why: Some(why), .. }))
             | State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
             _ => self.inspect_image(record_now(self, &id)?),
@@ -2274,7 +2346,7 @@ impl ImageClass {
             State::Held => return Err(held()),
             State::Booting | State::Running(_) | State::Stopping(..) => {
                 // The delete's intent, durable before its waits, and the phase it was in.
-                let before = devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                let before = devices::with_record_transaction(self.image_books()?, &id, |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                     let before = current.phase;
                     current.phase = Phase::Deleting;
@@ -2293,7 +2365,7 @@ impl ImageClass {
                         match self.final_use(&id, &state) {
                             Ok(read) => last = read,
                             Err(why) => {
-                                devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                                devices::with_record_transaction(self.image_books()?, &id, |t| {
                                     let mut current =
                                         t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                                     current.phase = before;
@@ -2327,7 +2399,7 @@ impl ImageClass {
         if let Some(file) = &record.diagnostics {
             remove_diagnostics(file)?;
         }
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if current.phase != Phase::Creating && current.exit.is_none() {
                 return Err(super::books::uncertain(
