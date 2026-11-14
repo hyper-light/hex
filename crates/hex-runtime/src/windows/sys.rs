@@ -1275,6 +1275,238 @@ pub fn exit_code(process: &Handle) -> io::Result<u32> {
     Ok(code)
 }
 
+// The guest-cost producer's reads of a VM process from outside it (crates/hex-cli/examples/guest_cost, AC-T7.4.1): as
+// macOS's are (`macos::sys`), so its VMM's own CPU and memory are told from its guest's.
+
+/// `ERROR_INVALID_PARAMETER`: what Windows answers for a process id no process has now, or an address past a process's
+/// highest.
+const INVALID_PARAMETER: i32 = 87;
+
+/// Process `pid` opened for the guest-cost producer's reads: its times and memory counters, its address space's
+/// regions and its working set's pages (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, what `VirtualQueryEx` and
+/// `GetProcessMemoryInfo` ask); `None` where no process has the pid.
+pub fn open_for_reading(pid: u32) -> io::Result<Option<Handle>> {
+    use windows_sys::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    match process_with_rights(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ) {
+        Ok(process) => Ok(Some(process)),
+        Err(error) if error.raw_os_error() == Some(INVALID_PARAMETER) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// One region of a process's address space, as `VirtualQueryEx` reads it: where it starts, how long it is, and whether
+/// it is committed private read/write memory (`MEM_COMMIT`, `MEM_PRIVATE`, `PAGE_READWRITE`), as Shards' WHP guest RAM
+/// is (its `reserve_ram`: a placeholder replaced by committed read/write memory, which pages in as it is touched).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub base: u64,
+    pub size: u64,
+    pub private_rw: bool,
+}
+
+/// The region of `process`'s address space holding address `at`; `None` past its last.
+pub fn region(process: &Handle, at: u64) -> io::Result<Option<Region>> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_READWRITE, VirtualQueryEx,
+    };
+    let address = usize::try_from(at).map_err(|_| io::Error::other("an address past usize"))?;
+    let mut info: MEMORY_BASIC_INFORMATION = zeroed_struct();
+    // SAFETY: a process handle with query rights; `address` names a place in its space, an integer the call reads and
+    // never dereferences here; `info` of the size given, written by the call.
+    let wrote = unsafe {
+        VirtualQueryEx(
+            process.raw(),
+            std::ptr::without_provenance(address),
+            &raw mut info,
+            size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    if wrote == 0 {
+        let error = last_error();
+        // An address past the process's highest.
+        return if error.raw_os_error() == Some(INVALID_PARAMETER) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
+    Ok(Some(Region {
+        base: u64::try_from(info.BaseAddress.addr())
+            .map_err(|_| io::Error::other("an address past u64"))?,
+        size: u64::try_from(info.RegionSize).map_err(|_| io::Error::other("a region past u64"))?,
+        private_rw: info.State == MEM_COMMIT
+            && info.Type == MEM_PRIVATE
+            && info.Protect == PAGE_READWRITE,
+    }))
+}
+
+/// `PSAPI_WORKING_SET_EX_BLOCK`'s Valid bit (bit 0) and Shared bit (bit 15), as psapi.h lays its bitfield out.
+const PAGE_VALID: usize = 1;
+const PAGE_SHARED: usize = 1 << 15;
+
+/// The bytes of `range` (`[start, end)`, on page boundaries) of `process` that its working set holds as pages of its
+/// own (`QueryWorkingSetEx`: each page's Valid bit set and Shared bit clear), in `page`-byte pages: every page of the
+/// range asked at once, one entry each, so the buffer is as long as the range has pages (a guest's RAM read takes as
+/// long as its RAM is large, as Linux's smaps and macOS's region reads do).
+pub fn resident_private(process: &Handle, range: (u64, u64), page: u64) -> io::Result<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
+    };
+    let (start, end) = range;
+    let span = end
+        .checked_sub(start)
+        .filter(|_| page != 0 && start % page == 0 && end % page == 0)
+        .ok_or_else(|| io::Error::other("a range not on page boundaries"))?;
+    let pages =
+        usize::try_from(span / page).map_err(|_| io::Error::other("a page count past usize"))?;
+    let mut entries: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = Vec::new();
+    entries
+        .try_reserve_exact(pages)
+        .map_err(|_| io::Error::other("no room for a range's pages"))?;
+    let mut at = start;
+    while at < end {
+        let address = usize::try_from(at).map_err(|_| io::Error::other("an address past usize"))?;
+        let mut entry: PSAPI_WORKING_SET_EX_INFORMATION = zeroed_struct();
+        entry.VirtualAddress = std::ptr::without_provenance_mut(address);
+        entries.push(entry);
+        at = at
+            .checked_add(page)
+            .ok_or_else(|| io::Error::other("a range past the address space"))?;
+    }
+    let bytes = pages
+        .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::other("a range's pages past one QueryWorkingSetEx"))?;
+    // SAFETY: a process handle with query rights; `entries` holds `bytes` of entries, each naming an address of the
+    // process's, read and never dereferenced here, whose attributes the call writes.
+    if unsafe { K32QueryWorkingSetEx(process.raw(), entries.as_mut_ptr().cast(), bytes) } == 0 {
+        return Err(last_error());
+    }
+    let mut held = 0u64;
+    for entry in &entries {
+        // SAFETY: the union's whole word, which every bit pattern makes a valid usize, as the call wrote it.
+        let flags = unsafe { entry.VirtualAttributes.Flags };
+        if flags & PAGE_VALID != 0 && flags & PAGE_SHARED == 0 {
+            held = held
+                .checked_add(page)
+                .ok_or_else(|| io::Error::other("a range's pages past u64"))?;
+        }
+    }
+    Ok(held)
+}
+
+/// This machine's page size (`GetSystemInfo`'s `dwPageSize`).
+pub fn page_size() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+    let mut info: SYSTEM_INFO = zeroed_struct();
+    // SAFETY: GetSystemInfo writes one SYSTEM_INFO this frame owns, and can't fail.
+    unsafe { GetSystemInfo(&raw mut info) };
+    info.dwPageSize
+}
+
+/// The allocation unit of the volume that holds `path`: its mount point (`GetVolumePathNameW`, never longer than the
+/// path it holds and its trailing separator), then that volume's sectors per cluster times bytes per sector
+/// (`GetDiskFreeSpaceW`): the disk's quantum, as statvfs's `f_frsize` is elsewhere.
+pub fn cluster_bytes(path: &std::path::Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceW, GetVolumePathNameW};
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let room = wide
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("a path past usize"))?;
+    let mut volume = vec![0u16; room];
+    let units = u32::try_from(volume.len()).map_err(|_| io::Error::other("a path past u32"))?;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call; `volume` holds `units` u16s, which the
+    // call writes a NUL-terminated mount point into.
+    if unsafe { GetVolumePathNameW(wide.as_ptr(), volume.as_mut_ptr(), units) } == 0 {
+        return Err(last_error());
+    }
+    let (mut sectors, mut bytes, mut free, mut total) = (0u32, 0u32, 0u32, 0u32);
+    // SAFETY: `volume` is the NUL-terminated mount point the call above wrote; four u32s this frame owns, each written.
+    let ok = unsafe {
+        GetDiskFreeSpaceW(
+            volume.as_ptr(),
+            &raw mut sectors,
+            &raw mut bytes,
+            &raw mut free,
+            &raw mut total,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    u64::from(sectors)
+        .checked_mul(u64::from(bytes))
+        .filter(|unit| *unit > 0)
+        .ok_or_else(|| io::Error::other("a volume that names no allocation unit"))
+}
+
+/// The file at `path` as the guest-cost producer counts what its folders hold: the file it names (its volume's serial
+/// number and its file index, which a rename keeps: `GetFileInformationByHandle`) and its allocated bytes
+/// (`FileStandardInfo`'s `AllocationSize`), opened for its attributes alone (`FILE_READ_ATTRIBUTES`, which no sharing
+/// mode refuses), a link read as itself. `None` where nothing is at `path` now.
+pub fn file_held(path: &std::path::Path) -> io::Result<Option<((u64, u64), u64)>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call; no security attributes or template; the
+    // handle returned is owned below.
+    let raw = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        let error = last_error();
+        let gone = [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
+            .iter()
+            .any(|code| error.raw_os_error() == i32::try_from(*code).ok());
+        return if gone { Ok(None) } else { Err(error) };
+    }
+    // SAFETY: a handle just opened, owned from here and closed as `file` drops.
+    let file = unsafe { Handle::own(raw) };
+    let mut info: BY_HANDLE_FILE_INFORMATION = zeroed_struct();
+    // SAFETY: the file's handle; one BY_HANDLE_FILE_INFORMATION this frame owns, written by the call.
+    if unsafe { GetFileInformationByHandle(file.raw(), &raw mut info) } == 0 {
+        return Err(last_error());
+    }
+    let mut standard: FILE_STANDARD_INFO = zeroed_struct();
+    let size = u32::try_from(size_of::<FILE_STANDARD_INFO>())
+        .map_err(|_| io::Error::other("FILE_STANDARD_INFO's size past u32"))?;
+    // SAFETY: the file's handle; one FILE_STANDARD_INFO of the size given, which this frame owns, written by the call.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.raw(),
+            FileStandardInfo,
+            (&raw mut standard).cast(),
+            size,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    let allocated = u64::try_from(standard.AllocationSize)
+        .map_err(|_| io::Error::other("a file's allocation below none"))?;
+    Ok(Some((
+        (u64::from(info.dwVolumeSerialNumber), index),
+        allocated,
+    )))
+}
+
 /// A zeroed `T` of a plain Windows structure (every field an integer, pointer or union of them, for
 /// which all-zero is a valid, inert value). Used for the job-info and startup structures this file
 /// fills before a call.
