@@ -40,6 +40,17 @@ pub(crate) fn bridged(conn: Conn) -> io::Result<Bridged> {
     Ok(Bridged::new(owner, cut))
 }
 
+/// The `n` bytes a direction copied through `buf`, wiped once copied where `conn` carries the node's wire, whose
+/// messages may carry a lease's value or a sign-in's tokens (docs/design/credential-grants.md C7, C8; the review's
+/// E-6).
+fn wiped(conn: &Conn, buf: &mut [u8], n: usize) {
+    if conn.wipes()
+        && let Some(copied) = buf.get_mut(..n)
+    {
+        hex_api::lease::wipe_in_place(copied);
+    }
+}
+
 /// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
 /// [`downward`] then ends its reading.
 fn upward(conn: &Conn, mut from: Local) {
@@ -56,10 +67,9 @@ fn upward(conn: &Conn, mut from: Local) {
                 return;
             }
             Ok(n) => {
-                if conn
-                    .write_all(buf.get(..n).unwrap_or_default(), None)
-                    .is_err()
-                {
+                let wrote = conn.write_all(buf.get(..n).unwrap_or_default(), None);
+                wiped(conn, &mut buf, n);
+                if wrote.is_err() {
                     let _ = from.shutdown(Shutdown::Read);
                     return;
                 }
@@ -88,7 +98,9 @@ fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
                 return;
             }
             Ok(n) => {
-                if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                let wrote = to.write_all(buf.get(..n).unwrap_or_default());
+                wiped(conn, &mut buf, n);
+                if wrote.is_err() {
                     conn.reset(Why::Gone);
                     end(&to);
                     return;

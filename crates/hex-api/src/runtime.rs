@@ -111,6 +111,27 @@ pub trait Runtime: Send + Sync {
         })
     }
 
+    /// Sends `signal` to member `member` of running Shards image box `id` alone, on its own lane of its run's
+    /// agent-control endpoint (goal 2's item 2; D238), KILL among them: the member's, never its VM's, which runs on.
+    /// Refused `NotRunning(id, "signal a member: it has ended")` where the member has ended, `NotRunning(id, "signal a
+    /// member: it runs no program")` where it is files alone, `NotRunning(id, "signal a member")` where its run isn't
+    /// running, `Invalid` for a member its run declares not, and, naming the class, by a class whose boxes have no
+    /// members.
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &crate::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        let _ = (member, signal);
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members a signal reaches"
+            ),
+        })
+    }
+
     /// Tells box `id`'s guest the room its caller's budget leaves it (D188; Shards' D241; joint plan step 14, C7): the
     /// caller's budget-left for the box, everything the VM holds coming out of it, in bytes past what the box holds now,
     /// negative where the budget is short of that (its guest then reclaims its file pages); none lifts the hold.
@@ -1254,6 +1275,25 @@ impl LearnedRank {
     }
 }
 
+/// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): a box whose record its node couldn't read in its learner's
+/// last window, by its holder, and why, in its store's words. Its class, caps and receipt are its record's alone, so its
+/// learner counts it at its machine, and every VM class's answer names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedUnrecorded {
+    pub id: LearnedHolder,
+    pub why: String,
+}
+
+impl LearnedUnrecorded {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            why: copy_words(&self.why, "why a node couldn't read a box's record")?,
+        })
+    }
+}
+
 impl RateHeld {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         Ok(match self {
@@ -1408,6 +1448,15 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_ranked"
     )]
     pub ranked: Vec<LearnedRank>,
+    /// The boxes whose records can't be read, counted at their machine, each once, and why (the review's dropped records;
+    /// ROOT, 2026-11-14), on every VM class's answer, as many as the answer has room for after the ranked. Added after the
+    /// ranked, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_unrecorded"
+    )]
+    pub unrecorded: Vec<LearnedUnrecorded>,
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1467,6 +1516,17 @@ impl Learned {
         )
     }
 
+    /// At most [`MAX_LEARNED_HOLDINGS`]: one for each of a node's boxes.
+    pub fn deserialize_unrecorded<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedUnrecorded>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned unrecorded boxes exceed a node's boxes",
+        )
+    }
+
     /// At most [`MAX_LEARNED_HOLDINGS`]: one for each running VM.
     pub fn deserialize_rates<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -1523,8 +1583,9 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits and ranked
-    /// node VMs; at most [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope twice.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits, ranked node VMs
+    /// and unrecorded boxes, no box unrecorded twice; at most [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope
+    /// twice.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.ceilings.len() > MAX_LEARNED_PRIORS {
             return Err(Refusal::Exhausted {
@@ -1553,11 +1614,21 @@ impl Learned {
             ("learned unread VMs", self.unread.len()),
             ("learned awaits", self.awaits.len()),
             ("learned ranked VMs", self.ranked.len()),
+            ("learned unrecorded boxes", self.unrecorded.len()),
         ] {
             if told > MAX_LEARNED_HOLDINGS {
                 return Err(Refusal::Exhausted {
                     what,
                     bound: MAX_LEARNED_HOLDINGS,
+                });
+            }
+        }
+        let mut unrecorded = std::collections::BTreeSet::new();
+        for told in &self.unrecorded {
+            if !unrecorded.insert(&told.id) {
+                return Err(Refusal::Invalid {
+                    what: "learned unrecorded boxes",
+                    why: "a box repeats".to_owned(),
                 });
             }
         }
@@ -1647,6 +1718,11 @@ impl Learned {
             unread: try_clones(&self.unread, "learned unread VMs", LearnedUnread::try_clone)?,
             awaits: try_clones(&self.awaits, "learned awaits", LearnedAwait::try_clone)?,
             ranked: try_clones(&self.ranked, "learned ranked VMs", LearnedRank::try_clone)?,
+            unrecorded: try_clones(
+                &self.unrecorded,
+                "learned unrecorded boxes",
+                LearnedUnrecorded::try_clone,
+            )?,
         })
     }
 }
@@ -2556,6 +2632,55 @@ pub enum Refusal {
     /// it. After `Failed` (append-only).
     #[error("this node is configured with no {what}: {why}")]
     Unconfigured { what: &'static str, why: String },
+    /// The Shards guest a call needed failed it, `op` what the call was doing, in Shards' own kind ([`GuestFailure`];
+    /// the review's B-15), where an OS error's text would lose which. After `Unconfigured` (append-only).
+    #[error("{op}: the guest {failure}")]
+    Guest {
+        op: &'static str,
+        failure: GuestFailure,
+    },
+}
+
+/// How a Shards guest failed a call ([`Refusal::Guest`]): each of Shards' kinds by itself (Shards R04), so a caller
+/// tells a stalled boot from an ended guest, and either from an OS call's failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GuestFailure {
+    /// Its VM process ran no CPU at all over `over`, a whole W* or more, `slowest` the slowest answer of the wait's kind
+    /// its host had seen, found `waited` into the wait: Shards' Part B judge of a VM's boot or end, which stops no guest.
+    #[error(
+        "stalled: its VM ran no CPU over {over:?}, past the slowest answer of its kind seen, {slowest:?}, \
+         {waited:?} into the wait"
+    )]
+    Stalled {
+        waited: Duration,
+        over: Duration,
+        slowest: Duration,
+    },
+    /// It ended ([`GuestEnd`]).
+    #[error("ended: {0}")]
+    Ended(GuestEnd),
+    /// Its VM process, `pid`, is gone: `why`, in Shards' words.
+    #[error("is gone, its VM process {pid}: {why}")]
+    Gone { pid: u32, why: String },
+    /// Its VM process held its vCPUs to no rate it was told (Shards' D255), in its words.
+    #[error("refused its rate: {0}")]
+    Rate(String),
+    /// Its VM process answered its use with none of the protocol's (Shards' D260), as Shards says.
+    #[error("answered its use with none of the protocol's: {0}")]
+    HostUse(String),
+}
+
+/// How a Shards guest ended ([`GuestFailure::Ended`]): Shards' own ends.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GuestEnd {
+    #[error("it powered off")]
+    PowerOff,
+    #[error("it asked for a reset")]
+    Reset,
+    #[error("it was stopped")]
+    Stopped,
+    #[error("its VM failed: {0}")]
+    Failed(String),
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's
@@ -2588,7 +2713,10 @@ pub enum Upstream {
     /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
     /// first version, which owes `attach`.
     AttachAfterCrash,
-    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
+    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint. Given since Shards
+    /// 16451e19f (D238's member lanes, image channel v27): a member's signal rides its own lane, in process and over the
+    /// node's wire (`Runtime::signal_member`, goal 2's item 2), so no call awaits it now. Its tag stays, the wire being
+    /// append-only.
     MemberSignal,
     /// A microVM member's flows to an IPv6 address, or by UDP to any address: Shards' destinations
     /// (D236) reach an IPv4 address by TCP alone.

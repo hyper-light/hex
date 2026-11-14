@@ -182,8 +182,15 @@ harness member's):
   itself, so it carries them (lanes) and the node joins each to the member's own, a copy on a thread of its own to the
   source's end (`serve.rs` `joined`). The member has no pid here for an OS watch, so a thread of the node's waits
   for its end and tells it as a remote program's (`MemberEnd`); its release under the same lock clears an end told
-  before its start was registered, and its own kill is refused `Awaits(MemberSignal)`: the node's wire carries no
-  member's signal yet.
+  before its start was registered, and its own kill is its host's `signal_member(KILL)` on one of serve's workers, as
+  every call is (no thread of its own; ROOT, 2026-11-14), told to its caller whatever becomes of it, a member that no
+  longer runs having nothing to end, as in process.
+- `Runtime::signal_member(id, member, signal)` sends one member alone a signal on its own lane of the run's endpoint
+  (goal 2's item 2), KILL among them: the member's, never its VM's, which runs on. Refused `NotRunning(id, "signal a
+  member: it has ended")` for a member that has ended, `NotRunning(id, "signal a member: it runs no program")` for
+  one of files alone, `NotRunning(id, "signal a member")` where the run isn't running, and `Invalid` for a member the
+  run declares not. The node's wire carries it (`Call::MemberSignal`, kind `0x001e`, appended), sent by `hex-client`'s
+  `Runtime::signal_member`; the simulator's member its caller took ends by it, its echo keeping no handler.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -234,8 +241,9 @@ boot's time is no sample of the boot's W*: it is the time to its stop, no boot's
 W* with `Runtime::started` rather than polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed
 to its boot's answer as a delete follows it, by a wait of its own, `hex.image.started` (refused only where the boot's
 thread ends with no answer, the boot it follows still under way), then answered as inspect answers it, Running, or as
-its run's own failure in its runtime's words (`Refusal::Failed`), as `start` answers a run that failed; a box not
-booting is answered at once. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among
+its run's own failure in its runtime's words (`Refusal::Failed`), as `start` answers a run that failed, or, for a run
+whose publishes break its grants, which the call that took its boot's answer stops (network-grants.md N6), the grants'
+refusal once that stop has ended, as `start` answers it; a box not booting is answered at once. A Held box is refused `Awaits(AttachAfterCrash)` by every call, recovery's adoption among
 them, and is listed running: Hex can't prove it isn't.
 
 ## 4. Usage
@@ -294,6 +302,8 @@ D231's boot waits at most the patience its caller gives: past it, its run host i
 (`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and
 makes the boot on a thread of its own: the boot's W* is where a start answers `Lifecycle { Pending }` and tells the
 census its run-out, never where a boot ends, and the answer, when a later call takes it, is the sample W* rises to. A
+start answered so is followed through `Runtime::started` (`hex.image.started`), which the node's wire carries
+(`Call::Started`, kind `0x001f`, appended; ROOT, 2026-11-14), so a remote caller waits on the fact, never by looks. A
 stats ask is given `Duration::MAX` too and followed by its run's life alone, its W* where the census is told a run-out.
 D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
 past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's

@@ -843,7 +843,7 @@ fn a_dial_with_no_deadline_follows_its_guest_past_the_links_bound() {
 
 /// Decision 9 (AC-T7.4.1), on every OS: dial, with no caller deadline, a Shards simulator guest that never listens on
 /// the port, and stop the guest once the dial has been made again past its link's bound. Expect the dial refused at
-/// the guest's end, by its end, never at a bound.
+/// the guest's end, by its end as Shards' own kind (the review's B-15), never at a bound.
 #[test]
 fn a_dial_with_no_deadline_is_refused_at_its_guests_end() {
     static AGAIN: hex_core::patience::Patience = hex_core::patience::Patience::measuring(
@@ -868,10 +868,10 @@ fn a_dial_with_no_deadline_is_refused_at_its_guests_end() {
     assert!(
         matches!(
             &refused,
-            Err(Refusal::Os {
+            Err(Refusal::Guest {
                 op: "connecting to the guest",
-                why,
-            }) if why.contains("ended")
+                failure: hex_api::GuestFailure::Ended(_),
+            })
         ),
         "{refused:?}"
     );

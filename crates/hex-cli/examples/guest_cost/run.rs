@@ -37,23 +37,29 @@ impl Plan {
 }
 
 /// The window the node's CPU control enforces a VM's rate over (Linux: its cgroup's `cpu.max` period;
-/// macOS: the managed CPU control's cycle), and where it comes from.
+/// macOS: the managed CPU control's cycle; Windows: the VM's own governor's period), and where it comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     pub length: Duration,
     pub source: String,
 }
 
-/// The windows a VM's rate is enforced over: one period whatever the rate (Linux's `cpu.max`), or one that
-/// the VM's rate sets (the Mac control's cycle), given that rate in milli-CPU.
+/// The windows a VM's rate is enforced over: one period whatever the rate (Linux's `cpu.max`), one that
+/// the VM's rate sets (the Mac control's cycle), given that rate in milli-CPU, or the period the VM's own governor
+/// answers as it is asked to hold a rate (Shards' D191, D255), which a guest of the class is asked
+/// ([`super::seam::Driver::governed_window`]).
 pub enum Windows {
     #[cfg(any(target_os = "linux", test))]
     Fixed(Window),
     #[cfg(any(target_os = "macos", test))]
     AtRate(Box<dyn Fn(u64) -> Result<Window, String>>),
+    #[cfg(any(windows, test))]
+    Governed,
 }
 
 impl Windows {
+    /// The window at `rate`, where it is derived; a governor's is its guest's answer, asked of one
+    /// ([`Self::asked`]).
     pub fn at(&self, rate: u64) -> Result<Window, String> {
         match self {
             #[cfg(any(target_os = "linux", test))]
@@ -63,15 +69,38 @@ impl Windows {
             }
             #[cfg(any(target_os = "macos", test))]
             Self::AtRate(at) => at(rate),
+            #[cfg(any(windows, test))]
+            Self::Governed => {
+                let _ = rate;
+                Err(
+                    "a governor's window is its guest's answer, asked of one, never derived"
+                        .to_owned(),
+                )
+            }
         }
     }
 
+    /// The window at `rate`: derived, or asked of a guest of `driver`'s class where its governor holds the rate.
+    pub fn asked<D: Driver>(&self, driver: &mut D, rate: u64) -> Result<Window, String> {
+        #[cfg(any(windows, test))]
+        if matches!(self, Self::Governed) {
+            return driver.governed_window(rate);
+        }
+        let _ = &driver;
+        self.at(rate)
+    }
+
+    /// Whether a census at one rate may find another window: the Mac's cycle, which the rate sets. A governor holds
+    /// every rate over its one period, and each guest's own answer is held to the census's window
+    /// ([`super::seam::Driver::governed_window`]).
     pub fn depends_on_rate(&self) -> bool {
         match self {
             #[cfg(any(target_os = "linux", test))]
             Self::Fixed(_) => false,
             #[cfg(any(target_os = "macos", test))]
             Self::AtRate(_) => true,
+            #[cfg(any(windows, test))]
+            Self::Governed => false,
         }
     }
 }
@@ -102,12 +131,15 @@ enum Told {
 /// ordinary timed wait (on this lane's Mac, waits for a 4.3 ms window woke a median 8.8 ms and up to 34 ms
 /// late), so it waits as the managed CPU control's own watcher does, on a one-shot kqueue timer marked
 /// `NOTE_CRITICAL` (`hex_runtime::macos::sys::Kqueue::wait`). Linux's timed waits are hrtimers, late by
-/// their thread's timer slack alone.
+/// their thread's timer slack alone. Windows' end at the system timer's tick (15.6 ms unless raised), so it waits
+/// on a high-resolution waitable timer (`hex_runtime::windows::sys::HighResTimer`), as the charge-window probe does.
 struct Clock {
     #[cfg(target_os = "macos")]
     kq: hex_runtime::macos::sys::Kqueue,
     #[cfg(target_os = "macos")]
     events: Vec<hex_runtime::macos::sys::Event>,
+    #[cfg(windows)]
+    timer: hex_runtime::windows::sys::HighResTimer,
 }
 
 impl Clock {
@@ -117,6 +149,9 @@ impl Clock {
             kq: hex_runtime::macos::sys::Kqueue::new().map_err(|e| format!("a kqueue: {e}"))?,
             #[cfg(target_os = "macos")]
             events: Vec::new(),
+            #[cfg(windows)]
+            timer: hex_runtime::windows::sys::HighResTimer::new()
+                .map_err(|e| format!("a high-resolution timer: {e}"))?,
         })
     }
 
@@ -134,6 +169,13 @@ impl Clock {
             {
                 let _ = bound;
                 std::thread::park_timeout(left);
+            }
+            #[cfg(windows)]
+            {
+                let _ = bound;
+                self.timer
+                    .wait(left)
+                    .map_err(|e| format!("the sampling timer: {e}"))?;
             }
         }
         Ok(())
@@ -359,12 +401,33 @@ fn milli(used: Duration, span: Duration) -> Result<u64, String> {
     u64::try_from(milli).map_err(|_| "a VMM's CPU rate overflows".to_owned())
 }
 
-/// What is held on disk under `folders`: every path's file and allocated bytes (`st_blocks` x 512, a
-/// hard-linked file once), sorted by path, walked with an explicit stack; a path gone between its listing
-/// and its read is passed over, as a folder not there at all.
+/// The file `path` names and its allocated bytes, `meta` its metadata: on unix its device and inode and `st_blocks` x
+/// 512; on Windows its volume's serial and its file index and `FileStandardInfo`'s `AllocationSize`
+/// (`hex_runtime::windows::sys::file_held`), none where it went since its listing.
+/// A file as [`walk`] counts it: the file it names (its device and inode, or volume and index) and its allocated
+/// bytes.
+type FileHeld = ((u64, u64), u64);
+
+#[cfg(unix)]
+fn file_of(_: &Path, meta: &std::fs::Metadata) -> Result<Option<FileHeld>, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(Some((
+        (meta.dev(), meta.ino()),
+        meta.blocks().saturating_mul(512),
+    )))
+}
+
+#[cfg(windows)]
+fn file_of(path: &Path, _: &std::fs::Metadata) -> Result<Option<FileHeld>, String> {
+    hex_runtime::windows::sys::file_held(path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))
+}
+
+/// What is held on disk under `folders`: every path's file and allocated bytes ([`file_of`], a hard-linked file
+/// once), sorted by path, walked with an explicit stack; a path gone between its listing and its read is passed
+/// over, as a folder not there at all.
 pub fn walk(folders: &[PathBuf]) -> Result<Files, String> {
     use std::io::ErrorKind::NotFound;
-    use std::os::unix::fs::MetadataExt as _;
     let mut held = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = folders.to_vec();
@@ -388,13 +451,11 @@ pub fn walk(folders: &[PathBuf]) -> Result<Files, String> {
                 }
             }
         }
-        let file = (meta.dev(), meta.ino());
+        let Some((file, bytes)) = file_of(&path, &meta)? else {
+            continue;
+        };
         if seen.insert(file) {
-            held.push(Held {
-                path,
-                file,
-                bytes: meta.blocks().saturating_mul(512),
-            });
+            held.push(Held { path, file, bytes });
         }
     }
     held.sort();
@@ -748,6 +809,29 @@ struct Iteration {
     measured: u64,
 }
 
+/// The memory and disk quanta: this host's page size, and the allocation unit of the filesystem `runtime` is on.
+#[cfg(unix)]
+pub fn quanta(runtime: &Path) -> Result<(u64, u64), String> {
+    let page = u64::try_from(rustix::param::page_size()).map_err(|e| e.to_string())?;
+    let block = rustix::fs::statvfs(runtime)
+        .map_err(|e| format!("reading {}'s filesystem: {e}", runtime.display()))?
+        .f_frsize;
+    Ok((page, block))
+}
+
+#[cfg(windows)]
+pub fn quanta(runtime: &Path) -> Result<(u64, u64), String> {
+    let block = hex_runtime::windows::sys::cluster_bytes(runtime)
+        .map_err(|e| format!("reading {}'s volume: {e}", runtime.display()))?;
+    Ok((u64::from(hex_runtime::windows::sys::page_size()), block))
+}
+
+/// How [`quanta`] read the disk's: what the evidence says of it.
+#[cfg(unix)]
+const BLOCK_SOURCE: &str = "statvfs f_frsize";
+#[cfg(windows)]
+const BLOCK_SOURCE: &str = "the volume's allocation unit (GetDiskFreeSpaceW)";
+
 /// The run on `driver`: its census at the window the node's CPU control enforces with, the cost and evidence
 /// derived from it, written under `out` as `cost.json`, `evidence` and `samples`, the cost's id the evidence's
 /// SHA-256. A window that depends on the VM's rate (the Mac's cycle) is taken first at the envelope's rate,
@@ -766,13 +850,10 @@ pub fn produce<D: Driver>(
     let described = driver.describe()?;
     let envelope = driver.envelope()?;
     let patience = driver.patience()?;
-    let page = rustix::param::page_size();
-    let block = rustix::fs::statvfs(driver.runtime())
-        .map_err(|e| format!("reading {}'s filesystem: {e}", driver.runtime().display()))?
-        .f_frsize;
+    let (page, block) = quanta(driver.runtime())?;
     let quantum = CapacityResources {
         cpu_milli: 1,
-        mem_bytes: u64::try_from(page).map_err(|e| e.to_string())?,
+        mem_bytes: page,
         disk_bytes: block,
     };
     std::fs::create_dir_all(out).map_err(|e| format!("making {}: {e}", out.display()))?;
@@ -786,7 +867,7 @@ pub fn produce<D: Driver>(
             .cpu_milli
             .checked_add(charged)
             .ok_or("the CPU rate overflows")?;
-        let window = windows.at(rate)?;
+        let window = windows.asked(driver, rate)?;
         if window.length.is_zero() {
             return Err("a window of no time".to_owned());
         }
@@ -848,8 +929,9 @@ pub fn produce<D: Driver>(
         envelope.source
     ));
     line(format!(
-        "quantum {} (cpu: the API's milli-CPU; mem: this host's page size; disk: statvfs f_frsize of {})",
+        "quantum {} (cpu: the API's milli-CPU; mem: this host's page size; disk: {} of {})",
         resources(quantum),
+        BLOCK_SOURCE,
         driver.runtime().display()
     ));
     line(format!(
@@ -1021,6 +1103,8 @@ mod tests {
         torn_down: usize,
         bounds: Vec<Duration>,
         disk: Files,
+        /// The rates its governed window was asked at.
+        governed: Vec<u64>,
     }
 
     impl Driven {
@@ -1032,6 +1116,7 @@ mod tests {
                 torn_down: 0,
                 bounds: Vec::new(),
                 disk: Vec::new(),
+                governed: Vec::new(),
             }
         }
     }
@@ -1109,6 +1194,13 @@ mod tests {
                 self.disk.sort();
             }
             Ok(())
+        }
+        fn governed_window(&mut self, rate: u64) -> Result<Window, String> {
+            self.governed.push(rate);
+            Ok(Window {
+                length: Duration::from_millis(20),
+                source: format!("governed at {rate}"),
+            })
         }
     }
 
@@ -1490,6 +1582,34 @@ mod tests {
             .is_err()
         );
         assert_eq!(driver.launched, 2);
+    }
+
+    /// AC-T7.4.1 (ROOT, 2026-11-14: a Windows node holds a managed VM's rate with its own governor, Shards' D255): a
+    /// class whose window is its guests' governor's period: expect the window asked of the class once, at the
+    /// envelope's rate, one census taken at it, and the evidence naming its window by the class's answer.
+    #[test]
+    fn a_governed_window_is_asked_of_the_class_once_at_the_envelopes_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let steady: Vec<(Use, Holding)> = (0..64)
+            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
+            .collect();
+        let mut driver = Driven::new(dir.path(), vec![Some(script(steady, 400 << 20)); 64]);
+        let out = dir.path().join("out");
+        let made = produce(
+            &mut driver,
+            &Plan { seedable: 2 },
+            &out,
+            &Windows::Governed,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(driver.governed, vec![2000]);
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        assert!(
+            text.contains("\nwindow 20000000 ns (governed at 2000)\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches("\nwindow_census ").count(), 1, "{text}");
     }
 
     /// AC-T7.4.1 (ROOT, the Mac window's fixed point): a window that the rate sets, over guests whose VMM uses
