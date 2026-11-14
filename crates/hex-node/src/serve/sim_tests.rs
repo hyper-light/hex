@@ -597,6 +597,11 @@ struct SimHost {
     abandoned: Mutex<Vec<BoxId>>,
     guest: Arc<Guest>,
     offered: Mutex<Option<Arc<OfferedGuest>>>,
+    /// Each MCP call's wait in this host, by the name of the thread it waits on (goal 2's item 3).
+    mcp_threads: Mutex<Vec<String>>,
+    /// The test holds each MCP call's wait, as a harness that hasn't connected does ([`SimHost::hold_mcp`]).
+    mcp_held: Mutex<bool>,
+    mcp_opened: Condvar,
 }
 
 impl SimHost {
@@ -610,6 +615,9 @@ impl SimHost {
             abandoned: Mutex::new(Vec::new()),
             guest: Arc::default(),
             offered: Mutex::new(None),
+            mcp_threads: Mutex::new(Vec::new()),
+            mcp_held: Mutex::new(false),
+            mcp_opened: Condvar::new(),
         });
         for id in [b(), g()] {
             host.sim
@@ -631,6 +639,21 @@ impl SimHost {
     fn hold(&self, shut: bool) {
         *self.shut.lock().unwrap() = shut;
         self.opened.notify_all();
+    }
+
+    /// Holds each MCP call's wait in this host while `held`, as a harness that hasn't connected holds it.
+    fn hold_mcp(&self, held: bool) {
+        *self.mcp_held.lock().unwrap() = held;
+        self.mcp_opened.notify_all();
+    }
+}
+
+/// Lets the host's MCP waits go as it drops, so a test that fails while one is held ends with its server.
+struct McpWaitsGo(Arc<SimHost>);
+
+impl Drop for McpWaitsGo {
+    fn drop(&mut self) {
+        self.0.hold_mcp(false);
     }
 }
 
@@ -678,6 +701,20 @@ impl Runtime for SimHost {
     }
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         self.sim.delete(id)
+    }
+    /// A member's MCP connection's wait, as a harness that hasn't connected holds it: the thread it waits on recorded,
+    /// held while the test holds it ([`SimHost::hold_mcp`]), then refused as a run that ended refuses it.
+    fn mcp(&self, id: &BoxId, _member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.mcp_threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().name().unwrap_or_default().to_owned());
+        let deadline = Instant::now() + PATIENCE;
+        let mut held = self.mcp_held.lock().unwrap();
+        while *held && Instant::now() < deadline {
+            held = self.mcp_opened.wait_timeout(held, PATIENCE).unwrap().0;
+        }
+        Err(Refusal::NotRunning(id.clone(), "mcp: its run ended"))
     }
 }
 
@@ -816,6 +853,22 @@ fn of_wire(mut bytes: Vec<u8>, theirs: u64) -> Vec<u8> {
 
 fn exec(id: u64) -> Vec<u8> {
     exec_in(id, b())
+}
+
+/// A member's next MCP connection in box [`b`] (goal 2's item 3), no stream carried or asked for.
+fn mcp(id: u64) -> Vec<u8> {
+    request(
+        id,
+        Call::Mcp {
+            id: b(),
+            member: hex_api::Member {
+                kind: hex_api::MemberKind::Agent,
+                name: "helper".to_owned(),
+            },
+            streams: Streams::default(),
+            ask: Streams::default(),
+        },
+    )
 }
 
 /// A run (decision 7) of a program in a `process` box named `name`.
@@ -1345,10 +1398,12 @@ fn w2_a_members_kill_the_queue_cannot_take_is_refused_never_dropped() {
     let end = MemberEnd {
         shared: Arc::downgrade(&shared),
         token: FIRST_TOKEN,
-        id: b(),
-        member: hex_api::Member {
-            kind: hex_api::MemberKind::Harness,
-            name: "claude".to_owned(),
+        kills: Kills::Member {
+            id: b(),
+            member: hex_api::Member {
+                kind: hex_api::MemberKind::Harness,
+                name: "claude".to_owned(),
+            },
         },
         released: Mutex::new(false),
     };
@@ -2049,4 +2104,119 @@ fn an_offered_host_refusal_before_queued_guest_error_reclaims_admission_once() {
     offered.reclaimed();
     assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
     offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// Goal 2's item 3 (ROOT, 2026-11-14; AC-T7.4.1): an MCP call waits for its harness on a thread of its own, never one of
+/// the node's workers, so the node's own jobs behind it run. Do: on a node of one worker, a client execs a program, then
+/// another asks a member's MCP connection, whose host holds the wait as a harness that hasn't connected does; then the
+/// first client goes. Expect: the MCP wait in its host on a thread of its own, `hex-node mcp`, not a worker; the first
+/// client's program killed by the disconnect rule and counted in its box, a job of the node's own on its one worker, while
+/// the MCP wait goes on; and the MCP call answered with its host's refusal once the wait lets go.
+#[test]
+fn w2_mcp_a_wait_holds_no_worker_so_the_nodes_own_jobs_run() {
+    let lab = Lab::with_limits(
+        1,
+        Limits {
+            connections: 2,
+            message_bytes: 4096,
+            in_flight: 3,
+            programs: 2,
+        },
+    );
+    let _go = McpWaitsGo(Arc::clone(&lab.host));
+    lab.host.hold_mcp(true);
+    let leaving = lab.os.connect(true, 64);
+    lab.os.put(&leaving, exec(1));
+    assert!(matches!(answer_of(&leaving).1, Answer::Started { .. }));
+    let waiting = lab.os.connect(true, 64);
+    lab.os.put(&waiting, mcp(2));
+    wait_until("the MCP call's wait in its host", || {
+        !lab.host.mcp_threads.lock().unwrap().is_empty()
+    });
+    assert_eq!(
+        *lab.host.mcp_threads.lock().unwrap(),
+        vec!["hex-node mcp".to_owned()],
+        "an MCP wait holds no worker"
+    );
+    lab.os.leave(&leaving);
+    wait_until("the leaving client's program counted in its box", || {
+        lab.host.abandoned.lock().unwrap().len() == 1
+    });
+    lab.host.hold_mcp(false);
+    let (header, answer) = answer_of(&waiting);
+    assert_eq!(
+        (header.id, answer),
+        (
+            2,
+            Answer::Refused(Refusal::NotRunning(b(), "mcp: its run ended"))
+        )
+    );
+}
+
+/// Goal 2's item 3 (ROOT, 2026-11-14; KEPT's reason, the lead's of 2026-11-06; AC-T7.4.1): an MCP call never holds its
+/// connection's kept call, so a connection waiting on its bridges can still stop and delete its box. Do: on a node of one
+/// connection and two calls in flight, a program running in box `b`, ask a member's MCP connection, its host holding the
+/// wait; ask another; send the box KILL, and once it is answered delete the box. Expect: the second MCP call refused
+/// `Exhausted`, naming the calls in flight and their bound, the budget's shared part held by the first; the KILL and the
+/// delete each done, on the connection's kept call; and the first MCP call answered with its host's refusal once its wait
+/// lets go.
+#[test]
+fn w2_mcp_a_connection_waiting_on_a_bridge_can_still_stop_and_delete() {
+    let lab = Lab::with_limits(
+        2,
+        Limits {
+            connections: 1,
+            message_bytes: 4096,
+            in_flight: 2,
+            programs: 4,
+        },
+    );
+    let _go = McpWaitsGo(Arc::clone(&lab.host));
+    lab.host.hold_mcp(true);
+    let _running = lab
+        .host
+        .sim
+        .exec(&b(), Program::of(&["wait"]), Stdio::null())
+        .unwrap();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, mcp(1));
+    wait_until("the first MCP call's wait in its host", || {
+        lab.host.mcp_threads.lock().unwrap().len() == 1
+    });
+    lab.os.put(&sock, mcp(2));
+    lab.os.put(
+        &sock,
+        request(
+            3,
+            Call::Signal {
+                id: b(),
+                signal: Signal::KILL,
+            },
+        ),
+    );
+    let next = || {
+        let (header, answer) = answer_of(&sock);
+        (header.id, answer)
+    };
+    assert_eq!(
+        next(),
+        (
+            2,
+            Answer::Refused(Refusal::Exhausted {
+                what: IN_FLIGHT,
+                bound: 2
+            })
+        )
+    );
+    assert_eq!(next(), (3, Answer::Done));
+    lab.os.put(&sock, request(4, Call::Delete(b())));
+    assert_eq!(next(), (4, Answer::Done));
+    lab.host.hold_mcp(false);
+    assert_eq!(
+        next(),
+        (
+            1,
+            Answer::Refused(Refusal::NotRunning(b(), "mcp: its run ended"))
+        )
+    );
 }

@@ -212,7 +212,22 @@ harness member's):
   (the review's D-10). Its kill aborts what the harness is sent (ECONNRESET), the lane having no hangup of its own at
   Shards `2737fc4ec`, so a kill made while a record waits for the harness to take it goes once the harness takes it, or
   the run ends (ROOT's asks of g121, 2026-11-14: a hangup for an exec or MCP lane, and `Output` and `Input` that don't
-  wait).
+  wait). The node's wire carries it (`Call::Mcp`, kind `0x0021`, appended after A-10's `Reserved`), sent by
+  `hex-client`'s `Runtime::mcp`, its stdin and stdout asked for, timed by a box kind of its own
+  (`client.answer.mcp.<class>`). The node serves it as `Call::Member` but for its wait (ROOT, 2026-11-14): its runtime's
+  `mcp` waits on a thread of its own (`hex-node mcp`), never one of serve's workers, which the node's other calls and its
+  own jobs run on (a program's collect, a member's kill, an abandoned box's count, a list's parts); the call stays in
+  flight until it is answered, so the in-flight bound bounds these threads; and it is admitted from the budget's shared
+  part alone, never the connection's kept call (`KEPT`, whose reason is that a connection can always make one call, so a
+  connection waiting on its bridges can always stop, delete or inspect), refused `Exhausted` where that part is spent.
+  The same thread then waits for the connection's end and tells it as a remote program's; a remote kill (`Call::Kill`,
+  the disconnect rule) reaches it through its runtime's kill apart from it (`Proc::killer`), on a thread of its own
+  (`hex-node mcp kill`). Its costs: a thread for each MCP call from its ask to its connection's end, the image class's two
+  pumps for each connection, and over QUIC a copy thread for each stream it carries (`joined`); a wait whose connection
+  closes waits on until its harness connects or its run ends, its place in flight held, and the disconnect rule then ends
+  what it took. At the next revendor (Shards `9f5b1f754`'s `Dialed::wake`) the pending wait moves onto the node's event
+  loop (`PendingMcp::wait(Duration::ZERO)` after each ring) and holds no thread; an open connection's pumps keep theirs
+  until Shards gives `Output` and `Input` forms that don't wait.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach

@@ -825,6 +825,28 @@ fn requests() -> Vec<(u64, Request, usize)> {
             })),
             0,
         ),
+        // Goal 2's item 3: a member's next MCP connection, its stdin carried and its stdout asked for, appended.
+        (
+            211,
+            Request::Call(Call::Mcp {
+                id: id("image"),
+                member: Member {
+                    kind: MemberKind::Agent,
+                    name: "helper".to_owned(),
+                },
+                streams: Streams {
+                    stdin: true,
+                    stdout: false,
+                    stderr: false,
+                },
+                ask: Streams {
+                    stdin: false,
+                    stdout: true,
+                    stderr: false,
+                },
+            }),
+            1,
+        ),
         // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
         (205, Request::Call(Call::Lessors), 0),
         (206, Request::Lessor(Ok(())), 0),
@@ -2199,7 +2221,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0021, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0022, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
