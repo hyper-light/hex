@@ -129,6 +129,21 @@ pub(super) fn apply(
     let mut masks = Vec::new();
     reserve(&mut masks, devices.len(), "normalized device route masks")?;
     masks.resize(devices.len(), 0u64);
+    // The room its NodeVm routes admit within (joint plan step 39, V2): its Ready node VM's guest, the one guest that
+    // serves its oci class.
+    let mut node_vm_room = None;
+    for receipt in reports
+        .iter()
+        .filter_map(|(_, report)| report.as_ref())
+        .flat_map(|report| &report.node_vms)
+        .filter(|receipt| receipt.phase == hex_api::NodeVmPhase::Ready)
+    {
+        if node_vm_room.replace(receipt.guest).is_some() {
+            return Err(invalid(
+                "two node VMs Ready in one node's answers: one guest serves its oci class",
+            ));
+        }
+    }
     let mut backings: Vec<hex_api::BackingOffer> = Vec::new();
     reserve(
         &mut backings,
@@ -183,6 +198,7 @@ pub(super) fn apply(
         offers,
         device_routes: masks,
         backings,
+        node_vm_room,
     };
     let provisioned = routes
         .unobserved_claims(&devices, node.id)

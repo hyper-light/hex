@@ -765,6 +765,7 @@ fn render_route(out: &mut impl std::fmt::Write, receipt: Option<RouteReceipt>) -
         Execution::ShardsShared => "shards-shared",
         Execution::ShardsDedicated => "shards-dedicated",
         Execution::Firecracker => "firecracker",
+        Execution::NodeVm => "node-vm",
     };
     let gpu = match key.gpu {
         GpuEligibility::Any => "any",

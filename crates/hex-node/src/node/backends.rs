@@ -38,7 +38,7 @@ fn project_initialized_routes(
         let present = match pool.execution {
             Execution::Firecracker => firecracker.is_some(),
             Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
-            Execution::Native => false,
+            Execution::Native | Execution::NodeVm => false,
         };
         if !present {
             return Err(Refusal::Backing {
@@ -52,7 +52,7 @@ fn project_initialized_routes(
         let present = match execution {
             Execution::Firecracker => firecracker.is_some(),
             Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
-            Execution::Native => false,
+            Execution::Native | Execution::NodeVm => false,
         };
         if !present {
             return Err(projection_refused(
@@ -679,7 +679,7 @@ impl Node {
                         refused("its node configures no Shards backend to preflight it")
                     })?
                     .preflight_backing(record)?,
-                Execution::Native => {
+                Execution::Native | Execution::NodeVm => {
                     return Err(refused(
                         "its record's execution is native, which no backend preflights",
                     ));
@@ -767,7 +767,7 @@ impl Node {
                     .and_then(|backends| backends.shards.as_ref())
                     .ok_or_else(|| refused("its node configures no Shards backend to recover it"))?
                     .recover_backing()?,
-                Execution::Native => {
+                Execution::Native | Execution::NodeVm => {
                     return Err(refused(
                         "its record's execution is native, which no backend recovers",
                     ));
