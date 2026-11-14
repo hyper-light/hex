@@ -260,6 +260,7 @@ fn guest_box(id: &BoxId) -> hex_api::BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }

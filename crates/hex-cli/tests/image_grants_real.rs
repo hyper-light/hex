@@ -13,8 +13,10 @@
 //!   among them; inspect shows no grant and nothing published, and the host's service took nothing. Its image links
 //!   its harness past the microVM, so its run keeps its network, whose network process (Shards' `shards-net`, D36),
 //!   told nothing kept, lets nothing past (D250): one network process, no process of its run holding a socket that
-//!   takes what comes in (a listening TCP socket, a UDP socket with no peer) but its run's agent-control endpoint
-//!   (Hex's own, on the host's loopback, where inspect says: `BoxInfo.control`), and no flow past the host's loopback.
+//!   takes what comes in (a listening TCP socket, a UDP socket with no peer) but its run's agent-control endpoint's,
+//!   all three held (Hex's own, on the host's loopback, where inspect says: `BoxInfo.control` and `control_wake`, its
+//!   served socket, its waker and its wake, which Windows' table shows with no peer), and no flow past the host's
+//!   loopback.
 //! - **One publish, published alone, to its member.** A VM of its members alone is granted one publish: the probe's
 //!   port at the host's loopback, on a host port the OS picks. Inspect shows that one grant, and its one published
 //!   port at 127.0.0.1 reaching the probe at that port, as Shards names it. Its run listens there alone, past its
@@ -168,13 +170,17 @@ fn start(client: &Client, id: &BoxId) -> Result<(), Refusal> {
     }
 }
 
-/// Where running box `id`'s run's agent-control endpoint is bound, as its inspect `shown` says (`BoxInfo.control`),
-/// told on stderr. Hex asks every image run for one, so a running VM that says none fails.
-fn agent_control(id: &BoxId, shown: &hex_api::BoxInfo) -> SocketAddr {
-    let control = shown
-        .control
-        .unwrap_or_else(|| panic!("{id} runs and says no agent-control endpoint: {shown:?}"));
-    eprintln!("GRANTS {id}'s agent-control endpoint at {control}");
+/// Every socket running box `id`'s run's agent-control endpoint holds, as its inspect `shown` says (`BoxInfo.control`
+/// and `control_wake`, Shards' `ControlAt::sockets`, image channel v30): its served address, its waker's and its wake's,
+/// told on stderr. Hex asks every image run for an endpoint, so a running VM that says none, or its address alone, fails.
+fn agent_control(id: &BoxId, shown: &hex_api::BoxInfo) -> [SocketAddr; 3] {
+    let control = shown.control_sockets().unwrap_or_else(|| {
+        panic!("{id} runs and says no agent-control endpoint's sockets: {shown:?}")
+    });
+    let [address, waker, wake] = control;
+    eprintln!(
+        "GRANTS {id}'s agent-control endpoint at {address}, its waker at {waker}, its wake at {wake}"
+    );
     control
 }
 

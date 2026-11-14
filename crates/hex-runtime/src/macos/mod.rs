@@ -573,6 +573,7 @@ impl MacRuntime {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
     }
@@ -798,6 +799,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }

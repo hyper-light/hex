@@ -659,6 +659,7 @@ fn info() -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }
@@ -1222,6 +1223,7 @@ fn answers() -> Vec<(u64, Answer)> {
                         last_resort: None,
                         ended: None,
                         control: None,
+                        control_wake: None,
                         credentials: Vec::new(),
                     },
                 ],
@@ -2316,8 +2318,17 @@ fn hostile_values_are_refused_by_name() {
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
     // empty grant and published lists' counts, the last resort's and the run's words' none tags, the empty
     // credential list's count and the agent-control endpoint's none tag end the info.
-    let adopted =
-        info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - 2 - 8 - 6 - 1;
+    let adopted = info.len()
+        - NO_GRANTS
+        - NO_END
+        - NO_WORDS
+        - NO_CREDENTIALS
+        - NO_CONTROL
+        - NO_WAKE
+        - 2
+        - 8
+        - 6
+        - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -2534,6 +2545,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 last_resort: None,
                 ended: None,
                 control: None,
+                control_wake: None,
                 credentials: Vec::new(),
             },
         )
@@ -3701,8 +3713,14 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
     );
     // The info's route comes before its empty grant and published lists' counts, its last resort's and its run's
     // words' none tags, its empty credential list's count and its agent-control endpoint's none tag.
-    let route_at =
-        bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - route_bytes;
+    let route_at = bad.len()
+        - NO_GRANTS
+        - NO_END
+        - NO_WORDS
+        - NO_CREDENTIALS
+        - NO_CONTROL
+        - NO_WAKE
+        - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -5248,6 +5266,9 @@ const NO_CREDENTIALS: usize = size_of::<u32>();
 /// What ends an info whose run told no agent-control endpoint (joint plan step 15, N6): its none tag, after its
 /// credentials.
 const NO_CONTROL: usize = 1;
+/// What ends an info whose run told no agent-control endpoint's waker and wake (Shards' D252 amended, image channel
+/// v30): its none tag, after the endpoint's.
+const NO_WAKE: usize = 1;
 
 /// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire after its info's grants. Do:
 /// encode an info with an end and one with none, cut the second before its end's none tag, and read and write both as
@@ -5267,11 +5288,11 @@ fn w14_an_infos_last_resort_crosses_the_wire_after_its_grants() {
     let plain = info();
     let mut cut = answer(3, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END],
+        cut[cut.len() - NO_WAKE - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END],
         0,
         "no end's tag"
     );
-    cut.truncate(cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END);
+    cut.truncate(cut.len() - NO_WAKE - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5302,9 +5323,11 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         Answer::Info(failed.clone())
     );
-    assert!(bytes[..bytes.len() - NO_CREDENTIALS - NO_CONTROL].ends_with(words.as_bytes()));
+    assert!(
+        bytes[..bytes.len() - NO_CREDENTIALS - NO_CONTROL - NO_WAKE].ends_with(words.as_bytes())
+    );
     let mut garbled = bytes.clone();
-    let last = garbled.len() - NO_CREDENTIALS - NO_CONTROL - 1;
+    let last = garbled.len() - NO_CREDENTIALS - NO_CONTROL - NO_WAKE - 1;
     garbled[last] = 0xff;
     assert!(matches!(
         read_answer(&received(&garbled, 0), MAX_MESSAGE),
@@ -5313,11 +5336,11 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     let plain = info();
     let mut cut = answer(5, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CREDENTIALS - NO_CONTROL - 1],
+        cut[cut.len() - NO_CREDENTIALS - NO_CONTROL - NO_WAKE - 1],
         0,
         "no words' tag ends it, but for its credentials and its agent-control endpoint"
     );
-    cut.truncate(cut.len() - NO_CREDENTIALS - NO_CONTROL - NO_WORDS);
+    cut.truncate(cut.len() - NO_CREDENTIALS - NO_CONTROL - NO_WAKE - NO_WORDS);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5803,7 +5826,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend(49152u16.to_le_bytes());
     tail.push(1);
     tail.extend(1455u16.to_le_bytes());
-    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL]);
+    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL + NO_WAKE]);
     assert!(bytes.ends_with(&tail));
     let declared = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -5823,7 +5846,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         older.ends_with(
             &[
                 &[0][..],
-                &[0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL][..]
+                &[0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL + NO_WAKE][..]
             ]
             .concat()
         )
@@ -5845,8 +5868,14 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let receiver =
-        hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL;
+    let receiver = hostile.len()
+        - 1
+        - size_of::<u16>()
+        - NO_END
+        - NO_WORDS
+        - NO_CREDENTIALS
+        - NO_CONTROL
+        - NO_WAKE;
     hostile[receiver] = 2;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
@@ -6041,7 +6070,7 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
     );
     let mut listed = Writer::new(MAX_MESSAGE);
     put_credentials(&mut listed, &credentials, &each_way()).unwrap();
-    assert!(bytes[..bytes.len() - NO_CONTROL].ends_with(&listed.done().unwrap()));
+    assert!(bytes[..bytes.len() - NO_CONTROL - NO_WAKE].ends_with(&listed.done().unwrap()));
     let unreached = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: Vec::new(),
@@ -6059,8 +6088,9 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
 
 /// Joint plan step 15 (N6; AC-T7.7.2): do answer an inspect of a running Shards image VM with its run's agent-control
 /// endpoint, at an IPv4 loopback address and at IPv6's, and one with none; read each back, and write each as JSON. Expect
-/// each back exactly, the endpoint its info's last bytes (tag 1, its address as a grant's is written, its port), none a
-/// 0 last and refused once cut, as every truncation is, and JSON without the field reading as none. Do read one whose
+/// each back exactly, the endpoint its info's last bytes but its waker's and wake's none tag (tag 1, its address as a
+/// grant's is written, its port), none a 0 there and refused once cut, as every truncation is, and JSON without the
+/// field reading as none. Do read one whose
 /// endpoint's address family is none, and one whose tag is neither 0 nor 1; expect each refused by name.
 #[test]
 fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
@@ -6074,6 +6104,7 @@ fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
         let shown = BoxInfo {
             class: Class::Shards,
             control: Some(at.parse().unwrap()),
+            control_wake: None,
             ..info()
         };
         let bytes = answer(99, &Answer::Info(shown.clone()), MAX_MESSAGE).unwrap();
@@ -6082,7 +6113,7 @@ fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
             Answer::Info(shown.clone()),
             "{at}"
         );
-        let tail = [&[1u8][..], &address, &43471u16.to_le_bytes()].concat();
+        let tail = [&[1u8][..], &address, &43471u16.to_le_bytes(), &[0u8]].concat();
         assert!(bytes.ends_with(&tail), "{at}");
         let json = serde_json::to_value(&shown).unwrap();
         assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), shown);
@@ -6101,8 +6132,8 @@ fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
     }
     let plain = info();
     let mut cut = answer(99, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
-    assert_eq!(cut.last(), Some(&0), "no endpoint's tag ends it");
-    cut.truncate(cut.len() - NO_CONTROL);
+    assert_eq!(cut.last(), Some(&0), "no waker's and wake's tag ends it");
+    cut.truncate(cut.len() - NO_WAKE);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -6110,6 +6141,73 @@ fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
     let older = serde_json::to_value(&plain).unwrap();
     assert!(older.get("control").is_none(), "skipped when none");
     assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
+}
+
+/// Shards' D252 amended (image channel v30; AC-T7.7.2): do answer an inspect of a running Shards image VM with its run's
+/// agent-control endpoint and that endpoint's waker and wake, at IPv4 loopback addresses and at IPv6's; read each back,
+/// and write each as JSON. Expect each back exactly, the waker and the wake its info's last bytes (tag 1, then each
+/// address as a grant's is written and its port), every socket the endpoint holds its `control_sockets`, and JSON
+/// without the field reading as none. Do read one telling a waker and wake with no endpoint; expect it refused by name.
+#[test]
+fn v30_an_inspect_carries_its_endpoints_waker_and_wake_after_it() {
+    let v6 = |port: u16| std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    let v4 = |port: u16| std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    for (control, waker, wake) in [
+        (v4(43471), v4(50001), v4(50002)),
+        (v6(43471), v6(50001), v6(50002)),
+    ] {
+        let shown = BoxInfo {
+            class: Class::Shards,
+            control: Some(control),
+            control_wake: Some(ControlWake { waker, wake }),
+            ..info()
+        };
+        assert_eq!(shown.control_sockets(), Some([control, waker, wake]));
+        let bytes = answer(99, &Answer::Info(shown.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            Answer::Info(shown.clone()),
+            "{control}"
+        );
+        let address = |at: std::net::SocketAddr| match at.ip() {
+            std::net::IpAddr::V4(ip) => [&[4u8][..], &ip.octets()].concat(),
+            std::net::IpAddr::V6(ip) => [&[6u8][..], &ip.octets()].concat(),
+        };
+        let tail = [
+            &[1u8][..],
+            &address(waker),
+            &waker.port().to_le_bytes(),
+            &address(wake),
+            &wake.port().to_le_bytes(),
+        ]
+        .concat();
+        assert!(bytes.ends_with(&tail), "{control}");
+        let json = serde_json::to_value(&shown).unwrap();
+        assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), shown);
+    }
+    let unbound = BoxInfo {
+        class: Class::Shards,
+        control: None,
+        control_wake: Some(ControlWake {
+            waker: v4(50001),
+            wake: v4(50002),
+        }),
+        ..info()
+    };
+    assert_eq!(unbound.control_sockets(), None);
+    let bytes = answer(99, &Answer::Info(unbound), MAX_MESSAGE).unwrap();
+    assert!(
+        matches!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "control_wake",
+                ..
+            })
+        ),
+        "a waker and wake with no endpoint"
+    );
+    let older = serde_json::to_value(info()).unwrap();
+    assert!(older.get("control_wake").is_none(), "skipped when none");
 }
 
 /// docs/design/credential-grants.md C7: a lease's value crosses the wire in its own message alone, which says it carries

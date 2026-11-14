@@ -953,6 +953,7 @@ fn unread_info(id: BoxId) -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }
@@ -978,6 +979,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),
@@ -2194,9 +2196,14 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
-                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
-                // from a socket no grant made.
+                // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake
+                // (Shards' D252 amended, image channel v30), so a reading of the host tells each from a socket no grant
+                // made.
                 shown.control = guest.control().map(|at| at.address);
+                shown.control_wake = guest.control().map(|at| hex_api::ControlWake {
+                    waker: at.waker,
+                    wake: at.wake,
+                });
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),

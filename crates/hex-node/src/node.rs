@@ -1125,6 +1125,7 @@ impl Node {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
     }
@@ -1649,6 +1650,7 @@ impl Node {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
     }
@@ -2320,6 +2322,7 @@ impl Runtime for Node {
                         last_resort: None,
                         ended: None,
                         control: None,
+                        control_wake: None,
                         credentials: Vec::new(),
                     }),
                     Err(why) => return Err(why),
@@ -2343,6 +2346,7 @@ impl Runtime for Node {
                     last_resort: None,
                     ended: None,
                     control: None,
+                    control_wake: None,
                     credentials: Vec::new(),
                 });
             }
