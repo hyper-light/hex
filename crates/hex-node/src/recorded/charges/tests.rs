@@ -1266,10 +1266,25 @@ struct Imaging {
     node_rooms: std::sync::Mutex<Vec<(hex_api::NodeRun, i64)>>,
     /// Each rate an image box's run was held to, in order.
     box_rates: std::sync::Mutex<Vec<(String, u64)>>,
+    /// Whether the lock its node's capacity answers take is held, where a test watches it (A-2); each ask the learner
+    /// made of it, and each made while that lock was held, in order.
+    watch: std::sync::OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
+    asked: std::sync::Mutex<Vec<&'static str>>,
+    held: std::sync::Mutex<Vec<&'static str>>,
 }
 
 #[derive(Clone, Default)]
 struct Images(std::sync::Arc<Imaging>);
+
+impl Images {
+    /// Notes the learner's ask `what`, and whether the lock its node's capacity answers take was held as it was made.
+    fn ask(&self, what: &'static str) {
+        self.0.asked.lock().unwrap().push(what);
+        if self.0.watch.get().is_some_and(|held| held()) {
+            self.0.held.lock().unwrap().push(what);
+        }
+    }
+}
 
 impl hex_api::Runtime for Images {
     fn classes(&self) -> Vec<hex_api::Class> {
@@ -1313,6 +1328,7 @@ impl hex_api::Runtime for Images {
         self.0.sim.delete(id)
     }
     fn room(&self, _: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.ask("room");
         Ok(room.and_then(|room| u64::try_from(room).ok()))
     }
     fn rate(
@@ -1320,6 +1336,7 @@ impl hex_api::Runtime for Images {
         id: &BoxId,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.ask("rate");
         self.0.box_rates.lock().unwrap().push((
             id.as_str().to_owned(),
             rate.map_or(0, std::num::NonZeroU64::get),
@@ -1327,6 +1344,7 @@ impl hex_api::Runtime for Images {
         Ok(rate)
     }
     fn host_use(&self, _: &BoxId) -> Result<HostUse, Refusal> {
+        self.ask("host_use");
         Ok(HostUse {
             cpu_ns: 0,
             footprint_bytes: GIB,
@@ -1357,6 +1375,7 @@ impl crate::recorded::Recover for Images {
     }
     /// Its run's use as it reads first: nothing run yet, a GiB held, over the life it has had, one of its periods.
     fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<HostUse, Refusal> {
+        self.ask("node_vm_host_use");
         self.0
             .node_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1369,6 +1388,7 @@ impl crate::recorded::Recover for Images {
         })
     }
     fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Duration, Refusal> {
+        self.ask("node_vm_rate_period");
         self.0
             .node_periods
             .lock()
@@ -1382,6 +1402,7 @@ impl crate::recorded::Recover for Images {
         run: hex_api::NodeRun,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.ask("node_vm_rate");
         self.0
             .node_rates
             .lock()
@@ -1390,10 +1411,12 @@ impl crate::recorded::Recover for Images {
         Ok(rate)
     }
     fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.ask("node_vm_room");
         self.0.node_rooms.lock().unwrap().push((run, room));
         Ok(())
     }
     fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+        self.ask("image_rate_period");
         self.0
             .reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2877,4 +2900,68 @@ fn w39_a6_an_oci_box_its_node_vm_ended_is_kept_with_why_across_a_restart() {
     );
     let info = node.books.counted(record.retired_info().unwrap()).unwrap();
     assert_eq!(info.last_resort, Some(node_end(4)));
+}
+
+/// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
+/// stalled every capacity answer; AC-T7.4.1): a window asks its VMs with the lock its capacity answers take let go. Do
+/// start the charge learner of a node whose platform holds no window, before any VM is on record, so its own thread waits
+/// for a box to begin and runs no window beside this one; then keep a Shards image VM and a node VM's row Ready, each run
+/// saying 70 ms, and run a window, noting at each ask of either whether that lock is held. Expect each VM asked its
+/// period, its use, its rate and its room, and none of those asked while that lock is held.
+#[test]
+fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let weak = std::sync::Arc::downgrade(&node);
+    let watching = images.0.watch.set(Box::new(move || {
+        weak.upgrade().is_some_and(|node| {
+            node.books
+                .charges
+                .get()
+                .is_some_and(|(learner, _)| learner.try_lock().is_err())
+        })
+    }));
+    assert!(watching.is_ok(), "the lock watched once");
+    node.start_charges().unwrap();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let store = &node.books.store;
+    store.put(&image_vm("img-1", 1)).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
+    let asked = images.0.asked.lock().unwrap().clone();
+    for what in [
+        "image_rate_period",
+        "host_use",
+        "rate",
+        "room",
+        "node_vm_rate_period",
+        "node_vm_host_use",
+        "node_vm_rate",
+        "node_vm_room",
+    ] {
+        assert!(asked.contains(&what), "{what} asked: {asked:?}");
+    }
+    assert_eq!(
+        *images.0.held.lock().unwrap(),
+        Vec::<&str>::new(),
+        "asked while the lock its capacity answers take was held"
+    );
 }
