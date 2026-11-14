@@ -189,17 +189,19 @@ impl ImageClass {
             }
             Settled::None => return Err(not_running(&run)),
         };
+        // The stop's thread followed as its party (B-1, C-3): its answer seen given though another call took it first,
+        // and its end with none refusing the stop, never waited for forever.
         let bound = waits.stop.deadline();
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
-            }
-            if !matches!(slot.told_within(None)?, Told::Came) {
-                return Err(Refusal::Broken(format!(
-                    "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
-                    run_name(&run)
-                )));
-            }
+        let mut told = slot.told_within(bound)?;
+        if let (Told::NotYet, Some(bound)) = (&told, bound) {
+            waits.stop.ran_out(bound);
+            told = slot.told_within(None)?;
+        }
+        if !matches!(told, Told::Came) {
+            return Err(Refusal::Broken(format!(
+                "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
+                run_name(&run)
+            )));
         }
         match image.runs.settle(run, Some(waits))? {
             Settled::Ends(end) => self.ended_node(books.as_ref(), run, &end),

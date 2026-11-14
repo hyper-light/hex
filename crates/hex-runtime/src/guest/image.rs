@@ -10,11 +10,13 @@
 //! `Awaits(AttachAfterCrash)` until a reboot of the host proves it ended).
 //!
 //! D231's boot waits for its run's start or its host's end, given no bound of Hex's, and its stop for its run's end:
-//! each runs on a thread of its own and answers in a [`Slot`]. A caller waits at most its learned W* ([`ImageWaits`]),
-//! a bound only while answers come within it (decision 9, the person's ruling of 2026-11-13): past it the run-out is
-//! told to the census and the call is refused `Lifecycle { Pending }`, the boot or stop going on, and its answer,
-//! however long it took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards
-//! call, and a run is let go of only once its stop has returned, since D231 stops a run it drops.
+//! each runs on a thread of its own and answers in a [`Slot`], which a wait follows as its party
+//! ([`Slot::told_within`]): an answer given is seen though another call took it since, and the thread's end with none
+//! refuses the call, as the node's broken state. A caller waits at most its learned W* ([`ImageWaits`]), a bound only
+//! while answers come within it (decision 9, the person's ruling of 2026-11-13): past it the run-out is told to the
+//! census and the call is refused `Lifecycle { Pending }`, the boot or stop going on, and its answer, however long it
+//! took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards call, and a run
+//! is let go of only once its stop has returned, since D231 stops a run it drops.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -276,24 +278,6 @@ impl<T> Slot<T> {
         })
     }
 
-    /// Whether the answer came within `wait` (`None`: a measuring patience, until it comes).
-    fn came_within(&self, wait: Option<Duration>) -> Result<bool, Refusal> {
-        let answer = self.answer.lock().map_err(poisoned)?;
-        let answer = match wait {
-            Some(wait) => {
-                self.came
-                    .wait_timeout_while(answer, wait, |a| a.is_none())
-                    .map_err(wait_refused)?
-                    .0
-            }
-            None => self
-                .came
-                .wait_while(answer, |a| a.is_none())
-                .map_err(wait_refused)?,
-        };
-        Ok(answer.is_some())
-    }
-
     /// The answer, once, with how long it took: the sample its wait records.
     fn take(&self) -> Result<Option<(T, Duration)>, Refusal> {
         Ok(self.answer.lock().map_err(poisoned)?.take())
@@ -358,15 +342,22 @@ impl Follower {
 
     /// Its refusal where the boot's thread ended with no answer, in its own words.
     fn gone(self, id: &BoxId) -> Refusal {
-        let (boot, record) = match self {
-            Self::Delete => ("the boot it ends", ", and its record is kept, deleting"),
-            Self::Started => ("the boot it follows", ""),
-        };
-        Refusal::Broken(format!(
-            "box {id}: {boot} is still under way: its boot's thread ended with no answer, so neither its run's start \
-             nor its run host's end is known{record}"
-        ))
+        match self {
+            Self::Delete => {
+                unanswered_boot(id, "the boot it ends", ", and its record is kept, deleting")
+            }
+            Self::Started => unanswered_boot(id, "the boot it follows", ""),
+        }
     }
+}
+
+/// Box `id`'s `boot` (as its caller names it) is still under way, its thread ended with no answer: the node's broken
+/// state, `record` saying what its record keeps.
+fn unanswered_boot(id: &BoxId, boot: &str, record: &str) -> Refusal {
+    Refusal::Broken(format!(
+        "box {id}: {boot} is still under way: its boot's thread ended with no answer, so neither its run's start nor \
+         its run host's end is known{record}"
+    ))
 }
 
 /// A run as its runs' lock found it, the answer its boot's or stop's thread gave taken ([`Runs::settle`]).
@@ -1594,11 +1585,17 @@ impl ImageClass {
             image.runs.forget(&id)?;
             return Err(Refusal::os("starting a Shards image VM's boot", why));
         }
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.boot.ran_out(bound);
+        // The boot's thread followed as its party (B-1): its answer seen given though another call took it first, and
+        // its end with none the node's broken state.
+        match slot.told_within(bound)? {
+            Told::Came => {}
+            Told::NotYet => {
+                if let Some(bound) = bound {
+                    waits.boot.ran_out(bound);
+                }
+                return Err(pending(&id)?);
             }
-            return Err(pending(&id)?);
+            Told::Gone => return Err(unanswered_boot(&id, "its boot", "")),
         }
         // The answer, taken here unless another call took it first, and its time the sample.
         match image.runs.booted(&id, &slot, waits)? {
@@ -1668,24 +1665,31 @@ impl ImageClass {
             State::Held => return Err(held()),
             State::Created => return Err(Refusal::NotRunning(id.try_clone()?, "stop")),
         };
+        // The stop's thread followed as its party (B-1): its answer seen given though another call took it first, and
+        // its end with none the node's broken state, nothing under way to be Pending on.
         let bound = waits.stop.deadline();
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
-            }
+        let mut told = slot.told_within(bound)?;
+        if let (Told::NotYet, Some(bound)) = (&told, bound) {
+            waits.stop.ran_out(bound);
             match past {
                 Past::Pending => return Err(pending(id)?),
                 // On to its answer: D231's stop is never refused, and its thread answers once the run host has gone,
                 // refused only where that thread ends with none.
-                Past::Follow => {
-                    if !matches!(slot.told_within(None)?, Told::Came) {
-                        return Err(Refusal::Broken(format!(
-                            "box {id}: the stop its delete asked is still under way: its stop's thread ended with no \
-                             answer, so its run's end is unknown, and its record is kept, deleting"
-                        )));
-                    }
-                }
+                Past::Follow => told = slot.told_within(None)?,
             }
+        }
+        if !matches!(told, Told::Came) {
+            let (stop, record) = match past {
+                Past::Pending => ("its stop", ""),
+                Past::Follow => (
+                    "the stop its delete asked",
+                    ", and its record is kept, deleting",
+                ),
+            };
+            return Err(Refusal::Broken(format!(
+                "box {id}: {stop} is still under way: its stop's thread ended with no answer, so its run's end is \
+                 unknown{record}"
+            )));
         }
         // Its answer, and its time the sample, is taken as the record is settled.
         match self.settle(&record_now(self, id)?)? {
