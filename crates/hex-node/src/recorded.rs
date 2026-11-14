@@ -2568,7 +2568,11 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
         let band = charges::node_band(records.iter());
-        let records: Vec<BoxRecord> = records.into_values().flatten().collect();
+        // Each record it can't read is counted at its machine and told, never dropped (the review's dropped records).
+        let (records, unreadable) = match charges::readable(records) {
+            Ok(split) => split,
+            Err(why) => return fail(why),
+        };
         let io = Managed {
             runtime: &self.runtime,
             store: &self.books.store,
@@ -2632,6 +2636,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             shared,
             &io,
             &sorted.learned,
+            unreadable,
             budget,
             std::time::Instant::now(),
         );
@@ -2717,6 +2722,8 @@ impl Books {
         let rows = self.store.all_node_vms()?;
         let band = charges::node_band(records.iter());
         let nodes = charges::nodes(&rows, &band)?;
+        // Its holders are the records it reads: a box whose record it can't read is told from its last window, counted
+        // at its machine (the review's dropped records).
         learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
