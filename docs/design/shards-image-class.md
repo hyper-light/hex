@@ -4,8 +4,10 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `2737fc4ec`, image channel v29 (`20015fb5`, a run's stop returning released, so a delete frees
-nothing the run still holds, the review's B-4; `ce80cbb37` before it, at `9ff60efb`, a run's end with its microVM's final
+Merged on Hex's main at Shards `d7ff8a094`, image channel v30 (a member's stdio read and written without waiting, and an
+exec's hangup; `2246a8829` before it, at `d91ebb32` and `d7179108`, every socket a run's agent-control endpoint holds
+told, its waker and wake in inspect; `2737fc4ec` before it, v29, at `20015fb5`, a run's stop returning
+released, so a delete frees nothing the run still holds, the review's B-4; `ce80cbb37` before that, at `9ff60efb`, a run's end with its microVM's final
 use, of which the class reads the end alone yet, a member's lane asks waited within their W* and followed past it, told,
 and no GPU report asked; `16451e19f` before that, v27, at `cf844022`, a member's end typed, a member a signal killed
 `Exit::Signal(n)`, never its 128-plus status; `37ddeb080` before that, v26, at `2f55dccf`, no upstream root named;
@@ -20,7 +22,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
-  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37` and `2737fc4ec`) and
+  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829` and `d7ff8a094`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -59,7 +61,9 @@ Sources, read at the revisions named:
   caller's patience (`155b5ee2e`: `PendingMember`, `MemberSteering::steered`), and a run's GPU report (D233,
   `fad757af4`: `ImageSpec::gpu_report`, `ImageGuest::take_gpu_report`), which the class asks of no run. At `2737fc4ec`:
   a run's stop returning released (D231, `c133bfb56`: its run host exited and reaped, every process it started gone).
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37` and `2737fc4ec`: `crates/api/src/image.rs` (`Images`, its `boot` and
+  At `2246a8829`, version 30: every socket a run's agent-control endpoint holds (D252 amended, `d3950c7d1`:
+  `ControlAt::waker`, `wake`, `sockets`).
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829` and `d7ff8a094`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -138,9 +142,13 @@ Sources, read at the revisions named:
   names `state/image-diagnostics/<box>.log` in its record with its boot's intent and makes the file before the boot;
   the booted run's host writes every part of its diagnostics, its VM's among them, there from then on, after what it
   kept until then (a run whose host can't is dropped, which ends it, and its boot is refused in those words). The file
-  is kept whole, with no bound of Hex's: it is for diagnosing the run. A failed run's `BoxInfo.ended` carries its
-  words, then the file's last bytes, as many as Shards quotes of a VM's end (`shards_abi::bounds::console_said` over
-  the kernel's console records, as the dedicated guest reads them). The node Store keeps the file's name, the run's
+  is bounded by the disk the box's allocation was admitted with (ROOT, 2026-11-14; the review's B-9): the diagnostics
+  are the box's own output on the node's disk, so they are charged to it, and no number is picked. Past that bound the
+  file is cut back to the tail Shards keeps for quoting, and its run host's words go on after it, through Shards'
+  bounded `keep_diagnostics(to, bound)`, asked of Shards and owed: until Hex vendors it and passes the bound, the file
+  has no bound of Hex's. A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
+  quotes of a VM's end (`shards_abi::bounds::console_said` over the kernel's console records, as the dedicated guest
+  reads them). The node Store keeps the file's name, the run's
   words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the
   box's delete removes the file before its record.
 
@@ -212,7 +220,22 @@ harness member's):
   (the review's D-10). Its kill aborts what the harness is sent (ECONNRESET), the lane having no hangup of its own at
   Shards `2737fc4ec`, so a kill made while a record waits for the harness to take it goes once the harness takes it, or
   the run ends (ROOT's asks of g121, 2026-11-14: a hangup for an exec or MCP lane, and `Output` and `Input` that don't
-  wait).
+  wait). The node's wire carries it (`Call::Mcp`, kind `0x0021`, appended after A-10's `Reserved`), sent by
+  `hex-client`'s `Runtime::mcp`, its stdin and stdout asked for, timed by a box kind of its own
+  (`client.answer.mcp.<class>`). The node serves it as `Call::Member` but for its wait (ROOT, 2026-11-14): its runtime's
+  `mcp` waits on a thread of its own (`hex-node mcp`), never one of serve's workers, which the node's other calls and its
+  own jobs run on (a program's collect, a member's kill, an abandoned box's count, a list's parts); the call stays in
+  flight until it is answered, so the in-flight bound bounds these threads; and it is admitted from the budget's shared
+  part alone, never the connection's kept call (`KEPT`, whose reason is that a connection can always make one call, so a
+  connection waiting on its bridges can always stop, delete or inspect), refused `Exhausted` where that part is spent.
+  The same thread then waits for the connection's end and tells it as a remote program's; a remote kill (`Call::Kill`,
+  the disconnect rule) reaches it through its runtime's kill apart from it (`Proc::killer`), on a thread of its own
+  (`hex-node mcp kill`). Its costs: a thread for each MCP call from its ask to its connection's end, the image class's two
+  pumps for each connection, and over QUIC a copy thread for each stream it carries (`joined`); a wait whose connection
+  closes waits on until its harness connects or its run ends, its place in flight held, and the disconnect rule then ends
+  what it took. At the next revendor (Shards `9f5b1f754`'s `Dialed::wake`) the pending wait moves onto the node's event
+  loop (`PendingMcp::wait(Duration::ZERO)` after each ring) and holds no thread; an open connection's pumps keep theirs
+  until Shards gives `Output` and `Input` forms that don't wait.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -366,7 +389,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `2737fc4ec` or later (image channel version 29: Hex's `shards` and its shards-init, rebuilt on each host by
+  `d7ff8a094` or later (image channel version 30: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec

@@ -917,6 +917,10 @@ pub(super) fn set_rate(
 ) -> Result<(), Refusal> {
     remote::set_rate(runtime, record, rate)
 }
+/// The stop response the node's managed helper learned from its holds (2c-4b): none before its first, or with no helper.
+pub(super) fn response(runtime: &MacRuntime) -> Result<Option<std::time::Duration>, Refusal> {
+    remote::response(runtime)
+}
 pub(super) fn finalize(
     runtime: &MacRuntime,
     record: NativeRecord<'_>,

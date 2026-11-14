@@ -209,7 +209,7 @@ Production, a W* that still ends something:
    namespace (the kernel's rtnetlink, its notices) to its settle or answer, refused only where its socket fails or
    ends.
 5. **`hex.image.stats`** (hex-runtime `guest::image`): goal 12's.
-6. **`guest.hosted.ready`** (hex-runtime `guest::hosted::follow_ready`): past W* a node VM's boot is refused where a
+6. **`guest.hosted.ready`** (hex-runtime `guest::image::node::follow_ready`): past W* a node VM's boot is refused where a
    whole W* window shows no CPU time of its VM's process: a VM's boot, the one place a stall of measured progress is
    judged ("Life alone at the node's local sites"), to become Shards' Part B once vendored.
 7. **The guest's first boot** ("Owed", 1): records.tsv's `boot_ready`, the Link's.

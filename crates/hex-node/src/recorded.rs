@@ -270,10 +270,11 @@ pub trait Recover: Runtime {
         Err(record.uncertain("its node has no native owner to read its usage"))
     }
 
-    /// Joint plan step 14 (C1; ROOT, 2026-11-13): the cycle this owner's cap holds a managed VM at `rate` over, derived
-    /// from how the platform holds a VM's CPU rate, which the charge learner's window takes for each VM that cap holds;
-    /// none at a rate it never holds a VM below. Refused, typed, naming what is missing where nothing derives it.
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    /// Joint plan step 14 (C1; ROOT, 2026-11-13; 2c-4b): the cycle this owner's cap holds a managed VM at `rate` over,
+    /// derived from how the platform holds a VM's CPU rate, which the charge learner's window takes for each VM that cap
+    /// holds: never at a rate it never holds a VM below, and cold, told, until what derives it has been measured.
+    /// Refused, typed, naming what is missing where nothing derives it.
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         let _ = rate;
         Err(Refusal::Platform {
             what: "a managed VM's cap's cycle",
@@ -702,7 +703,7 @@ pub(crate) fn check_single_consumer(
     for (other, row) in records {
         let row = row
             .as_ref()
-            .map_err(|_| uncertain(other, "a record beside it can't be read"))?;
+            .map_err(|why| uncertain(other, &format!("a record beside it can't be read: {why}")))?;
         if row.version != hex_core::record::RECORD_VERSION || row.spec.id != *other {
             return Err(uncertain(
                 other,
@@ -857,7 +858,7 @@ pub(crate) fn preflight_records(
     for (id, result) in records {
         let record = result
             .as_ref()
-            .map_err(|_| uncertain(id, "its record can't be read"))?;
+            .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
         if record.version != hex_core::record::RECORD_VERSION || record.spec.id != *id {
             return Err(uncertain(
                 id,
@@ -1451,7 +1452,7 @@ pub(crate) fn handoff_transaction(
         check_backing_reference(
             current
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?,
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?,
             &pool,
         )?;
     }
@@ -1606,7 +1607,7 @@ impl<R: Recover> Recorded<R> {
         for (id, record) in &records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             let handoff = preflight_handoff_turns(
                 &self.books.lifecycle,
                 &self.books.store,
@@ -1934,6 +1935,7 @@ mod projection_tests {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         }
     }
@@ -2381,7 +2383,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         }
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         self.runtime.cap_cycle(rate)
     }
 
@@ -2872,7 +2874,12 @@ impl Books {
                 project_info(&mut info, &projection(record.spec)?)?;
                 abandoned
             }
-            Some(Err(_)) => return Err(uncertain(&info.id, "its record can't be read")),
+            Some(Err(why)) => {
+                return Err(uncertain(
+                    &info.id,
+                    &format!("its record can't be read: {why}"),
+                ));
+            }
             None => 0,
         };
         info.abandoned = recorded.saturating_add(self.abandoned.unrecorded(&info.id)?);
@@ -3326,7 +3333,7 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::stop_managed(self, record)
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         hex_runtime::macos::MacRuntime::cap_cycle(self, rate)
     }
 
@@ -3447,7 +3454,7 @@ impl Recover for hex_runtime::windows::WinRuntime {
     /// A managed VM here is held by its governor over its governor's period (D255; every managed VM is booted
     /// `--host-managed`), the job's hard cap only its ceiling, so no job's cycle is a window: a VM whose process takes no
     /// rate is booked whole, told (ROOT, 2026-11-13).
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         let _ = rate;
         Err(Refusal::Platform {
             what: "a managed VM's cap's cycle",
@@ -3671,7 +3678,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().stop_managed(record)
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         self.host().cap_cycle(rate)
     }
 

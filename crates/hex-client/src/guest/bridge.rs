@@ -8,6 +8,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::{Duplex, DuplexOwner, Handle, own_duplex};
@@ -51,27 +52,33 @@ pub fn pair() -> io::Result<(Local, Local)> {
 
 /// The owner's end of a bridged connection, read as the connection is: the bytes that came, then its End, or the
 /// error that cut it short (a reset, the link's end: what its connection's read ended with before the peer's End,
-/// recorded as the bridge ends the owner's socket), which the socket pair alone would read as an End.
+/// recorded as the bridge ends the owner's socket), which the socket pair alone would read as an End. Its clones share
+/// its one socket ([`Duplex::try_clone`]): no duplicate, which Windows makes inheritable (the review's D-5).
 pub struct Bridged {
-    sock: Local,
+    sock: Arc<Local>,
     cut: Cut,
 }
 
 impl Bridged {
     /// The owner's end `sock` of a bridge whose copier records what cut its connection in `cut`.
     pub fn new(sock: Local, cut: Cut) -> Self {
-        Self { sock, cut }
+        Self {
+            sock: Arc::new(sock),
+            cut,
+        }
     }
 
-    /// The owner's end as the local socket alone, its cut no longer told.
-    pub fn into_socket(self) -> Local {
-        self.sock
+    /// The owner's end as the local socket alone, its cut no longer told; refused while a clone shares it.
+    pub fn into_socket(self) -> io::Result<Local> {
+        Arc::try_unwrap(self.sock)
+            .map_err(|_| io::Error::other("a clone of the bridged connection shares its socket"))
     }
 }
 
 impl Read for Bridged {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.sock.read(buf)?;
+        let mut sock: &Local = &self.sock;
+        let n = sock.read(buf)?;
         if n == 0
             && !buf.is_empty()
             && let Some(cut) = self.cut.error()
@@ -90,18 +97,21 @@ impl Write for Bridged {
         if let Some(cut) = self.cut.error() {
             return Err(cut);
         }
-        self.sock.write(bytes)
+        let mut sock: &Local = &self.sock;
+        sock.write(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.sock.flush()
+        let mut sock: &Local = &self.sock;
+        sock.flush()
     }
 }
 
 impl Duplex for Bridged {
+    /// Another handle on the same socket, shared, never a duplicate.
     fn try_clone(&self) -> io::Result<DuplexOwner> {
         own_duplex(Bridged {
-            sock: Local::try_clone(&self.sock)?,
+            sock: Arc::clone(&self.sock),
             cut: self.cut.clone(),
         })
         .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
@@ -120,7 +130,7 @@ impl Duplex for Bridged {
     }
 
     fn handle(&self) -> Handle<'_> {
-        Duplex::handle(&self.sock)
+        Duplex::handle(&*self.sock)
     }
 
     fn set_nonblocking(&self, on: bool) -> io::Result<()> {

@@ -32,6 +32,9 @@ struct Owner {
     /// Its next write of a Deleting record, held once written where the test asks it, until the test lets it go: a
     /// delete's intent as slow to return as its disk's flush may be, so another call moves the box on meanwhile.
     deleting: Holding,
+    /// Its next write of a box's start, Creating to Ready, held once written where the test asks it, until the test lets
+    /// it go: a start's intent as slow to return as its disk's flush may be, so another call reads the box meanwhile.
+    readying: Holding,
     /// Its next scan of every record ([`Books::records`]), held once read where the test asks it, until the test lets it
     /// go: a call whose read other calls' writes then outdate, as its thread's preemption may leave it.
     reading: Holding,
@@ -101,6 +104,7 @@ impl Owner {
             scans: AtomicUsize::new(0),
             state: tempfile::tempdir().unwrap(),
             deleting: Holding::default(),
+            readying: Holding::default(),
             reading: Holding::default(),
             ending: Holding::default(),
             refuse_ready: AtomicBool::new(false),
@@ -166,6 +170,10 @@ impl Transaction for Owner {
             self.ending.here();
         }
         let mut records = self.records.lock().unwrap();
+        let readies = record.phase == Phase::Ready
+            && records
+                .get(&record.spec.id)
+                .is_some_and(|current| current.as_ref().unwrap().phase == Phase::Creating);
         let allowed = match records.get(&record.spec.id) {
             None => record.phase == Phase::Creating,
             Some(current) => {
@@ -187,6 +195,9 @@ impl Transaction for Owner {
         drop(records);
         if record.phase == Phase::Deleting {
             self.deleting.here();
+        }
+        if readies {
+            self.readying.here();
         }
         Ok(())
     }
@@ -415,6 +426,8 @@ fn model_control() -> shards_api::image::ControlAt {
     shards_api::image::ControlAt {
         address: std::net::SocketAddr::from(([127, 0, 0, 1], 49_000)),
         vm: [7; 32],
+        waker: std::net::SocketAddr::from(([127, 0, 0, 1], 49_001)),
+        wake: std::net::SocketAddr::from(([127, 0, 0, 1], 49_002)),
     }
 }
 
@@ -2069,6 +2082,8 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
         control: Some(shards_api::image::ControlAt {
             address: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
             vm: [7; 32],
+            waker: std::net::SocketAddr::from(([127, 0, 0, 1], 10)),
+            wake: std::net::SocketAddr::from(([127, 0, 0, 1], 11)),
         }),
         rate_period: Duration::from_millis(100),
         from: StartedFrom::Booted,
@@ -4363,7 +4378,7 @@ fn serve_members(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let lanes = served.members.unwrap();
     let revoke = served.revoke;
@@ -4387,6 +4402,8 @@ fn serve_members(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -4414,7 +4431,7 @@ fn serve_mcp(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let starts = served.execs.unwrap();
     let revoke = served.revoke;
@@ -4435,6 +4452,8 @@ fn serve_mcp(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -4504,7 +4523,7 @@ fn serve_lanes(
         },
     )
     .unwrap();
-    let address = endpoint.address;
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
     std::thread::spawn(move || endpoint.run());
     let asks = served.sockets.unwrap();
     let revoke = served.revoke;
@@ -4525,6 +4544,8 @@ fn serve_lanes(
     shards_api::image::ControlAt {
         address,
         vm: vm.fingerprint(),
+        waker,
+        wake,
     }
 }
 
@@ -6022,4 +6043,62 @@ fn c10_a_cold_ready_wait_is_told_as_it_starts() {
         })
         .collect();
     assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
+}
+
+/// The start held at its Ready write, as this case's fact: no recorded operation makes it.
+static READYING_HELD: Patience = Patience::measuring("test.hex_runtime.image_readying_held");
+
+/// The review's F4 side finding (1) (AC-T7.4.1; T-T7.1.2): a start puts its boot under way in this process's runs before
+/// it writes its box Ready, so a call that reads the box Ready finds the boot this process runs, never a run of an
+/// earlier process held. Do create an image VM and start it, holding the start once its Ready is written; inspect the
+/// box meanwhile; then let the start go. Expect the inspect not refused as a held run (`Awaits(AttachAfterCrash)`), and
+/// the start to boot the box.
+#[test]
+fn f4s1_a_box_whose_start_has_written_it_ready_is_never_held() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("ready-window", None)).unwrap().id;
+    owner.readying.ask();
+    std::thread::scope(|scope| {
+        let start = scope.spawn(|| runtime.start(&id));
+        // A look: the owner tells no event as it holds a write; its party is the start's thread.
+        follow::until(
+            &READYING_HELD,
+            "the start held at its Ready write",
+            || spawned(&start),
+            || owner.readying.holds(),
+        )
+        .unwrap();
+        let seen = runtime.inspect(&id);
+        owner.readying.let_go();
+        assert!(
+            !matches!(
+                seen,
+                Err(Refusal::Awaits {
+                    needs: Upstream::AttachAfterCrash
+                })
+            ),
+            "its own start's box read as held: {seen:?}"
+        );
+        start.join().unwrap().unwrap();
+    });
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// The review's B-12 (AC-T7.4.1): a call on an image VM whose record can't be read is refused saying why it can't. Do
+/// keep an image box's record unreadable in its owner, with why, and inspect the box through the image class. Expect it
+/// refused as broken, in the record's own words.
+#[test]
+fn b12_an_image_vm_whose_record_cant_be_read_is_refused_in_its_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = BoxId::new("unreadable").unwrap();
+    owner.records.lock().unwrap().insert(
+        id.try_clone().unwrap(),
+        Err("its bytes end mid-field".to_owned()),
+    );
+    match Runtime::inspect(&runtime.images, &id) {
+        Err(Refusal::Broken(why)) => assert!(why.contains("its bytes end mid-field"), "{why}"),
+        other => panic!("an unreadable record inspected: {other:?}"),
+    }
 }

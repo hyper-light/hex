@@ -997,6 +997,7 @@ fn unread_info(id: BoxId) -> BoxInfo {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     }
 }
@@ -1022,6 +1023,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),
@@ -1155,14 +1157,16 @@ const ECONNRESET: std::num::NonZeroU16 = match std::num::NonZeroU16::new(104) {
 /// the caller's ends of a pipe each way, given once ([`Proc::streams`]), and no stderr; its end the connection's
 /// ([`ExecControl::wait`]), told once the harness's output has finished.
 ///
-/// Two threads of its own pump it, one each way, each lasting as long as the connection does: Shards' MCP lane gives no
-/// read or write that doesn't wait (9f5b1f754's `try_read` is its socket lanes' alone; ROOT's ask of g121 for `Output`
-/// and `Input`, 2026-11-14), so the cost of a connection is two threads, as a stream's copy is one (the review's D-10).
+/// Two threads of its own pump it, one each way, each lasting as long as the connection does, through the reads and
+/// writes of Shards' MCP lane that wait (its forms that don't, `Output::try_next_record` and `Input::try_write`, came at
+/// Shards 5142c6a7 and aren't used here yet), so the cost of a connection is two threads, as a stream's copy is one (the
+/// review's D-10).
 /// What the harness sends goes to the caller's stdout record by record (a caller that lets its stdout go has the rest
 /// read and let go, the connection ending as its stdin does); what the caller writes goes to the harness as it comes, its
-/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset Shards gives an MCP
-/// lane at this pin, which has no hangup of its own (ROOT's ask of g121, 2026-11-14): a kill made while a record waits for
-/// the harness to take it goes once it is taken, or the run ends.
+/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset its lane's `Input`
+/// gives (`ExecControl::hangup`, Shards 5142c6a7, isn't used here yet): a kill made while a record waits for the harness
+/// to take it goes once it is taken, or the run ends. Its output's pump keeps the connection's `ExecControl` until it has
+/// read the exit, since one let go before that hangs the connection up.
 struct McpProc {
     /// What the caller's bytes go to the harness through, until its input ends: taken by its pump as the caller's end
     /// of input ends it, or by its kill.
@@ -1347,27 +1351,44 @@ impl Proc for McpProc {
         }
     }
 
-    /// Aborts what the harness is sent (ECONNRESET), so its bridge's connection resets: its end then reads `Signal(9)`.
-    /// One that has ended, or whose input has ended already (its caller's close, which ends it as its harness closes),
-    /// has nothing more to send: answered at once.
+    /// Aborts what the harness is sent ([`abort_mcp`]).
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.ended.is_some()
-            || !matches!(self.end.told_within(Some(Duration::ZERO))?, Told::NotYet)
-        {
+        if self.ended.is_some() {
             return Ok(());
         }
-        let taken = self.to.lock().map_err(poisoned)?.take();
-        if let Some(mut to) = taken {
-            self.killed.store(true, Ordering::Release);
-            // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
-            let _ = to.abort(ECONNRESET);
-        }
-        Ok(())
+        abort_mcp(&self.to, &self.killed, &self.end)
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
         Ok(self.given.take().unwrap_or_default())
     }
+
+    /// Its kill, apart from it, for a node that holds it for a remote caller ([`abort_mcp`]).
+    fn killer(&mut self) -> Option<hex_api::Killer> {
+        let (to, killed, end) = (
+            Arc::clone(&self.to),
+            Arc::clone(&self.killed),
+            Arc::clone(&self.end),
+        );
+        Some(Box::new(move || abort_mcp(&to, &killed, &end)))
+    }
+}
+
+/// An MCP connection's kill: aborts what the harness is sent (ECONNRESET), so its bridge's connection resets, its end then
+/// reading `Signal(9)`; it waits while a record in flight to the harness is taken, and for the abort's answer, both on the
+/// run's connection's life. One that has ended, or whose input has ended already (its caller's close, which ends it as its
+/// harness closes), has nothing more to send: answered at once.
+fn abort_mcp(to: &Mutex<Option<Input>>, killed: &AtomicBool, end: &McpEnd) -> Result<(), Refusal> {
+    if !matches!(end.told_within(Some(Duration::ZERO))?, Told::NotYet) {
+        return Ok(());
+    }
+    let taken = to.lock().map_err(poisoned)?.take();
+    if let Some(mut to) = taken {
+        killed.store(true, Ordering::Release);
+        // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
+        let _ = to.abort(ECONNRESET);
+    }
+    Ok(())
 }
 
 fn pending(id: &BoxId) -> Result<Refusal, Refusal> {
@@ -1640,21 +1661,22 @@ impl ImageBoot {
     }
 }
 
-/// Boots `spec` on a thread of its own, its answer `slot`'s: Shards waits for the run's start or its host's end alone
-/// (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps its diagnostics in
-/// `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends it, and its boot
-/// is refused in those words.
+/// Boots `spec` on a thread of its own, its answer its `party`'s slot's, the party going with the thread, or with its
+/// closure where no thread starts, so a follower sees the boot end with no answer: Shards waits for the run's start or
+/// its host's end alone (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps
+/// its diagnostics in `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends
+/// it, and its boot is refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
     kept: std::fs::File,
-    slot: Arc<Slot<Booted>>,
+    party: Party<Booted>,
     stop: Arc<BootStop>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("hex-image-boot".to_owned())
         .spawn(move || {
-            let party = Party(slot);
+            let party = party;
             let booted = images
                 .boot_stoppable(&spec, Duration::MAX, &stop)
                 .and_then(|guest| {
@@ -1813,8 +1835,9 @@ impl ImageClass {
             .records()?
             .remove(id)
             .map(|record| {
-                record
-                    .map_err(|_| Refusal::Broken("a Shards image VM's record is unreadable".into()))
+                record.map_err(|why| {
+                    Refusal::Broken(format!("a Shards image VM's record is unreadable: {why}"))
+                })
             })
             .transpose()
     }
@@ -2181,8 +2204,19 @@ impl ImageClass {
         // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
+        let slot = Arc::new(Slot::new());
+        let stop = Arc::new(BootStop::new());
+        // Its boot's party, held here until its thread holds it: a call following a boot that never began sees it end
+        // with no answer, never waits for good.
+        let party = Party(Arc::clone(&slot));
+        // Its boot in this process's runs before its Ready is written (the review's F4 side finding 1): a call that reads
+        // the box Ready finds the boot this process runs, never a run of an earlier process, held. A call that reads it
+        // Creating sees it Created, and never looks.
+        image
+            .runs
+            .insert(&id, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
         // The boot's intent, durable before any effect: a crash from here on holds the box.
-        devices::with_record_transaction(self.image_books()?, &id, |transaction| {
+        let intent = devices::with_record_transaction(self.image_books()?, &id, |transaction| {
             let mut current = transaction
                 .read(&id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -2198,7 +2232,12 @@ impl ImageClass {
             current.phase = Phase::Ready;
             current.diagnostics = Some(diagnostics.clone());
             transaction.put(&current)
-        })?;
+        });
+        if let Err(why) = intent {
+            // No call read it Ready, so none follows its boot: its run goes.
+            image.runs.forget(&id)?;
+            return Err(why);
+        }
         // Its file made before its boot, so the run host keeps there all it says from its start on.
         let kept = match diagnostics_file(&diagnostics) {
             Ok(file) => file,
@@ -2211,17 +2250,12 @@ impl ImageClass {
                 return Err(why);
             }
         };
-        let slot = Arc::new(Slot::new());
-        let stop = Arc::new(BootStop::new());
-        image
-            .runs
-            .insert(&id, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
         // Shards waits for the run's start or its host's end alone (`Duration::MAX`): the boot's learned W* is where
         // the start answers Pending and tells the census, never where a boot ends (decision 9, the person's ruling of
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, party, stop) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
@@ -2464,9 +2498,14 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
-                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
-                // from a socket no grant made.
+                // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake
+                // (Shards' D252 amended, image channel v30), so a reading of the host tells each from a socket no grant
+                // made.
                 shown.control = guest.control().map(|at| at.address);
+                shown.control_wake = guest.control().map(|at| hex_api::ControlWake {
+                    waker: at.waker,
+                    wake: at.wake,
+                });
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),
@@ -2756,7 +2795,14 @@ impl ImageClass {
             }
             match told {
                 Told::Came => wait.answered(asked.elapsed()),
-                Told::Gone | Told::NotYet => return Err(follower.gone(id)),
+                Told::Gone | Told::NotYet => {
+                    // A boot whose start was refused before its thread began has its end recorded first (the review's
+                    // F4 side finding 1): that end is the answer; any other boot's thread ended with none.
+                    return match self.settle(&record_now(self, id)?)? {
+                        state @ State::Ended(_) => Ok(state),
+                        _ => Err(follower.gone(id)),
+                    };
+                }
             }
         }
         self.settle(&record_now(self, id)?)

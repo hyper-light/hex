@@ -1865,6 +1865,7 @@ impl WinRuntime {
                 last_resort: None,
                 ended: None,
                 control: None,
+                control_wake: None,
                 credentials: Vec::new(),
             }),
             Held::Oci(b) => oci::info(b),
