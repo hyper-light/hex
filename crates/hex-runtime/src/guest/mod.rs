@@ -446,23 +446,9 @@ fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
     })
 }
 
-// The guest's records live beside the link whose first dial their boot record bounds.
-pub use hex_client::guest::shards::{CLASS, recorded, recorded_boot, seed_in, slowest_in};
-
-/// The first dial's bound before this node has seen a boot ([`GuestRuntime::first_dial_bound`] with nothing
-/// learned): the record's slowest boot to ready ([`recorded_boot`]), the managed helper's control patience at the
-/// node's start, and the bound the macOS CPU response's producer measures up to (hex-cli's example
-/// `macos_cpu_response`, AC-T7.4.1).
-pub fn recorded_dial_bound() -> Result<Duration, Refusal> {
-    dial_bound(None)
-}
-
-/// The slowest of the record's boot and `seen`, the slowest boot this node has seen. The record is the build's one
-/// remaining read of `bench/native/guest/records.tsv` (decision 9), for the managed budgets alone: the kernel-form boot
-/// follows its guest ([`GuestRuntime::boot_bound`]).
-fn dial_bound(seen: Option<Duration>) -> Result<Duration, Refusal> {
-    Ok(recorded_boot()?.max(seen.unwrap_or_default()))
-}
+// This host's class, as the records name it, and its slowest boot to ready on record: a GPU create's budget alone
+// (`managed::gpu_create`, owed until Shards' GPU report takes no deadline; the review's C-9).
+pub use hex_client::guest::shards::{CLASS, recorded_boot};
 
 /// The managed plan of guest `spec` booted with `binary` on `socket`: the native plan where `images` declare its images
 /// (its cost evidence's), else Shards' own plan with the runtime folders `paths`. Its guest is told no boot deadline, so
@@ -498,15 +484,14 @@ pub fn managed_plan(
     plan.map_err(|why| refusal("preparing admitted Shards scope", &why))
 }
 
-/// A managed guest booted from `plan` through `transaction`'s native owner within `patience`: the one managed launch a
-/// node's guests take ([`managed::boot`]), public so the guest-cost producer boots its guests as a node does
-/// (AC-T7.4.1).
+/// A managed guest booted from `plan` through `transaction`'s native owner, following its guest with no deadline (the
+/// review's C-9): the one managed launch a node's guests take ([`managed::boot`]), public so the guest-cost producer
+/// boots its guests as a node does (AC-T7.4.1).
 pub fn boot_managed(
     transaction: &dyn crate::devices::Transaction,
     plan: shards_api::PreparedBoot,
-    patience: Duration,
 ) -> Result<shards_api::ManagedGuest, Refusal> {
-    managed::boot(transaction, plan, managed::Budget::new(patience)?)
+    managed::boot(transaction, plan, managed::Budget::following())
 }
 
 /// What tells a node's loop that bytes wait to be written on a connection it watches.
@@ -854,7 +839,8 @@ impl GuestRuntime {
 
     fn join_before(&self, b: &Booted, budget: managed::Budget) -> Result<(), Refusal> {
         budget.remaining()?;
-        self.join_with_deadline(b, Some(budget.deadline()))?;
+        // With no deadline, its join follows its guest (the review's C-9).
+        self.join_with_deadline(b, budget.deadline())?;
         budget.remaining()?;
         Ok(())
     }
@@ -983,13 +969,6 @@ impl GuestRuntime {
         if let Some(t) = thread {
             let _ = t.join();
         }
-    }
-
-    /// The managed budgets' bound (decision 9, learned waits): the slowest of the record's boot to ready and this node's
-    /// own, so it only rises; before any boot here, the record's ([`dial_bound`]). The guest's own boot follows it
-    /// instead ([`Self::boot_bound`]).
-    pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
-        dial_bound(self.boot_bound()?)
     }
 
     /// The W* of the guest's boots (decision 9; the review's C-9): the slowest boot to ready this node has seen; none

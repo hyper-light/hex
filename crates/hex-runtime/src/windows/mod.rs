@@ -1479,7 +1479,7 @@ impl WinRuntime {
         record: NativeRecord<'_>,
         plan: &crate::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         managed::launch(self, record, plan, io, patience, publish)
@@ -3228,8 +3228,8 @@ mod tests {
                 stderr,
                 gpu_report: None,
             },
-            // A finite launch bound this test never spends: publication refuses first.
-            std::time::Duration::from_secs(3_600),
+            // No deadline (the review's C-9): publication refuses first.
+            None,
             &mut publish,
         ) else {
             panic!("a launch whose publication was refused succeeded");

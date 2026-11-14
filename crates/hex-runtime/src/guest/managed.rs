@@ -7,14 +7,22 @@ use super::*;
 use crate::devices::{ManagedLaunch, Transaction};
 use hex_core::patience::{Patience, Piece};
 
-/// One create/attach attempt spends one existing measured boot bound. Native
-/// launch and the first relay dial consume its remainder rather than restarting it.
+/// One create/attach attempt's budget (decision 9; the review's C-9). It follows its guest: no deadline of its own, each
+/// wait in it (native launch, first relay dial, join) waiting within its own W* and past it following its party. A GPU
+/// create's alone is finite ([`gpu_create`]); its native launch, report and first relay dial spend its remainder rather
+/// than restart it.
 #[derive(Clone, Copy)]
 pub(super) struct Budget {
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl Budget {
+    /// A budget that follows its guest, with no deadline of its own.
+    pub fn following() -> Self {
+        Self { deadline: None }
+    }
+
+    /// A finite budget, `patience` from now.
     pub fn new(patience: Duration) -> Result<Self, Refusal> {
         if patience.is_zero() {
             return Err(Refusal::Invalid {
@@ -23,33 +31,66 @@ impl Budget {
             });
         }
         Ok(Self {
-            deadline: Instant::now()
-                .checked_add(patience)
-                .ok_or_else(|| Refusal::Invalid {
+            deadline: Some(Instant::now().checked_add(patience).ok_or_else(|| {
+                Refusal::Invalid {
                     what: "managed guest budget",
                     why: "the measured boot bound exceeds a finite native deadline".into(),
-                })?,
+                }
+            })?),
         })
     }
 
-    pub fn remaining(self) -> Result<Duration, Refusal> {
+    /// What is left of it: none for one that follows; refused once a finite one is spent.
+    pub fn remaining(self) -> Result<Option<Duration>, Refusal> {
         self.remaining_at(Instant::now())
     }
 
-    pub fn deadline(self) -> Instant {
+    pub fn deadline(self) -> Option<Instant> {
         self.deadline
     }
 
-    fn remaining_at(self, now: Instant) -> Result<Duration, Refusal> {
-        self.deadline
+    fn remaining_at(self, now: Instant) -> Result<Option<Duration>, Refusal> {
+        let Some(deadline) = self.deadline else {
+            return Ok(None);
+        };
+        deadline
             .checked_duration_since(now)
             .filter(|remaining| !remaining.is_zero())
+            .map(Some)
             .ok_or_else(|| {
                 Refusal::os(
                     "spending the original managed guest create budget",
                     std::io::ErrorKind::TimedOut,
                 )
             })
+    }
+}
+
+/// A GPU create's budget: the one place a record still bounds a managed create, owed until Shards' GPU report takes no
+/// deadline (the review's C-9; ROOT's ask of Shards, 2026-11-14). Shards binds a VM process's GPU report to a finite
+/// absolute create deadline (`PreparedBoot::with_gpu_report`), so a create with devices spends the slowest boot to ready
+/// on record for its host class (bench/native/guest/records.tsv's `boot_ready`, [`super::recorded_boot`]), the build's
+/// one read of the record. Every other managed create follows its guest ([`Budget::following`]).
+pub(super) fn gpu_create() -> Result<Budget, Refusal> {
+    Budget::new(super::recorded_boot()?)
+}
+
+/// `budget`'s deadline, which a GPU create's report and observer need ([`gpu_create`]): refused by type for one that
+/// follows.
+pub(super) fn gpu_deadline(budget: Budget) -> Result<Instant, Refusal> {
+    budget.deadline().ok_or_else(follows)
+}
+
+/// What is left of `budget`, as [`gpu_deadline`] needs it: refused once spent, and by type for one that follows.
+pub(super) fn gpu_remaining(budget: Budget) -> Result<Duration, Refusal> {
+    budget.remaining()?.ok_or_else(follows)
+}
+
+fn follows() -> Refusal {
+    Refusal::Invalid {
+        what: "a GPU create's budget",
+        why: "Shards binds its GPU report to a finite create deadline, and this budget follows its guest"
+            .into(),
     }
 }
 
@@ -703,20 +744,39 @@ mod tests {
         assert!(same_init(&record, &identity).is_err());
     }
 
-    /// AC-T7.4.1: no stage restarts a create budget after scope publication.
+    /// AC-T7.4.1: no stage restarts a finite create budget after scope publication.
     #[test]
     fn managed_budget_is_one_absolute_finite_deadline() {
         assert!(Budget::new(Duration::ZERO).is_err());
         assert!(Budget::new(Duration::MAX).is_err());
         let start = Instant::now();
         let deadline = start.checked_add(Duration::from_secs(1)).unwrap();
-        let budget = Budget { deadline };
-        assert_eq!(budget.remaining_at(start).unwrap(), Duration::from_secs(1));
+        let budget = Budget {
+            deadline: Some(deadline),
+        };
+        assert_eq!(
+            budget.remaining_at(start).unwrap(),
+            Some(Duration::from_secs(1))
+        );
         assert!(budget.remaining_at(deadline).is_err());
         assert!(
             budget
                 .remaining_at(deadline.checked_add(Duration::from_nanos(1)).unwrap())
                 .is_err()
         );
+    }
+
+    /// The review's C-9 (decision 9): a managed create's budget that follows its guest has no deadline and none left,
+    /// spent never; a GPU create's is finite, the record's, until Shards' GPU report takes none (owed).
+    #[test]
+    fn c9_a_following_budget_has_no_deadline_and_a_gpu_creates_has_one() {
+        let following = Budget::following();
+        assert_eq!(following.deadline(), None);
+        assert_eq!(following.remaining().unwrap(), None);
+        assert!(gpu_deadline(following).is_err());
+        let gpu = gpu_create().unwrap();
+        let left = gpu.remaining().unwrap().unwrap();
+        assert!(left <= crate::guest::recorded_boot().unwrap(), "{left:?}");
+        assert_eq!(gpu_deadline(gpu).ok(), gpu.deadline());
     }
 }

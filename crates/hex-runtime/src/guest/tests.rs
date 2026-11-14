@@ -1257,14 +1257,12 @@ fn c9_a_first_boot_slower_than_w_star_is_followed_never_stopped_and_booted_again
     );
 }
 
-/// HEX-GUEST-34 (decision 9: a host class with no record seeds from the slowest record of any class, every class's
-/// records taken as one, then rises with the node's own): on Linux (KVM), whose boot-to-ready row isn't in
-/// records.tsv yet, expect the first dial's bound that seed, the slowest boot_ready of any class with no margin,
-/// never a refusal, and the recorded dial bound (AC-T7.4.1's managed patience) the same; then tell it of a boot slower
-/// than the seed: expect the bound that boot, risen.
+/// HEX-GUEST-34 (the record's slowest boot to ready, a GPU create's budget alone, owed until Shards' GPU report takes no
+/// deadline; the review's C-9): on Linux (KVM), whose boot-to-ready row isn't in records.tsv yet, expect it the slowest
+/// boot_ready of any class, with no margin, never a refusal.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_unrecorded_class_seeds_from_the_slowest_of_any_class_and_rises() {
+fn an_unrecorded_class_seeds_from_the_slowest_of_any_class() {
     let slowest_any = hex_client::guest::shards::RECORDS
         .lines()
         .filter(|l| !l.starts_with('#'))
@@ -1274,14 +1272,7 @@ fn an_unrecorded_class_seeds_from_the_slowest_of_any_class_and_rises() {
         })
         .max()
         .unwrap();
-    let seed = Duration::from_micros(slowest_any);
-    let rt = GuestRuntime::new(Arc::new(Planned::new(&[Boots::Ready])), config());
-    assert_eq!(recorded_boot().unwrap(), seed);
-    assert_eq!(rt.first_dial_bound().unwrap(), seed);
-    assert_eq!(recorded_dial_bound().unwrap(), seed);
-    let slow = 3 * seed;
-    rt.learn(slow);
-    assert_eq!(rt.first_dial_bound().unwrap(), slow);
+    assert_eq!(recorded_boot().unwrap(), Duration::from_micros(slowest_any));
 }
 
 /// HEX-GUEST-34 (the lead: the record is the input that turns a class on; decision 9's seed for a class with no
@@ -1290,6 +1281,7 @@ fn an_unrecorded_class_seeds_from_the_slowest_of_any_class_and_rises() {
 /// between them.
 #[test]
 fn a_records_row_is_what_turns_a_class_on() {
+    use hex_client::guest::shards::{seed_in, slowest_in};
     let hvf = "# measure\tclass\tslowest_us\trecord\nboot_ready\tmacOS-HVF\t265000\tr.md\n";
     assert_eq!(
         slowest_in(hvf, "boot_ready", "macOS-HVF"),

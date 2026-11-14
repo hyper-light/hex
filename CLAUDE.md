@@ -94,7 +94,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   errno there when it can't, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely. Its managed-VM launch also uses a COW clone with atomic pidfd
-  ownership and a finite private pipe gate: the trusted child joins the cgroup and isolates inherited
+  ownership and a private pipe gate, finite where its create has a deadline: the trusted child joins the cgroup and isolates inherited
   descriptors, then waits until the canonical identity is durable before foreign exec; EOF cancels.
   This held child uses prepared memory and signal-safe syscalls alone, with no vfork sharing.
   And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw

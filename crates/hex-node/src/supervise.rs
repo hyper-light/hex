@@ -485,7 +485,7 @@ impl Supervisor {
         program: &hex_api::Program,
         stdio: hex_api::Stdio,
         launch: hex_runtime::linux::process::HeldLaunch,
-        gate_budget: Duration,
+        gate_budget: Option<Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         self.same_managed(native)?;

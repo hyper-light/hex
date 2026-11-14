@@ -32,7 +32,7 @@ fn no_launch(
     _: NativeRecord<'_>,
     _: &hex_runtime::devices::ManagedLaunch<'_>,
     _: shards_api::LaunchIo,
-    _: Duration,
+    _: Option<Duration>,
     _: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     panic!("read-only submission preflight cannot launch")

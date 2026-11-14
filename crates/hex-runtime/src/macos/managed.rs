@@ -756,7 +756,7 @@ pub(super) fn launch(
     record: NativeRecord<'_>,
     plan: &crate::devices::ManagedLaunch<'_>,
     io: shards_api::LaunchIo,
-    patience: Duration,
+    patience: Option<Duration>,
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     remote::launch(runtime, record, plan, io, patience, publish)

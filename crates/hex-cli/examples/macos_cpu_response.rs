@@ -17,8 +17,9 @@
 //! No input of the measurement is chosen; each is derived, and the samples file's `#` lines say how:
 //! - samples: the census rule's `SEEDABLE` (bench/competitive/probes/waits_census.py, decision 9), the
 //!   fewest a row seeds from, read from the census itself;
-//! - bound: the guest's recorded first dial bound (`hex_runtime::guest::recorded_dial_bound`), the
-//!   node's managed helper's control patience; a stop not seen within it refuses the run;
+//! - bound: the slowest boot to ready on record (`hex_runtime::guest::recorded_boot`), which was the node's managed
+//!   helper's control patience; a stop not seen within it refuses the run. Owed: the producer's waits follow their
+//!   parties, and its top arm is derived anew (the review's C-9; ROOT's, after c9);
 //! - waits: the watcher arms its timer for whatever credit is left, so the arms run from the timer's own
 //!   resolution up to the bound, one per binary order of magnitude of its microsecond count, then the
 //!   bound, each taken the same number of times, round-robin. The row's max covers every arm.
@@ -74,7 +75,7 @@ mod producer {
                 .find_map(|line| line.strip_prefix("SEEDABLE = "))
                 .and_then(|n| n.trim().replace('_', "").parse::<usize>().ok())
                 .ok_or("bench/competitive/probes/waits_census.py names no SEEDABLE")?;
-            let bound = hex_runtime::guest::recorded_dial_bound().map_err(|e| e.to_string())?;
+            let bound = hex_runtime::guest::recorded_boot().map_err(|e| e.to_string())?;
             Self::new(seedable, bound)
         }
 
@@ -112,9 +113,9 @@ mod producer {
                 "# hex-macos-cpu-response samples, host {host}\n\
                  # samples {}: {} arms taken {} times each, round-robin, at least SEEDABLE {} \
                  (bench/competitive/probes/waits_census.py, decision 9)\n\
-                 # bound_nanos {}: the guest's recorded first dial bound over boot_ready {} ns of class {} \
-                 (bench/native/guest/records.tsv; hex_runtime::guest::recorded_dial_bound), the managed \
-                 helper's control patience\n\
+                 # bound_nanos {}: the slowest boot to ready on record, boot_ready {} ns of class {} \
+                 (bench/native/guest/records.tsv; hex_runtime::guest::recorded_boot); owed: the producer's waits \
+                 follow their parties\n\
                  # waits: from the watcher timer's resolution {} ns (NOTE_USECONDS) doubling below the bound, \
                  then the bound\n\
                  # wait_nanos sample_nanos\n",
@@ -435,10 +436,7 @@ mod producer {
         fn the_plan_is_derived_from_the_census_the_record_and_the_timer() {
             let plan = Plan::derived().unwrap();
             assert_eq!(plan.seedable, 1_000);
-            assert_eq!(
-                plan.bound,
-                hex_runtime::guest::recorded_dial_bound().unwrap()
-            );
+            assert_eq!(plan.bound, hex_runtime::guest::recorded_boot().unwrap());
             assert_eq!(plan.arms.first(), Some(&RESOLUTION));
             assert_eq!(plan.arms.last(), Some(&plan.bound));
             for pair in plan.arms.windows(2) {

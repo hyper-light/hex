@@ -723,7 +723,7 @@ impl FirecrackerRuntime {
                     memlock,
                 },
                 io,
-                remaining(until)?,
+                Some(remaining(until)?),
             )?;
             let mut current = transaction.read_pool(&grant.key)?.ok_or_else(|| {
                 backing_uncertain(grant.key, "its observer record is gone after its launch")
@@ -1528,7 +1528,7 @@ pub(super) mod tests {
             &self,
             _: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: Duration,
+            _: Option<Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("a stop launches no VMM")
         }

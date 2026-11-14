@@ -400,10 +400,9 @@ impl Driver for Shards {
     }
 
     fn ready(&mut self, guest: &mut Guest) -> Result<(), String> {
-        // Followed to its answer: its link's dials past the class's W* tell the run-out once and follow the guest's VM by
-        // its life, and its hello waits on its connection (decision 9).
-        let bound = self.patience()?.bound;
-        let client = own_link(ShardsLink::new(Arc::clone(&guest.vm), Some(bound)))
+        // Followed to its answer: its link's dials past their own W* tell the run-out once and follow the guest's VM by
+        // its life, with no bound of the record's, and its hello waits on its connection (decision 9; the review's C-9).
+        let client = own_link(ShardsLink::new(Arc::clone(&guest.vm), None))
             .and_then(Client::connect)
             .map_err(|why| format!("reaching the guest's agent: {why}"))?;
         guest.client = Some(client);

@@ -425,8 +425,9 @@ impl GuestRuntime {
     pub(super) fn initialize_gpu_pool(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
         grant.check()?;
         // This one finite absolute budget is captured before grant persistence,
-        // native effects, report observation, guest workload or publication.
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
+        // native effects, report observation, guest workload or publication: a GPU create's (its
+        // report needs one), the record's until Shards' report takes none (the review's C-9, owed).
+        let budget = managed::gpu_create()?;
         let definition = self.gpu_definition_for(grant.key)?;
         if grant.devices != definition.devices
             || grant.allocation != self.configured_allocation()?
@@ -584,7 +585,10 @@ impl GuestRuntime {
                     uncertain(key, "its selected GPUs aren't the ones its node reads now"),
                 )?;
                 let plan = plan
-                    .with_gpu_report(*receipt.original.scope().bytes(), budget.deadline())
+                    .with_gpu_report(
+                        *receipt.original.scope().bytes(),
+                        managed::gpu_deadline(budget)?,
+                    )
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
                 pool::write(&definition.path, &receipt)?;
                 managed::boot(transaction, plan, budget)?
@@ -630,7 +634,8 @@ impl GuestRuntime {
         if fresh {
             receipt.report = Some(
                 guest
-                    .take_gpu_report(budget.remaining()?)
+                    // Its report's own deadline bounds it where its budget has none left to give.
+                    .take_gpu_report(budget.remaining()?.unwrap_or(std::time::Duration::MAX))
                     .map_err(|why| refusal("observing same-scope full renderer ACK", &why))?,
             );
             receipt.checked_report()?;
@@ -2425,7 +2430,7 @@ mod tests {
             &self,
             _: &devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: std::time::Duration,
+            _: Option<std::time::Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             self.launches.fetch_add(1, Ordering::SeqCst);
             Err(refused_model())

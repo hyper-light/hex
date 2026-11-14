@@ -226,7 +226,7 @@ fn wait(
 ) -> Result<[bool; 2], Refusal> {
     use rustix::event::{PollFd, PollFlags};
     loop {
-        let left = budget.remaining()?;
+        let left = crate::guest::managed::gpu_remaining(budget)?;
         // macOS poll's signed millisecond timeout is the smallest supported
         // Unix ABI ceiling; only that ABI can split a larger finite wait.
         let ceiling =
@@ -267,7 +267,7 @@ fn wait(
     use std::os::windows::io::AsSocket as _;
     crate::windows::sys::readable_pair(
         [stdout.map(Socket::as_socket), stderr.map(Socket::as_socket)],
-        budget.remaining()?,
+        crate::guest::managed::gpu_remaining(budget)?,
     )
     .map_err(|why| Refusal::os("waiting for guest observer output", why))
 }
@@ -314,11 +314,13 @@ mod tests {
         .unwrap();
         let mut stdout = Captured::new(3).unwrap();
         let mut stderr = Captured::new(3).unwrap();
-        // The drain spends its observer attempt's budget, as the node gives one before any boot
-        // (`first_dial_bound`): the guest's recorded boot to ready.
-        let attempt = crate::guest::recorded_dial_bound().unwrap();
+        // The drain spends its observer attempt's budget, a GPU create's (`managed::gpu_create`).
         streams
-            .drain(&mut stdout, &mut stderr, Budget::new(attempt).unwrap())
+            .drain(
+                &mut stdout,
+                &mut stderr,
+                crate::guest::managed::gpu_create().unwrap(),
+            )
             .unwrap();
         assert_eq!(stdout.bytes().unwrap(), b"out");
         assert_eq!(stderr.bytes().unwrap(), b"err");

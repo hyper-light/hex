@@ -1066,7 +1066,8 @@ impl GuestRuntime {
         if self.shared_key()? != Some(key) {
             return Err(refused(key, LifecycleCause::Pending));
         }
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
+        // A shared backing carries no devices: its boot follows its guest (the review's C-9).
+        let budget = managed::Budget::following();
         let books = self
             .books
             .get()

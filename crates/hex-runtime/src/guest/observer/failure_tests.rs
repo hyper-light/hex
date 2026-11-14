@@ -94,7 +94,7 @@ fn read_exact(
 ) -> Result<(), String> {
     while !bytes.is_empty() {
         stream
-            .set_read_timeout(Some(budget.remaining().map_err(|why| why.to_string())?))
+            .set_read_timeout(budget.remaining().map_err(|why| why.to_string())?)
             .map_err(|why| why.to_string())?;
         match stream.read(bytes) {
             Ok(0) => return Err("model peer read EOF".into()),
@@ -114,7 +114,7 @@ fn write_all(
 ) -> Result<(), String> {
     while !bytes.is_empty() {
         stream
-            .set_write_timeout(Some(budget.remaining().map_err(|why| why.to_string())?))
+            .set_write_timeout(budget.remaining().map_err(|why| why.to_string())?)
             .map_err(|why| why.to_string())?;
         match stream.write(bytes) {
             Ok(0) => return Err("model peer wrote zero bytes".into()),
@@ -286,7 +286,7 @@ fn hex(bytes: &[u8]) -> String {
 /// read back and as written, what the model saw, the run's scope and allocation, and native calls.
 struct Observed {
     result: Result<(), Refusal>,
-    remaining: Result<Duration, Refusal>,
+    remaining: Result<Option<Duration>, Refusal>,
     retained: Result<Option<pool::Receipt>, Refusal>,
     durable: std::io::Result<String>,
     seen: Seen,
@@ -347,13 +347,16 @@ fn observed(dir: &std::path::Path, deleted: bool) -> Observed {
     })
     .unwrap();
     let native_calls = Arc::new(AtomicUsize::new(0));
-    // One observer attempt's budget, as the node gives one before any boot (`first_dial_bound`).
-    let budget = managed::Budget::new(crate::guest::recorded_dial_bound().unwrap()).unwrap();
+    // One observer attempt's budget, a GPU create's (`managed::gpu_create`).
+    let budget = managed::gpu_create().unwrap();
     let worker = std::thread::Builder::new()
         .name("observer-known-facts".into())
         .spawn(move || failed_workload(peer, stdout, stderr, budget, deleted))
         .unwrap();
-    let connected = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline());
+    let connected = Client::connect_before(
+        triomphe::Arc::clone(&link),
+        managed::gpu_deadline(budget).unwrap(),
+    );
     let setup_ok = connected.is_ok();
     let result = match connected {
         Ok(client) => {

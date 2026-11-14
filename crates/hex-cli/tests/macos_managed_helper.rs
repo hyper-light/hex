@@ -195,7 +195,7 @@ impl Lab {
                     stderr,
                     gpu_report: None,
                 },
-                PATIENCE,
+                Some(PATIENCE),
             )
         })
     }

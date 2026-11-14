@@ -547,7 +547,7 @@ impl FirecrackerRuntime {
                 memlock,
             },
             io,
-            remaining(until)?,
+            Some(remaining(until)?),
         )?;
         // Publication happened while the child was held. Read the SAME immutable scope/spec back.
         let current = transaction
@@ -1971,7 +1971,7 @@ mod io_tests {
             &self,
             _: &ManagedLaunch<'_>,
             io: shards_api::LaunchIo,
-            _: std::time::Duration,
+            _: Option<std::time::Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             let (vmm, gate) = StandIn::held(
                 &format!("echo '{MEMLOCK}' >&2; exit 1"),
@@ -2451,7 +2451,7 @@ mod cleanup_tests {
             &self,
             _: &ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: std::time::Duration,
+            _: Option<std::time::Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("this create is refused before its VMM")
         }
@@ -2642,7 +2642,7 @@ mod memlock_tests {
             &self,
             _: &ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: std::time::Duration,
+            _: Option<std::time::Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             Err(Refusal::Broken(
                 "the VMM was launched past its memlock".to_owned(),
@@ -2904,7 +2904,7 @@ mod single_use_tests {
             &self,
             _: &ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: std::time::Duration,
+            _: Option<std::time::Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             self.launched.set(self.launched.get() + 1);
             Err(Refusal::Broken(

@@ -253,7 +253,13 @@ impl GuestRuntime {
 
     pub(super) fn create_recorded(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         self.check_allocation(&spec)?;
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
+        // A create with devices has a GPU report, which Shards binds to a finite deadline: the record's, owed until its
+        // report takes none. Every other create follows its guest (the review's C-9).
+        let budget = if spec.devices.is_empty() {
+            managed::Budget::following()
+        } else {
+            managed::gpu_create()?
+        };
         let books = self.books.get().ok_or_else(|| {
             Refusal::Broken("a dedicated guest needs the native record authority".into())
         })?;
@@ -668,7 +674,7 @@ mod tests {
             &self,
             _: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: Duration,
+            _: Option<Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("pure record control cannot launch")
         }

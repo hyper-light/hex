@@ -17,10 +17,10 @@ use hex_core::patience::{Patience, Piece};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
-/// The slowest recorded value of each wait that seeds a bound, by host class
-/// (bench/native/guest/records.tsv). A class with no row for a measure seeds from the slowest row of any
-/// class ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code
-/// change.
+/// The slowest recorded value of each guest wait, by host class (bench/native/guest/records.tsv): the build's one read
+/// of it, for a GPU create's budget alone (`hex_runtime::guest`'s `gpu_create`), owed until Shards' GPU report takes no
+/// deadline (the review's C-9). A class with no row for a measure seeds from the slowest row of any class
+/// ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code change.
 pub const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
 
 /// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
@@ -70,7 +70,7 @@ pub fn seed_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
 
 /// The seed for `measure` on this host's class ([`seed_in`] over records.tsv), or the refusal naming the
 /// record to take where no class records it.
-pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
+fn recorded(measure: &str) -> Result<Duration, Refusal> {
     seed_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
         what: "the oci class's guest",
         platform: std::env::consts::OS,
@@ -80,9 +80,8 @@ pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
     })
 }
 
-/// The seed of the first dial's bound before this node has seen a boot: the slowest boot to ready on record
-/// for this host's class, or with none, the slowest of any class (bench/native/guest/boot-ready/RECORD.md, its
-/// rows in records.tsv).
+/// The slowest boot to ready on record for this host's class, or with none, the slowest of any class
+/// (bench/native/guest/boot-ready/RECORD.md, its rows in records.tsv): a GPU create's budget alone, owed ([`RECORDS`]).
 pub fn recorded_boot() -> Result<Duration, Refusal> {
     recorded("boot_ready")
 }

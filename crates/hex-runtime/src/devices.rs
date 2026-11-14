@@ -413,13 +413,15 @@ impl ManagedLaunch<'_> {
 
 /// Shared pre-effect guard for the existing Node/Recorded native transaction consumers. The
 /// writer's final OS duplication/rendering stays at its native launcher, never in this metadata.
+/// Its answer is the launch's deadline: the caller's, a report's at most, none for a launch that
+/// follows its guest with no report (the review's C-9).
 pub fn check_managed_report(
     catalog: Option<&Catalog>,
     record: NativeRecord<'_>,
     plan: &ManagedLaunch<'_>,
     writer: bool,
-    deadline: Instant,
-) -> Result<Instant, Refusal> {
+    deadline: Option<Instant>,
+) -> Result<Option<Instant>, Refusal> {
     match record {
         NativeRecord::Box(record) => record.spec.check()?,
         NativeRecord::Pool(record) => record.check()?,
@@ -452,11 +454,13 @@ pub fn check_managed_report(
             record,
             request.selected(),
         )?;
-        deadline.min(request.deadline())
+        Some(deadline.map_or(request.deadline(), |deadline| {
+            deadline.min(request.deadline())
+        }))
     } else {
         deadline
     };
-    if deadline <= Instant::now() {
+    if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
         return Err(record.refusal(hex_api::LifecycleCause::Pending));
     }
     Ok(deadline)
@@ -656,11 +660,13 @@ pub trait Transaction {
     fn remove(&self, id: &BoxId) -> Result<(), Refusal>;
     /// Launch in the original record's admitted native envelope from the first instruction.
     /// The existing native receipt alone owns observation/reaping; no Process record is added.
+    /// `patience` is what is left of a finite create budget (a GPU create's), none for a create that
+    /// follows its guest (the review's C-9), whose launch has no deadline of the caller's.
     fn launch_managed(
         &self,
         plan: &ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: Duration,
+        patience: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal>;
     /// Reattach the exact persisted native identity and envelope without creating a process.
     /// None is cleanup-only for Creating/Deleting before identity publication, never a usable
@@ -748,7 +754,7 @@ impl Transaction for RecordOnly<'_> {
         &self,
         _: &ManagedLaunch<'_>,
         _: shards_api::LaunchIo,
-        _: Duration,
+        _: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         Err(native_in_record())
     }
@@ -1869,7 +1875,7 @@ mod authority_tests {
             &self,
             _: &ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: Duration,
+            _: Option<Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             Err(invalid("fixture has no native launcher"))
         }
@@ -1986,7 +1992,8 @@ mod authority_tests {
             Ok((
                 t.read(&id)?,
                 [
-                    t.launch_managed(&launch, io, Duration::ZERO).map(drop),
+                    t.launch_managed(&launch, io, Some(Duration::ZERO))
+                        .map(drop),
                     t.attach_managed(None).map(drop),
                     t.finalize_managed(None),
                     t.managed_usage().map(drop),

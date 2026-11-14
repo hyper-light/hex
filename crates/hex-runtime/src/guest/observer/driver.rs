@@ -38,19 +38,24 @@ pub(super) fn output_bound(expected: usize) -> Result<usize, Refusal> {
         .ok_or_else(|| exhausted(expected))
 }
 
-/// The child receives only a finite remainder. The original parent Instant also
-/// bounds process launch, both streams, exit and cleanup; it is never restarted.
+/// The child receives its create's finite remainder where it has one (`--wait-ns`), never restarted: the original
+/// parent Instant also bounds process launch, both streams, exit and cleanup. With none (the review's C-9) it is told no
+/// deadline, and waits on its fences as Vulkan's `UINT64_MAX` waits, until they signal or its guest ends.
 pub(super) fn program(
     configured: &super::config::GpuObserver,
     expected: usize,
-    remaining: Duration,
+    remaining: Option<Duration>,
 ) -> Result<Program, Refusal> {
     use std::fmt::Write as _;
+    let mut program = configured.program(expected)?;
+    let Some(remaining) = remaining else {
+        program.check()?;
+        return Ok(program);
+    };
     let nanos = u64::try_from(remaining.as_nanos())
         .ok()
         .filter(|n| *n != 0 && *n != u64::MAX)
         .ok_or_else(|| invalid("observer requires a positive finite fence deadline"))?;
-    let mut program = configured.program(expected)?;
     program
         .args
         .try_reserve_exact(2)
@@ -202,7 +207,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (config, input, allocation) = super::super::config::tests::fixture(dir.path());
         let observer = super::super::config::GpuObserver::new(input, &config, allocation).unwrap();
-        let program = program(&observer, 1, Duration::from_secs(1)).unwrap();
+        let program = program(&observer, 1, Some(Duration::from_secs(1))).unwrap();
         let flags: Vec<&String> = program
             .args
             .iter()
@@ -211,6 +216,34 @@ mod tests {
         assert_eq!(flags.len(), 6, "{:?}", program.args);
         for flag in flags {
             assert!(producer.contains(&format!("\"{flag}\"")), "{flag}");
+        }
+    }
+
+    /// The review's C-9 (ROOT, 2026-11-14): an observer whose create follows its guest is told no deadline. Do: make the
+    /// program with no remainder, and read the producer's source. Expect five flags, no `--wait-ns`, and the producer
+    /// taking either count, a deadline it isn't told its `NO_DEADLINE`, which its fence waits take as Vulkan's
+    /// `UINT64_MAX`.
+    #[test]
+    fn c9_an_observer_with_no_deadline_is_told_none_and_waits_its_fences_out() {
+        let producer = include_str!("hex-vulkan-guest-ready.c");
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = super::super::config::tests::fixture(dir.path());
+        let observer = super::super::config::GpuObserver::new(input, &config, allocation).unwrap();
+        let program = program(&observer, 1, None).unwrap();
+        let flags: Vec<&String> = program
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--"))
+            .collect();
+        assert_eq!(flags.len(), 5, "{:?}", program.args);
+        assert!(!program.args.iter().any(|arg| arg == "--wait-ns"));
+        for words in [
+            "argc != 1 + 6 * 2 && argc != 1 + 5 * 2",
+            "limit->wait_ns = NO_DEADLINE;",
+            "#define NO_DEADLINE UINT64_MAX",
+            "if (deadline == NO_DEADLINE) {",
+        ] {
+            assert!(producer.contains(words), "{words}");
         }
     }
 
