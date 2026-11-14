@@ -1400,3 +1400,121 @@ fn w14_a3_a_failed_linux_window_says_why_for_its_answers() {
     assert!(learner.learned(Class::Shards, &[cost()]).unwrap().is_none());
     assert_eq!(learner.unlearned(), Some(why.to_string()));
 }
+
+/// The cgroups as `Record` keeps them, noting each ask made of them and whether `learner`, the lock the node's capacity
+/// answers take, was held as it was made (A-2).
+struct Watched<'a> {
+    io: &'a Record,
+    learner: &'a Shared,
+    asked: RefCell<Vec<&'static str>>,
+    held: RefCell<Vec<&'static str>>,
+}
+
+impl Watched<'_> {
+    fn ask(&self, what: &'static str) {
+        self.asked.borrow_mut().push(what);
+        if self.learner.try_lock().is_err() {
+            self.held.borrow_mut().push(what);
+        }
+    }
+}
+
+impl Cgroups for Watched<'_> {
+    fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal> {
+        self.ask("usage");
+        self.io.usage(cgroup)
+    }
+
+    fn guest_time(&self, id: &hex_api::LearnedHolder) -> Result<ManagedGuestTime, Refusal> {
+        self.ask("guest_time");
+        self.io.guest_time(id)
+    }
+
+    fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal> {
+        self.ask("write");
+        self.io.write(cgroup, write)
+    }
+
+    fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal> {
+        self.ask("children");
+        self.io.children(dir)
+    }
+
+    fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal> {
+        self.ask("read");
+        self.io.read(dir, file)
+    }
+
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
+        self.ask("kill");
+        self.io.kill(cgroup)
+    }
+
+    fn intend(
+        &self,
+        id: &hex_api::LearnedHolder,
+        scope: Scope,
+        end: &LearnedEnd,
+    ) -> Result<bool, Refusal> {
+        self.ask("intend");
+        self.io.intend(id, scope, end)
+    }
+}
+
+/// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
+/// stalled every capacity answer; AC-T7.4.1): a window asks its VMs, reads and writes their cgroups and ends one with the
+/// lock its capacity answers take let go. Do record three Shards VMs in a node's store, run the node's window over them
+/// holding nothing, then one in which vm-2 holds 12 GiB of their fleet's 16 GiB budget, noting at each ask whether that
+/// lock is held. Expect each VM's guest time, use and record read, the node's cgroups listed and written, vm-2's end
+/// written into its record and its cgroup killed, and none of those asked while that lock is held.
+#[test]
+fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
+    use crate::store::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    let vms = recorded_three(&store);
+    let io = Record::default();
+    *io.records.borrow_mut() = Some(store.clone());
+    io.dir(&fleet(), &[]);
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    let shared: Shared = Mutex::new(Learner::new(&fleet(), machine()).unwrap());
+    let watched = Watched {
+        io: &io,
+        learner: &shared,
+        asked: RefCell::default(),
+        held: RefCell::default(),
+    };
+    let fleet_budget = res(32_000, 16 * GIB);
+    let start = Instant::now();
+    let record = |id: &hex_api::LearnedHolder| {
+        watched.ask("record");
+        booked_at_four(id)
+    };
+    let read = || Ok((vms.clone(), Vec::new(), fleet_budget));
+    one_window(&shared, &watched, &store, read, record, || start);
+    for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(name), 0, held);
+    }
+    one_window(&shared, &watched, &store, read, record, || start + WINDOW);
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
+    let asked = watched.asked.borrow().clone();
+    for what in [
+        "guest_time",
+        "usage",
+        "record",
+        "children",
+        "read",
+        "write",
+        "intend",
+        "kill",
+    ] {
+        assert!(asked.contains(&what), "{what} asked: {asked:?}");
+    }
+    assert_eq!(
+        *watched.held.borrow(),
+        Vec::<&str>::new(),
+        "asked while the lock its capacity answers take was held"
+    );
+}
