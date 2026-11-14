@@ -1398,10 +1398,12 @@ fn w2_a_members_kill_the_queue_cannot_take_is_refused_never_dropped() {
     let end = MemberEnd {
         shared: Arc::downgrade(&shared),
         token: FIRST_TOKEN,
-        id: b(),
-        member: hex_api::Member {
-            kind: hex_api::MemberKind::Harness,
-            name: "claude".to_owned(),
+        kills: Kills::Member {
+            id: b(),
+            member: hex_api::Member {
+                kind: hex_api::MemberKind::Harness,
+                name: "claude".to_owned(),
+            },
         },
         released: Mutex::new(false),
     };
