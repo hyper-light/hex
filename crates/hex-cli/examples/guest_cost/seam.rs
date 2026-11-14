@@ -109,6 +109,12 @@ pub trait Driver {
 
     /// What is held on disk under the class's runtime folders now: before a guest, and after its end.
     fn held(&self) -> Result<Files, String>;
+    /// Where the class's VMs leave records that its next VM's start sweeps away, and what they are: what a guest leaves
+    /// there is counted and named in the evidence, and must be gone by the next guest's end, rather than refused as a
+    /// VM's leftovers. None where its VMs leave none.
+    fn swept_at_next_start(&self) -> Option<(PathBuf, String)> {
+        None
+    }
     /// Starts one guest's VMM, its guest told no deadline (it keeps its learned bounds), and returns it with the probes
     /// that read it.
     fn launch(&mut self) -> Result<Launched<Self>, String>;

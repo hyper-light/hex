@@ -42,6 +42,8 @@ pub struct Managed {
     paths: shards_api::RuntimePaths,
     cache: PathBuf,
     home: PathBuf,
+    /// Shards' records of its VM processes' AppContainer profiles, in its cache ([`Driver::swept_at_next_start`]).
+    containers: PathBuf,
     /// The run's own folder of runtime folders, its guests' sockets among them.
     folder: PathBuf,
     /// The cost each guest is booted under while its own is measured: its envelope's, floor and ceiling, in this
@@ -250,6 +252,7 @@ impl Managed {
             config,
             runtime: Arc::new(WinRuntime::new()),
             paths,
+            containers: cache.join("containers"),
             cache,
             home,
             folder,
@@ -471,6 +474,17 @@ impl Driver for Managed {
 
     fn held(&self) -> Result<Files, String> {
         walk(&[self.cache.clone(), self.home.clone()])
+    }
+
+    /// Shards' records of its VM processes' AppContainer profiles (Shards' helpers::containers, D141): each VM process
+    /// makes its profile and a record of it as it starts, and deletes both as it ends; Hex ends a managed VM by its
+    /// job's end (its native owner's stop: shards_api has no other for a managed VM), so the profile and its record
+    /// stay until the next VM's start sweeps them.
+    fn swept_at_next_start(&self) -> Option<(PathBuf, String)> {
+        Some((
+            self.containers.clone(),
+            "Shards' AppContainer profile record left by a killed VM, swept at the next start (D141; its profile, in LOCALAPPDATA's Packages and the registry, lives as long)".to_owned(),
+        ))
     }
 
     fn launch(&mut self) -> Result<Launched<Self>, String> {
