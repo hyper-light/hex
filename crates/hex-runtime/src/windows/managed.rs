@@ -24,7 +24,7 @@ pub(super) struct Receipt {
     process: Mutex<BoxProc>,
 }
 
-fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
+pub(super) fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
     if record.class()? != Class::Shards {
         return Err(record
             .uncertain("its record isn't a Shards VM's, which Windows host bounds are made for"));

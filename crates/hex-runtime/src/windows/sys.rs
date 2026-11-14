@@ -582,6 +582,16 @@ impl Job {
         self.set(JobObjectCpuRateControlInformation, &rate)
     }
 
+    /// The job's commit limit, where it holds one (`JOB_OBJECT_LIMIT_JOB_MEMORY` set): its tests read back what
+    /// a configure or an adoption wrote.
+    #[cfg(test)]
+    pub fn memory_limit(&self) -> io::Result<Option<u64>> {
+        let ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+            self.query(JobObjectExtendedLimitInformation)?;
+        let held = (ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY) != 0;
+        Ok(held.then(|| u64::try_from(ext.JobMemoryLimit).unwrap_or(u64::MAX)))
+    }
+
     fn set<T>(&self, class: i32, value: &T) -> io::Result<()> {
         let len = u32::try_from(size_of::<T>()).unwrap_or(u32::MAX);
         // SAFETY: SetInformationJobObject reads `len` bytes from `value` (one T, alive for the call) and
