@@ -10,8 +10,8 @@ use std::time::Duration;
 use crate::patience::{Party, Patience, Piece};
 use crate::{
     Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, CredentialGrant, Destination,
-    DeviceId, DeviceKind, Exit, Grant, GuestTime, Member, MemberKind, Mount, Network, OciSpec,
-    Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
+    DeviceId, DeviceKind, Exit, Grant, GuestTime, LifecycleCause, Member, MemberKind, Mount,
+    Network, OciSpec, Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
 };
 
 /// What a fixture's program does.
@@ -1133,12 +1133,26 @@ fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     Ok(())
 }
 
+/// KILL to Shards image VM `id`, its stop taken, its end for [`exit_of`] to follow. A stop past its runtime's W* is
+/// answered `Lifecycle { Pending }` (the 11-13 ruling: the stop goes on), a stop taken too. No call of the node's wire
+/// follows a stop's end yet, so a remote caller reads it as `exit_of` does (ROOT, 2026-11-14: the next appended call,
+/// if kiln asks for one).
+fn stopped(rt: &dyn Runtime, id: &BoxId) -> Result<(), String> {
+    match rt.signal(id, Signal::KILL) {
+        Ok(())
+        | Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        }) => Ok(()),
+        Err(e) => Err(format!("stop: {e}")),
+    }
+}
+
 fn image_stop(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = image_made(rt, fx, "image-stop")?;
     deleting(rt, &id, || {
         rt.start(&id).map_err(|e| format!("start: {e}"))?;
-        rt.signal(&id, Signal::KILL)
-            .map_err(|e| format!("stop: {e}"))?;
+        stopped(rt, &id)?;
         let info = exit_of(rt, fx, &id)?;
         ensure(
             (info.state, info.exit) == (BoxState::Empty, Some(Exit::Signal(9))),
@@ -1219,8 +1233,7 @@ fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         ensure(second.iter().all(|ns| *ns <= wall), || {
             format!("guest time {second:?} past the {wall} ns since its start")
         })?;
-        rt.signal(&id, Signal::KILL)
-            .map_err(|e| format!("stop: {e}"))?;
+        stopped(rt, &id)?;
         exit_of(rt, fx, &id)?;
         let late = rt.usage(&id);
         ensure(matches!(late, Err(Refusal::NotRunning(..))), || {
@@ -1842,5 +1855,78 @@ mod tests {
             still_running().is_some_and(|watch| took < watch),
             "HEX-RT-4 took {took:?}"
         );
+    }
+
+    /// The simulator, every KILL it takes answered `Lifecycle { Pending }`, as a Shards image VM's stop past its W* is
+    /// answered (the 11-13 ruling: the stop goes on, its end recorded when a later call finds it); a KILL the simulator
+    /// refuses is refused so.
+    struct PendingStops {
+        sim: SimRuntime,
+    }
+
+    impl Runtime for PendingStops {
+        fn classes(&self) -> Vec<Class> {
+            self.sim.classes()
+        }
+        fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.sim.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.start(id)
+        }
+        fn exec(
+            &self,
+            id: &BoxId,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.exec(id, program, stdio)
+        }
+        fn run(
+            &self,
+            spec: BoxSpec,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, program, stdio)
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.sim.signal(id, signal)?;
+            if signal != Signal::KILL {
+                return Ok(());
+            }
+            Err(Refusal::Lifecycle {
+                id: id.clone(),
+                cause: crate::LifecycleCause::Pending,
+                why: None,
+            })
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            self.sim.inspect(id)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.sim.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.sim.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.delete(id)
+        }
+    }
+
+    /// HEX-IMG-2 and HEX-IMG-4 (goal 2; ROOT, 2026-11-14): a Shards image VM's KILL its runtime answers
+    /// `Lifecycle { Pending }`, its stop under way past W*, is a stop taken, its end followed to the box's exit as
+    /// [`exit_of`] reads it. Do: run the image cases against a simulator whose every KILL it takes is answered so.
+    /// Expect: no case fails.
+    #[test]
+    fn w2_an_image_vms_stop_answered_pending_is_followed_to_its_end() {
+        let failures = run_image(
+            &PendingStops {
+                sim: SimRuntime::new(),
+            },
+            &SimFixture::ShardsImage,
+        );
+        assert_eq!(failures, Vec::new());
     }
 }
