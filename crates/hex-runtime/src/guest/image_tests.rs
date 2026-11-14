@@ -4386,9 +4386,12 @@ fn b1_a_deletes_wait_for_a_stop_whose_answer_another_call_took_sees_it_given() {
     owner.hold_deleting();
     let (answered, taught) = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
-        hex_testkit::waits::until(&B1_DELETE_HELD, "the delete's intent held", || {
-            deleting.is_finished() || owner.holds_deleting()
-        })
+        follow::until(
+            &B1_DELETE_HELD,
+            "the delete's intent held",
+            || spawned(&deleting),
+            || deleting.is_finished() || owner.holds_deleting(),
+        )
         .unwrap();
         images.run.hold_stops(false);
         shown(&runtime, &id, BoxState::Empty, &B1_STOP_TAKEN);
@@ -4436,9 +4439,12 @@ fn b1_a_kill_whose_stops_thread_ended_with_no_answer_is_refused_never_pending() 
     *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
     let slot = stopping(&runtime, &id).unwrap();
-    hex_testkit::waits::until(&B1_STOP_GONE, "the stop's thread gone", || {
-        slot.gone.load(Ordering::Acquire)
-    })
+    follow::until(
+        &B1_STOP_GONE,
+        "the stop's thread gone",
+        || kept(&owner, &id),
+        || slot.gone.load(Ordering::Acquire),
+    )
     .unwrap();
     let killed = runtime.signal(&id, Signal::KILL);
     assert!(
@@ -4468,9 +4474,12 @@ fn b1_a_cold_start_whose_boots_thread_ends_with_no_answer_is_refused() {
     images.abandon.store(true, Ordering::SeqCst);
     let started = std::thread::scope(|scope| {
         let starting = scope.spawn(|| runtime.start(&id));
-        hex_testkit::waits::until(&B1_BOOT_ASKED, "the boot asked", || {
-            starting.is_finished() || !images.asked.lock().unwrap().is_empty()
-        })
+        follow::until(
+            &B1_BOOT_ASKED,
+            "the boot asked",
+            || spawned(&starting),
+            || starting.is_finished() || !images.asked.lock().unwrap().is_empty(),
+        )
         .unwrap();
         images.gate(Gate::Open);
         starting.join().unwrap()
