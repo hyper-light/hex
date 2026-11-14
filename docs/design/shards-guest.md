@@ -608,22 +608,27 @@ Hex's tests of the channel, each citing its ID:
   the one read (`hex guest`).
 - HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
   pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
-- HEX-GUEST-33: every attempt of a dial to a booted guest carries one finite absolute deadline, within which Shards'
-  client asks again while the guest doesn't listen there yet: a boot's first dial the boot's own (HEX-GUEST-34), any
-  other its caller's or, with none, the learned bound on a boot to ready from the attempt's start; never a relative
-  patience, as Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
-  (`hex_client::guest::shards::ShardsLink`). A dial with no caller deadline waits as decision 9 waits, the bound its
-  W*: past it, the run-out told, the dial is made again while the guest lives, refused at its end, never at a bound
-  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as decision 9
+- HEX-GUEST-33: every bounded attempt of a dial to a booted guest carries one finite absolute deadline, within which
+  Shards' client asks again while the guest doesn't listen there yet: a boot's first dial the boot's own W*
+  (HEX-GUEST-34), any other its caller's or, with none, its W* from the attempt's start; never a relative patience, as
+  Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
+  (`hex_client::guest::shards::ShardsLink`). A dial with no caller deadline waits as decision 9 waits (the review's
+  C-9), its W* the slowest boot to ready its node has seen, or with none the slowest such dial its process has seen
+  (`client.guest.link.dial`): within it one attempt; past it the run-out told once and one dial that follows the guest's
+  VM by its life, Shards' `connect_while_runs`, refused at the guest's end or as `Stalled` where its VM ran no CPU for
+  a whole W* of Shards' own (Part B), never at a bound, never given up and made again; with no W* it follows from its
+  start, told once (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as decision 9
   waits (the review's D-2): within its W*, the slowest token its transport has carried (`client.guest.relay.token`,
   `client.quic.relay.token`), the token is the answer; past it, the run-out told, the read follows the connection,
   the bytes read before kept, refused at its end, never at a bound (`guest::token_following`).
-- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: the slowest boot to ready on record before any
-  boot is seen (bench/native/guest/boot-ready/RECORD.md), then the slowest of the record's and the node's own, only
-  rising, with no margin (decision 9 of runtime-architecture.md, 2026-11-13); a guest alive and not ready within it is
-  stopped, counted and booted once more, and only a second hang refuses its caller, by type
-  (`hex_runtime::guest::GuestRuntime`). The record is the build's one remaining read of records.tsv: a first boot that
-  follows the guest's liveness, as decision 9's cold start does, is owed.
+- HEX-GUEST-34: a boot's first dial is the boot's own wait (decision 9 of runtime-architecture.md; the review's C-9,
+  2026-11-14): within W*, the slowest boot to ready its node has seen, counted from the boot's start, with no margin;
+  past it, the run-out told once and the dial following the guest's VM by its life (HEX-GUEST-33); before any boot is
+  seen, following from its start, told once as it starts (`hex.wait event=following`). One boot: a guest alive and
+  not ready is followed to its answer, never stopped and booted again; it is refused only at its end, its VM's stall
+  as Shards judges it, or a refusal of its own, and a W* past any monotonic deadline is refused by type before
+  anything boots (`hex_runtime::guest::GuestRuntime`). Its answer, however late, is the boot's sample, and W* rises to
+  it. No record bounds it: records.tsv is read now only for the managed creates' budgets, owed (the rest of C-9).
 - HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
   learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
 - HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through
@@ -644,7 +649,9 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-40: on each create (a stat, no polling) the node compares the Shards binary's identity with the one its
   running guest booted. If it changed, one throwaway guest boots on it in the background, at Shards' least memory
   with no shares, and stops, so the node's next boot is warm; at most one is in flight, a binary is warmed once,
-  and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
+  and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`). The throwaway is
+  told no boot deadline and its readiness is waited for as the node's own boot's is (HEX-GUEST-34); a node that ends
+  stops it rather than wait on it, which ends its wait.
 - HEX-GUEST-41: a guest program's streams through the host node's socket are the guest's own stdio connections,
   whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
   caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes
@@ -658,14 +665,14 @@ Hex's tests of the channel, each citing its ID:
   `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
   behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms
   among its cases (`crates/hex-cli/tests/node_socket.rs`).
-- HEX-GUEST-43 (AC-T7.4.1): the host tells a guest its boot's deadline on its kernel command line,
-  `hex.ready-ms=`: what is left of HEX-GUEST-34's bound as it boots (a managed boot's, of its create's budget, the
-  same bound), in milliseconds rounded up, so the guest, counting from its kernel's start, ends no sooner than its
-  host (`hex_runtime::guest::READY_MS`), as a Firecracker guest is told `hex.firecracker-ready-ms`. Init waits for
-  its node's and relay's ready lines within it, refused past it, and hands it to them, whose calls to the node before
-  the guest is ready take it as their caller's, a learned wait passing on the way only a run-out recorded
-  (`hex guest`). A guest told none keeps its learned bounds. On 00aad the relay's hello, refused at its learned
-  bound while a GPU's initialization held the node, ended a boot with most of its deadline left.
+- HEX-GUEST-43 (AC-T7.4.1): a Firecracker host tells its guest its boot's deadline on its kernel command line,
+  `hex.firecracker-ready-ms`, counted from the kernel's start. Init waits for its node's and relay's ready lines
+  within it, refused past it, and hands it to them, whose calls to the node before the guest is ready take it as
+  their caller's, a learned wait passing on the way only a run-out recorded (`hex guest`). On 00aad the relay's
+  hello, refused at its learned bound while a GPU's initialization held the node, ended a boot with most of its
+  deadline left. A Shards host tells its guest none (the review's C-9, 2026-11-14: its `hex.ready-ms=` carried what
+  was left of a bound its boot no longer has, the node's own guest's, a managed create's and a warm-up's alike): the
+  guest keeps its learned bounds, each following its party past W* (decision 9).
 
 ## 7. What would falsify it
 

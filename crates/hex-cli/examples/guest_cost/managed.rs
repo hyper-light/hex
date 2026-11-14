@@ -316,7 +316,6 @@ impl Managed {
             &socket,
             &self.paths,
             None,
-            None,
         )
         .map_err(|e| format!("preparing the guest's managed plan: {e}"))?;
         let vm = hex_runtime::guest::boot_managed(scope.as_ref(), plan, self.patience()?.bound)
@@ -504,7 +503,7 @@ impl Driver for Managed {
         // its life, and its hello waits on its connection (decision 9).
         let bound = self.patience()?.bound;
         let vm: Arc<dyn shards_api::Guest> = Arc::clone(&guest.vm) as Arc<dyn shards_api::Guest>;
-        let client = own_link(ShardsLink::new(vm, bound))
+        let client = own_link(ShardsLink::new(vm, Some(bound)))
             .and_then(Client::connect)
             .map_err(|why| format!("reaching the guest's agent: {why}"))?;
         guest.client = Some(client);

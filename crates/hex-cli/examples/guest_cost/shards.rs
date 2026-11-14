@@ -403,7 +403,7 @@ impl Driver for Shards {
         // Followed to its answer: its link's dials past the class's W* tell the run-out once and follow the guest's VM by
         // its life, and its hello waits on its connection (decision 9).
         let bound = self.patience()?.bound;
-        let client = own_link(ShardsLink::new(Arc::clone(&guest.vm), bound))
+        let client = own_link(ShardsLink::new(Arc::clone(&guest.vm), Some(bound)))
             .and_then(Client::connect)
             .map_err(|why| format!("reaching the guest's agent: {why}"))?;
         guest.client = Some(client);

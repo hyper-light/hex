@@ -1,7 +1,7 @@
 //! The guest's ports through Shards (docs/design/shards-guest.md §2, Appendix A "Hex's side"): a
 //! [`Link`] whose first dial is `shards_api::Guest::connect_before` and every later one
-//! `connect_once_before`, Firecracker's `CONNECT <port>` on the guest's vsock, and a [`Duplex`] over the
-//! stream it returns. Hex never names Shards' stream type: on
+//! `connect_once_before`, a dial past its W* `connect_while_runs`, Firecracker's `CONNECT <port>` on the
+//! guest's vsock, and a [`Duplex`] over the stream it returns. Hex never names Shards' stream type: on
 //! Windows it is Shards' overlapped AF_UNIX socket, whose timeouts poll first, behind the same trait.
 
 use std::io::{self, Read, Write};
@@ -135,18 +135,20 @@ impl Duplex for ShardsStream {
     }
 }
 
-/// A guest's ports. A dial given its caller's deadline waits within it; one given none follows the guest
-/// past `bound` ([`ShardsLink::dial_following`], decision 9), each of its attempts within `bound` from
-/// its start. Until a dial has reached the guest's relay an attempt is one `connect_before`, within
-/// which Shards' client asks again while the guest doesn't listen there yet. The relay binds every port
-/// it serves before it serves any (`hex guest`), so after that a refused port has no relay behind it:
-/// each later attempt is one `connect_once_before`, refused at once if nothing listens. `bound` is the
-/// caller's learned bound on a boot to ready (`hex_runtime::guest::GuestRuntime::first_dial_bound`),
-/// whose ready includes a whole CONNECT/OK exchange. Never a relative patience: Shards' client awaits a
-/// zero or `Duration::MAX` patience's answer without a bound (HEX-GUEST-33).
+/// A guest's ports. A dial given its caller's deadline waits within it; one given none waits within W* and
+/// past it follows the guest ([`ShardsLink::dial_following`], decision 9). Until a dial has reached the
+/// guest's relay its bounded attempt is one `connect_before`, within which Shards' client asks again while
+/// the guest doesn't listen there yet. The relay binds every port it serves before it serves any (`hex
+/// guest`), so after that a refused port has no relay behind it: each later attempt is one
+/// `connect_once_before`, refused at once if nothing listens. `bound` is its node's W* for the guest, the
+/// slowest boot to ready it has seen (`hex_runtime::guest::GuestRuntime::boot_bound`), whose ready includes a
+/// whole CONNECT/OK exchange; none before its node has seen one. Never a relative patience: Shards' client
+/// awaits a zero or `Duration::MAX` patience's answer without a bound (HEX-GUEST-33).
 pub struct ShardsLink {
     guest: ShardsGuest,
-    bound: Duration,
+    bound: Option<Duration>,
+    /// Its guest's boot's start, for a link made as its guest boots: its first dial is that boot's own wait.
+    booted: Option<Instant>,
     listened: AtomicBool,
 }
 
@@ -165,14 +167,16 @@ impl ShardsGuest {
 }
 
 /// A guest link's dials with no caller deadline, as the waits census keeps them (decision 9): each stream, timed from
-/// its dial's start, and each dial's run-out past its link's bound ([`ShardsLink::dial_following`]).
+/// its dial's start, and each dial's run-out past its W* ([`ShardsLink::dial_following`]). Its own slowest answer is the
+/// W* of a link whose node has seen no boot.
 static FOLLOWED: Patience = Patience::measuring("client.guest.link.dial");
 
 impl ShardsLink {
-    pub fn new(guest: Arc<dyn shards_api::Guest>, bound: Duration) -> Self {
+    pub fn new(guest: Arc<dyn shards_api::Guest>, bound: Option<Duration>) -> Self {
         Self {
             guest: ShardsGuest::Owned(guest),
             bound,
+            booted: None,
             listened: AtomicBool::new(false),
         }
     }
@@ -180,73 +184,100 @@ impl ShardsLink {
     /// AC-T7.4.1: retain the API's existing native/protocol receipt directly. The
     /// caller uses ManagedGuest::try_clone when it also retains a boot handle;
     /// adapting that handle needs no second Arc allocation or lifecycle owner.
-    pub fn managed(guest: shards_api::ManagedGuest, bound: Duration) -> Self {
+    pub fn managed(guest: shards_api::ManagedGuest, bound: Option<Duration>) -> Self {
         Self {
             guest: ShardsGuest::Managed(guest),
             bound,
+            booted: None,
             listened: AtomicBool::new(false),
         }
     }
 
-    /// A dial to `port` with no caller deadline, as decision 9 waits (the person's ruling of 2026-11-13). Its W* is the
-    /// link's bound: the slowest boot to ready its node has seen, whose ready includes a whole CONNECT/OK exchange, and
-    /// the one finite deadline Shards' connector waits in here.
-    /// - **Within it** the stream is the answer.
-    /// - **Past it** the run-out is told, once ([`FOLLOWED`]), and the dial follows the guest's VM by its life: made
-    ///   again, waiting the bound again, as each attempt's passes, refused at the guest's end (Shards' connector looks
-    ///   at its VM before each CONNECT and after) or by any refusal that came before its attempt's bound passed, never
-    ///   at a bound.
-    ///
-    /// No attempt is given up sooner: one given up is closed unanswered, a connection the guest takes for nothing.
+    /// The same link to a guest whose boot began at `began`: its first dial with no caller deadline is that boot's own
+    /// wait, its W* counted from the boot's start, as the slowest boot was (HEX-GUEST-34).
+    pub fn booted_at(mut self, began: Instant) -> Self {
+        self.booted = Some(began);
+        self
+    }
+
+    /// A dial to `port` with no caller deadline, as decision 9 waits (the person's ruling of 2026-11-13; the review's
+    /// C-9). Its W* is the link's bound, the slowest boot to ready its node has seen, whose ready includes a whole
+    /// CONNECT/OK exchange. A booting link's first dial is its boot's own wait: its W* is that bound alone, counted from
+    /// the boot's start, none before its node's first boot. Any other dial with no bound takes the slowest such dial
+    /// this process has seen ([`FOLLOWED`]).
+    /// - **Within it** one attempt, `connect_before` (`connect_once_before` once the relay listens): its stream is the
+    ///   answer, and a refusal before W* or at the guest's end is the dial's.
+    /// - **Past it** the run-out is told, once, and one dial follows the guest's VM by its life, Shards'
+    ///   `connect_while_runs`: refused at the guest's end, or as `Stalled` where its VM ran no CPU for a whole W* of
+    ///   Shards' own (Part B, the VM's liveness), never at a bound of Hex's. No attempt is given up and made again past
+    ///   it: each one closed unanswered is a connection the guest takes for nothing.
+    /// - **With no W*** it follows from its start, told once as it starts.
     fn dial_following(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let began = Instant::now();
-        let mut told = false;
-        loop {
-            let at = self.bound_from_now()?;
-            let guest = self.guest.guest();
-            let dialed = if self.listened.load(Ordering::Acquire) {
-                guest.connect_once_before(port, at)
-            } else {
-                guest.connect_before(port, at)
-            };
-            match dialed {
-                Ok(stream) => {
-                    self.listened.store(true, Ordering::Release);
-                    FOLLOWED.answered(began.elapsed());
-                    return own_duplex(ShardsStream(stream));
-                }
-                Err(why) if Instant::now() < at || gone(&why) => {
-                    return Err(refusal("connecting to the guest", &why));
-                }
-                Err(_) => {
-                    if !told {
-                        // No sample (Karn's point): the run-out is told, and the dial goes on.
-                        FOLLOWED.ran_out(
-                            self.bound,
-                            began.elapsed(),
-                            &[
-                                Piece::Kind("the guest's VM, its port "),
-                                Piece::Number(u64::from(port)),
-                                Piece::Kind("'s answer to a dial"),
-                            ],
-                        );
-                        told = true;
+        let guest = self.guest.guest();
+        let party = [
+            Piece::Kind("the guest's VM, its port "),
+            Piece::Number(u64::from(port)),
+            Piece::Kind("'s answer to a dial"),
+        ];
+        let listened = self.listened.load(Ordering::Acquire);
+        let booting = self.booted.filter(|_| !listened);
+        match self.w_star(booting.is_some())? {
+            Some(w_star) => {
+                let from = booting.unwrap_or(began);
+                let at = from.checked_add(w_star).ok_or_else(unbounded)?;
+                let dialed = if listened {
+                    guest.connect_once_before(port, at)
+                } else {
+                    guest.connect_before(port, at)
+                };
+                match dialed {
+                    Ok(stream) => return self.answered(stream, began),
+                    Err(why) if Instant::now() < at || gone(&why) => {
+                        return Err(refusal("connecting to the guest", &why));
                     }
+                    // No sample (Karn's point): the run-out is told, and the dial follows the guest.
+                    Err(_) => FOLLOWED.ran_out(w_star, from.elapsed(), &party),
                 }
             }
+            // A boot's own W* is its node's, whatever this process has learned of other dials (`follows`).
+            None => FOLLOWED.follows(&party),
+        }
+        let stream = guest
+            .connect_while_runs(port)
+            .map_err(|why| refusal("connecting to the guest", &why))?;
+        self.answered(stream, began)
+    }
+
+    /// The W* of a dial with no caller deadline ([`ShardsLink::dial_following`]): its bound, refused by type where that is
+    /// zero; with none, a boot's own first dial has none, and any other the slowest such dial this process has seen.
+    fn w_star(&self, booting: bool) -> Result<Option<Duration>, Refusal> {
+        match self.bound {
+            Some(bound) if bound.is_zero() => Err(unbounded()),
+            Some(bound) => Ok(Some(bound)),
+            None if booting => Ok(None),
+            None => Ok(FOLLOWED.deadline()),
         }
     }
 
-    /// The link's bound from now, refused by type where it names no finite deadline: zero (a boot that spent its
-    /// bound), or past a monotonic one (`Duration::MAX`).
-    fn bound_from_now(&self) -> Result<Instant, Refusal> {
-        (!self.bound.is_zero())
-            .then(|| Instant::now().checked_add(self.bound))
-            .flatten()
-            .ok_or_else(|| Refusal::Invalid {
-                what: "guest dial bound",
-                why: "it must be positive and fit a monotonic deadline".to_owned(),
-            })
+    /// `stream`, a dial's answer begun at `began`: its port's relay listens, and the dial's time is its sample.
+    fn answered(
+        &self,
+        stream: Box<dyn shards_api::Stream>,
+        began: Instant,
+    ) -> Result<DuplexOwner, Refusal> {
+        self.listened.store(true, Ordering::Release);
+        FOLLOWED.answered(began.elapsed());
+        own_duplex(ShardsStream(stream))
+    }
+}
+
+/// A link's bound that names no finite deadline, zero or past a monotonic one, refused by type before Shards is asked
+/// (HEX-GUEST-33).
+fn unbounded() -> Refusal {
+    Refusal::Invalid {
+        what: "guest dial bound",
+        why: "it must be positive and fit a monotonic deadline".to_owned(),
     }
 }
 
@@ -276,11 +307,10 @@ impl Link for ShardsLink {
         true
     }
 
-    /// The learned bound on a boot to ready, whose ready includes the CONNECT/OK exchange: what each
-    /// attempt of a dial with no caller deadline waits ([`ShardsLink::dial_following`]), and what a
-    /// stream offer carries for a caller's borrowed CONNECTs (HEX-RT-17).
+    /// The W* of a dial with no caller deadline ([`ShardsLink::dial_following`]), whose answer includes the CONNECT/OK
+    /// exchange: what a stream offer carries for a caller's borrowed CONNECTs (HEX-RT-17); none before any is learned.
     fn setup_bound(&self) -> Option<Duration> {
-        Some(self.bound)
+        self.bound.or_else(|| FOLLOWED.deadline())
     }
 
     /// Shards carries a half-close (its D12, held by its conformance case).

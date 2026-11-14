@@ -13,7 +13,7 @@
 //! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, gives the node the descriptor
 //! limit `hex node --descriptors` counts (soft and hard, `fs.nr_open` raised to it where lower), starts `hex node`
 //! and then `hex guest relay --vsock`, each within the boot's deadline where its host gave one (Firecracker's
-//! `hex.firecracker-ready-ms`, a Shards host's `hex.ready-ms`), which it hands them (`BOOT_READY_BY`), says
+//! `hex.firecracker-ready-ms`; a Shards host gives none), which it hands them (`BOOT_READY_BY`), says
 //! `hex guest ready` on the console, and reaps every process that ends,
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
@@ -247,7 +247,7 @@ const BOOT_T0: &str = "HEX_BOOT_T0";
 const BOOT_STAMPS: &str = "HEX_BOOT_STAMPS";
 /// The variable that carries the boot's deadline from init to each child it starts before the guest is ready, the
 /// node and the relay (AC-T7.4.1): the instant on the guest's own clock, `CLOCK_BOOTTIME` nanoseconds, by which its
-/// host waits for it to be ready, its readiness bound ([`boot_budget`]) counted from the kernel's start, so the time
+/// host waits for it to be ready, its readiness bound ([`firecracker_ready_budget`]) counted from the kernel's start, so the time
 /// the boot has spent is what the clock reads. The relay's calls to its node take it as their caller's.
 const BOOT_READY_BY: &str = "HEX_BOOT_READY_BY";
 
@@ -440,7 +440,7 @@ impl Duty {
 /// Where init takes the boot's deadline from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Deadline {
-    /// The kernel's command line: `hex.ready-ms` or Firecracker's, counted from the kernel's start ([`boot_budget`]).
+    /// The kernel's command line: Firecracker's, counted from the kernel's start ([`firecracker_ready_budget`]).
     Kernel,
     /// What its service manager told it ([`SHARDS_READY_BY`]), none where it told none.
     Told(Option<u128>),
@@ -585,9 +585,9 @@ impl Boot {
             Duty::Deadline(Deadline::Kernel) => {
                 let cmdline = kernel_cmdline()?;
                 self.firecracker = firecracker_ready_budget(&cmdline)?;
-                // AC-T7.4.1: its host's readiness bound from the kernel's start, an instant on the guest's clock.
-                self.ready_by =
-                    boot_budget(&cmdline, self.firecracker)?.map(|budget| budget.as_nanos());
+                // AC-T7.4.1: its host's readiness bound from the kernel's start, an instant on the guest's clock. A
+                // Shards host tells none (the review's C-9): its guest keeps its learned bounds.
+                self.ready_by = self.firecracker.map(|budget| budget.as_nanos());
                 Ok(())
             }
             Duty::Deadline(Deadline::Told(ready_by)) => {
@@ -959,36 +959,6 @@ fn firecracker_ready_budget(cmdline: &str) -> Result<Option<Duration>, String> {
         (false, None) => Ok(None),
         (true, Some(budget)) => Ok(Some(budget)),
         _ => Err("Firecracker readiness requires its flag and finite budget together".to_owned()),
-    }
-}
-
-/// The boot's readiness bound its host told the guest on its kernel command line, counted from the kernel's start
-/// (AC-T7.4.1): Firecracker's, `firecracker` ([`firecracker_ready_budget`]), or a Shards host's,
-/// [`hex_runtime::guest::READY_MS`]; none where the host told none, whose guest keeps its learned bounds. Refused where
-/// both are told, or the Shards word is malformed or told twice.
-fn boot_budget(cmdline: &str, firecracker: Option<Duration>) -> Result<Option<Duration>, String> {
-    use hex_runtime::guest::READY_MS;
-    let mut told = None;
-    for word in cmdline.split_whitespace().take_while(|word| *word != "--") {
-        let Some(rest) = word.strip_prefix(READY_MS) else {
-            continue;
-        };
-        let millis = rest
-            .strip_prefix('=')
-            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|ms| *ms != 0)
-            .ok_or_else(|| format!("{READY_MS} needs positive milliseconds, not {word:?}"))?;
-        if told.replace(Duration::from_millis(millis)).is_some() {
-            return Err(format!("{READY_MS} is given twice"));
-        }
-    }
-    match (firecracker, told) {
-        (Some(_), Some(_)) => Err(format!(
-            "hex.firecracker-ready-ms and {READY_MS} both name the boot's deadline"
-        )),
-        (Some(budget), None) => Ok(Some(budget)),
-        (None, told) => Ok(told),
     }
 }
 
@@ -1422,39 +1392,6 @@ mod tests {
             assert!(ready_by(bad, 0).is_err(), "{bad:?}");
         }
         assert!(boot_deadline(Some(OsStr::from_bytes(b"\xff1")), now, 0).is_err());
-    }
-
-    /// AC-T7.4.1: the boot's deadline is its host's readiness bound, Firecracker's (`hex.firecracker-ready-ms`) or a
-    /// Shards host's (`hex.ready-ms`), and a guest told none keeps its learned bounds. Do: read command lines that name
-    /// either, neither or both, malformed or repeated Shards words, and one after `--`. Expect each bound as told, none
-    /// for neither or init's own arguments, and a refusal for the rest.
-    #[test]
-    fn the_boots_deadline_is_its_hosts_readiness_bound_either_way() {
-        let firecracker = Some(Duration::from_secs(60));
-        assert_eq!(boot_budget("console=ttyS0 panic=-1", None), Ok(None));
-        assert_eq!(boot_budget("console=ttyS0", firecracker), Ok(firecracker));
-        assert_eq!(
-            boot_budget(
-                "console=ttyS0 panic=-1 hex.shares=rw hex.ready-ms=21056",
-                None
-            ),
-            Ok(Some(Duration::from_millis(21_056)))
-        );
-        assert_eq!(boot_budget("quiet -- hex.ready-ms=5", None), Ok(None));
-        for bad in [
-            "hex.ready-ms",
-            "hex.ready-ms=",
-            "hex.ready-ms=0",
-            "hex.ready-ms=-1",
-            "hex.ready-ms=+1",
-            "hex.ready-ms=1.5",
-            "hex.ready-msx=1",
-            "hex.ready-ms=18446744073709551616",
-            "hex.ready-ms=1 hex.ready-ms=2",
-        ] {
-            assert!(boot_budget(bad, None).is_err(), "{bad}");
-        }
-        assert!(boot_budget("hex.ready-ms=5", firecracker).is_err());
     }
 
     /// AC-T7.4.1 (original): init waited for each child's ready line with no bound, so a node or relay that never
