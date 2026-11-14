@@ -84,6 +84,9 @@ struct Record {
     records: RefCell<Option<crate::store::Store>>,
     /// Every intent asked and every kill, in order: `intend <box>`, `kill <cgroup>`.
     events: RefCell<Vec<String>>,
+    /// Each VM's guest time as its VM process answers its use (D260), as the test sets it, by its box: none apart for a
+    /// VM it sets none for.
+    guest: RefCell<BTreeMap<String, ManagedGuestTime>>,
 }
 
 impl Cgroups for Record {
@@ -93,6 +96,15 @@ impl Cgroups for Record {
             .get(cgroup.dir())
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such cgroup".into()))
+    }
+
+    fn guest_time(&self, id: &hex_api::LearnedHolder) -> Result<ManagedGuestTime, Refusal> {
+        Ok(self
+            .guest
+            .borrow()
+            .get(box_of(id))
+            .cloned()
+            .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
     }
 
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal> {
@@ -1267,4 +1279,60 @@ fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
     );
     let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| box_of(id)).collect();
     assert_eq!(unread, ["vm-2"]);
+}
+
+/// Joint plan step 39, place 1 (ROOT, 2026-11-13), as the macOS and Windows learner carries them: the last-resort ends
+/// its node's start reads back from node VM rows join the learner's ends. Do carry why the last resort ended node VM 4
+/// into a learner that has run no window, then answer the Shards class. Expect that end among the class's ends.
+#[test]
+fn w39_a_carried_node_vm_end_is_among_the_learners_ends() {
+    let run = hex_api::NodeRun::from_bytes([4; 16]);
+    let end = LearnedEnd {
+        id: hex_api::LearnedHolder::Node(run),
+        held: 3 * GIB,
+        budget: 2 * GIB,
+        band: 0,
+        fleet_held: 9 * GIB,
+        fleet_growth: GIB,
+        fleet_budget: 8 * GIB,
+        unmoved: Some(Upstream::LiveMove),
+    };
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner.carry_ended(vec![end.clone()]).unwrap();
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(learned.ended, [end]);
+}
+
+/// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): a managed VM on Linux is read as every OS's learner reads it,
+/// its vCPUs' guest time apart from its VMM's own, one model everywhere, `cpu.max` holding the whole. Do run a window of
+/// a Shards VM of 16 vCPUs, its whole 16-CPU allocation booked, whose process answers its vCPUs' guest time; then one a
+/// window on, in which its cgroup ran 120 ms of CPU, 100 ms of it its vCPUs'. Expect its class's ceiling to carry its
+/// VMM's own over the window, 200 milli-CPU, past the envelope.
+#[test]
+fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
+    let io = Record::default();
+    let vms = running(&[("vm-1", 1)]);
+    io.set(vms[0].2.dir(), 0, GIB);
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), ManagedGuestTime::PerVcpu(vec![0; 16]));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, vms.clone(), shards, &[], machine(), start)
+        .unwrap();
+    io.set(vms[0].2.dir(), 120_000, GIB);
+    io.guest.borrow_mut().insert(
+        "vm-1".to_owned(),
+        ManagedGuestTime::PerVcpu(vec![6_250_000; 16]),
+    );
+    learner
+        .window(&io, vms, shards, &[], machine(), start + WINDOW)
+        .unwrap();
+    let ceilings = learner
+        .learned(Class::Shards, &[cost()])
+        .unwrap()
+        .unwrap()
+        .ceilings;
+    assert_eq!(ceilings[0].overhead.cpu_milli, Some(200));
 }

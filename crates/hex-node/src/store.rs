@@ -51,7 +51,7 @@ use crate::turns::{Turn, Turns};
 
 mod node_vm;
 mod pool;
-pub use node_vm::NodeVmSettled;
+pub use node_vm::{NodeVmEnds, NodeVmSettled, NodeVmsSettled};
 use pool::scoped_paths;
 
 /// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's
@@ -590,14 +590,16 @@ impl Store {
     }
 
     /// The node's start order as the store opens (joint plan step 14, C3): the next place is one past the most any
-    /// record holds; then each VM record of this boot that holds none, begun by an earlier node agent, is given the next,
-    /// in box-id order, so every VM that may run holds one before the node takes a create. A record of an earlier boot
-    /// names nothing that runs and is recovery's to remove, so it is left as that boot wrote it, as is a torn one.
+    /// record holds, a box's or a node VM's (step 39); then each VM record of this boot that holds none, begun by an
+    /// earlier node agent, is given the next, in box-id order, so every VM that may run holds one before the node takes
+    /// a create. A record of an earlier boot names nothing that runs and is recovery's to remove, so it is left as that
+    /// boot wrote it, as is a torn one.
     fn count_starts(&self) -> Result<(), Refusal> {
         let records = self.all()?;
         let most = records
             .values()
             .filter_map(|record| record.as_ref().ok()?.started)
+            .chain(self.all_node_vms()?.iter().filter_map(|row| row.started))
             .max()
             .unwrap_or(0);
         let next = most.checked_add(1).ok_or(Refusal::Exhausted {

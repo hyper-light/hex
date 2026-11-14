@@ -2295,6 +2295,8 @@ const LEARNED_CEILING_MIN_BYTES: usize = 32 + RESOURCE_BYTES + 3;
 const LEARNED_CEILING_BYTES: usize = 32 + RESOURCE_BYTES + 3 * (1 + size_of::<u64>());
 /// One learned rate at its least (D255): its holder at its least, then what holds it with no reason.
 const LEARNED_RATE_MIN_BYTES: usize = HOLDER_MIN_BYTES + 1;
+/// A learned rate's VMM own taking its share (D260): its tag, then its own and its share.
+const OWN_TAKES_SHARE_BYTES: usize = 1 + 2 * size_of::<u64>();
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
@@ -2411,8 +2413,9 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     Ok(())
 }
 
-/// One learned rate (D255): its holder, then 0 its governor, 1 its governor under its job, or 2 and why, its platform's
-/// cap.
+/// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
+/// platform's cap, 3 and why its governor with its VMM's own unheld, or 4 and its VMM's own and its share, its VMM's own
+/// taking its share.
 fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
     put_holder(w, &rate.id)?;
     w.reserve_fixed(1)?;
@@ -2429,6 +2432,17 @@ fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
             w.u8(2);
             w.string(why)
         }
+        RateHeld::GovernorOwnUnheld(why) => {
+            w.u8(3);
+            w.string(why)
+        }
+        RateHeld::OwnTakesShare { own, share } => {
+            w.reserve_fixed(OWN_TAKES_SHARE_BYTES)?;
+            w.u8(4);
+            w.u64(*own);
+            w.u64(*share);
+            Ok(())
+        }
     }
 }
 
@@ -2436,9 +2450,10 @@ fn put_learned_rate(w: &mut Writer, rate: &LearnedRate) -> Result<(), Fault> {
 fn learned_rate_bytes(rate: &LearnedRate) -> usize {
     let held = match &rate.held {
         RateHeld::Governor | RateHeld::GovernorUnderJob => 1,
-        RateHeld::Platform(why) => 1usize
+        RateHeld::Platform(why) | RateHeld::GovernorOwnUnheld(why) => 1usize
             .saturating_add(size_of::<u32>())
             .saturating_add(why.len()),
+        RateHeld::OwnTakesShare { .. } => OWN_TAKES_SHARE_BYTES,
     };
     holder_bytes(&rate.id).saturating_add(held)
 }
@@ -2450,6 +2465,11 @@ fn learned_rate(r: &mut Reader<'_>) -> Result<LearnedRate, Fault> {
         0 => RateHeld::Governor,
         1 => RateHeld::GovernorUnderJob,
         2 => RateHeld::Platform(r.string("a managed VM's rate's reason")?),
+        3 => RateHeld::GovernorOwnUnheld(r.string("a managed VM's rate's reason")?),
+        4 => RateHeld::OwnTakesShare {
+            own: r.u64()?,
+            share: r.u64()?,
+        },
         tag => {
             return Err(Fault::value(
                 "a learned rate",

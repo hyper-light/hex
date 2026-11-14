@@ -34,6 +34,44 @@ fn record(phase: NodeVmPhase, exit: Option<Exit>) -> NodeVmRecord {
         phase,
         diagnostics: Some(PathBuf::from("/state/node-vms/run.log")),
         exit,
+        last_resort: None,
+        started: None,
+    }
+}
+
+/// Why a last resort ended holder `id`: 3 GiB held of a 2 GiB budget, in band 0, its fleet past its budget.
+fn end_of(id: hex_api::LearnedHolder) -> LearnedEnd {
+    LearnedEnd {
+        id,
+        held: 3 << 30,
+        budget: 2 << 30,
+        band: 0,
+        fleet_held: 9 << 30,
+        fleet_growth: 1 << 30,
+        fleet_budget: 8 << 30,
+        unmoved: Some(hex_api::Upstream::LiveMove),
+    }
+}
+
+/// Joint plan step 39, place 1 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's last-resort end lives in its row): do keep a
+/// node VM's row with why the last resort ended its own run, then one naming another run's VM, and one naming a box.
+/// Expect the first to round trip as its row's bytes, and the other two refused: a row keeps its own VM's end alone.
+#[test]
+fn w39_a_node_vm_rows_last_resort_end_names_its_own_run() {
+    let mut kept = record(NodeVmPhase::Ended, Some(Exit::Signal(9)));
+    kept.last_resort = Some(end_of(hex_api::LearnedHolder::Node(kept.run)));
+    assert_eq!(NodeVmRecord::decode(&kept.encode().unwrap()).unwrap(), kept);
+    for other in [
+        hex_api::LearnedHolder::Node(NodeRun::from_bytes([8; 16])),
+        hex_api::LearnedHolder::Box(hex_api::BoxId::new("a-box").unwrap()),
+    ] {
+        let mut row = record(NodeVmPhase::Ready, None);
+        row.last_resort = Some(end_of(other));
+        assert!(
+            matches!(row.check(), Err(Refusal::Invalid { .. })),
+            "{:?}",
+            row.last_resort
+        );
     }
 }
 

@@ -26,7 +26,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use hex_api::{NodeRun, NodeVmPhase, Refusal};
+use hex_api::{LearnedEnd, NodeRun, NodeVmPhase, Refusal};
 use hex_core::patience::Patience;
 use hex_core::record::NodeVmRecord;
 
@@ -60,6 +60,57 @@ impl std::fmt::Display for NodeVmSettled {
                  that process to its end"
             }
         })
+    }
+}
+
+/// What a node's start did with the node VM rows an earlier node process left (joint plan step 39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeVmsSettled {
+    /// Each row by its run, with what the start did with it.
+    pub rows: Vec<(NodeRun, NodeVmSettled)>,
+    /// The last-resort ends the let-go rows kept (C5), each read back before its row went: an Ended row's, and one
+    /// whose owner had ended.
+    pub ends: Vec<LearnedEnd>,
+}
+
+/// What a node's start carried of its node VMs' last-resort ends into its charge learner (joint plan step 39, place 1;
+/// ROOT, 2026-11-13): none on record is its cold start, told, never a guess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NodeVmEnds {
+    /// No node VM row it let go kept a last-resort end: the learner's node VM ends begin empty.
+    #[default]
+    NoneOnRecord,
+    /// These, each read back from its row before the row went, in its runs' order.
+    Carried(Vec<LearnedEnd>),
+}
+
+impl NodeVmEnds {
+    /// What `ends`, read back from the let-go rows, tell: none, a cold start; else each.
+    pub fn of(ends: &[LearnedEnd]) -> Result<Self, Refusal> {
+        if ends.is_empty() {
+            return Ok(Self::NoneOnRecord);
+        }
+        let mut carried = Vec::new();
+        carried
+            .try_reserve_exact(ends.len())
+            .map_err(|_| allocation(ends.len()))?;
+        for end in ends {
+            carried.push(end.try_clone()?);
+        }
+        Ok(Self::Carried(carried))
+    }
+}
+
+impl std::fmt::Display for NodeVmEnds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoneOnRecord => f.write_str("node VM: no last-resort end on record"),
+            Self::Carried(ends) => write!(
+                f,
+                "node VM: {} last-resort end(s) on record, carried into the charge learner's ends",
+                ends.len()
+            ),
+        }
     }
 }
 
@@ -260,11 +311,14 @@ impl Store {
         self.disk.join(".node-vms")
     }
 
-    /// Keeps `record`, its run's row replaced whole, published durably. A run's first row is refused past [`TURNS`]
-    /// rows. A Booting or Ready row of a run this process doesn't hold yet takes the run's lock first, so no live run's
-    /// row is ever written unlocked; an Ended row lets the lock go once written, its run its owner's no more.
+    /// Keeps `record`, its run's row replaced whole but for its last-resort end and its start place, published durably.
+    /// A run's first row is refused past [`TURNS`] rows, and is given the next place in the node's start order (C3), which
+    /// every later write keeps. A Booting or Ready row of a run this process doesn't hold yet takes the run's lock first,
+    /// so no live run's row is ever written unlocked; an Ended row lets the lock go once written, its run its owner's no
+    /// more. The end is its learner's to write ([`Store::update_node_vm`]): a phase write, made from a read before that
+    /// write, keeps the row's (C5, intent first).
     pub(crate) fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
-        let bytes = record.encode()?;
+        record.check()?;
         let _metadata = self.changing_metadata()?;
         let directory = self.node_vm_directory();
         fs::create_dir_all(&directory)
@@ -274,6 +328,16 @@ impl Store {
             return Err(allocation(TURNS));
         }
         let mut owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
+        let (last_resort, started) = match self.node_vm(&record.run)? {
+            Some(row) => (row.last_resort, row.started),
+            None => (None, Some(self.next_start()?)),
+        };
+        let bytes = NodeVmRecord {
+            last_resort,
+            started,
+            ..record.clone()
+        }
+        .encode()?;
         let taken = if record.phase != NodeVmPhase::Ended && !owners.contains_key(&record.run) {
             let file = open_lock(&directory, &record.run)?;
             if !try_own(&file)? {
@@ -303,6 +367,28 @@ impl Store {
             owners.remove(&record.run);
         }
         Ok(())
+    }
+
+    /// Changes run `run`'s row by `change` where it keeps one and `change` says it changed it, published durably: read
+    /// and written under the lock every node VM row's write takes, so no other write lands between its read and its
+    /// write. The learner's write of why its last resort ends the VM (C5, intent first). Whether it changed the row.
+    pub(crate) fn update_node_vm(
+        &self,
+        run: &NodeRun,
+        change: impl FnOnce(&mut NodeVmRecord) -> bool,
+    ) -> Result<bool, Refusal> {
+        let _metadata = self.changing_metadata()?;
+        let directory = self.node_vm_directory();
+        let (temporary, final_path) = scoped_paths(&directory, &name(run)?)?;
+        let _owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
+        let Some(mut record) = self.node_vm(run)? else {
+            return Ok(false);
+        };
+        if !change(&mut record) {
+            return Ok(false);
+        }
+        self.publish_durable(&directory, &temporary, &final_path, &record.encode()?)?;
+        Ok(true)
     }
 
     /// Node VM `run`'s record, `None` where it keeps none.
@@ -367,18 +453,24 @@ impl Store {
     /// its owner having ended, or the host's boot having, and its run with it (D231); one whose owner still runs stays,
     /// its receipt booked, and a thread follows that owner to its end (decision 9, no timer), then lets it go. A row
     /// this process holds is its own, left as it is, its lock file never opened again. A follow is two threads, its
-    /// lock's and its W*'s, one follow a row, so at most [`TURNS`] of them. Says what it did with each.
-    pub(crate) fn settle_node_vms(&self) -> Result<Vec<(NodeRun, NodeVmSettled)>, Refusal> {
+    /// lock's and its W*'s, one follow a row, so at most [`TURNS`] of them. Says what it did with each, and the last-resort
+    /// end each row it let go kept, read back before the row went (place 1).
+    pub(crate) fn settle_node_vms(&self) -> Result<NodeVmsSettled, Refusal> {
         let records = self.all_node_vms()?;
         let mut settled = Vec::new();
         settled
             .try_reserve_exact(records.len())
             .map_err(|_| allocation(records.len()))?;
+        let mut ends = Vec::new();
+        ends.try_reserve_exact(records.len())
+            .map_err(|_| allocation(records.len()))?;
         let directory = self.node_vm_directory();
-        for record in records {
+        for mut record in records {
             if record.phase == NodeVmPhase::Ended {
+                let end = record.last_resort.take();
                 self.let_go(&record)?;
                 settled.push((record.run, NodeVmSettled::Ended));
+                ends.extend(end);
                 continue;
             }
             if self
@@ -391,14 +483,19 @@ impl Store {
             }
             let file = open_lock(&directory, &record.run)?;
             if try_own(&file)? {
+                let end = record.last_resort.take();
                 self.let_go(&record)?;
                 settled.push((record.run, NodeVmSettled::OwnerEnded));
+                ends.extend(end);
             } else {
                 self.follow(record.run, file)?;
                 settled.push((record.run, NodeVmSettled::Followed));
             }
         }
-        Ok(settled)
+        Ok(NodeVmsSettled {
+            rows: settled,
+            ends,
+        })
     }
 
     /// Follows run `run`'s owner, a live node process, to its end on a thread of its own, its row booked meanwhile, then

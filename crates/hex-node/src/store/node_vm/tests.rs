@@ -45,6 +45,15 @@ fn a_box(id: &str) -> hex_core::record::BoxRecord {
     hex_core::record::BoxRecord::new(spec, hex_core::record::Phase::Ready, vec![])
 }
 
+/// `row` as its store keeps it, at `place` in its node's start order, which its first write was given: a fresh store's
+/// first place is one past none.
+fn placed(row: &NodeVmRecord, place: u64) -> NodeVmRecord {
+    NodeVmRecord {
+        started: Some(place),
+        ..row.clone()
+    }
+}
+
 fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
     NodeVmRecord {
         version: RECORD_VERSION,
@@ -58,6 +67,8 @@ fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
         } else {
             None
         },
+        last_resort: None,
+        started: None,
     }
 }
 
@@ -81,12 +92,15 @@ fn a_node_vms_row_is_kept_apart_from_box_and_pool_rows() {
         store.all_pools().unwrap().is_empty(),
         "the pool rows see no node VM"
     );
-    assert_eq!(store.node_vm(&booting.run).unwrap(), Some(booting.clone()));
+    assert_eq!(
+        store.node_vm(&booting.run).unwrap(),
+        Some(placed(&booting, 1))
+    );
     let ready = record(7, NodeVmPhase::Ready);
     store.put_node_vm(&ready).unwrap();
     assert_eq!(
         store.node_vm(&ready.run).unwrap(),
-        Some(ready.clone()),
+        Some(placed(&ready, 1)),
         "replaced whole"
     );
     store.remove_node_vm(&ready.run).unwrap();
@@ -112,7 +126,11 @@ fn every_node_vms_row_is_listed_in_its_runs_order() {
     }
     assert_eq!(
         store.all_node_vms().unwrap(),
-        [rows[1].clone(), rows[2].clone(), rows[0].clone()]
+        [
+            placed(&rows[1], 2),
+            placed(&rows[2], 3),
+            placed(&rows[0], 1)
+        ]
     );
     std::fs::write(store.node_vm_directory().join("a-box.json"), b"{}\n").unwrap();
     assert!(matches!(store.all_node_vms(), Err(Refusal::Invalid { .. })));
@@ -197,8 +215,8 @@ fn node_vm_role() {
         reason = "it outlives this process, as the case asks: it is never waited for here"
     )]
     let _outlives = child.spawn().unwrap();
-    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
-    assert_eq!(store.all_node_vms().unwrap(), [row]);
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(placed(&row, 1)));
+    assert_eq!(store.all_node_vms().unwrap(), [placed(&row, 1)]);
     let mut out = std::io::stdout().lock();
     out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
     out.flush().unwrap();
@@ -233,7 +251,7 @@ fn w39_a_node_vm_row_of_an_earlier_boot_is_let_go_at_start() {
     .unwrap();
     assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
     assert_eq!(
-        store.settle_node_vms().unwrap(),
+        store.settle_node_vms().unwrap().rows,
         [(row.run, NodeVmSettled::OwnerEnded)]
     );
     assert_eq!(store.node_vm(&row.run).unwrap(), None);
@@ -254,7 +272,7 @@ fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
         Some(NodeVmPhase::Booting)
     );
     assert_eq!(
-        store.settle_node_vms().unwrap(),
+        store.settle_node_vms().unwrap().rows,
         [(run(7), NodeVmSettled::OwnerEnded)]
     );
     assert_eq!(store.node_vm(&run(7)).unwrap(), None);
@@ -298,7 +316,7 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
     }
     let store = store_in(dir.path());
     assert_eq!(
-        store.settle_node_vms().unwrap(),
+        store.settle_node_vms().unwrap().rows,
         [(run(7), NodeVmSettled::Followed)]
     );
     assert_eq!(
@@ -342,7 +360,7 @@ fn w39_an_ended_node_vm_row_is_let_go_at_start() {
     let row = diagnosed(dir.path(), 7, NodeVmPhase::Ended);
     store.put_node_vm(&row).unwrap();
     assert_eq!(
-        store.settle_node_vms().unwrap(),
+        store.settle_node_vms().unwrap().rows,
         [(row.run, NodeVmSettled::Ended)]
     );
     assert_eq!(store.node_vm(&row.run).unwrap(), None);
@@ -357,7 +375,115 @@ fn w39_a_nodes_own_node_vm_row_is_never_settled() {
     let store = store_in(dir.path());
     let row = diagnosed(dir.path(), 7, NodeVmPhase::Booting);
     store.put_node_vm(&row).unwrap();
-    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row.clone()));
-    assert_eq!(store.settle_node_vms().unwrap(), []);
-    assert_eq!(store.node_vm(&row.run).unwrap(), Some(row));
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(placed(&row, 1)));
+    assert_eq!(store.settle_node_vms().unwrap().rows, []);
+    assert_eq!(store.node_vm(&row.run).unwrap(), Some(placed(&row, 1)));
+}
+
+/// Why a last resort ended node VM `run`: 3 GiB held of a 2 GiB budget in band 0, its fleet past its budget.
+fn end_of(run: &NodeRun) -> LearnedEnd {
+    LearnedEnd {
+        id: hex_api::LearnedHolder::Node(*run),
+        held: 3 << 30,
+        budget: 2 << 30,
+        band: 0,
+        fleet_held: 9 << 30,
+        fleet_growth: 1 << 30,
+        fleet_budget: 8 << 30,
+        unmoved: Some(hex_api::Upstream::LiveMove),
+    }
+}
+
+/// `row` as an earlier node process left it: its bytes in its place, its lock held by no process.
+fn left(store: &Store, row: &NodeVmRecord) {
+    std::fs::create_dir_all(store.node_vm_directory()).unwrap();
+    std::fs::write(
+        store
+            .node_vm_directory()
+            .join(format!("{}.json", name(&row.run).unwrap())),
+        row.encode().unwrap(),
+    )
+    .unwrap();
+}
+
+/// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13): a node VM row's last-resort end is its learner's
+/// to write, and a phase write made from a read before it keeps it, so a reap racing the intent never drops it. Do
+/// write node VM 7's row Booting, then Ready; put why the last resort is ending it into the row; then write it Ended
+/// from the Ready record read before that end was. Expect the row Ended with its exit, its end kept.
+#[test]
+fn w39_a_node_vm_rows_phase_write_keeps_its_last_resort() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    store.put_node_vm(&record(7, NodeVmPhase::Booting)).unwrap();
+    let ready = record(7, NodeVmPhase::Ready);
+    store.put_node_vm(&ready).unwrap();
+    let end = end_of(&run(7));
+    left(
+        &store,
+        &NodeVmRecord {
+            last_resort: Some(end.clone()),
+            ..ready.clone()
+        },
+    );
+    let ended = NodeVmRecord {
+        phase: NodeVmPhase::Ended,
+        exit: Some(Exit::Signal(9)),
+        ..ready
+    };
+    store.put_node_vm(&ended).unwrap();
+    let kept = store.node_vm(&run(7)).unwrap().unwrap();
+    assert_eq!(
+        (kept.phase, kept.exit, kept.last_resort),
+        (NodeVmPhase::Ended, Some(Exit::Signal(9)), Some(end))
+    );
+}
+
+/// Joint plan step 39, place 1 (ROOT, 2026-11-13: an Ended row's last-resort end, and one whose owner ended, are read
+/// back before the row goes): do leave, as an earlier node process would, node VM 4's row Ended and node VM 5's Ready,
+/// no process holding its lock, each with why the last resort ended it, and node VM 6's Ended with none; then start a
+/// node. Expect all three let go, and the two ends read back in their runs' order.
+#[test]
+fn w39_a_nodes_start_reads_back_each_let_go_rows_last_resort_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let mut ended = record(4, NodeVmPhase::Ended);
+    ended.last_resort = Some(end_of(&run(4)));
+    let mut unowned = record(5, NodeVmPhase::Ready);
+    unowned.last_resort = Some(end_of(&run(5)));
+    for row in [&ended, &unowned, &record(6, NodeVmPhase::Ended)] {
+        left(&store, row);
+    }
+    let settled = store.settle_node_vms().unwrap();
+    assert_eq!(
+        settled.rows,
+        [
+            (run(4), NodeVmSettled::Ended),
+            (run(5), NodeVmSettled::OwnerEnded),
+            (run(6), NodeVmSettled::Ended),
+        ]
+    );
+    assert_eq!(settled.ends, [end_of(&run(4)), end_of(&run(5))]);
+    assert!(store.all_node_vms().unwrap().is_empty());
+}
+
+/// Joint plan step 39, place 3 (ROOT, 2026-11-13: a node VM's start place is its real start order among the host's
+/// holders): do write node VM 7's row Booting, then Ready; then reopen the store as a restarted node does. Expect its row
+/// to hold a place in the node's start order from its first write, the same place after its Ready write, and the next
+/// place given past it, before and after the reopening.
+#[test]
+fn w39_a_node_vm_rows_place_in_its_nodes_start_order_is_given_at_its_first_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    store.put_node_vm(&record(7, NodeVmPhase::Booting)).unwrap();
+    let place = store.node_vm(&run(7)).unwrap().unwrap().started;
+    assert!(place.is_some(), "no place given at its first write");
+    store.put_node_vm(&record(7, NodeVmPhase::Ready)).unwrap();
+    assert_eq!(store.node_vm(&run(7)).unwrap().unwrap().started, place);
+    assert!(Some(store.next_start().unwrap()) > place);
+    drop(store);
+    let reopened = store_in(dir.path());
+    assert!(
+        Some(reopened.next_start().unwrap()) > place,
+        "the order runs on past the node VM's place"
+    );
 }
