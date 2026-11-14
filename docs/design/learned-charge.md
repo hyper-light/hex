@@ -76,9 +76,11 @@ contention rule and the predictors; they do not hold the step up.
   Where the platform's cap derives no cycle (Windows today) the learner's first
   sight of a managed VM asks its governor at the VM's ceiling, which holds nothing below its vCPUs (`Learner::govern`):
   one whose governor answers a period is learned over it (`Learner::learns`); one whose process takes no rate, or
-  whose ask fails, stays booked whole, told (`RateHeld::Platform`), the failed asked again next window. With neither
-  (Windows holding no image or governed VM) it waits for a box to begin
-  (`recorded::charges::wait`), each create and start telling it. A managed VM on a platform with no window is booked
+  whose ask fails, stays booked whole, told (`RateHeld::Platform`), the failed asked again next window. Its first
+  window runs as its node starts, so what the node holds then (the VMs its recovery took back, its node VM) is read,
+  capped and told at once (the review's A-9, 2026-11-14). Then, with neither (Windows holding no image or governed
+  VM), it waits for a box to begin or a node VM to boot (`recorded::charges::learn`), each create, start and node
+  VM's Ready telling it. A managed VM on a platform with no window is booked
   whole off the fleet's budget (`recorded::charges::sort`). A reading is charged over at least the window in force
   when it was read (`Node::set_window`), and the fastest growth on record (C5) is kept with the window it was seen
   over and projected over the one in force. A charge and the census's overhead are per the same window.

@@ -2113,6 +2113,69 @@ fn a9_a_node_vms_boot_wakes_its_learner() {
     );
 }
 
+/// The learner's start window, read from the stand-in's asks: a fact no recorded operation makes, so it measures, for
+/// its fact alone (hex_testkit::waits).
+static STARTED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.charges_started");
+
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a node's learner reads what its node holds as it starts, with no box
+/// begun, its own thread's first window reading, capping and telling each VM then held. Do keep, on a node whose
+/// platform holds no window, a Shards image VM and a node VM's row Ready, each run saying 70 ms; then start its charge
+/// learner and begin no box. Expect each VM's use read, its rate held and its guest told its room.
+#[test]
+fn a9_a_learner_reads_what_its_node_holds_at_its_start_with_no_box_begun() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    store.put(&image_vm("img-1", 1)).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    node.start_charges().unwrap();
+    let wanted = [
+        "host_use",
+        "rate",
+        "room",
+        "node_vm_host_use",
+        "node_vm_rate",
+        "node_vm_room",
+    ];
+    // A look: the stand-in tells no event as the learner asks it. Its party, the learner, ends where it has failed: its
+    // thread, detached, records why on the learner.
+    hex_testkit::waits::follow::until(
+        &STARTED,
+        "the learner's start window",
+        || match node.books.charges.get() {
+            Some((learner, _)) if learner.lock().is_ok_and(|learner| learner.fault.is_none()) => {
+                hex_testkit::waits::follow::Party::Live
+            }
+            _ => hex_testkit::waits::follow::Party::Ended,
+        },
+        || {
+            let asked = images.0.asked.lock().unwrap();
+            wanted.iter().all(|what| asked.contains(what))
+        },
+    )
+    .unwrap();
+}
+
 /// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13: a node VM's last-resort end lives in its row): the
 /// last resort's intent for a node VM goes into its row, as a box's goes into its record. Do write why it is ending node
 /// VM 7 into its Ready row through the write the learner makes; withdraw it; write it under another lifetime's scope;

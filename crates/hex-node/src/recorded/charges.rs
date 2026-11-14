@@ -8,8 +8,8 @@
 //! its run's own period, read each window, [`crate::recorded::Recover::image_rate_period`]), its cost read from its run
 //! host (`Runtime::host_use`, D241) and its guest told its room, its budget less what it holds (`Runtime::room`, D188).
 //! A managed VM on a platform whose cap derives no cycle is booked whole off the fleet's budget, as a native box books
-//! its caps, unless its governor answers a period ([`sort`]); holding no cap, the learner waits for a box to begin
-//! ([`wait`]).
+//! its caps, unless its governor answers a period ([`sort`]). The learner runs a window as it starts, so what its node
+//! holds then is read at once (A-9); holding no cap, it then waits for a box to begin or a node VM to boot ([`learn`]).
 //! Every VM it learns so keeps at least its booking and the caps fit the fleet's CPU budget, as Linux's weights hold
 //! them (C4).
 //! Neither platform can hold a managed VM's memory at a budget below its ceiling: macOS ends a process past its
@@ -595,8 +595,8 @@ pub(crate) enum Waited {
 
 /// Waits for the learner's next window (C1): out its window where it has one, a box's beginning told on `ended`
 /// meanwhile changing nothing, as the window's end reads every VM it then holds; with none (a node with no platform
-/// window holding no image VM), until a box begins. Gone once its node has gone, `ended`'s sender dropped with it.
-/// Refused, typed, where it can't wait.
+/// window holding no image VM), until a box begins or a node VM boots. Gone once its node has gone, `ended`'s sender
+/// dropped with it. Refused, typed, where it can't wait.
 pub(crate) fn wait(
     ended: &hex_wait::mpsc::Receiver<()>,
     window: Option<Duration>,
@@ -622,23 +622,22 @@ pub(crate) fn wait(
     }
 }
 
-/// The learner's thread (C1): it waits for each window ([`wait`]) on `begun`, a box's beginning told there, and runs it
-/// through `look`, which answers the span of the next, none once its node has gone; until its node has gone. Refused,
-/// typed, where it can't wait.
+/// The learner's thread (C1): a window at once, so what its node holds as it starts, the VMs its recovery took back and
+/// its node VM, is read, capped and told with no box begun (A-9); then each next window, waited for ([`wait`]) on
+/// `begun`, where each box's beginning and each node VM's boot is told. `look` runs a window and answers the span of
+/// the next, none once its node has gone; the thread ends then, or once `begun`'s sender has gone with its node.
+/// Refused, typed, where it can't wait.
 pub(crate) fn learn(
     begun: &hex_wait::mpsc::Receiver<()>,
     mut look: impl FnMut() -> Option<Option<Duration>>,
 ) -> Result<(), Refusal> {
-    // A learner holds no cap before its first window, so it has no window yet ([`Learner::next_window`]).
-    let mut window = None;
     loop {
+        let Some(window) = look() else {
+            return Ok(());
+        };
         if wait(begun, window)? == Waited::Gone {
             return Ok(());
         }
-        let Some(next) = look() else {
-            return Ok(());
-        };
-        window = next;
     }
 }
 
@@ -1522,7 +1521,8 @@ fn vcpus(allocation: hex_api::Allocation) -> Result<u32, Refusal> {
 
 impl Learner {
     /// A learner on a machine of `machine` whose platform's cap holds managed VMs over cycles it derives where `caps`:
-    /// with no cap held it reads over no window, and waits for a box to begin (C1, [`wait`]).
+    /// with no cap held it reads over no window, and, past its start's window, waits for a box to begin or a node VM to
+    /// boot (C1, [`learn`]).
     pub(crate) fn new(caps: bool, machine: CapacityResources) -> Result<Self, Refusal> {
         let bounds = bounds(machine)?;
         Ok(Self {

@@ -1830,7 +1830,13 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         self.books.store.node_vm(run)
     }
     fn put_node_vm(&self, record: &hex_core::record::NodeVmRecord) -> Result<(), Refusal> {
-        self.books.store.put_node_vm(record)
+        self.books.store.put_node_vm(record)?;
+        // A node VM Ready is a VM to learn: a learner holding no cap reads it now, not at the next box's beginning
+        // (A-9).
+        if record.phase == hex_api::NodeVmPhase::Ready {
+            self.begun();
+        }
+        Ok(())
     }
     fn all_node_vms(&self) -> Result<Vec<hex_core::record::NodeVmRecord>, Refusal> {
         self.books.store.all_node_vms()
@@ -1969,9 +1975,9 @@ impl Drop for ForwardTurn {
 }
 
 impl<R: Recover> Recorded<R> {
-    /// Tells the charge learner a box has begun (joint plan step 14, C1): one waiting for a box, with no window of its
-    /// platform's and no image VM held, runs a window; one waiting out its window reads it at the window's end. Nothing
-    /// where no learner runs.
+    /// Tells the charge learner a box has begun, or a node VM has booted (joint plan step 14, C1; A-9): one holding no
+    /// cap runs a window at once; one waiting out its window reads it at the window's end. Nothing where no learner
+    /// runs.
     fn begun(&self) {
         if let Some((_, begun)) = self.books.charges.get()
             && let Ok(begun) = begun.lock()
@@ -2481,8 +2487,9 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// managed VM's memory budget, or, where the platform's cap derives no cycle (`Recover::cap_cycle`), why its managed
     /// VMs are learned over their governors' periods alone. Its window is the longest period of the caps it holds,
     /// re-read each window: each image VM's its run's own (`Recover::image_rate_period`), each governed managed VM's its
-    /// governor's, and each VM its platform's cap holds that cap's cycle at its share; with none, it waits for a box to
-    /// begin (`charges::wait`).
+    /// governor's, and each VM its platform's cap holds that cap's cycle at its share. Its first window runs as it
+    /// starts, so what its node holds then (the VMs its recovery took back, its node VM) is read, capped and told at
+    /// once (A-9); holding no cap, it then waits for a box to begin or a node VM to boot (`charges::learn`).
     pub fn start_charges(
         self: &Arc<Self>,
     ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
