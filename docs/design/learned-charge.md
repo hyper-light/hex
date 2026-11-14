@@ -255,7 +255,7 @@ on hardware (ROOT's fairness run).
 - **Last**, when what the fleet's VMs hold plus the fastest growth on record in one window passes the fleet's
   budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
   so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
-  growth is learned from the node's own windows, only rising as a rate: kept with the window it was seen over and
+  growth is learned from the node's own windows, only rising as a rate, and only from a VM's readings after its first: what a VM holds as its learner first meets it is its baseline, never a window's growth, so a restarted node's learner meeting its whole fleet records no growth, and before its first reading a VM counts at its booking (ROOT, 2026-11-13, A-1; `charge::Node::baseline`): kept with the window it was seen over and
   projected over the window in force, rounded up, so a window that changes with the caps a learner holds (C1) neither
   shrinks nor swells it. Moving it instead of ending it waits on Shards' D176
   (`Awaits(LiveMove)`): its saved and live moves are the `shards` command's, which shards-api's image run (D231)

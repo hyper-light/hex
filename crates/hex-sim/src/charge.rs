@@ -346,7 +346,7 @@ impl Vm {
     /// What it holds of memory and disk as the rule counts it: its last reading; before its first, its booking, what
     /// the ledger holds of it, so a VM never read is never past its budget nor counted as nothing.
     fn holding(&self) -> [u64; 3] {
-        self.held.unwrap_or([0; 3])
+        self.held.unwrap_or(self.booking)
     }
 
     /// Its charge (C1): the p99.9 of its last SEEDABLE windows, no less than its booking while it is cold, each at
@@ -647,7 +647,15 @@ impl<K: Ord + Copy> Node<K> {
     /// ROOT, 2026-11-13): what it holds from then, which its room and its budget's hold reckon with, and what its next
     /// reading's growth is counted from, never a window's growth itself. Refused for a VM read before.
     pub fn baseline(&mut self, id: &K, mem_bytes: u64) -> Result<(), ChargeError> {
-        let _ = (id, mem_bytes);
+        let vm = self.vms.get_mut(id).ok_or(ChargeError::Unknown)?;
+        if vm.held.is_some() {
+            return Err(ChargeError::Invalid {
+                what: "a VM's baseline",
+                why: "it was read before: a baseline is its first reading",
+            });
+        }
+        let [_, _, booked_disk] = vm.booking;
+        vm.held = Some([0, mem_bytes, booked_disk]);
         Ok(())
     }
 
@@ -737,9 +745,11 @@ impl<K: Ord + Copy> Node<K> {
             _ => Evidence::None,
         };
         let class = vm.class;
-        self.grew = self
-            .grew
-            .saturating_add(sample.mem_bytes.saturating_sub(before.unwrap_or(0)));
+        if let Some(before) = before {
+            self.grew = self
+                .grew
+                .saturating_add(sample.mem_bytes.saturating_sub(before));
+        }
         // A held VM's class is never forgotten (`remember`), so its record is there.
         let record = self.classes.get_mut(&class).ok_or(ChargeError::Invalid {
             what: "a class's record",
