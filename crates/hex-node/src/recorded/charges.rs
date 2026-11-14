@@ -687,7 +687,7 @@ impl Read {
             });
         }
         let guest_ns = match io.guest_time(holder)? {
-            ManagedGuestTime::PerVcpu(times) => Ok(times),
+            ManagedGuestTime::PerVcpu { ns, .. } => Ok(ns),
             ManagedGuestTime::Unheld(why) => Err(why),
         };
         let usage = io.usage(holder)?;
@@ -1706,7 +1706,7 @@ impl Learner {
     }
 
     /// Runs a window as a node does ([`window`]), the learner held alone, every record read, within the fleet's
-    /// `budget` as given.
+    /// `budget` as given, every read at `now`.
     #[cfg(test)]
     pub(crate) fn window(
         &mut self,
@@ -1715,7 +1715,19 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        window(self, io, running, Vec::new(), |_| Ok(budget), now)
+        window(self, io, running, Vec::new(), |_| Ok(budget), || now)
+    }
+
+    /// Runs a window as [`Self::window`] does, the time told by `clock` as the window and each of its reads ask it.
+    #[cfg(test)]
+    pub(crate) fn window_by(
+        &mut self,
+        io: &impl Managed,
+        running: &[Holder<'_>],
+        budget: CapacityResources,
+        clock: impl Fn() -> Instant,
+    ) -> Result<(), Refusal> {
+        window(self, io, running, Vec::new(), |_| Ok(budget), clock)
     }
 
     /// What a window asks of the VMs it learns among `running` (A-2): each one's reading, its life too where it holds no
@@ -2403,8 +2415,9 @@ pub(crate) fn window(
     running: &[Holder<'_>],
     unreadable: Unreadable,
     budget: impl FnOnce(u64) -> Result<CapacityResources, Refusal>,
-    now: Instant,
+    clock: impl Fn() -> Instant,
 ) -> Result<(), Refusal> {
+    let now = clock();
     let asks = learner.take()?.asks(running);
     // The fleet's budget once its VMs are read (C7; the review's A-10), given what they hold ([`measured`]).
     let read = asks

@@ -618,7 +618,7 @@ impl Learner {
                 }
             };
             let guest_ns = match guest {
-                ManagedGuestTime::PerVcpu(times) => Some(times),
+                ManagedGuestTime::PerVcpu { ns, .. } => Some(ns),
                 ManagedGuestTime::Unheld(_) => None,
             };
             if let Some(vm) = self.vms.get_mut(&scope) {

@@ -1585,7 +1585,7 @@ fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
     io.set(vms[0].2.dir(), 0, GIB);
     io.guest
         .borrow_mut()
-        .insert("vm-1".to_owned(), ManagedGuestTime::PerVcpu(vec![0; 16]));
+        .insert("vm-1".to_owned(), sampled(vec![0; 16]));
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
     let start = Instant::now();
     learner
@@ -1594,7 +1594,7 @@ fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
     io.set(vms[0].2.dir(), 120_000, GIB);
     io.guest.borrow_mut().insert(
         "vm-1".to_owned(),
-        ManagedGuestTime::PerVcpu(vec![6_250_000; 16]),
+        sampled(vec![6_250_000; 16]),
     );
     learner
         .window(&io, vms, shards, &[], machine(), start + WINDOW)
@@ -1805,4 +1805,14 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         Vec::<&str>::new(),
         "asked while the lock its capacity answers take was held"
     );
+}
+
+/// A managed VM's guest time `ns` by vCPU as its VM process answers its use (D260), read now.
+fn sampled(ns: Vec<u64>) -> ManagedGuestTime {
+    let at = Instant::now();
+    ManagedGuestTime::PerVcpu {
+        ns,
+        asked: at,
+        answered: at,
+    }
 }
