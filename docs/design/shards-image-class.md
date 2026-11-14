@@ -182,8 +182,9 @@ harness member's):
   itself, so it carries them (lanes) and the node joins each to the member's own, a copy on a thread of its own to the
   source's end (`serve.rs` `joined`). The member has no pid here for an OS watch, so a thread of the node's waits
   for its end and tells it as a remote program's (`MemberEnd`); its release under the same lock clears an end told
-  before its start was registered, and its own kill is its host's `signal_member(KILL)` on a thread of its own, a
-  member that no longer runs having nothing to end, as in process.
+  before its start was registered, and its own kill is its host's `signal_member(KILL)` on one of serve's workers, as
+  every call is (no thread of its own; ROOT, 2026-11-14), told to its caller whatever becomes of it, a member that no
+  longer runs having nothing to end, as in process.
 - `Runtime::signal_member(id, member, signal)` sends one member alone a signal on its own lane of the run's endpoint
   (goal 2's item 2), KILL among them: the member's, never its VM's, which runs on. Refused `NotRunning(id, "signal a
   member: it has ended")` for a member that has ended, `NotRunning(id, "signal a member: it runs no program")` for
