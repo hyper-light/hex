@@ -9,8 +9,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr};
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hex_api::{ConnectFailure, ConnectPhase, IoKind, Refusal};
 use hex_core::lanes::DATA_BOUND;
@@ -32,7 +31,7 @@ pub const DIR: &str = "/run/hex/channel";
 
 /// The controller's connection to a node VM's endpoint and the lanes it opens on it to the node's relay.
 pub struct Lanes {
-    sockets: Arc<Sockets>,
+    sockets: Sockets,
     /// The connection: kept for the lanes' life, which end with it (dropped, it ends the connection and every lane).
     _hangup: Hangup,
     /// The most lanes open at once, as the run admits them: what a dial past it is refused naming.
@@ -87,7 +86,7 @@ impl Lanes {
             Refusal::Broken("a controller dialed for socket lanes was given none".to_owned())
         })?;
         Ok(Lanes {
-            sockets: Arc::new(sockets),
+            sockets,
             _hangup: hangup,
             lanes: admission.lanes,
         })
@@ -131,32 +130,29 @@ impl Lanes {
     /// refused, expired, and a lane that connects after it is let go, aborted.
     fn connect(&self, port: u32, deadline: Option<Instant>) -> Result<Socket, Refusal> {
         let name = named(port)?;
-        let answer = match deadline {
-            None => self.sockets.connect(name),
-            Some(at) => {
-                let left = at
-                    .checked_duration_since(Instant::now())
-                    .filter(|left| !left.is_zero())
-                    .ok_or_else(|| expired(port))?;
-                let (told, heard) = mpsc::channel();
-                let sockets = Arc::clone(&self.sockets);
-                std::thread::Builder::new()
-                    .name("hex-lanes-dial".to_owned())
-                    .spawn(move || {
-                        // Past the deadline no one hears it, and the lane is let go with it.
-                        let _ = told.send(sockets.connect(name));
-                    })
-                    .map_err(|e| Refusal::os("starting a lane's dial", e))?;
-                match heard.recv_timeout(left) {
-                    Ok(answer) => answer,
-                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(expired(port)),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(Refusal::Broken("a lane's dial ended unanswered".to_owned()));
-                    }
-                }
-            }
+        let patience = match deadline {
+            None => Duration::MAX,
+            Some(at) => at
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| expired(port))?,
         };
-        answer.map_err(|fault| refused(port, fault, self.lanes))
+        // Asked once; past the deadline the ask is let go, and a lane that connects after is closed as it opens.
+        let answer = self
+            .sockets
+            .connect(name)
+            .and_then(|mut asked| asked.wait(patience));
+        let socket = match answer {
+            Ok(Some(socket)) => socket,
+            Ok(None) if deadline.is_some() => return Err(expired(port)),
+            Ok(None) => {
+                return Err(Refusal::Broken(
+                    "a lane's dial with no deadline returned unanswered".to_owned(),
+                ));
+            }
+            Err(fault) => return Err(refused(port, fault, self.lanes)),
+        };
+        Ok(socket)
     }
 
     /// An exec's stream on a lane of its own, carried on a pipe whose end is the caller's (Windows, HEX-RT-17: the node

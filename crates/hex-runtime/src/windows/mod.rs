@@ -1857,6 +1857,7 @@ impl WinRuntime {
                 allocation: None,
                 last_resort: None,
                 ended: None,
+                control: None,
                 credentials: Vec::new(),
             }),
             Held::Oci(b) => oci::info(b),
@@ -3976,5 +3977,94 @@ mod tests {
             );
         });
         assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+    }
+
+    /// A delete's or a recovery's end's wait on a killed box's job past W*, stopped at the hold on its emptying, or its
+    /// answer: a fact no recorded operation makes, waited for measuring, following the ending thread.
+    static EMPTYING_FOLLOWED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_runtime.emptying_followed");
+
+    /// The review's E-12 (decision 9), AC-T7.4.1: a killed box's job that empties late is followed to its emptying,
+    /// never refused, nor said done, before it is. Do: make a box and start a program in it until it is ended; hold the
+    /// box's emptying under `key`, as a job whose last member's teardown runs long reads; end the box from another
+    /// thread (`end`); once that end follows the job past W* (stopped at the hold) or answers, let the hold go. Expect:
+    /// the end hadn't answered while the job read as not yet empty, then answers Ok; the program ends as `ends`.
+    fn a_late_emptying_is_followed_to_its_end(
+        rt: &WinRuntime,
+        spec: BoxSpec,
+        key: &str,
+        end: impl FnOnce() -> Result<(), Refusal> + Send,
+        ends: hex_api::Exit,
+    ) {
+        let id = spec.id.clone();
+        rt.create(spec).unwrap();
+        let mut program = rt.exec(&id, until_ended(), fed()).unwrap();
+        let _feeding = program.streams().unwrap().stdin;
+        let held = crate::emptying::hold::hold(key);
+        std::thread::scope(|s| {
+            let ending = s.spawn(end);
+            hex_testkit::waits::follow::until(
+                &EMPTYING_FOLLOWED,
+                "the end's wait following the job past W*, or its answer",
+                || party(&ending),
+                || held.following() || ending.is_finished(),
+            )
+            .unwrap();
+            if ending.is_finished() {
+                panic!(
+                    "the end answered while the job read as not yet empty: {:?}",
+                    ending.join()
+                );
+            }
+            drop(held);
+            assert_eq!(
+                ending.join().unwrap(),
+                Ok(()),
+                "the end once the job emptied"
+            );
+        });
+        assert_eq!(hex_api::conformance::end_of(&mut *program), Ok(ends));
+    }
+
+    /// E-12 at a box's delete (`JobBox::delete`): it refused at once while its killed job still listed a member, as
+    /// TerminateJobObject only begins its members' ends. The box is gone after.
+    #[test]
+    fn e12_a_delete_follows_a_late_emptying_to_its_end() {
+        let rt = WinRuntime::new();
+        let spec = process_box("e12-delete-win");
+        let id = spec.id.clone();
+        a_late_emptying_is_followed_to_its_end(
+            &rt,
+            spec,
+            id.as_str(),
+            || rt.delete(&id),
+            hex_api::Exit::Signal(9),
+        );
+        assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+    }
+
+    /// E-12 at a recovery's end of a box no node takes back (`WinRuntime::end`, `JobBox::end_named`): it said the box
+    /// ended once TerminateJobObject returned, its members still ending. The box is made by one runtime of a node and
+    /// ended by name from another of the same node, as a recovery ends it; the program, ended by a runtime that isn't
+    /// its box's, ends with the terminated job's code.
+    #[test]
+    fn e12_a_recoverys_end_follows_a_late_emptying_to_its_end() {
+        let name = node("e12end");
+        let mut made = WinRuntime::new();
+        made.node = Some(name.clone());
+        let mut recovering = WinRuntime::new();
+        recovering.node = Some(name);
+        let spec = process_box("e12-recovery-win");
+        let id = spec.id.clone();
+        let job = made.job_name(&id).unwrap();
+        let terminated = hex_core::job::terminated_code(Signal::KILL);
+        a_late_emptying_is_followed_to_its_end(
+            &made,
+            spec,
+            &job,
+            || recovering.end(&id),
+            hex_api::Exit::Code(i32::from_ne_bytes(terminated.to_ne_bytes())),
+        );
+        made.delete(&id).unwrap();
     }
 }

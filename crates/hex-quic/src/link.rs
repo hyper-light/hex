@@ -64,6 +64,15 @@ impl guest::Link for Link {
     fn carries_half_close(&self) -> bool {
         true
     }
+
+    /// The seal of this link's connection to its node, its control connection's among its connections (Q13): the node's
+    /// wire's secrets go under it.
+    fn sealing(&self) -> Result<Option<Arc<dyn hex_core::wire::Seal>>, Refusal> {
+        let keys: Arc<dyn hex_core::wire::Seal> = self.endpoint.keys(self.peer).map_err(
+            refusal("reading the seal of the connection to the node over QUIC"),
+        )?;
+        Ok(Some(keys))
+    }
 }
 
 /// The node agent's client over QUIC: the guest's protocol, its waits QUIC's own (`hex_client::guest::Quic`).

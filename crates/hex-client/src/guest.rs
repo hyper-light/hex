@@ -180,6 +180,12 @@ pub trait Link: Send + Sync + 'static {
         let _ = (named, deadline);
         None
     }
+    /// The seal its control connection's messages that carry a secret go under (`hex_core::wire::seal`; a node over
+    /// QUIC, docs/design/hex-quic.md Q13), asked once that connection is dialed: none where the link seals nothing, its
+    /// secrets crossing as the node's socket carries them, each copy wiped (docs/design/credential-grants.md C7).
+    fn sealing(&self) -> Result<Option<Arc<dyn wire::Seal>>, Refusal> {
+        Ok(None)
+    }
 }
 
 /// An exec's stream a link carries on a pipe of its own ([`Link::dial_piped`]): the caller's end, and, for an output
@@ -369,6 +375,9 @@ pub struct Stream<W = Guest> {
     /// Each exec's streams being set up whose cut is told, by name, until its start takes them
     /// ([`Transport::cuts`]): at most the calls in flight hold one.
     cuts: Mutex<BTreeMap<u64, Cuts>>,
+    /// The seal its messages that carry a secret go under, its link's ([`Link::sealing`]); none where the link seals
+    /// nothing.
+    seal: Option<Arc<dyn wire::Seal>>,
 }
 
 /// What the turn's holder reads with and into, and what of a frame has come.
@@ -998,7 +1007,13 @@ impl<W: Waits> Transport for Stream<W> {
                     }
                 };
                 input = input.get(took..).unwrap_or_default();
-                let Some(mut message) = whole else { continue };
+                let Some(message) = whole else { continue };
+                // Opened where it came sealed, as its link seals (docs/design/hex-quic.md Q13): refused, typed, where it
+                // came otherwise than the link carries it.
+                let mut message = match wire::open(message, self.seal.as_deref()) {
+                    Ok(message) => message,
+                    Err(fault) => break 'framed Err(Refusal::from(fault)),
+                };
                 let received = Received {
                     bytes: &message,
                     size: message.len(),
@@ -1021,6 +1036,20 @@ impl<W: Waits> Transport for Stream<W> {
             hex_api::lease::wipe_in_place(held);
         }
         framed.map(|()| true)
+    }
+
+    /// A message that carries a secret, sealed where the link seals (docs/design/hex-quic.md Q13), its bytes in the clear
+    /// wiped as the sealed copy takes their place.
+    fn seal(&self, mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let Some(seal) = self.seal.as_deref() else {
+            return Ok(message);
+        };
+        if !wire::carries_secret(&message) {
+            return Ok(message);
+        }
+        let sealed = wire::seal(&message, seal).map_err(Refusal::from);
+        hex_api::lease::wipe(&mut message);
+        sealed
     }
 
     fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
@@ -1343,6 +1372,7 @@ impl<W: Waits> Stream<W> {
             None => token_following(&mut *conn, &mut token, W::token())?,
         }
         let token = u64::from_le_bytes(token);
+        let seal = link.sealing()?;
         let read = conn
             .try_clone()
             .map_err(os("holding the node agent's connection"))?;
@@ -1361,6 +1391,7 @@ impl<W: Waits> Stream<W> {
             read: Mutex::new(Some(read)),
             backlog: Mutex::new(None),
             cuts: Mutex::new(BTreeMap::new()),
+            seal,
         })
     }
 }

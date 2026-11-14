@@ -352,20 +352,33 @@ impl<N: Os> Quic<N> {
                 Ok(None) => return Recv::WouldBlock,
             };
             let mut input = chunk.get(..n).unwrap_or_default();
+            let mut gone = false;
             while !input.is_empty() {
                 let Ok((took, whole)) = deframer.take(input) else {
                     // Bytes that aren't a frame: the connection can't be read further, so it ends.
-                    return Recv::Gone;
+                    gone = true;
+                    break;
                 };
                 input = input.get(took..).unwrap_or_default();
-                if let Some(message) = whole {
-                    self.route(control, message);
+                // Opened where it came sealed under its connection's seal (docs/design/hex-quic.md Q13). One that
+                // carries a secret and came unsealed, came sealed carrying none, or whose seal doesn't open breaks the
+                // node's wire as bytes that aren't a frame do: the connection ends, every ask waiting on it told so.
+                match whole.map(|message| wire::open(message, Some(control.conn.keys()))) {
+                    Some(Ok(message)) => self.route(control, message),
+                    Some(Err(_)) => {
+                        gone = true;
+                        break;
+                    }
+                    None => {}
                 }
             }
-            // Framed into the messages it holds now: what was read here, which may carry a lease's value, wiped
-            // (docs/design/credential-grants.md C7).
+            // Framed into the messages it holds now, or refused: what was read here, which may carry a lease's value,
+            // wiped (docs/design/credential-grants.md C7).
             if let Some(held) = chunk.get_mut(..n) {
                 hex_api::lease::wipe_in_place(held);
+            }
+            if gone {
+                return Recv::Gone;
             }
         }
         Recv::WouldBlock
@@ -969,13 +982,24 @@ impl<N: Os> Os for Quic<N> {
                 if !fds.is_empty() {
                     return Sent::Gone;
                 }
-                let Ok(framed) = stream::frame(bytes, wire::MAX_MESSAGE) else {
+                // A message that carries a lease's value or a sign-in's tokens goes sealed under its connection's
+                // seal, so its framed copy, and what the transport beneath holds of it, is ciphertext; the message is
+                // the server's to wipe (docs/design/hex-quic.md Q13; credential-grants.md C7, C8; the review's E-6).
+                // A send the connection has no room for now seals again as it is sent again, under its next nonce.
+                let sealed;
+                let message = if wire::carries_secret(bytes) {
+                    let Ok(made) = wire::seal(bytes, control.conn.keys()) else {
+                        return Sent::Gone;
+                    };
+                    sealed = made;
+                    sealed.as_slice()
+                } else {
+                    bytes
+                };
+                let Ok(framed) = stream::frame(message, wire::MAX_MESSAGE) else {
                     return Sent::Gone;
                 };
-                // Its framed copy wiped as it goes where the message carries a lease's value or a sign-in's tokens;
-                // the connection's own copy is its to wipe (docs/design/credential-grants.md C7, C8; the review's E-6).
-                let framed = hex_api::lease::Wiped::new(framed, wire::carries_secret(bytes));
-                match control.conn.try_write(framed.bytes()) {
+                match control.conn.try_write(&framed) {
                     Ok(true) => Sent::Sent,
                     Ok(false) => Sent::WouldBlock,
                     Err(_) => Sent::Gone,

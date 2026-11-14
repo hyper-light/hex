@@ -288,6 +288,14 @@ holds it. While the VM runs, `inspect` also reports what its boot bound, `BoxInf
 the grant's host address, on its host port or on the one the OS picked. A run doesn't outlive its owner in
 D231's first version (`Awaits(AttachAfterCrash)`), so this report is the live run's, not the durable record's.
 
+While it runs, `inspect` also says where its run's agent-control endpoint is bound, `BoxInfo.control`, as the run host
+told it (`ImageGuest::control()`; Shards' D238, D252). That is Hex's own control endpoint, which every run's host
+binds on the host's loopback for Hex's key alone. It is no published port and no grant makes it. It is told so that a
+reading of the host can tell it from a socket no grant made: `image_grants_real` requires every socket a run's
+processes hold that takes what comes in to be at that one address (goal 5, 2026-11-14). Shards' QUIC driver holds two
+more peerless loopback sockets beside it, its waker and its wake, which Shards is to connect to each other (g121's
+ruling, 2026-11-14). Until Hex vendors that change, the check fails on those two.
+
 As its boot's answer is taken, Hex holds the run's own report to the grants (`hex_runtime::grants::bound`), by
 whichever call takes it: the start, or, where the boot outlasts its W* and the start answers `Lifecycle { Pending }`
 (decision 9, the person's ruling of 2026-11-13), the later call that finds the answer (`started`, an inspect, a
