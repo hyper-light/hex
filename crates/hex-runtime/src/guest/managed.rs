@@ -279,6 +279,9 @@ pub enum CapCycle {
     Never,
     /// Not known yet: its control has measured no stop to derive it from, why told (decision 9's cold start).
     Cold(String),
+    /// Its run and its hold at a cold estimate of its control's stop response, the slowest of too few holds to have seen
+    /// their p99.9: used, and why it is cold told (the review's A-14).
+    ColdOf { cycle: Duration, why: String },
 }
 
 /// A managed VM's rate's ask (decision 9; D255; ROOT, 2026-11-13), from its ask until its VM process answers: a wait

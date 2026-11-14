@@ -19,6 +19,7 @@ use hex_api::{
     Stdio,
 };
 use hex_core::helper::START_FDS;
+use hex_core::helper::managed::response::Estimate;
 
 use super::MacRuntime;
 use super::helper_daemon::{self, Daemon, Member, Privileged};
@@ -1037,19 +1038,63 @@ fn w14_d260_a_process_life_runs_from_its_start_to_now_on_one_clock() {
 fn w14_the_controls_cycle_at_a_rate_is_its_run_and_hold_there() {
     let ceiling = super::cpu_ceiling().unwrap();
     let response = Duration::from_millis(1);
+    let estimate = Some(Estimate {
+        response,
+        cold: false,
+    });
     let at = |rate| {
         let (run, hold) = super::cpu::cycle(rate, ceiling, response).unwrap();
         run + hold
     };
     assert_eq!(
-        super::cycle_of(1, ceiling, Some(response)).unwrap(),
+        super::cycle_of(1, ceiling, estimate).unwrap(),
         crate::guest::CapCycle::Of(at(1))
     );
     assert_eq!(
-        super::cycle_of(1_000, ceiling, Some(response)).unwrap(),
+        super::cycle_of(1_000, ceiling, estimate).unwrap(),
         crate::guest::CapCycle::Of(at(1_000))
     );
     assert!(at(1) > at(1_000));
+}
+
+/// The review's A-14 (ROOT, 2026-11-14; AC-T7.4.1): a cycle at a cold estimate of the control's stop response, the
+/// slowest of too few holds to have seen their p99.9 (or an older helper's slowest seen), is used, and told cold. Do take
+/// the cycle at a thousandth of a CPU at a cold 1 ms estimate and at a settled one. Expect both the control's run and
+/// hold at 1 ms, the cold one saying why, the settled one plain.
+#[test]
+fn a14_a_cycle_at_a_cold_estimate_is_used_and_told_cold() {
+    let ceiling = super::cpu_ceiling().unwrap();
+    let response = Duration::from_millis(1);
+    let (run, hold) = super::cpu::cycle(1, ceiling, response).unwrap();
+    let cold = super::cycle_of(
+        1,
+        ceiling,
+        Some(Estimate {
+            response,
+            cold: true,
+        }),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &cold,
+            crate::guest::CapCycle::ColdOf { cycle, why }
+                if *cycle == run + hold && why.contains("slowest stop")
+        ),
+        "{cold:?}"
+    );
+    assert_eq!(
+        super::cycle_of(
+            1,
+            ceiling,
+            Some(Estimate {
+                response,
+                cold: false,
+            }),
+        )
+        .unwrap(),
+        crate::guest::CapCycle::Of(run + hold)
+    );
 }
 
 /// The review's A-14 (2c-4b; ROOT, 2026-11-13: no record seeds, a cold start told): the node's control takes its cycle

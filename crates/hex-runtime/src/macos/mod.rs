@@ -278,10 +278,11 @@ impl MacRuntime {
         managed::usage(self, record)
     }
     /// Joint plan step 14 (C1 on macOS; ROOT, 2026-11-13; 2c-4b): the cycle this control holds a scope at `rate`
-    /// milli-CPU over, its run and then its hold ([`cpu::cycle`]) at the stop response its managed helper learned from
+    /// milli-CPU over, its run and then its hold ([`cpu::cycle`]) at the stop response its managed helper estimates from
     /// its own holds, asked of it each time ([`cycle_of`]), so a VM it holds there keeps its rate on average over one:
     /// the charge learner's window takes it for each VM the control holds. Never at the control's ceiling or past it;
-    /// cold, told, until its helper has measured a hold, or where none runs. Refused where no control is configured.
+    /// cold, told, until its helper has measured a hold, or where none runs; used and told cold while its estimate is
+    /// (the review's A-14). Refused where no control is configured.
     pub fn cap_cycle(&self, rate: u64) -> Result<crate::guest::CapCycle, Refusal> {
         let (_, ceiling) = self
             .cpu_control
@@ -322,9 +323,11 @@ impl MacRuntime {
         self.shared.rates()
     }
 
-    /// The slowest stop response the managed CPU control has seen in its own holds (joint plan step 14, 2c): none
-    /// before its first.
-    pub fn cpu_response(&self) -> Result<Option<std::time::Duration>, Refusal> {
+    /// The stop response the managed CPU control estimates from its own holds (joint plan step 14, 2c; the review's
+    /// A-14): none before its first.
+    pub fn cpu_response(
+        &self,
+    ) -> Result<Option<hex_core::helper::managed::response::Estimate>, Refusal> {
         self.shared.cpu_response()
     }
 
@@ -1054,24 +1057,34 @@ fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
 }
 
 /// Joint plan step 14 (C1 on macOS; 2c-4b): the managed control's cycle at `rate` milli-CPU below its `ceiling`, its run
-/// and its hold at the stop `response` its helper learned ([`cpu::cycle`]); cold, told, where it has learned none, as
-/// no response is guessed (decision 9's cold start).
+/// and its hold at the stop `response` its helper estimates ([`cpu::cycle`]); cold, told, where it has learned none, as
+/// no response is guessed (decision 9's cold start); and while its estimate is cold, the slowest of too few holds or an
+/// older helper's slowest seen, that cycle used and told cold (the review's A-14).
 pub(crate) fn cycle_of(
     rate: u64,
     ceiling: u64,
-    response: Option<std::time::Duration>,
+    response: Option<hex_core::helper::managed::response::Estimate>,
 ) -> Result<crate::guest::CapCycle, Refusal> {
     let Some(response) = response else {
         return Ok(crate::guest::CapCycle::Cold(
             "its control's cycle is unknown until its managed helper measures a stop".to_owned(),
         ));
     };
-    let (run, hold) = cpu::cycle(rate, ceiling, response).map_err(|_| {
+    let (run, hold) = cpu::cycle(rate, ceiling, response.response).map_err(|_| {
         managed::configuration("the CPU control has no cycle at the rate it is asked")
     })?;
-    run.checked_add(hold)
-        .map(crate::guest::CapCycle::Of)
-        .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
+    let cycle = run
+        .checked_add(hold)
+        .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))?;
+    Ok(if response.cold {
+        crate::guest::CapCycle::ColdOf {
+            cycle,
+            why: "its control's cycle is at the slowest stop its managed helper has measured, not their p99.9"
+                .to_owned(),
+        }
+    } else {
+        crate::guest::CapCycle::Of(cycle)
+    })
 }
 
 /// Joint plan step 14 (D260): how long the process that started at `started` has run: from its start, as `proc_pid_rusage`
