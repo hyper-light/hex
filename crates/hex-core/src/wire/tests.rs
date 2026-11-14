@@ -4820,6 +4820,7 @@ fn learned_capacity() -> Capacity {
         awaits: Vec::new(),
         ranked: Vec::new(),
         unrecorded: Vec::new(),
+        unacted: Vec::new(),
     });
     capacity
 }
@@ -5087,9 +5088,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
     // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
-    // (place 4), no unrecorded box's (the review's dropped records), its machine's time unread, no node VM's count, and
-    // no learner's why (A-3).
-    let at = bytes.len() - (10 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
+    // (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7), its machine's time unread,
+    // no node VM's count, and no learner's why (A-3).
+    let at = bytes.len() - (11 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5185,10 +5186,10 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
     // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
-    // await's and no ranked VM's (place 4), no unrecorded box's (the review's dropped records), its machine's time
-    // unread, no node VM's count, and no learner's why (A-3): five counts and lengths besides place 4's three and the
-    // unrecorded boxes' one.
-    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>() + size_of::<u32>();
+    // await's and no ranked VM's (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7),
+    // its machine's time unread, no node VM's count, and no learner's why (A-3): five counts and lengths besides place
+    // 4's three, the unrecorded boxes' one and the unacted VMs' one.
+    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>() + 2 * size_of::<u32>();
     let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -6332,6 +6333,102 @@ fn w14_dropped_the_boxes_whose_records_cant_be_read_are_held_to_a_nodes_boxes_ea
     if let Some(learned) = more.learned.as_mut() {
         let next = learned.unrecorded.len();
         learned.unrecorded.push(unrecorded[next].clone());
+    }
+    assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
+}
+
+/// A-7 (the review's, 2026-11-14; ROOT's ruling; AC-T7.4.1): each VM its node's window couldn't cap or tell its room,
+/// held at what was last set, and why, crosses the wire on its class's capacity answer, last, after the boxes whose
+/// records can't be read. Do encode a learned capacity naming two such VMs and an unrecorded box, and read it back;
+/// then its JSON without the VMs. Expect it back exactly, and the JSON read as naming none.
+#[test]
+fn a7_the_vms_a_window_couldnt_act_on_cross_the_wire_last() {
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.unrecorded = vec![hex_api::LearnedUnrecorded {
+            id: LearnedHolder::Box(BoxId::new("torn-1").unwrap()),
+            why: "its record can't be read: EOF while parsing a value; counted at its machine"
+                .to_owned(),
+        }];
+        learned.unacted = ["vm-1", "vm-2"]
+            .map(|id| hex_api::LearnedUnacted {
+                id: LearnedHolder::Box(BoxId::new(id).unwrap()),
+                why: "its cap couldn't be set: the rate was refused; held at its last, 8000 milli-CPU".to_owned(),
+            })
+            .to_vec();
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let mut json = serde_json::to_value(&capacity).unwrap();
+    json["learned"].as_object_mut().unwrap().remove("unacted");
+    let older = serde_json::from_value::<Capacity>(json)
+        .unwrap()
+        .learned
+        .unwrap();
+    assert!(older.unacted.is_empty());
+}
+
+/// A-7 (ROOT, 2026-11-14: as place 4's lists are, each VM once): the VMs a window couldn't act on are held to a node's
+/// VMs, each named once, and fitted to one message after its unrecorded boxes. Do check learned uses naming one past a
+/// node's VMs, and one VM twice; then fit a capacity naming a node's VMs, and encode it. Expect the first refused,
+/// typed, naming its bound, and the second naming the repeat; the fitted capacity within one message, its list a prefix
+/// of what it named, the first cut, and refused with one more.
+#[test]
+fn a7_the_vms_a_window_couldnt_act_on_are_held_to_a_nodes_vms_each_once() {
+    let told = |n: usize| hex_api::LearnedUnacted {
+        id: LearnedHolder::Box(BoxId::new(&format!("hex-place-a-1-0-{n}")).unwrap()),
+        why: "its cap couldn't be set: the rate was refused; held at its last, 8000 milli-CPU"
+            .to_owned(),
+    };
+    let unacted: Vec<hex_api::LearnedUnacted> = (0..=MAX_LEARNED_HOLDINGS).map(told).collect();
+    let learned = || learned_capacity().learned.unwrap();
+    let past = Learned {
+        unacted: unacted.clone(),
+        ..learned()
+    };
+    assert!(
+        matches!(past.check(), Err(Refusal::Exhausted { what, bound }) if what == "learned unacted VMs" && bound == MAX_LEARNED_HOLDINGS),
+        "{:?}",
+        past.check()
+    );
+    let twice = Learned {
+        unacted: vec![told(1), told(2), told(1)],
+        ..learned()
+    };
+    assert!(
+        matches!(twice.check(), Err(Refusal::Invalid { what, .. }) if what == "learned unacted VMs"),
+        "{:?}",
+        twice.check()
+    );
+    let mut capacity = learned_capacity();
+    capacity.learned = Some(Learned {
+        unacted: unacted[..MAX_LEARNED_HOLDINGS].to_vec(),
+        ..learned()
+    });
+    fit_learned(&mut capacity).unwrap();
+    let fitted = capacity.learned.as_ref().unwrap();
+    assert!(fitted.check().is_ok(), "{:?}", fitted.check());
+    assert!(
+        !fitted.unacted.is_empty() && fitted.unacted.len() < MAX_LEARNED_HOLDINGS,
+        "{} of a node's VMs",
+        fitted.unacted.len()
+    );
+    assert_eq!(fitted.unacted, unacted[..fitted.unacted.len()]);
+    let bytes = answer(
+        14,
+        &Answer::Capacity(Some(capacity.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let mut more = capacity;
+    if let Some(learned) = more.learned.as_mut() {
+        let next = learned.unacted.len();
+        learned.unacted.push(unacted[next].clone());
     }
     assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
 }

@@ -80,6 +80,8 @@ struct Record {
     /// Every cgroup killed, in order, and whether a kill is refused.
     kills: RefCell<Vec<PathBuf>>,
     refuse_kills: Cell<bool>,
+    /// The cgroups whose writes are refused, as the test names them (A-7): the rest are written.
+    refuse_writes: RefCell<Vec<PathBuf>>,
     /// The node's records, where the test keeps them: an intent is written there, as the node writes it.
     records: RefCell<Option<crate::store::Store>>,
     /// Every intent asked and every kill, in order: `intend <box>`, `kill <cgroup>`.
@@ -108,6 +110,14 @@ impl Cgroups for Record {
     }
 
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal> {
+        if self
+            .refuse_writes
+            .borrow()
+            .iter()
+            .any(|dir| dir == cgroup.dir())
+        {
+            return Err(Refusal::Broken(format!("{} refused its write", write.file)));
+        }
         self.files
             .borrow_mut()
             .entry(cgroup.dir().to_path_buf())
@@ -1283,6 +1293,63 @@ fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
         .map(|(id, _, _)| box_of(id))
         .collect();
     assert_eq!(unread, ["vm-2"]);
+}
+
+/// A-7 (the review's, 2026-11-14; ROOT's ruling (ii); AC-T7.4.1), C4 and C5 in the node: each VM's cgroup is its own,
+/// and one its window couldn't write is held at what was last written and counted there, as every OS's learner counts
+/// a VM held at its last cap. Do run a window of two cold Shards VMs of 16-CPU, 8 GiB receipts in a 16-CPU, 64 GiB
+/// fleet budget, the first's cgroup refusing its writes; then a window with the first still refusing. Expect the first
+/// window passed, the second VM and the fleet written, the first named on its class's answer; then the second's memory
+/// budget the fleet's 64 GiB less the 8 GiB the first's create holds it at (its `memory.max`), the first still named.
+#[test]
+fn a7_a_vm_whose_cgroup_cant_be_written_is_held_at_what_was_last_written() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, GIB);
+    }
+    io.refuse_writes.borrow_mut().push(fleet().join("vm-1"));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, vms.clone(), shards, &[], res(16_000, 64 * GIB), start)
+        .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-2"), "memory.high"),
+        Some((32 * GIB).to_string())
+    );
+    assert_eq!(
+        io.file(&fleet(), "cpu.max"),
+        Some("1600000 100000".to_owned())
+    );
+    let unacted = |learner: &Learner| {
+        learner
+            .learned(Class::Shards, &[cost()])
+            .unwrap()
+            .unwrap()
+            .unacted
+    };
+    let told = unacted(&learner);
+    assert_eq!(
+        told.iter().map(|told| box_of(&told.id)).collect::<Vec<_>>(),
+        ["vm-1"]
+    );
+    assert_eq!(
+        told[0].why,
+        format!(
+            "its cgroup couldn't be written: {}; held at what was last written",
+            Refusal::Broken("memory.max refused its write".into())
+        )
+    );
+    learner
+        .window(&io, vms, shards, &[], res(16_000, 64 * GIB), start + WINDOW)
+        .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-2"), "memory.high"),
+        Some((56 * GIB).to_string())
+    );
+    assert_eq!(unacted(&learner).len(), 1);
 }
 
 /// Joint plan step 39, place 1 (ROOT, 2026-11-13), as the macOS and Windows learner carries them: the last-resort ends

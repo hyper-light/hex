@@ -116,6 +116,10 @@ struct Record {
     /// Each VM's actuator's least share (C4), as the test sets it: a governor's for a VM it sets none for.
     leasts: RefCell<BTreeMap<String, u64>>,
     refuse_rates: std::cell::Cell<bool>,
+    /// The VMs whose caps the native owner refuses, as the test names them (A-7): the rest are set.
+    refuse_rate_of: RefCell<Vec<String>>,
+    /// Each cap asked, its VM and share, in order, set or refused (A-7).
+    asked: RefCell<Vec<(String, u64)>>,
     /// Whether an intent's write is refused, as a store whose write fails refuses it.
     refuse_intents: std::cell::Cell<bool>,
     stops: RefCell<Vec<String>>,
@@ -205,10 +209,14 @@ impl Managed for Record {
     }
 
     fn set_rate(&self, holder: Holder<'_>, cap: Cap<'_>) -> Result<hex_api::RateHeld, Refusal> {
+        let name = named(holder);
+        self.asked.borrow_mut().push((name.clone(), cap.share));
         if self.refuse_rates.get() {
             return Err(Refusal::Broken("the rate was refused".into()));
         }
-        let name = named(holder);
+        if self.refuse_rate_of.borrow().contains(&name) {
+            return Err(Refusal::Broken(format!("{name}'s rate was refused")));
+        }
         self.rates.borrow_mut().push((name.clone(), cap.share));
         let own = match cap.own {
             Own::Read(own) => Ok(own),
@@ -337,12 +345,14 @@ fn w14_a_capping_node_caps_each_vm_at_its_water_filled_share() {
     ));
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C4 and C8 on macOS and Windows: a cap the platform refuses fails the window. Do run
-/// a window of two VMs whose caps the native owner refuses, then ask for the class's capacity answer, then let a
-/// window pass. Expect the window refused with the owner's refusal, typed, no learned use on the answer, and the
-/// answer's learned use again once a window passes: the VMs' receipts and holdings.
+/// Joint plan step 14 (AC-T7.4.1), C4 and C8 on macOS and Windows, and A-7 (the review's, 2026-11-14; ROOT's ruling):
+/// a cap the platform refuses is its VM's alone, never its window's. Do run a window of two VMs whose caps the native
+/// owner refuses, then ask for the class's capacity answer, then let a window pass. Expect the window passed, its
+/// answer's learned use there and naming both VMs, each held at its last cap (its allocation's 16 CPUs, never capped
+/// yet) with the owner's refusal; and once a window sets their caps, neither named, the answer's learned use the VMs'
+/// receipts and holdings.
 #[test]
-fn w14_a_refused_cap_fails_the_window_typed() {
+fn a7_a_refused_cap_holds_its_vm_at_its_last_and_is_told() {
     let io = Record::default();
     let vms = vec![vm("vm-1", 1), vm("vm-2", 2)];
     for record in &vms {
@@ -351,15 +361,29 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
     io.refuse_rates.set(true);
     let start = Instant::now();
+    learner
+        .window(&io, &holders(&vms), res(24_000, 64 * GIB), start)
+        .unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &holders(&vms))
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        learner.window(&io, &holders(&vms), res(24_000, 64 * GIB), start),
-        Err(Refusal::Broken("the rate was refused".into()))
+        learned
+            .unacted
+            .iter()
+            .map(|told| box_of(&told.id))
+            .collect::<Vec<_>>(),
+        ["vm-1", "vm-2"]
     );
-    assert_eq!(
-        learner
-            .learned(Class::Shards, &[cost()], &holders(&vms))
-            .unwrap(),
-        None
+    let why = format!(
+        "its cap couldn't be set: {}; held at its last, 16000 milli-CPU",
+        Refusal::Broken("the rate was refused".into())
+    );
+    assert!(
+        learned.unacted.iter().all(|told| told.why == why),
+        "{:?}",
+        learned.unacted
     );
     io.refuse_rates.set(false);
     learner
@@ -369,8 +393,84 @@ fn w14_a_refused_cap_fails_the_window_typed() {
         .learned(Class::Shards, &[cost()], &holders(&vms))
         .unwrap()
         .unwrap();
+    assert!(learned.unacted.is_empty(), "{:?}", learned.unacted);
     assert_eq!(learned.used.booked, res(8_000, 8 * GIB));
     assert_eq!(learned.holdings.len(), 2);
+}
+
+/// A-7 (the review's, 2026-11-14; ROOT's ruling (ii); AC-T7.4.1), C4 on macOS and Windows: each VM's cap is its own,
+/// and one its window couldn't move is held at its last and counted there. Do cap three Shards VMs of 16-CPU
+/// allocations, each booked at 4 CPUs, in a 24-CPU fleet budget (8 CPUs each); then run a window in which the first
+/// uses its whole cap and its cap is refused; then one in which every VM uses its whole cap, the first's still refused.
+/// Expect the second window passed, the others capped as if none were refused (4 CPUs each) and the first named on its
+/// class's answer, held at its last 8 CPUs; then the first asked again at its last, the others' caps summing to the
+/// budget less it (16 CPUs), and the first still named.
+#[test]
+fn a7_a_vm_whose_cap_is_refused_is_held_at_its_last_and_the_others_share_the_rest() {
+    let io = Record::default();
+    let vms = vec![vm("vm-1", 1), vm("vm-2", 2), vm("vm-3", 3)];
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, GIB);
+    }
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let first = Scope::of(&vms[0]).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
+    assert_eq!(learner.rate(&first), Some(8_000));
+    io.rates.borrow_mut().clear();
+    io.refuse_rate_of.borrow_mut().push("vm-1".to_owned());
+    // 300 ms windows: the first used its whole 8-CPU cap (2.4 s), the second 1 CPU, the third 2 CPUs.
+    io.set("vm-1", 2_400_000, GIB);
+    io.set("vm-2", 300_000, GIB);
+    io.set("vm-3", 600_000, GIB);
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW)
+        .unwrap();
+    assert_eq!(
+        *io.rates.borrow(),
+        vec![("vm-2".to_owned(), 4_000), ("vm-3".to_owned(), 4_000)]
+    );
+    assert_eq!(learner.rate(&first), Some(8_000));
+    let unacted = |learner: &Learner| {
+        learner
+            .learned(Class::Shards, &[cost()], &holders(&vms))
+            .unwrap()
+            .unwrap()
+            .unacted
+    };
+    let told = unacted(&learner);
+    assert_eq!(
+        told.iter().map(|told| box_of(&told.id)).collect::<Vec<_>>(),
+        ["vm-1"]
+    );
+    assert_eq!(
+        told[0].why,
+        format!(
+            "its cap couldn't be set: {}; held at its last, 8000 milli-CPU",
+            Refusal::Broken("vm-1's rate was refused".into())
+        )
+    );
+    io.asked.borrow_mut().clear();
+    // Each used its whole cap: the first its 8 CPUs, the others their 4 (1.2 s each).
+    io.set("vm-1", 2_400_000 + 2_400_000, GIB);
+    io.set("vm-2", 300_000 + 1_200_000, GIB);
+    io.set("vm-3", 600_000 + 1_200_000, GIB);
+    learner
+        .window(&io, &holders(&vms), budget, start + WINDOW * 2)
+        .unwrap();
+    assert!(
+        io.asked.borrow().contains(&("vm-1".to_owned(), 8_000)),
+        "{:?}",
+        io.asked.borrow()
+    );
+    let others: u64 = vms[1..]
+        .iter()
+        .map(|r| learner.rate(&Scope::of(r).unwrap()).unwrap())
+        .sum();
+    assert_eq!(others, budget.cpu_milli - 8_000);
+    assert_eq!(learner.rate(&first), Some(8_000));
+    assert_eq!(unacted(&learner).len(), 1);
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C2: a learner carries a cold class at the workload's admission, the census's VMM

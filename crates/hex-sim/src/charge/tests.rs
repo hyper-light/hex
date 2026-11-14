@@ -746,6 +746,45 @@ fn w14_a_capping_platforms_rates_keep_every_booking_and_share_the_rest() {
     assert!(least.iter().all(|(_, cap)| *cap == 10), "{least:?}");
 }
 
+/// A-7 (the review's, 2026-11-14; ROOT's ruling (ii); AC-T7.4.1), C4 and C5: a VM its shell couldn't move from what it
+/// last set is counted at what holds it, and the rest share what it leaves. Do cap three VMs booked 4, 2 and 1 CPUs and
+/// 1 GiB each in a 10-CPU, 8 GiB budget, each asking its ceiling, then hold the first at a 6-CPU cap and a 3 GiB
+/// budget, then hold none. Expect the first at 6 CPUs and 3 GiB, the others' caps summing to the 4 CPUs it leaves and
+/// their budgets to the 5 GiB; and with none held, the caps and budgets as before.
+#[test]
+fn a7_a_held_vm_is_counted_at_what_holds_it_and_the_rest_share_what_it_leaves() {
+    let mut n = node(res(10_000, 8 * GIB, 0));
+    for (id, booking) in [(1, 4_000), (2, 2_000), (3, 1_000)] {
+        n.track(
+            id,
+            class_of(u8::try_from(id).unwrap(), 8_000, 8 * GIB),
+            0,
+            8,
+            res(booking, GIB, 0),
+        )
+        .unwrap();
+    }
+    let ceilings = BTreeMap::new();
+    let free = n.rates(10_000, &ceilings, |_| 10).unwrap();
+    let budgets = n.budgets().unwrap();
+    n.set_held(BTreeMap::from([(
+        1,
+        Held {
+            cpu_milli: Some(6_000),
+            mem_bytes: Some(3 * GIB),
+        },
+    )]));
+    let rates = n.rates(10_000, &ceilings, |_| 10).unwrap();
+    assert_eq!(rates[0], (1, 6_000));
+    assert_eq!(rates[1..].iter().map(|(_, cap)| cap).sum::<u64>(), 4_000);
+    let held = n.budgets().unwrap();
+    assert_eq!(held[0].1.bytes, 3 * GIB);
+    assert_eq!(held[1..].iter().map(|(_, b)| b.bytes).sum::<u64>(), 5 * GIB);
+    n.set_held(BTreeMap::new());
+    assert_eq!(n.rates(10_000, &ceilings, |_| 10).unwrap(), free);
+    assert_eq!(n.budgets().unwrap(), budgets);
+}
+
 /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13): each VM's cap is held at least at the least its own actuator takes,
 /// never one platform-wide number. Do cap three VMs booked nothing in a budget of one milli-CPU, their actuators' leasts
 /// 1, 13 and 4 milli-CPU (a governor's unit; a Windows job's on 128 and on 32 processors). Expect each at its own least.
