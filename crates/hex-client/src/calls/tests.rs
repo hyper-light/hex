@@ -1161,7 +1161,7 @@ mod release_frame {
 #[test]
 fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!((KINDS, BOX_KINDS, CLASSES), (21, 13, 4));
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (21, 14, 4));
     for (request, index) in [
         (
             Request::Hello {
@@ -1251,6 +1251,19 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
         ),
         // A start followed to its end (ROOT, 2026-11-14): its own kind, timed apart from a start's answer.
         (Request::Call(Call::Started(b.clone())), BoxKind::Started),
+        // Goal 2's item 3: a member's next MCP connection, its own kind, answered as its harness connects.
+        (
+            Request::Call(Call::Mcp {
+                id: b.clone(),
+                member: hex_api::Member {
+                    kind: hex_api::MemberKind::Agent,
+                    name: "helper".to_owned(),
+                },
+                streams: hex_core::wire::Streams::default(),
+                ask: hex_core::wire::Streams::default(),
+            }),
+            BoxKind::Mcp,
+        ),
     ] {
         assert!(kind_of(waits, &request).is_none(), "{request:?}");
         assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));
@@ -1331,6 +1344,7 @@ fn every_kind_and_class_has_its_own_census_name() {
             "capacity",
             "member",
             "started",
+            "mcp",
         ];
         for wait in T::answers() {
             assert!(seen.insert(wait.name()), "{} twice", wait.name());

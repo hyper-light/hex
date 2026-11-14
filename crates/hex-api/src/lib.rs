@@ -54,7 +54,7 @@ pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
     GpuEligibility, GuestEnd, GuestFailure, GuestTime, HostUse, ImageArch, ImageOs, ImagePlatform,
-    IoKind, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
+    IoKind, Killer, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
     LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedReservations, LearnedUnacted,
     LearnedUnread, LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause,
     MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, MachineTime, Membership, NodeRun,

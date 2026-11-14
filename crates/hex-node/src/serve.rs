@@ -137,7 +137,11 @@ pub const KEPT: usize = 1;
 fn starts_program(call: &Call) -> bool {
     matches!(
         call,
-        Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } | Call::Member { .. }
+        Call::Exec { .. }
+            | Call::ExecStreams { .. }
+            | Call::Run { .. }
+            | Call::Member { .. }
+            | Call::Mcp { .. }
     )
 }
 
@@ -2246,7 +2250,8 @@ impl<O: Os> Shared<O> {
         let starts = match &call {
             Call::Exec { id, streams, .. }
             | Call::ExecStreams { id, streams, .. }
-            | Call::Member { id, streams, .. } => Some((id, *streams)),
+            | Call::Member { id, streams, .. }
+            | Call::Mcp { id, streams, .. } => Some((id, *streams)),
             Call::Run { spec, streams, .. } => Some((&spec.id, *streams)),
             _ => None,
         };
@@ -2262,7 +2267,8 @@ impl<O: Os> Shared<O> {
                 };
                 if let Call::ExecStreams { ask, .. }
                 | Call::Run { ask, .. }
-                | Call::Member { ask, .. } = &call
+                | Call::Member { ask, .. }
+                | Call::Mcp { ask, .. } = &call
                 {
                     stdio.ask = hex_api::Ask {
                         stdin: ask.stdin,
@@ -2375,7 +2381,10 @@ impl<O: Os> Shared<O> {
                     return self.exec(conn, header, token, Launch::Run(spec, program), stdio);
                 }
                 ((Call::Member { id, member, .. }, stdio), Some((token, _))) => {
-                    return self.member(conn, header, token, id, member, stdio);
+                    return self.member(conn, header, token, id, member, stdio, false);
+                }
+                ((Call::Mcp { id, member, .. }, stdio), Some((token, _))) => {
+                    return self.member(conn, header, token, id, member, stdio, true);
                 }
                 ((call, _), _) => call,
             },
@@ -2385,7 +2394,8 @@ impl<O: Os> Shared<O> {
             Call::Exec { .. }
             | Call::ExecStreams { .. }
             | Call::Run { .. }
-            | Call::Member { .. } => Err(Refusal::Broken(
+            | Call::Member { .. }
+            | Call::Mcp { .. } => Err(Refusal::Broken(
                 "an exec came back from its host without its place".to_owned(),
             )),
             Call::Kill { exec } => return self.kill(conn, header, exec),
@@ -2748,12 +2758,18 @@ impl<O: Os> Shared<O> {
         id: BoxId,
         member: hex_api::Member,
         stdio: Stdio,
+        mcp: bool,
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
             self.answer(conn, header.id, &answer)
         };
-        let mut proc = match self.host.member(&id, &member) {
+        let got = if mcp {
+            self.host.mcp(&id, &member)
+        } else {
+            self.host.member(&id, &member)
+        };
+        let mut proc = match got {
             Ok(proc) => proc,
             Err(r) => {
                 self.unreserve(conn)?;
