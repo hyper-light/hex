@@ -405,6 +405,10 @@ fn owner_ready(
     std::io::BufReader<std::process::ChildStdout>,
 ) {
     use std::io::BufRead;
+    #[expect(
+        clippy::zombie_processes,
+        reason = "its caller waits for it; one that ended unready has ended, the test with it"
+    )]
     let mut owner = role(role_named, dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
