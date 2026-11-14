@@ -43,11 +43,16 @@ fn case(runners: usize, survive: bool) -> Case {
     }
 }
 
-/// The bounded suite's seeds and steps: OWED. ROOT's (6) sweep (`the_record_sweep`) gives the fewest at which every
-/// planted mistake is caught, and they're pinned here; until then these are the suite's earlier 64 seeds of 2,000 steps
-/// (32 with two runners), chosen anew by nothing.
-const SEEDS: u64 = 64;
-const SEEDS_RETIRING: u64 = 32;
+/// The bounded suite's seeds and steps, pinned from ROOT's (6) sweep (`the_record_sweep`, filled time, 256 seeds at
+/// 2,000 to 64,000 steps doubling; adacachy2 at main 7c0ed02e9, 2026-11-14, ~/.cache/hex-lead/units/sweep-filled.log):
+/// - STEPS: the smallest budget at which every planted mistake is caught on some seed in some survive case: 2,000
+///   already (each mistake's caught count there: 3 to 256 of 256), the unplanted cases failing on none at any budget.
+/// - SEEDS: at that budget, the largest over the mistakes of each one's first catching seed plus one, its smaller
+///   value of its two survive cases: Hex ignoring kiln's reservations (`LocalIgnoresForeign`) is first caught at seed
+///   75 (survive=false; seed 125 with survive=true), every other mistake by seed 2, so 76.
+/// - SEEDS_RETIRING: the two-runner case plants no mistake to be caught, so it runs as deep as the suite does, SEEDS.
+const SEEDS: u64 = 76;
+const SEEDS_RETIRING: u64 = SEEDS;
 const STEPS: u64 = 2_000;
 
 fn seeds(runners: usize, seeds: u64, steps: u64, time: Time) -> Report {
