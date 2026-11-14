@@ -393,7 +393,8 @@ impl<N: Os> Quic<N> {
                 Request::Call(
                     Call::Exec { streams, .. }
                     | Call::Run { streams, .. }
-                    | Call::Member { streams, .. },
+                    | Call::Member { streams, .. }
+                    | Call::Mcp { streams, .. },
                 ),
             )) if streams != Streams::default() => Some((header.id, streams)),
             _ => None,

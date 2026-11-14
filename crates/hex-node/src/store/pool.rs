@@ -591,10 +591,32 @@ impl Store {
         Ok(records)
     }
 
-    /// Shared scoped Box/Pool publication. The caller has encoded/reserved all bytes and paths.
+    /// Shared scoped Box/Pool publication. The caller has encoded/reserved all bytes and paths. A write that fails
+    /// before its rename removes its temporary file (the review's C-12), so no stray of it counts against its directory's
+    /// scan bound; a crash's are its directory's recovery's.
     pub(super) fn publish_durable(
         &self,
         directory: &Path,
+        temporary: &Path,
+        final_path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), Refusal> {
+        if let Err(why) = self.publish_temporary(temporary, final_path, bytes) {
+            return Err(match fs::remove_file(temporary) {
+                Ok(()) => why,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => why,
+                Err(error) => Refusal::Os {
+                    op: "publishing a scoped record",
+                    why: format!("{why}; and removing its temporary file: {error}"),
+                },
+            });
+        }
+        self.flush_pool_directory(directory)
+    }
+
+    /// Writes `bytes` to `temporary`, flushed, then renames it to `final_path`.
+    fn publish_temporary(
+        &self,
         temporary: &Path,
         final_path: &Path,
         bytes: &[u8],
@@ -613,7 +635,7 @@ impl Store {
         #[cfg(not(windows))]
         fs::rename(temporary, final_path)
             .map_err(|error| Refusal::os("publishing a scoped record", error))?;
-        self.flush_pool_directory(directory)
+        Ok(())
     }
 
     pub(super) fn flush_pool_directory(&self, directory: &Path) -> Result<(), Refusal> {

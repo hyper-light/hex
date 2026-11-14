@@ -1347,27 +1347,44 @@ impl Proc for McpProc {
         }
     }
 
-    /// Aborts what the harness is sent (ECONNRESET), so its bridge's connection resets: its end then reads `Signal(9)`.
-    /// One that has ended, or whose input has ended already (its caller's close, which ends it as its harness closes),
-    /// has nothing more to send: answered at once.
+    /// Aborts what the harness is sent ([`abort_mcp`]).
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.ended.is_some()
-            || !matches!(self.end.told_within(Some(Duration::ZERO))?, Told::NotYet)
-        {
+        if self.ended.is_some() {
             return Ok(());
         }
-        let taken = self.to.lock().map_err(poisoned)?.take();
-        if let Some(mut to) = taken {
-            self.killed.store(true, Ordering::Release);
-            // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
-            let _ = to.abort(ECONNRESET);
-        }
-        Ok(())
+        abort_mcp(&self.to, &self.killed, &self.end)
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
         Ok(self.given.take().unwrap_or_default())
     }
+
+    /// Its kill, apart from it, for a node that holds it for a remote caller ([`abort_mcp`]).
+    fn killer(&mut self) -> Option<hex_api::Killer> {
+        let (to, killed, end) = (
+            Arc::clone(&self.to),
+            Arc::clone(&self.killed),
+            Arc::clone(&self.end),
+        );
+        Some(Box::new(move || abort_mcp(&to, &killed, &end)))
+    }
+}
+
+/// An MCP connection's kill: aborts what the harness is sent (ECONNRESET), so its bridge's connection resets, its end then
+/// reading `Signal(9)`; it waits while a record in flight to the harness is taken, and for the abort's answer, both on the
+/// run's connection's life. One that has ended, or whose input has ended already (its caller's close, which ends it as its
+/// harness closes), has nothing more to send: answered at once.
+fn abort_mcp(to: &Mutex<Option<Input>>, killed: &AtomicBool, end: &McpEnd) -> Result<(), Refusal> {
+    if !matches!(end.told_within(Some(Duration::ZERO))?, Told::NotYet) {
+        return Ok(());
+    }
+    let taken = to.lock().map_err(poisoned)?.take();
+    if let Some(mut to) = taken {
+        killed.store(true, Ordering::Release);
+        // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
+        let _ = to.abort(ECONNRESET);
+    }
+    Ok(())
 }
 
 fn pending(id: &BoxId) -> Result<Refusal, Refusal> {

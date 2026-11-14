@@ -200,6 +200,7 @@ mod kind {
     pub const MEMBER_SIGNAL: u16 = 0x001e;
     pub const START_FOLLOWED: u16 = 0x001f;
     pub const RESERVED: u16 = 0x0020;
+    pub const MCP: u16 = 0x0021;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -340,6 +341,17 @@ pub enum Call {
     /// reserved through its keeper, which the node's charge learner takes off its fleet's budget; answered
     /// [`Answer::Done`], or refused by type. Appended (ROOT, 2026-11-14).
     Reserved(hex_api::Reserved),
+    /// The next connection member `member`'s harness makes to its MCP bridge in running Shards image box `id`
+    /// (`Runtime::mcp`; goal 2's item 3, D254), handed over as [`Call::Member`] hands its member: the streams `streams`
+    /// names travel with it, each joined to the connection's own, and those `ask` names the node gives with its answer.
+    /// Answered once the harness connects, as an exec is ([`Answer::Started`] or [`Answer::Given`]), then
+    /// [`Answer::Exited`] with its end; or refused by type. Appended (ROOT, 2026-11-14).
+    Mcp {
+        id: BoxId,
+        member: Member,
+        streams: Streams,
+        ask: Streams,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1537,6 +1549,18 @@ fn parse_request(
             keeper: r.u64().map_err(bad)?,
             reserved: resources(&mut r).map_err(bad)?,
         })),
+        kind::MCP => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::Mcp {
+                id,
+                member,
+                streams,
+                ask,
+            })
+        }
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1628,7 +1652,8 @@ fn parse_request(
             Call::Exec { streams, .. }
             | Call::ExecStreams { streams, .. }
             | Call::Run { streams, .. }
-            | Call::Member { streams, .. },
+            | Call::Member { streams, .. }
+            | Call::Mcp { streams, .. },
         ) if carried => streams.count(),
         _ => 0,
     };
@@ -1953,6 +1978,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::MEMBER_SIGNAL => "a member's signal",
         kind::START_FOLLOWED => "a start followed",
         kind::RESERVED => "a keeper's word",
+        kind::MCP => "an MCP connection",
         _ => "a request",
     }
 }
@@ -1978,6 +2004,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             ask,
         } => {
             w.header(kind::MEMBER, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
+            Ok(())
+        }
+        Call::Mcp {
+            id: b,
+            member,
+            streams,
+            ask,
+        } => {
+            w.header(kind::MCP, id);
             w.string(b.as_str())?;
             put_member(w, member)?;
             w.u8(streams.bits());
