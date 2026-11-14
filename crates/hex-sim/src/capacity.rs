@@ -16,9 +16,8 @@
 //! The room is measured, as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which
 //! lacks what each runner's process and its runs use, a runner's runs held besides in its reservations (counted twice,
 //! CV12 being withdrawn: under-admission, never more than the machine holds). Each run uses memory within its
-//! reservation, moved by the nemesis between samples and, both ways, several times, on either side of the free memory's
-//! read in a sample's window. After every step the keeper decides in no more room than its host last measured: nothing
-//! is credited.
+//! reservation, moved by the nemesis at any step, a sample's window among them, as often as it has them. After every
+//! step the keeper decides in no more room than its host last measured: nothing is credited.
 //!
 //! Pure, as the rest of hex-sim: one seed decides every step.
 
@@ -205,8 +204,6 @@ struct Runner {
     /// Runs running, started on a grant: the runner's own records, which its next process reads.
     running: BTreeMap<ReservationId, Amounts>,
     link: Link,
-    /// Whether its runs outlive its process.
-    survive: bool,
     /// Gone for good.
     retired: bool,
     /// Gone for good, and the person hasn't released its reservations yet.
@@ -272,11 +269,6 @@ const MIX: [(Kind, u64); 20] = [
     (Kind::Sample, 30),
 ];
 
-/// The most times a run's use moves on each side of the free memory's read in a sample's window, each move anywhere from
-/// none to its reservation: both ways, as often, so a use may fall and rise again while free memory is read (any
-/// movement, which no credit from the OS's reads survives: CV12). A test generator's parameter.
-const MOVES_IN_WINDOW: u64 = 3;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Deliver,
@@ -314,21 +306,110 @@ pub const ROOM: Amounts = Amounts {
     gpus: 0,
 };
 
-/// The steps of the charges the runners and Hex ask ([`World::charge`]): a quarter CPU, and 256 MiB. A test generator's
-/// parameters.
-const CHARGE_CPU: u64 = 250;
-const CHARGE_MEM: u64 = 256 << 20;
+/// kiln's own CI as recorded: fourteen days of its legs, each one's need what kiln measured it using, its mean cores in
+/// milli-cores and its peak RSS in bytes (`bench/sched/kiln_workload.md`), the charges kiln's runners ask (ROOT's
+/// ruling of 2026-11-14: drawn as recorded).
+const KILN_LEGS: &str = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
 
-/// The most reservations one runner holds: its runs each of the smallest charge the generator asks, as many as the room
-/// holds in the dimension that holds fewest, the room's 32 CPUs (128 against memory's 250)
-/// (`a_runners_reservation_bound_is_the_smallest_charges_that_fill_the_room`).
-pub const RESERVATIONS: usize = 128;
+/// The recorded fleet's day (H10), whose `oci` legs are the boxes Hex places of its own (ROOT, 2026-11-14), on the room
+/// [`ROOM`] is read from.
+const FLEET: &str = include_str!("../../../bench/sched/huawei-r5-day30.fleet.trace");
+
+/// The resolution of a recorded leg's need: the trace's unit of CPU, a milli-core, to which `kiln_trace.py` rounds each
+/// mean, and the export's of memory, a 4 KiB page, of which every peak RSS kiln measured is a whole number
+/// (`a_recorded_legs_need_is_whole_units_of_its_resolution`). A leg recorded below it, 0, used between nothing and one
+/// unit: it is drawn as one unit, the bound above its true need (ROOT, 2026-11-14), so none is dropped and none made 0.
+const RESOLUTION: Amounts = Amounts {
+    cpu_milli: 1,
+    mem_bytes: 4096,
+    disk_bytes: 0,
+    gpus: 0,
+};
+
+/// One leg's need from its trace row, `leg,<arrival>,<runs for>,<cpu milli>,<memory bytes>,...`: `None` for any other
+/// row.
+fn need(row: &str) -> Option<Amounts> {
+    let mut fields = row.trim().split(',');
+    if fields.next()? != "leg" {
+        return None;
+    }
+    let mut fields = fields.skip(2);
+    let cpu_milli = fields.next()?.parse().ok()?;
+    let mem_bytes = fields.next()?.parse().ok()?;
+    Some(Amounts {
+        cpu_milli,
+        mem_bytes,
+        ..Amounts::ZERO
+    })
+}
+
+/// The charges kiln's runners ask, each a recorded leg's need ([`KILN_LEGS`]), none below its resolution.
+fn run_charges() -> &'static [Amounts] {
+    static CHARGES: std::sync::OnceLock<Vec<Amounts>> = std::sync::OnceLock::new();
+    CHARGES.get_or_init(|| {
+        KILN_LEGS
+            .lines()
+            .filter_map(need)
+            .map(|need| Amounts {
+                cpu_milli: need.cpu_milli.max(RESOLUTION.cpu_milli),
+                mem_bytes: need.mem_bytes.max(RESOLUTION.mem_bytes),
+                ..need
+            })
+            .collect()
+    })
+}
+
+/// The charges of Hex's own boxes, each a recorded `oci` leg's need ([`FLEET`]).
+fn box_charges() -> &'static [Amounts] {
+    static CHARGES: std::sync::OnceLock<Vec<Amounts>> = std::sync::OnceLock::new();
+    CHARGES.get_or_init(|| {
+        FLEET
+            .lines()
+            .filter(|row| row.trim().ends_with(",oci"))
+            .filter_map(need)
+            .collect()
+    })
+}
+
+/// The most reservations one runner holds (CV8): runs of the smallest charge recorded ([`run_charges`]), as many as the
+/// room holds in its dimension that holds fewest, but never more than one sync carries (`hex_core::capacity::most_held`):
+/// the protocol's own bound, which wins (ROOT, 2026-11-14; `a_runners_reservation_bound_is_the_protocols_own`).
+pub fn reservations() -> Result<usize, Violation> {
+    let smallest = run_charges()
+        .iter()
+        .copied()
+        .reduce(Amounts::min)
+        .ok_or_else(|| stopped("no recorded leg"))?;
+    let fits = ROOM
+        .cpu_milli
+        .checked_div(smallest.cpu_milli)
+        .zip(ROOM.mem_bytes.checked_div(smallest.mem_bytes))
+        .map(|(cpu, mem)| cpu.min(mem))
+        .ok_or_else(|| stopped("a recorded charge of nothing"))?;
+    let most = hex_core::capacity::most_held().map_err(stopped)?;
+    Ok(usize::try_from(fits).map_or(most, |fits| fits.min(most)))
+}
+
+/// The host's sample under way: each runner's work as it began, the room once it has read free memory, and whether a
+/// run's use moved since it began. Uses move at any step ([`Kind::Use`]), between its reads too, as often as the nemesis
+/// has them (ROOT, 2026-11-14: no bound, the most adversarial case; it was at most three moves each side, picked).
+#[derive(Debug)]
+struct Window {
+    before: Vec<u64>,
+    room: Option<Amounts>,
+    moved: bool,
+}
 
 /// One machine under the nemesis (module docs).
 #[derive(Debug)]
 pub struct World {
     rng: Rng,
     budget: Budget,
+    /// Whether the runners' runs outlive their processes: kiln states it for neither, so both are their own cases
+    /// (ROOT, 2026-11-14).
+    survive: bool,
+    /// The host's sample under way ([`World::sample`]).
+    window: Option<Window>,
     disk: Disk,
     keeper: Option<Keeper>,
     boxes: BTreeMap<u64, Amounts>,
@@ -340,20 +421,23 @@ pub struct World {
     report: Report,
 }
 
-/// A runner process's own memory: a CI runner agent's resident set, 64 MiB to 1 GiB. A test generator's
-/// parameter, as the charges are.
+/// A runner process's own memory: OWED. No record of a kiln runner agent's resident set exists; ROOT measures them on
+/// the fleet (2026-11-14), and until then this, 64 MiB to 1 GiB, is the generator's old picked range, chosen anew by
+/// nothing.
 fn own(rng: &mut Rng) -> u64 {
     rng.range(1, 16).saturating_mul(64 << 20)
 }
 
-/// Runs `steps` steps of seed `seed` with `runners` runners, then settles.
+/// Runs `steps` steps of seed `seed` with `runners` runners, their runs outliving their processes where `survive`, then
+/// settles.
 pub fn run(
     seed: u64,
     runners: usize,
     steps: u64,
+    survive: bool,
     mutant: Option<Mutant>,
 ) -> Result<Report, Violation> {
-    let mut world = World::new(seed, runners, mutant)?;
+    let mut world = World::new(seed, runners, survive, mutant)?;
     for _ in 0..steps {
         world.step()?;
     }
@@ -378,22 +462,27 @@ fn held(map: &BTreeMap<ReservationId, Amounts>) -> Vec<Held> {
 }
 
 impl World {
-    pub fn new(seed: u64, runners: usize, mutant: Option<Mutant>) -> Result<Self, Violation> {
+    pub fn new(
+        seed: u64,
+        runners: usize,
+        survive: bool,
+        mutant: Option<Mutant>,
+    ) -> Result<Self, Violation> {
         let mut rng = Rng::new(seed);
         let names: Vec<String> = (0..runners).map(|n| format!("kiln-runner-{n}")).collect();
         // The keeper's bound on a holder's name (CV8): the longest its runners say in their hellos.
         let name_bytes = names.iter().map(String::len).max().unwrap_or(0);
         let budget = Budget {
             holders: runners,
-            reservations: RESERVATIONS,
+            reservations: reservations()?,
             name_bytes,
         };
         let mut disk = Disk::default();
         let keeper = Keeper::boot(budget, &mut disk).map_err(stopped)?;
         let mut all = Vec::new();
         for name in names {
-            let survive = rng.chance(500);
-            let holder = Holder::start(name.clone(), 1, RESERVATIONS, &[]).map_err(stopped)?;
+            let holder =
+                Holder::start(name.clone(), 1, budget.reservations, &[]).map_err(stopped)?;
             all.push(Runner {
                 name,
                 epoch: 1,
@@ -401,7 +490,6 @@ impl World {
                 asked: BTreeMap::new(),
                 running: BTreeMap::new(),
                 link: Link::default(),
-                survive,
                 retired: false,
                 unforgotten: false,
                 hidden: BTreeMap::new(),
@@ -413,6 +501,8 @@ impl World {
         let mut world = Self {
             rng,
             budget,
+            survive,
+            window: None,
             disk,
             keeper: Some(keeper),
             boxes: BTreeMap::new(),
@@ -442,13 +532,11 @@ impl World {
         sum(self.boxes.values()).ok_or_else(|| stopped("Hex's boxes overflow a sum"))
     }
 
-    /// A charge as the runners and Hex ask: a quarter CPU to four, 256 MiB to 8 GiB.
-    fn charge(&mut self) -> Amounts {
-        Amounts {
-            cpu_milli: self.rng.range(1, 16).saturating_mul(CHARGE_CPU),
-            mem_bytes: self.rng.range(1, 32).saturating_mul(CHARGE_MEM),
-            ..Amounts::ZERO
-        }
+    /// A charge drawn from `recorded`: one of them, each as likely.
+    fn draw(&mut self, recorded: &[Amounts]) -> Amounts {
+        self.pick(recorded.len())
+            .and_then(|at| recorded.get(at).copied())
+            .unwrap_or(RESOLUTION)
     }
 
     fn pick(&mut self, len: usize) -> Option<usize> {
@@ -525,10 +613,10 @@ impl World {
             .collect()
     }
 
-    /// The machine's room as its host measures it now (`Facts::node_with_owned`): every CPU, and the memory that is
-    /// free or Hex's own boxes', so it lacks what the runners' processes and their work use. None is left in a
-    /// dimension they use whole. It is the most the keeper may decide in until the next measure.
-    fn measure(&mut self) -> Result<Amounts, Violation> {
+    /// The machine's room as its host reads it now (`Facts::node_with_owned`): every CPU, and the memory that is free
+    /// or Hex's own boxes', so it lacks what the runners' processes and their work use. None is left in a dimension
+    /// they use whole.
+    fn room_now(&self) -> Result<Amounts, Violation> {
         let mut taken = 0u64;
         for (r, work) in self.runners.iter().zip(self.works()?) {
             taken = taken
@@ -536,10 +624,15 @@ impl World {
                 .and_then(|t| t.checked_add(work))
                 .ok_or_else(|| stopped("the runners' memory overflows a sum"))?;
         }
-        self.measured = Amounts {
+        Ok(Amounts {
             mem_bytes: ROOM.mem_bytes.saturating_sub(taken),
             ..ROOM
-        };
+        })
+    }
+
+    /// The room measured now ([`World::room_now`]), the most the keeper may decide in until the next it is given.
+    fn measure(&mut self) -> Result<Amounts, Violation> {
+        self.measured = self.room_now()?;
         Ok(self.measured)
     }
 
@@ -565,43 +658,64 @@ impl World {
         match self.runners.get_mut(n) {
             Some(r) => {
                 r.uses.insert(id, to);
+                if let Some(window) = self.window.as_mut() {
+                    window.moved = true;
+                }
                 true
             }
             None => false,
         }
     }
 
-    /// The host's sample: the room measured and given the keeper as it is (CV12, withdrawn). A run's use moves, both
-    /// ways, several times, on either side of the free memory's read. The planted host also reads each joined runner's
-    /// work on either side, and credits the room the smaller, up to the runner's reservations: the withdrawn rule.
+    /// The host's sample, a phase a step (CV12, withdrawn): it reads each runner's work as it begins, then free memory,
+    /// the room it measures, then gives the keeper that room, the runs' uses moving at any step between
+    /// ([`Kind::Use`]). The planted host also reads each joined runner's work again as it ends, and credits the room the
+    /// smaller of the two reads, up to the runner's reservations: the withdrawn rule.
     fn sample(&mut self) -> Result<(), Violation> {
-        if self.keeper.is_none() {
-            return Ok(());
+        match self.window.take() {
+            None => {
+                if self.keeper.is_some() {
+                    self.window = Some(Window {
+                        before: self.works()?,
+                        room: None,
+                        moved: false,
+                    });
+                }
+                Ok(())
+            }
+            Some(Window {
+                before,
+                room: None,
+                moved,
+            }) => {
+                let room = Some(self.room_now()?);
+                self.window = Some(Window {
+                    before,
+                    room,
+                    moved,
+                });
+                Ok(())
+            }
+            Some(Window {
+                before,
+                room: Some(room),
+                moved,
+            }) => self.sample_end(&before, room, moved),
         }
-        let joined: Vec<usize> = (0..self.runners.len())
-            .filter(|n| {
-                self.runners
-                    .get(*n)
-                    .is_some_and(|r| r.link.session.is_some())
-            })
-            .collect();
-        let before = self.works()?;
-        let mover = self.pick(self.runners.len());
-        let mut moved = false;
-        for _ in 0..self.rng.range(0, MOVES_IN_WINDOW) {
-            moved |= self.move_use(mover);
-        }
-        let room = self.measure()?;
-        for _ in 0..self.rng.range(0, MOVES_IN_WINDOW) {
-            moved |= self.move_use(mover);
-        }
+    }
+
+    /// The sample's end ([`World::sample`]): the room it read given the keeper, the planted host's credit added.
+    fn sample_end(&mut self, before: &[u64], room: Amounts, moved: bool) -> Result<(), Violation> {
         let mut credit = Amounts::ZERO;
         if self.planted(Mutant::Credit) {
             let after = self.works()?;
-            for n in joined {
-                let (Some(r), Some(keeper)) = (self.runners.get(n), self.keeper.as_ref()) else {
-                    continue;
+            for (n, r) in self.runners.iter().enumerate() {
+                let Some(keeper) = self.keeper.as_ref() else {
+                    break;
                 };
+                if r.link.session.is_none() {
+                    continue;
+                }
                 let books = keeper
                     .held_by(&r.name)
                     .try_fold(Amounts::ZERO, |sum, h| sum.checked_add(h.amount))
@@ -622,9 +736,11 @@ impl World {
         let given = room
             .checked_add(credit)
             .ok_or_else(|| stopped("the room and its credit overflow a sum"))?;
-        if let Some(keeper) = self.keeper.as_mut() {
-            keeper.set_room(given);
-        }
+        let Some(keeper) = self.keeper.as_mut() else {
+            return Ok(());
+        };
+        self.measured = room;
+        keeper.set_room(given);
         let report = &mut self.report;
         report.samples = report.samples.saturating_add(1);
         if moved {
@@ -635,7 +751,7 @@ impl World {
 
     fn hex_admit(&mut self) -> Result<(), Violation> {
         let local = self.local()?;
-        let charge = self.charge();
+        let charge = self.draw(box_charges());
         let ignores = self.planted(Mutant::LocalIgnoresForeign);
         let Some(keeper) = self.keeper.as_mut() else {
             return Ok(());
@@ -669,7 +785,7 @@ impl World {
     }
 
     fn ask(&mut self, runner: Option<usize>) {
-        let charge = self.charge();
+        let charge = self.draw(run_charges());
         let early = self.planted(Mutant::StartBeforeGrant);
         let Some(r) = runner.and_then(|r| self.runners.get_mut(r)) else {
             return;
@@ -973,7 +1089,7 @@ impl World {
             r.holder = None;
             r.own = 0;
             r.asked.clear();
-            if !r.survive {
+            if !self.survive {
                 r.all_ended();
             }
             self.report.runner_crashes = self.report.runner_crashes.saturating_add(1);
@@ -999,8 +1115,13 @@ impl World {
         };
         r.epoch = r.epoch.saturating_add(1);
         let survivors = if forget { Vec::new() } else { held(&r.running) };
-        let holder =
-            Holder::start(r.name.clone(), r.epoch, RESERVATIONS, &survivors).map_err(stopped)?;
+        let holder = Holder::start(
+            r.name.clone(),
+            r.epoch,
+            self.budget.reservations,
+            &survivors,
+        )
+        .map_err(stopped)?;
         r.holder = Some(holder);
         r.own = own;
         Ok(())
@@ -1240,11 +1361,15 @@ impl World {
     /// answer has its runner say at most one more (a welcome its sync; a grant of a reserve it abandoned, or of another
     /// amount, its release), itself answered once: four deliveries. A word on a link to a runner starts at most three.
     /// Once a runner, its sync's answer has it say the release of each reservation it released while it synced, at
-    /// most the [`RESERVATIONS`] it holds, each answered: two deliveries apiece. Once all is quiet the keeper owes each
+    /// most the reservations it holds ([`reservations`]), each answered: two deliveries apiece. Once all is quiet the keeper owes each
     /// runner at most one hint, and two looks find it quiet, the first draining those hints.
     fn settle_bound(&self) -> Result<usize, Violation> {
         let overflow = || stopped("the settle's bound overflows");
-        let releases = RESERVATIONS.checked_mul(2).ok_or_else(overflow)?;
+        let releases = self
+            .budget
+            .reservations
+            .checked_mul(2)
+            .ok_or_else(overflow)?;
         self.runners.iter().try_fold(2usize, |bound, r| {
             let to_keeper = r.link.to_keeper.len().checked_mul(4);
             let to_holder = r.link.to_holder.len().checked_mul(3);
