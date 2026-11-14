@@ -577,6 +577,20 @@ pub trait Books: Send + Sync {
         devices: &[DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal>;
+    /// Box `id`'s record read and changed by `callback` alone, as [`Books::with_transaction`]'s is, by a transaction
+    /// that makes no native call: [`with_record_transaction`], its one caller, hands `callback` a view of it that
+    /// refuses each (`RecordOnly`). Nothing in it can then call back needing the box again, so its owner may wait for a
+    /// turn of the box under way, following its holder (decision 9), with no holder waiting on it, where a native
+    /// transaction must refuse the overlap (a launch's callback may need the box again): a call writing a box's record
+    /// is never refused because another's write of it is under way (the HVF run's HEX-IMG-4, 2026-11-14: a KILL refused
+    /// Busy where the charge learner's ask settled the same end). By default, as [`Books::with_transaction`].
+    fn with_record_transaction(
+        &self,
+        id: &BoxId,
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        self.with_transaction(id, &[], callback)
+    }
     fn with_pool_transaction(
         &self,
         key: &hex_api::BackingKey,
@@ -667,6 +681,83 @@ pub fn with_transaction<T>(
     transaction(books, operation, |books, callback| {
         books.with_transaction(id, devices, callback)
     })
+}
+
+/// Box `id`'s record read and changed by `operation` alone through its owner's record transaction
+/// ([`Books::with_record_transaction`]), which waits for a turn of the box under way where its owner does: `operation`
+/// sees its records alone (`RecordOnly`), each native call refused.
+pub fn with_record_transaction<T>(
+    books: &std::sync::Weak<dyn Books>,
+    id: &BoxId,
+    operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    transaction(
+        books,
+        |transaction| operation(&RecordOnly(transaction)),
+        |books, callback| books.with_record_transaction(id, callback),
+    )
+}
+
+/// A record transaction as its operation sees it ([`with_record_transaction`]): its records read and written as its
+/// transaction's are, and every native call refused, typed, before its owner sees it.
+struct RecordOnly<'a>(&'a dyn Transaction);
+
+/// A native call in a record transaction ([`RecordOnly`]): only a fault of Hex's own could make one.
+fn native_in_record() -> Refusal {
+    broken("a record transaction makes no native call")
+}
+
+impl Transaction for RecordOnly<'_> {
+    fn records(&self) -> Result<Records, Refusal> {
+        self.0.records()
+    }
+    fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+        self.0.pool_records()
+    }
+    fn read_pool(&self, key: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+        self.0.read_pool(key)
+    }
+    fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        self.0.put_pool(record)
+    }
+    fn grant_pool(&self, grant: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+        self.0.grant_pool(grant)
+    }
+    fn remove_pool(&self, key: &hex_api::BackingKey) -> Result<(), Refusal> {
+        self.0.remove_pool(key)
+    }
+    fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+        Err(native_in_record())
+    }
+    fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+        self.0.read(id)
+    }
+    fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        self.0.put(record)
+    }
+    fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.remove(id)
+    }
+    fn launch_managed(
+        &self,
+        _: &ManagedLaunch<'_>,
+        _: shards_api::LaunchIo,
+        _: Duration,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        Err(native_in_record())
+    }
+    fn attach_managed(
+        &self,
+        _: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        Err(native_in_record())
+    }
+    fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+        Err(native_in_record())
+    }
+    fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+        Err(native_in_record())
+    }
 }
 
 pub fn with_pool_transaction<T>(
@@ -1859,6 +1950,53 @@ mod authority_tests {
                 Mode::Refused => Err(Refusal::NoSuchBox(id.try_clone()?)),
             }
         }
+    }
+
+    /// The HVF run's HEX-IMG-4 (ROOT, 2026-11-14; decision 9; AC-T7.4.1): a record transaction makes no native call,
+    /// so its owner may wait for a turn of its box under way with no holder waiting on it: each native call in one is
+    /// refused in its own words before its owner sees it, and its records reach its owner as a transaction's do. Do: in
+    /// a record transaction of a box, read its record, then make each native call. Expect: the read answered by the
+    /// owner, and every native call refused Broken naming a record transaction, never the owner's own refusal.
+    #[test]
+    fn a_record_transaction_refuses_every_native_call_before_its_owner_sees_it() {
+        let owner: Arc<dyn Books> = Arc::new(Owner(Mode::Once));
+        let books = Arc::downgrade(&owner);
+        let id = BoxId::new("record-only").unwrap();
+        let program = hex_api::Program::default();
+        let (_out, stdout) = std::io::pipe().unwrap();
+        let (_err, stderr) = std::io::pipe().unwrap();
+        let (read, natives) = with_record_transaction(&books, &id, |t| {
+            let launch = ManagedLaunch::Firecracker {
+                program: &program,
+                vsock: Path::new("record-only.vsock"),
+                #[cfg(target_os = "linux")]
+                memlock: None,
+            };
+            let io = shards_api::LaunchIo {
+                stdout,
+                stderr,
+                gpu_report: None,
+            };
+            Ok((
+                t.read(&id)?,
+                [
+                    t.launch_managed(&launch, io, Duration::ZERO).map(drop),
+                    t.attach_managed(None).map(drop),
+                    t.finalize_managed(None),
+                    t.managed_usage().map(drop),
+                    t.check_unsubmitted_pool(),
+                ],
+            ))
+        })
+        .unwrap();
+        assert_eq!(read, None);
+        let refused = Err(Refusal::Broken(
+            "a record transaction makes no native call".to_owned(),
+        ));
+        assert!(
+            natives.iter().all(|native| *native == refused),
+            "{natives:?}"
+        );
     }
 
     /// AC-T7.4.1: path authority is the canonical incarnation, never the reusable public box id.
