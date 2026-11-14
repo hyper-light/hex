@@ -130,6 +130,19 @@ fn damaged(why: &str) -> Refusal {
 }
 
 /// Run `run`'s row's name: its 16 bytes in lowercase hex.
+/// `hex.guest event=node_vm_unfollowed run=<a JSON string> why=<a JSON string>`: run `run`'s owner unfollowed, and why.
+fn unfollowed_line(run: &NodeRun, why: &Refusal) -> String {
+    use hex_api::event::Value::Text;
+    hex_api::event::line(
+        "hex.guest",
+        "node_vm_unfollowed",
+        &[
+            ("run", Text(&name(run).unwrap_or_default())),
+            ("why", Text(&why.to_string())),
+        ],
+    )
+}
+
 fn name(run: &NodeRun) -> Result<String, Refusal> {
     let bytes = run.bytes();
     let count = bytes
@@ -530,8 +543,7 @@ impl Store {
 
     /// Follows run `run`'s owner, a live node process, to its end on a thread of its own, its row booked meanwhile, then
     /// lets its row go. Where the follow is refused, the row stays booked until the node's next start, and why is said
-    /// on `hex.guest`, the node VM being the node's guest, as the event `node_vm_unfollowed`, its `why` a JSON string
-    /// (`hex_api::event`).
+    /// on `hex.guest`, the node VM being the node's guest, as the event `node_vm_unfollowed` ([`unfollowed_line`]).
     fn follow(&self, run: NodeRun, file: File) -> Result<(), Refusal> {
         let store = self.clone();
         std::thread::Builder::new()
@@ -545,14 +557,9 @@ impl Store {
                 });
                 if let Err(why) = ended {
                     use std::io::Write as _;
-                    let _ = std::io::stderr().lock().write_all(
-                        format!(
-                            "hex.guest event=node_vm_unfollowed run={} why={}\n",
-                            name(&run).unwrap_or_default(),
-                            hex_api::event::json_string(&why.to_string())
-                        )
-                        .as_bytes(),
-                    );
+                    let _ = std::io::stderr()
+                        .lock()
+                        .write_all(format!("{}\n", unfollowed_line(&run, &why)).as_bytes());
                 }
             })
             .map_err(|e| Refusal::os("starting a node VM owner's follow", e))?;

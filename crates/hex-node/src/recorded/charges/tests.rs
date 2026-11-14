@@ -1442,9 +1442,19 @@ fn w14_a_node_with_no_platform_window_learns_its_image_vms_over_their_runs_perio
         band: 0,
     };
     hex_api::Runtime::create(node.as_ref(), spec).unwrap();
-    hex_testkit::waits::until(&WOKEN, "the learner woken by an image VM's making", || {
-        images.0.reads.load(std::sync::atomic::Ordering::SeqCst) > 0
-    })
+    // A look: the stand-in tells no event as the learner reads it, its count read. Its party, the learner, ends where
+    // it has failed: its thread, detached, records why on the learner and stops.
+    hex_testkit::waits::follow::until(
+        &WOKEN,
+        "the learner woken by an image VM's making",
+        || match node.books.charges.get() {
+            Some((learner, _)) if learner.lock().is_ok_and(|learner| learner.fault.is_none()) => {
+                hex_testkit::waits::follow::Party::Live
+            }
+            _ => hex_testkit::waits::follow::Party::Ended,
+        },
+        || images.0.reads.load(std::sync::atomic::Ordering::SeqCst) > 0,
+    )
     .unwrap();
     assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
 }

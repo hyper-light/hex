@@ -801,9 +801,7 @@ impl Log {
         readers.retain_mut(|reader| {
             let mut frame = Vec::new();
             if reader.missed > 0 {
-                frame.extend_from_slice(
-                    format!("hex.log event=missed lines={}\n", reader.missed).as_bytes(),
-                );
+                frame.extend_from_slice(format!("{}\n", missed_line(reader.missed)).as_bytes());
             }
             frame.extend_from_slice(line.as_bytes());
             if frame.len() > bound {
@@ -823,6 +821,15 @@ impl Log {
             }
         });
     }
+}
+
+/// `hex.log event=missed lines=<n>`: the lines a log's reader missed before the next it was sent.
+fn missed_line(lines: u64) -> String {
+    hex_api::event::line(
+        "hex.log",
+        "missed",
+        &[("lines", hex_api::event::Value::Number(u128::from(lines)))],
+    )
 }
 
 impl<N: Os> Os for Quic<N> {

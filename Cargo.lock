@@ -719,6 +719,7 @@ name = "hex-testkit"
 version = "0.1.0"
 dependencies = [
  "hex-core",
+ "hex-wait",
  "libc",
  "tempfile",
 ]
