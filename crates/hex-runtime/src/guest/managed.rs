@@ -400,44 +400,15 @@ pub(super) fn guest_time(
     }
 }
 
-/// Answers `ask`, box `id`'s VM's, a watcher telling `patience`'s run-out once `bound` passes with no answer while the
-/// ask goes on.
+/// Answers `ask`, box `id`'s VM's, its run-out told by the process's one watcher once `bound` passes with no answer
+/// while the ask goes on ([`super::run_out`]).
 fn told_past<T>(
     patience: &'static Patience,
     bound: Duration,
     id: &BoxId,
     ask: impl FnOnce() -> T,
 ) -> Result<T, Refusal> {
-    let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
-        hex_wait::Failed::Poisoned => {
-            Refusal::Broken("a managed VM ask's watch is poisoned".to_owned())
-        }
-        hex_wait::Failed::Os(why) => Refusal::os("making a managed VM ask's watch", why),
-    })?;
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("hex-managed-ask".to_owned())
-            .spawn_scoped(scope, move || {
-                if matches!(
-                    waiting.recv_timeout(bound),
-                    Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
-                ) {
-                    patience.ran_out(
-                        bound,
-                        bound,
-                        &[
-                            Piece::Kind("the managed VM process of box "),
-                            Piece::Name(id.as_str()),
-                            Piece::Kind(", its ask on its vsock socket"),
-                        ],
-                    );
-                }
-            })
-            .map_err(|why| Refusal::os("starting a managed VM ask's watcher", why))?;
-        let answer = ask();
-        drop(answered);
-        Ok(answer)
-    })
+    super::run_out::told_past(patience, bound, id, ask)
 }
 
 #[cfg(test)]
