@@ -1407,6 +1407,28 @@ mod tests {
         assert_eq!(store.get(&first.spec.id).unwrap(), deleting);
     }
 
+    /// The review's B-12 (AC-T7.4.1; T-T7.1.2): a lifecycle write refused over a fact its record holds already says
+    /// which fact. Do record a box Ready with its exit, then put it with another exit. Expect it refused, naming its
+    /// exit.
+    #[test]
+    fn b12_a_lifecycle_write_refused_over_a_fact_names_the_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut kept = record("fact-box");
+        kept.phase = Phase::Creating;
+        store.put_lifecycle(&kept).unwrap();
+        kept.phase = Phase::Ready;
+        kept.exit = Some(hex_api::Exit::Code(0));
+        store.put_lifecycle(&kept).unwrap();
+        kept.exit = Some(hex_api::Exit::Code(1));
+        match store.put_lifecycle(&kept) {
+            Err(Refusal::Lifecycle { why: Some(why), .. }) => {
+                assert!(why.contains("exit"), "{why}");
+            }
+            other => panic!("another exit put: {other:?}"),
+        }
+    }
+
     /// AC-T7.4.1/T-T7.1.2: both VM adapters update the sole Store with unchanged payload/cleanup
     /// authority. Metadata written by the socket while native I/O runs survives publication.
     #[test]
