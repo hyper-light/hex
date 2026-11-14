@@ -2323,14 +2323,23 @@ fn w39_a5_the_oci_boxes_a_node_vm_hosts_are_its_never_native_too() {
         capped("oci-1", oci, 2_000, 2 * GIB),
         capped("proc-1", ClassSpec::Process, 1_000, GIB),
     ];
-    let native = |rows: &[hex_core::record::NodeVmRecord]| sort(&records, rows, |_| true).unwrap().native;
-    assert_eq!(native(&[]), res(3_000, 3 * GIB), "no node VM: the oci box's caps native");
+    let native =
+        |rows: &[hex_core::record::NodeVmRecord]| sort(&records, rows, |_| true).unwrap().native;
+    assert_eq!(
+        native(&[]),
+        res(3_000, 3 * GIB),
+        "no node VM: the oci box's caps native"
+    );
     for phase in [
         hex_api::NodeVmPhase::Ready,
         hex_api::NodeVmPhase::Booting,
         hex_api::NodeVmPhase::Ended,
     ] {
-        assert_eq!(native(&[node_row(7, phase)]), res(1_000, GIB), "node VM {phase:?}");
+        assert_eq!(
+            native(&[node_row(7, phase)]),
+            res(1_000, GIB),
+            "node VM {phase:?}"
+        );
     }
 }
 
