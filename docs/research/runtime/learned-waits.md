@@ -65,7 +65,8 @@ owner, 2026-11-14): the names below are stable. What each follows, and what is w
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
 | `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | none: a local site | liveness alone past W*, never taken for hung (`Seeds::past_hang`) |
-| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | none: a local site | liveness alone past W* |
+| `seeds.wait` (hex-core `seeds`, hex-node `createpool`'s line) | the seeds up or starting | a seed handed to the create, on the pool's condition variable; refused only when none can come (`Seeds::none_can_come`) | none: a local site | liveness alone past W* |
+| `exec_seeds.answers` (hex-node `seed`'s `SeedPool::acquire`) | the busy exec seeds | a seed released, or a slot let go by a seed discarded, on the pool's condition variable. The round trip's answer that follows (`round_trip`) is read on the seed's socket alone, which the seed's end closes; no pidfd is polled beside it | none: a local site | liveness alone past W* |
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
@@ -151,10 +152,10 @@ answer was slower than the first's: half the time. The cost above, with `p = 0` 
 all. Since 2026-11-13 (decision 9's (c), the person's ruling) none ends at it: each records its run-out there and goes
 on following its party, as `wait_past` does under a caller's deadline. `combine` gives a call with no caller's deadline
 no budget, and it follows its agent's connection; a listing goes on, in process; `serve.reads` follows its client by
-the messages it takes; and the create seeds' line (`Seeds::claim`) and the exec seeds' (`SeedPool::acquire`) follow the
-seeds freed. Each is refused only at its party's end, a reset, or a whole W* window with no advance. Where that progress
-is no finer than the answer itself (a client taking one waiting part, a create first in line), the stall is judged one
-whole window past the run-out.
+its connection; the create seeds' line (`Seeds::claim`) follows the seeds up or starting, refused only when none can
+come; and the exec seeds' (`SeedPool::acquire`) waits for a seed freed or a slot let go. Each is refused only at its
+party's end or a reset: none judges a stall of its party's progress, which refuses healthy parties ("A stall judged at
+the slowest gap seen", above).
 
 The turns (`node.turns`, `store.turns`) do so since 2026-11-13: a hold past the slowest seen is told to the census and
 the wait follows the holder, this process's own thread, to its let-go. Refused there, the store failed HEX-SOCK-6
