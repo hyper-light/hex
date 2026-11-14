@@ -429,11 +429,18 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
     // once QUIC's idle timeout passes (RFC 9000 §10.1), and a write cut at a slice's end would leave half a message.
     /// The keeper's next word to the holder: its answer to what it said, or a hint.
     static HEAR: Patience = Patience::measuring("test.hex_node.capacity.hear");
-    let heard = |link: &mut Link| {
+    // By the life of the keeper's serving thread (the review's C-5), and the link's end, which the read says itself.
+    let heard = |link: &mut Link, keeper: &std::thread::JoinHandle<Refused>| {
         follow::within(
             &HEAR,
             "the keeper's next word",
-            || Party::Live,
+            || {
+                if keeper.is_finished() {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
             |by| match link.hear(by) {
                 Err(Refused::Deadline { .. }) => None,
                 heard => Some(heard),
@@ -483,11 +490,11 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
         &["kiln.capacity.test".to_owned()],
         Arc::new(|_: &str| {}),
     );
-    {
+    let keeper = {
         let server = Arc::clone(&server);
         let acceptor = node.acceptor(CAPACITY_PORT);
-        std::thread::spawn(move || server.serve(acceptor));
-    }
+        std::thread::spawn(move || server.serve(acceptor))
+    };
     let kiln_end = Endpoint::start(Config {
         credentials: enrolled("kiln.capacity.test"),
         bind: loopback,
@@ -510,7 +517,7 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
         while let Some(msg) = said.pop_front() {
             link.say(&msg, None).unwrap();
             let mut out = Out::default();
-            kiln.hear(heard(link), &mut out);
+            kiln.hear(heard(link, &keeper), &mut out);
             said.extend(out.send);
             events.extend(out.events);
         }
@@ -530,7 +537,7 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
     let (_, step) = driver.submit(d, p).unwrap();
     assert!(started(&quiesce(&driver, step)));
     server.hint().unwrap();
-    let ToHolder::Hint { view, .. } = heard(&mut link) else {
+    let ToHolder::Hint { view, .. } = heard(&mut link, &keeper) else {
         panic!("no hint");
     };
     assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 4000));

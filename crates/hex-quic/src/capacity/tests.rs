@@ -10,7 +10,7 @@ use hex_api::capacity::{
     Amounts, Budget, Close, Event, Holder, Out, ReservationId, ToHolder, ToKeeper, Why,
 };
 use hex_core::patience::Patience;
-use hex_testkit::waits::follow::{self, Party};
+use hex_testkit::waits::follow;
 use hyper_quic::rustls;
 
 use super::*;
@@ -34,13 +34,14 @@ fn sliced<T>(answer: Result<T, Refused>) -> Option<Result<T, Refused>> {
     }
 }
 
-/// The keeper's next word on `link`.
+/// The keeper's next word on `link`, by the life of the link's connection, whose end ends its hear too.
 fn heard(link: &mut Link) -> ToHolder {
+    let link = std::cell::RefCell::new(link);
     follow::within(
         &HEAR,
         "the keeper's next word",
-        || Party::Live,
-        |by| sliced(link.hear(by)),
+        || crate::tests::conn_party(&link.borrow().conn),
+        |by| sliced(link.borrow_mut().hear(by)),
     )
     .unwrap()
     .unwrap()
@@ -246,7 +247,7 @@ fn a_connection_that_breaks_the_protocol_is_reset() {
     let read = follow::within(
         &RESET,
         "the keeper's reset",
-        || Party::Live,
+        || crate::tests::conn_party(&conn),
         |by| match conn.read(&mut buf, by) {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => None,
             read => Some(read),

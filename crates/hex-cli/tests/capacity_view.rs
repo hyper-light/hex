@@ -564,6 +564,8 @@ mod two_hosts {
         );
         let lost = kiln.until_lost();
         say("HEX_CV_LOST", lost.0);
+        // A look at the operator's word, a file a person touches: its party is the person running this run, who ends
+        // it by ending the run (the review's C-5), and a file's appearing tells this test no event on every OS.
         follow::until(
             &HEALED,
             "the operator's word that the keeper is back",
