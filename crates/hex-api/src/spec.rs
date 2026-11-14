@@ -1518,6 +1518,57 @@ mod tests {
         }
     }
 
+    /// The review's B-10 (AC-T7.4.1, joint plan step 12): two shares the guest sees at one place are one share too
+    /// many, however their paths are spelled, or the read-only one's intent is lost to the order they are mounted in.
+    /// Do check a VM sharing a project read-only at `/work/hex` beside another directory, read-write, at the same place
+    /// spelled apart: a trailing slash, a `.` component, doubled slashes, a trailing `.`; and drive-absolute, the same
+    /// drive in the other case and with the other separator. Expect each refused as Invalid naming shares[1]'s
+    /// destination. Then shares at other places: a sibling whose name only begins alike, a folder above it, and the
+    /// same path on another drive. Expect those to pass.
+    #[test]
+    fn b10_two_shares_at_one_guest_place_spelled_apart_are_refused() {
+        let share = |source: &str, destination: &str, read_only: bool| Mount {
+            source: PathBuf::from(source),
+            destination: destination.to_owned(),
+            read_only,
+        };
+        let with = |first: &str, second: &str| ShardsImage {
+            shares: vec![
+                share("/srv/projects/hex", first, true),
+                share("/srv/other", second, false),
+            ],
+            ..ShardsImage::new(crate::sim::SIM_IMAGE)
+        };
+        for (first, second) in [
+            ("/work/hex", "/work/hex/"),
+            ("/work/hex", "/work/./hex"),
+            ("/work/hex", "//work/hex"),
+            ("/work/hex", "/work//hex"),
+            ("/work/hex", "/work/hex/."),
+            ("C:\\work\\hex", "c:/work/hex/"),
+        ] {
+            match with(first, second).check() {
+                Err(Refusal::Invalid { what, why }) => assert_eq!(
+                    (what, why.contains("shares[1].destination")),
+                    ("shards image", true),
+                    "{first:?} and {second:?}: {why}"
+                ),
+                other => panic!("{first:?} and {second:?}, one place: {other:?}"),
+            }
+        }
+        for (first, second) in [
+            ("/work/hex", "/work/hexa"),
+            ("/work/hex", "/work"),
+            ("C:\\work\\hex", "D:\\work\\hex"),
+        ] {
+            assert_eq!(
+                with(first, second).check(),
+                Ok(()),
+                "{first:?} and {second:?} are two places"
+            );
+        }
+    }
+
     /// AC-T7.4.1 (joint plan step 12): a Shards image VM of class Shards, its image pinned by a digest
     /// and its size its allocation's. Do: check a pinned image running its members alone, and one with a
     /// command, and read each back from JSON. Expect: both pass, read back whole, and a run of either is
