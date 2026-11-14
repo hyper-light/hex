@@ -801,8 +801,7 @@ fn hostile_records_are_refused_never_a_panic() {
         &[("holder-0", "1")],
         &[("holder-0", "1 has space")],
         &[("holder-0", "x kiln")],
-        &[("holder-1", "1 kiln")],
-        &[holder, ("holder-1", "1 b"), ("holder-2", "1 c")],
+        &[holder, ("holder-1", "1 a")],
         &[("res-0-1-0", "1 0 0 0")],
         &[holder, ("res-0-2-0", "1 0 0 0")],
         &[holder, ("res-0-1", "1 0 0 0")],
@@ -840,6 +839,18 @@ fn hostile_records_are_refused_never_a_panic() {
     let keeper = Keeper::boot(BUDGET, &mut records).unwrap();
     assert_eq!(keeper.epoch(), 5);
     assert_eq!(keeper.foreign(), Amounts::from_array([1, 2, 3, 0]));
+    // No damage either (the review's E-2): a number the person's release freed, and more holders recorded than a
+    // configuration that shrank authorizes.
+    let freed: &[(&str, &str)] = &[("holder-1", "1 kiln"), ("res-1-1-0", "1 0 0 0")];
+    let shrunk: &[(&str, &str)] = &[holder, ("holder-1", "1 b"), ("holder-2", "1 c")];
+    for case in [freed, shrunk] {
+        let records = case
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()));
+        let mut records = Mem(records.collect());
+        let booted = Keeper::boot(BUDGET, &mut records);
+        assert!(booted.is_ok(), "{case:?}: {booted:?}");
+    }
 }
 
 /// AC-T7.4.1, CV9: write every message as JSON and read it back; expect each the same, so the wire can
@@ -1002,6 +1013,104 @@ fn cv6_the_persons_release_of_a_holder_gone_for_good() {
         }]
     );
     assert_eq!(m.keeper.foreign(), cpu(3000));
+}
+
+fn hello_of(name: &str) -> ToKeeper {
+    ToKeeper::Hello {
+        holder: name.into(),
+        epoch: 1,
+        scope: None,
+    }
+}
+
+/// The review's E-2, CV8: two holders configured, joined and holding; the person takes one out of the host's
+/// configuration and the scheduler starts again with one. Expect the keeper to boot (a configuration's change is no
+/// damage) with both holders' reservations still in its view (CV6: only a holder's word or the person's release ends
+/// one), a new holder closed HoldersFull, and the one taken out forgotten on the person's word.
+#[test]
+fn e2_a_holder_taken_out_of_the_configuration_leaves_the_keeper_booting() {
+    let mut m = Machine::new(cpu(8000));
+    let (mut a, mut b) = (holder("kiln-a", 1), holder("kiln-b", 1));
+    m.join(&mut a);
+    m.join(&mut b);
+    m.reserve(&mut a, cpu(3000));
+    m.reserve(&mut b, cpu(2000));
+    let one = Budget {
+        holders: 1,
+        ..BUDGET
+    };
+    let booted = Keeper::boot(one, &mut m.records);
+    assert!(booted.is_ok(), "{booted:?}");
+    let mut keeper = booted.unwrap();
+    assert_eq!(keeper.foreign(), cpu(5000));
+    let full = keeper
+        .hear(hello_of("kiln-c"), Amounts::ZERO, &mut m.records)
+        .unwrap();
+    assert!(
+        matches!(
+            full,
+            ToHolder::Closed {
+                why: Close::HoldersFull { .. },
+                ..
+            }
+        ),
+        "{full:?}"
+    );
+    let forgotten = keeper.forget("kiln-b", &mut m.records).unwrap();
+    assert_eq!(forgotten.map(|f| f.sum), Ok(cpu(2000)));
+    assert_eq!(keeper.foreign(), cpu(3000));
+    let rebooted = Keeper::boot(one, &mut m.records);
+    assert!(rebooted.is_ok(), "{rebooted:?}");
+}
+
+/// The review's E-2, CV6, CV8: one holder configured, joined, then gone for good; the person forgets it and
+/// configures its replacement. Expect the replacement closed HoldersFull before the release, welcomed into the place
+/// the release freed after it (the forgotten holder's record gone with its reservations'), and a keeper booted after
+/// that serving the replacement.
+#[test]
+fn e2_a_forgotten_holders_place_takes_its_replacement() {
+    let one = Budget {
+        holders: 1,
+        ..BUDGET
+    };
+    let mut records = Mem::default();
+    let mut keeper = Keeper::boot(one, &mut records).unwrap();
+    let joined = keeper
+        .hear(hello_of("kiln-a"), Amounts::ZERO, &mut records)
+        .unwrap();
+    assert!(matches!(joined, ToHolder::Welcome { .. }), "{joined:?}");
+    let mut keeper = Keeper::boot(one, &mut records).unwrap();
+    let full = keeper
+        .hear(hello_of("kiln-b"), Amounts::ZERO, &mut records)
+        .unwrap();
+    assert!(
+        matches!(
+            full,
+            ToHolder::Closed {
+                why: Close::HoldersFull { .. },
+                ..
+            }
+        ),
+        "{full:?}"
+    );
+    assert!(keeper.forget("kiln-a", &mut records).unwrap().is_ok());
+    assert!(
+        records.0.keys().all(|name| !name.starts_with("holder-")),
+        "{records:?}"
+    );
+    let welcomed = keeper
+        .hear(hello_of("kiln-b"), Amounts::ZERO, &mut records)
+        .unwrap();
+    assert!(matches!(welcomed, ToHolder::Welcome { .. }), "{welcomed:?}");
+    let mut keeper = Keeper::boot(one, &mut records).unwrap();
+    let again = keeper
+        .hear(hello_of("kiln-b"), Amounts::ZERO, &mut records)
+        .unwrap();
+    assert!(matches!(again, ToHolder::Welcome { .. }), "{again:?}");
+    assert_eq!(
+        keeper.forget("kiln-a", &mut records).unwrap(),
+        Err(NotForgotten::Unknown)
+    );
 }
 
 /// AC-T7.4.1, CLAUDE.md §9: run the capacity view's conformance suite against its simulator; expect every
