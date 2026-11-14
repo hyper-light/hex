@@ -500,7 +500,8 @@ impl ShardsImage {
             }
         }
         // Each share as a mount's paths are checked (its host directory absolute and UTF-8 with no NUL, where the guest
-        // sees it absolute with no `..`), never at the guest's root, which it would hide, and each path seen once.
+        // sees it absolute with no `..`), never at the guest's root, which it would hide, and each place seen once,
+        // however its path is spelled (the review's B-10), so no share's read-only intent is lost to mount order.
         for (at, share) in self.shares.iter().enumerate() {
             let as_image = |e: Refusal| match e {
                 Refusal::Invalid { why, .. } => invalid_image(why),
@@ -519,7 +520,7 @@ impl ShardsImage {
                 .get(..at)
                 .unwrap_or_default()
                 .iter()
-                .any(|s| s.destination == share.destination)
+                .any(|s| same_place(&s.destination, &share.destination))
             {
                 return Err(invalid_image(format!(
                     "{field} {:?} is another share's too",
@@ -639,6 +640,24 @@ fn path_parts(path: &str) -> impl Iterator<Item = &str> {
         (path, false)
     };
     rest.split(move |c| c == '/' || (windows && c == '\\'))
+}
+
+/// Whether two paths [`container_path`] took name one place: the same drive where either is drive-absolute (its letter
+/// in either case, as Windows reads it), then the same steps, past the empty components a doubled or trailing
+/// separator leaves and `.`, which names none (`..` is refused before).
+fn same_place(a: &str, b: &str) -> bool {
+    let drive = |path: &str| {
+        path.chars()
+            .next()
+            .filter(|_| drive_absolute(path))
+            .map(|letter| letter.to_ascii_lowercase())
+    };
+    drive(a) == drive(b) && steps(a).eq(steps(b))
+}
+
+/// The components of an absolute path that each name a step ([`path_parts`] past the empty ones and `.`).
+fn steps(path: &str) -> impl Iterator<Item = &str> {
+    path_parts(path).filter(|part| !part.is_empty() && *part != ".")
 }
 
 /// A host path a spec names: absolute on the host that runs the container (POSIX-absolute on Linux and
