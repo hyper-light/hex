@@ -468,7 +468,8 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
             &ours,
             &[0; NLMSG_HDR],
             &mut scratch,
-            &Patience::measuring("test")
+            &Patience::measuring("test"),
+            &mut None,
         ),
         Ok(())
     );
