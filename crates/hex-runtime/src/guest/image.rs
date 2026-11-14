@@ -464,6 +464,12 @@ struct Slot<T> {
     gone: AtomicBool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's next wait on a slot is refused, as a poisoned lock or the OS refuses one: a test's fault.
+    static WAIT_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// What a wait that follows a slot's thread found ([`Slot::told_within`]).
 enum Told {
     /// Its answer was given (and may have been taken since).
@@ -512,6 +518,13 @@ impl<T> Slot<T> {
     /// Whether its answer was given within `wait`, or its thread ended with none (`None`: until either), as a wait that
     /// follows its party asks: an answer another call has taken since was given all the same.
     fn told_within(&self, wait: Option<Duration>) -> Result<Told, Refusal> {
+        #[cfg(test)]
+        if WAIT_REFUSED.with(|refused| refused.replace(false)) {
+            return Err(Refusal::Os {
+                op: "waiting for a Shards image's answer",
+                why: "refused as the test asked".to_owned(),
+            });
+        }
         let answer = self.answer.lock().map_err(poisoned)?;
         let open = |_: &mut Option<(T, Duration)>| {
             !self.given.load(Ordering::Acquire) && !self.gone.load(Ordering::Acquire)

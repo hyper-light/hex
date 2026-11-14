@@ -120,21 +120,25 @@ impl ImageClass {
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
             return Err(Refusal::os("starting a node VM's boot", why));
         }
-        let bound = waits.boot.deadline();
-        let mut told = slot.told_within(bound)?;
-        if let (Told::NotYet, Some(bound)) = (&told, bound) {
-            let run = run_name(&vm.run);
-            waits.boot.ran_out(
-                bound,
-                bound,
-                &[
-                    Piece::Kind("the boot of node VM "),
-                    Piece::Name(&run),
-                    Piece::Kind(", by its boot's thread"),
-                ],
-            );
-            told = slot.told_within(None)?;
-        }
+        let told = match boot_told(&slot, waits, &vm.run) {
+            Ok(told) => told,
+            // Its wait refused (its lock poisoned, or the OS refused it): the boot is stopped, let go and its row Ended,
+            // so none runs held by no one and booked (the review's F4 side finding 3).
+            Err(why) => {
+                let left = image
+                    .runs
+                    .stop_boot(vm.run)
+                    .and_then(|()| image.runs.forget(vm.run))
+                    .and_then(|()| end_record(books.as_ref(), &mut record, Exit::Unknown));
+                return Err(match left {
+                    Ok(()) => why,
+                    Err(left) => Refusal::Broken(format!(
+                        "node VM {}: {why}; and its boot's stop: {left}",
+                        run_name(&vm.run)
+                    )),
+                });
+            }
+        };
         if !matches!(told, Told::Came) {
             // Its thread ended with no answer: the guest it would have answered, if any, went with it (D231 stops a run
             // it drops).
@@ -250,6 +254,15 @@ impl ImageClass {
                 "node VM {}: its stop answered, and its run hasn't ended",
                 run_name(&run)
             ))),
+        }
+    }
+
+    /// Stops node VM `run` as [`ImageClass::stop_node`] does, for a caller that can answer no refusal (its guest
+    /// runtime's drop): one is told on the process's log, `hex.guest event=node_vm_unstopped`, its run and why, never
+    /// dropped (the review's F4 side finding 3; CLAUDE.md §3).
+    pub(in crate::guest) fn stop_node_told(&self, run: NodeRun) {
+        if let Err(why) = self.stop_node(run) {
+            tell(&unstopped_line(&run, &why));
         }
     }
 
@@ -466,10 +479,58 @@ pub(super) fn ready_line(
 /// Writes event `line` to this process's stderr, the node's log, as the node VM store's lines go: a write that fails
 /// has no other place to say it.
 fn tell(line: &str) {
+    #[cfg(test)]
+    TOLD.with(|told| told.borrow_mut().push(line.to_owned()));
     use std::io::Write as _;
     let _ = std::io::stderr()
         .lock()
         .write_all(format!("{line}\n").as_bytes());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The lines this thread has told ([`tell`]), as its tests read them.
+    pub(in crate::guest) static TOLD: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Node VM `run`'s boot answered within the boot's W*, or past it, its run-out told, followed by its thread's life
+/// (decision 9): whether it came, or its thread ended with none.
+fn boot_told(
+    slot: &Slot<Booted>,
+    waits: &super::ImageWaits,
+    run: &NodeRun,
+) -> Result<Told, Refusal> {
+    let bound = waits.boot.deadline();
+    let told = slot.told_within(bound)?;
+    let (Told::NotYet, Some(bound)) = (&told, bound) else {
+        return Ok(told);
+    };
+    let name = run_name(run);
+    waits.boot.ran_out(
+        bound,
+        bound,
+        &[
+            Piece::Kind("the boot of node VM "),
+            Piece::Name(&name),
+            Piece::Kind(", by its boot's thread"),
+        ],
+    );
+    slot.told_within(None)
+}
+
+/// `hex.guest event=node_vm_unstopped run=<a JSON string> why=<a JSON string>`: node VM `run`'s stop refused with `why`
+/// where no caller could be answered it ([`ImageClass::stop_node_told`]).
+fn unstopped_line(run: &NodeRun, why: &Refusal) -> String {
+    use hex_api::event::Value::Text;
+    hex_api::event::line(
+        "hex.guest",
+        "node_vm_unstopped",
+        &[
+            ("run", Text(&run_name(run))),
+            ("why", Text(&why.to_string())),
+        ],
+    )
 }
 
 /// A call about node VM `run` that isn't running here.

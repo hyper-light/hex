@@ -6085,6 +6085,71 @@ fn f4s1_a_box_whose_start_has_written_it_ready_is_never_held() {
     assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
+/// A node VM's run as its record and its lines name it: its 16 bytes in lowercase hex.
+fn run_hex(run: &NodeRun) -> String {
+    run.bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The review's F4 side finding (3) (AC-T7.4.1; CLAUDE.md §3): a guest runtime that ends while its node VM's stop is
+/// refused says so, never dropping the refusal, as its drop can return none. Do boot a node's guest under shards-init,
+/// refuse its row's Ended write as a full disk refuses it, and drop the runtime. Expect a `hex.guest
+/// event=node_vm_unstopped` line naming its run and the write's refusal.
+#[test]
+fn f4s3_a_node_vm_whose_stop_is_refused_as_its_runtime_ends_is_told() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), None);
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let run = *owner.node_vms.lock().unwrap().keys().next().unwrap();
+    owner.refuse_ended.store(true, Ordering::SeqCst);
+    node::TOLD.with(|told| told.borrow_mut().clear());
+    drop(runtime);
+    let told = node::TOLD.with(|told| told.borrow().clone());
+    assert!(
+        told.iter()
+            .any(|line| line.contains("event=node_vm_unstopped")
+                && line.contains(&run_hex(&run))
+                && line.contains("no space left on the device")),
+        "{told:?}"
+    );
+    assert!(relay.join().unwrap());
+}
+
+/// The review's F4 side finding (3) (AC-T7.4.1): a node VM's boot whose wait for its answer fails is stopped and its row
+/// Ended, never left under way, held by no one and booked. Do boot a node VM whose boot's wait is refused (the test's
+/// fault: its slot's next wait refused, as a poisoned lock or the OS refuses one). Expect the boot refused in the wait's
+/// words, and its row Ended.
+#[test]
+fn f4s3_a_node_vm_boot_whose_wait_fails_is_stopped_and_its_row_ended() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    WAIT_REFUSED.with(|refused| refused.set(true));
+    let booted = runtime.images.boot_node(&vm);
+    assert!(
+        matches!(&booted, Err(Refusal::Os { why, .. }) if why.contains("as the test asked")),
+        "{booted:?}"
+    );
+    let row = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (row.phase, row.exit.is_some()),
+        (NodeVmPhase::Ended, true),
+        "{row:?}"
+    );
+}
+
 /// The review's B-12 (AC-T7.4.1): a call on an image VM whose record can't be read is refused saying why it can't. Do
 /// keep an image box's record unreadable in its owner, with why, and inspect the box through the image class. Expect it
 /// refused as broken, in the record's own words.
