@@ -507,7 +507,11 @@ fn milli_over(ns: u64, span: Duration) -> Option<u64> {
 /// its VMM's own where its host read each vCPU's both times (D241), its VMM's own the whole less its vCPUs', never less
 /// than none past the clocks' steps; whole where it didn't. Two readings naming different vCPU counts are refused,
 /// typed: no vCPU's time is paired with another's.
-fn ran(cpu_ns: u64, now: Option<&[u64]>, before: Option<&[u64]>) -> Result<Cpu, ChargeError> {
+pub(crate) fn ran(
+    cpu_ns: u64,
+    now: Option<&[u64]>,
+    before: Option<&[u64]>,
+) -> Result<Cpu, ChargeError> {
     let (Some(now), Some(before)) = (now, before) else {
         return Ok(Cpu::Whole(Duration::from_nanos(cpu_ns)));
     };
