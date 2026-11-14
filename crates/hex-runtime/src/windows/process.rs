@@ -24,10 +24,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Class, Refusal, Signal, Usage};
 use hex_core::job::{self, Sent};
+use hex_core::patience::Piece;
 use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 
 use super::sys::{self, Job, Spawn, Started};
@@ -157,12 +159,24 @@ impl JobBox {
         }
     }
 
-    /// Ends what runs in the box a node before this one made as `name`, for a box recovery removes. One no
+    /// Ends what runs in the box a node before this one made as `name`, for a box recovery removes, and waits for its
+    /// job to empty as decision 9 waits ([`follow_emptying`]): TerminateJobObject only begins its members' ends. One no
     /// job holds has nothing left to end.
     pub fn end_named(name: &str) -> Result<(), Refusal> {
         if let Some(job) = Job::open(name).map_err(|e| Refusal::os("opening a box's job", e))? {
+            let killed = Instant::now();
             job.terminate(job::terminated_code(Signal::KILL))
                 .map_err(|e| Refusal::os("ending a box's job", e))?;
+            follow_emptying(
+                &job,
+                killed,
+                &[
+                    Piece::Kind("the killed job "),
+                    Piece::Name(name),
+                    Piece::Kind(" of a box recovery removes, by its members' process handles"),
+                ],
+                name,
+            )?;
         }
         Ok(())
     }
@@ -609,9 +623,10 @@ impl JobBox {
     }
 
     /// Ends the box: marks it stopping, records that it ended the job for KILL (so a member's exit reads
-    /// as Signal(9)), and requests termination. Acceptance is not scope completion: the same native
-    /// job must positively report no members before deletion succeeds. An OS error retains retry
-    /// authority; a previously accepted request is observed rather than dispatched again.
+    /// as Signal(9)), requests termination, and waits for the job to empty as decision 9 waits
+    /// ([`follow_emptying`]). Acceptance is not scope completion: TerminateJobObject only begins its members'
+    /// ends, and the same native job must positively report no members before deletion succeeds. An OS error
+    /// retains retry authority; a previously accepted request is observed rather than dispatched again.
     pub fn delete(&self) -> Result<(), Refusal> {
         self.state.stopping.store(true, Ordering::SeqCst);
         let request = {
@@ -625,6 +640,7 @@ impl JobBox {
                 }
             }
         };
+        let killed = Instant::now();
         if request {
             self.native_job()?
                 .terminate(job::terminated_code(Signal::KILL))
@@ -634,12 +650,103 @@ impl JobBox {
                 c.deletion = Deletion::Requested;
             }
         }
-        if self.live_processes()? != 0 {
-            return Err(self.uncertain("its job still holds live processes as it is deleted"));
+        match self.state.job.get() {
+            Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => {
+                let id = match self.owner() {
+                    OwnerRef::Box(id) => id.as_str(),
+                    OwnerRef::Pool(_) => "",
+                };
+                follow_emptying(
+                    job,
+                    killed,
+                    &[
+                        Piece::Kind("the killed job of box "),
+                        Piece::Name(id),
+                        Piece::Kind(", by its members' process handles"),
+                    ],
+                    id,
+                )?;
+            }
+            Some(NativeScope::NotSubmitted) => {}
+            None => return Err(super::proc::ObserveError::Unpublished.refusal()),
         }
         self.state.counts()?.deletion = Deletion::Released;
         Ok(())
     }
+}
+
+/// Waits for killed job `job` to empty, as decision 9 waits on [`crate::emptying::EMPTYING`] (the review's E-12): within
+/// W*, the slowest emptying seen, its emptying; past it, its run-out told once, naming `party`, and the job followed by
+/// its members' own ends ([`empties_within`]) however late, never refused at a time, nor said done before it is: it
+/// refused at once while TerminateJobObject's members were still ending, and a recovery's end didn't wait at all.
+/// `held` names the box to the test hold ([`crate::emptying::hold`]).
+fn follow_emptying(
+    job: &Job,
+    killed: Instant,
+    party: &[Piece<'_>],
+    held: &str,
+) -> Result<(), Refusal> {
+    crate::emptying::followed(&crate::emptying::EMPTYING, killed, party, |slice| {
+        empties_within(job, slice, held)
+    })
+}
+
+/// Whether killed job `job` empties within `slice` (`Duration::MAX`: until it does): the first member it lists waited
+/// for by its process handle, which the kernel signals at the member's end (WaitForSingleObject, no poll), and the job
+/// looked at again, until it lists none (`JobObjectBasicProcessIdList`'s count, which an ended member leaves though its
+/// handle is held). The job is terminated again before each member's wait, so a process a member started as the job was
+/// terminated, which may have joined it after the termination reached the rest, is ended too (terminating members already
+/// ending changes nothing). A member listed that ended before it could be opened (its process gone, or its id another's)
+/// is looked past. The job's completion port isn't the event:
+/// Microsoft documents its messages as not guaranteed to arrive (`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`), and its
+/// active-process count lingers while a terminated member's handle is held ([`Job::live_processes`]).
+fn empties_within(job: &Job, slice: Duration, held: &str) -> Result<bool, Refusal> {
+    #[cfg(test)]
+    if !crate::emptying::hold::lets_empty(held, slice) {
+        return Ok(false);
+    }
+    #[cfg(not(test))]
+    let _ = held;
+    let by = Instant::now().checked_add(slice);
+    loop {
+        let process = match job.member() {
+            Ok(sys::Member::Empty) => return Ok(true),
+            Ok(sys::Member::Process(process)) => process,
+            Err(e) if gone_before_its_open(&e) => continue,
+            Err(e) => return Err(Refusal::os("reading a killed box's job", e)),
+        };
+        job.terminate(job::terminated_code(Signal::KILL))
+            .map_err(|e| Refusal::os("ending a box's job", e))?;
+        let timeout = match by {
+            None => u32::MAX,
+            Some(by) => match by.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => ceil_millis(left),
+                _ => return Ok(false),
+            },
+        };
+        if !sys::wait(&process, timeout)
+            .map_err(|e| Refusal::os("waiting on a killed box's member", e))?
+        {
+            return Ok(false);
+        }
+    }
+}
+
+/// Whether a member the job listed ended before it could be opened: its process gone (OpenProcess's
+/// `ERROR_INVALID_PARAMETER`, no handle keeping it), or its id another process's, outside the job ([`Job::member`]'s
+/// `WouldBlock`). Either way the job lists it no more.
+fn gone_before_its_open(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::WouldBlock
+        || e.raw_os_error()
+            == i32::try_from(windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER).ok()
+}
+
+/// `left` in WaitForSingleObject's whole milliseconds, rounded up so a slice's wait never ends before its time, at most
+/// the longest finite wait (`INFINITE`, `u32::MAX`, less one).
+fn ceil_millis(left: Duration) -> u32 {
+    u32::try_from(left.as_nanos().div_ceil(1_000_000))
+        .unwrap_or(0xFFFF_FFFE)
+        .min(0xFFFF_FFFE)
 }
 
 impl Drop for JobBox {
