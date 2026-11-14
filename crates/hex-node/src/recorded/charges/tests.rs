@@ -379,7 +379,14 @@ fn a10_the_fleets_budget_is_what_is_free_and_what_its_vms_hold() {
         (Holder::Box(&native), res3(2_000, 8 * GIB, 0)),
         (Holder::Box(&whole), res3(4_000, 4 * GIB, 10 * GIB)),
     ];
-    let budget = measured(&io, res3(32_000, 64 * GIB, 100 * GIB), &booked, 4 * GIB).unwrap();
+    let budget = measured(
+        &io,
+        res3(32_000, 64 * GIB, 100 * GIB),
+        &booked,
+        4 * GIB,
+        CapacityResources::default(),
+    )
+    .unwrap();
     assert_eq!(budget, res3(26_000, 9 * GIB, 10 * GIB));
 }
 
@@ -398,9 +405,15 @@ fn a10_hexs_own_boxes_are_never_counted_twice() {
             let io = Record::default();
             io.taken.borrow_mut().insert("proc-1".to_owned(), taken);
             io.set_free(free, 0);
-            measured(&io, res3(32_000, 64 * GIB, 0), &booked, 0)
-                .unwrap()
-                .mem_bytes
+            measured(
+                &io,
+                res3(32_000, 64 * GIB, 0),
+                &booked,
+                0,
+                CapacityResources::default(),
+            )
+            .unwrap()
+            .mem_bytes
         })
         .collect();
     assert_eq!(budgets, [12 * GIB, 12 * GIB, 10 * GIB]);
@@ -422,8 +435,14 @@ fn a10_the_fleets_budget_never_passes_what_is_free_and_what_its_vms_hold() {
                         io.taken.borrow_mut().insert("proc-1".to_owned(), taken);
                         io.set_free(free, free);
                         let booked = [(Holder::Box(&native), res3(0, booking, booking))];
-                        let budget =
-                            measured(&io, res3(32_000, machine, machine), &booked, held).unwrap();
+                        let budget = measured(
+                            &io,
+                            res3(32_000, machine, machine),
+                            &booked,
+                            held,
+                            CapacityResources::default(),
+                        )
+                        .unwrap();
                         assert!(
                             budget.mem_bytes <= free + held && budget.disk_bytes <= free,
                             "machine {machine}, free {free}, held {held}, booking {booking}, taken {taken}: \
@@ -456,7 +475,15 @@ fn a10_a_window_reads_what_is_free_after_its_vms_and_its_boxes() {
         &io,
         &holders(&[image, managed]),
         Vec::new(),
-        |held| measured(&io, res3(32_000, 64 * GIB, 0), &booked, held),
+        |held| {
+            measured(
+                &io,
+                res3(32_000, 64 * GIB, 0),
+                &booked,
+                held,
+                CapacityResources::default(),
+            )
+        },
         Instant::now(),
     )
     .unwrap();
@@ -895,6 +922,8 @@ fn books(dir: &std::path::Path) -> crate::recorded::Books {
         last_boot: None,
         charges: std::sync::OnceLock::new(),
         node_vm_ends: std::sync::Mutex::new(Vec::new()),
+        capacity_view: std::sync::atomic::AtomicBool::new(false),
+        reserved: std::sync::Mutex::new(None),
     }
 }
 
@@ -3049,6 +3078,194 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
                 format!("its record can't be read: {why}; counted at its machine")
             )]
         )
+    );
+}
+
+/// A node whose platform holds no window (A-10), `served` where a capacity view serves its machine, beside a process box
+/// capped at all but 8 CPUs of the machine, keeping a Shards image VM as large as the machine booked at 2 CPUs whose run
+/// says 70 ms; its charge learner set with no thread of its own. Its stand-in keeps each rate it holds.
+fn reserving(
+    dir: &std::path::Path,
+    served: bool,
+) -> (std::sync::Arc<crate::recorded::Recorded<Images>>, Images) {
+    let images = Images::default();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    let node = std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir).unwrap());
+    node.set_capacity_view(served);
+    let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let cap = u32::try_from(machine.cpu_milli.saturating_sub(8_000)).unwrap();
+    store.put(&process_box("proc-1", cap, GIB)).unwrap();
+    let mut image = image_vm("img-1", 1);
+    image.spec.allocation = Some(
+        machine_cost(machine)
+            .allocate(CapacityResources::default())
+            .unwrap()
+            .booked_at(res(2_000, 2 * GIB)),
+    );
+    store.put(&image).unwrap();
+    node.set_charges().unwrap();
+    (node, images)
+}
+
+/// What `node`'s Shards class's capacity answer tells its learner takes off its fleet's budget for the capacity view's
+/// holders (A-10).
+fn told_reservations(
+    node: &crate::recorded::Recorded<Images>,
+) -> Option<hex_api::LearnedReservations> {
+    let machine = node.machine().unwrap();
+    let mut capacity = hex_api::Capacity {
+        own: Default::default(),
+        id: "shards".into(),
+        total: machine,
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(machine_cost(machine)),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    };
+    node.books
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &node.books.store.all().unwrap(),
+        )
+        .unwrap();
+    capacity.learned.and_then(|learned| learned.reservations)
+}
+
+/// The keeper of epoch `keeper`'s word: `cpu_milli` of CPU reserved.
+fn word(keeper: u64, cpu_milli: u64) -> hex_api::Reserved {
+    hex_api::Reserved {
+        keeper,
+        reserved: res(cpu_milli, 0),
+    }
+}
+
+/// The review's A-10 (AC-T7.4.1; ROOT, 2026-11-14): what the capacity view's holders reserve comes off the fleet's budget
+/// once its keeper says it. Do tell a node a capacity view serves, beside a process box capped at all but 8 CPUs of the
+/// machine, keeping an image VM booked at 2 CPUs that asks its ceiling, its keeper's word of 3 CPUs reserved, and run a
+/// window. Expect the word taken, the VM capped at the 5 CPUs left, and the answer telling the word heard.
+#[test]
+fn a10_a_keepers_word_comes_off_the_fleets_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, images) = reserving(dir.path(), true);
+    hex_api::Runtime::reserved(&*node, word(1, 3_000)).unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), 5_000)]
+    );
+    assert_eq!(
+        told_reservations(&node),
+        Some(hex_api::LearnedReservations::Heard {
+            keeper: 1,
+            reserved: res(3_000, 0),
+            unconfigured: false,
+        })
+    );
+}
+
+/// The review's A-10 (ROOT, 2026-11-14: the cold case told, never guessed): a node a capacity view serves whose keeper
+/// hasn't spoken since it started learns nothing, its VMs booked whole at their receipts; its keeper's word then has it
+/// learn. Do run a window of such a node; then tell it its keeper's word, 3 CPUs reserved, and run another. Expect no rate
+/// held and the answer telling kiln's reservations unheard; then the VM capped at the 5 CPUs left, the word told heard.
+#[test]
+fn a10_a_node_whose_keeper_hasnt_spoken_books_its_vms_whole_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, images) = reserving(dir.path(), true);
+    assert_eq!(node.learn_window(), None, "no window while it learns none");
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        Vec::<(String, u64)>::new()
+    );
+    assert_eq!(
+        told_reservations(&node),
+        Some(hex_api::LearnedReservations::Unheard)
+    );
+    hex_api::Runtime::reserved(&*node, word(1, 3_000)).unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), 5_000)]
+    );
+    assert!(matches!(
+        told_reservations(&node),
+        Some(hex_api::LearnedReservations::Heard { keeper: 1, .. })
+    ));
+}
+
+/// The review's A-10 (ROOT, 2026-11-14): where no capacity view serves a node's machine, no holder reserves room there,
+/// so none is counted, and its answers say so plainly. Do run a window of a node no view serves. Expect the VM capped at
+/// the 8 CPUs the process box leaves, and the answer telling no view serves the machine.
+#[test]
+fn a10_a_node_no_capacity_view_serves_counts_no_reservations_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, images) = reserving(dir.path(), false);
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), 8_000)]
+    );
+    assert_eq!(
+        told_reservations(&node),
+        Some(hex_api::LearnedReservations::Unserved)
+    );
+}
+
+/// The review's A-10 (ROOT, 2026-11-14: a word that comes without the flag is still taken, told): a keeper's word to a
+/// node whose configuration names no capacity view is counted, and its answers say the configuration names none. Do tell
+/// a node no view serves a keeper's word of 3 CPUs reserved, and run a window. Expect the VM capped at the 5 CPUs left
+/// and the answer telling the word heard, its configuration naming no view.
+#[test]
+fn a10_a_keepers_word_to_a_node_configured_with_none_is_taken_and_told() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, images) = reserving(dir.path(), false);
+    hex_api::Runtime::reserved(&*node, word(1, 3_000)).unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), 5_000)]
+    );
+    assert_eq!(
+        told_reservations(&node),
+        Some(hex_api::LearnedReservations::Heard {
+            keeper: 1,
+            reserved: res(3_000, 0),
+            unconfigured: true,
+        })
+    );
+}
+
+/// The review's A-10 (CV2: a keeper's epoch grows at each of its boots): a node keeps its latest keeper's word, and an
+/// older keeper's changes nothing, refused. Do tell a node keeper 2's word of 3 CPUs, then keeper 1's of 1 CPU, then
+/// keeper 2's of 4 CPUs, and run a window. Expect keeper 1's refused naming both keepers, and the VM capped at the 4 CPUs
+/// the latest word leaves.
+#[test]
+fn a10_an_older_keepers_word_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, images) = reserving(dir.path(), true);
+    hex_api::Runtime::reserved(&*node, word(2, 3_000)).unwrap();
+    let why = hex_api::Runtime::reserved(&*node, word(1, 1_000)).unwrap_err();
+    assert!(
+        why.to_string().contains("keeper 1") && why.to_string().contains("keeper 2"),
+        "{why}"
+    );
+    hex_api::Runtime::reserved(&*node, word(2, 4_000)).unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), 4_000)]
     );
 }
 

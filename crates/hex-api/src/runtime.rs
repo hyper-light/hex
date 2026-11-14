@@ -111,6 +111,25 @@ pub trait Runtime: Send + Sync {
         })
     }
 
+    /// The next connection member `member`'s harness makes to its MCP bridge (D254) in running Shards image box `id`,
+    /// whose spec asks the bridge of it ([`crate::ImageMember::mcp`]; goal 2's item 3), as a program: its stdout what the
+    /// harness sends, its stdin what it is sent, given once ([`Proc::streams`]), and no stderr; its end the connection's
+    /// end. Each call takes one connection. Waited for as decision 9 has a wait follow its party: within its W*, past it
+    /// the run-out told once and the run's agent-control connection followed, never a timer. Refused, typed: by a class
+    /// whose boxes have no members, naming the class; `Invalid` for a member whose spec asks no bridge, or one its run
+    /// declares not; as `member` is for a box that isn't running; `NotRunning(id, "mcp: its member takes no MCP
+    /// connection")` where the run's member takes none, and `NotRunning(id, "mcp: its run ended")` where the run's
+    /// connection ends first.
+    fn mcp(&self, id: &BoxId, member: &crate::Member) -> Result<Box<dyn Proc>, Refusal> {
+        let _ = member;
+        Err(Refusal::Invalid {
+            what: "mcp",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+            ),
+        })
+    }
+
     /// Sends `signal` to member `member` of running Shards image box `id` alone, on its own lane of its run's
     /// agent-control endpoint (goal 2's item 2; D238), KILL among them: the member's, never its VM's, which runs on.
     /// Refused `NotRunning(id, "signal a member: it has ended")` where the member has ended, `NotRunning(id, "signal a
@@ -195,6 +214,17 @@ pub trait Runtime: Send + Sync {
             why: format!(
                 "box {id} runs no VM process of its own: only a Shards image VM's run host reads its cost"
             ),
+        })
+    }
+
+    /// The machine's capacity view's word, what every holder has reserved through its keeper (joint plan steps 13 and
+    /// 14, C7; the review's A-10), which a node's charge learner takes off its fleet's budget: a node keeps the latest
+    /// keeper's, refusing an older keeper's, typed. A runtime that runs no charge learner refuses it, naming why.
+    fn reserved(&self, word: Reserved) -> Result<(), Refusal> {
+        let _ = word;
+        Err(Refusal::Invalid {
+            what: "reserved",
+            why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
         })
     }
 }
@@ -1485,6 +1515,42 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_unacted"
     )]
     pub unacted: Vec<LearnedUnacted>,
+    /// What its node's learner takes off its fleet's budget for the holders the machine's capacity view serves (C7; the
+    /// review's A-10), as its node's configuration and its keeper's word say. Added after the unacted VMs, so absent
+    /// means none told (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservations: Option<LearnedReservations>,
+}
+
+/// The machine's capacity view's word to its node (joint plan steps 13 and 14, C7; the review's A-10): what every holder
+/// has reserved through its keeper (`capacity::Keeper::foreign`), as the keeper of epoch `keeper` holds it, which the
+/// node's charge learner takes off its fleet's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reserved {
+    /// The keeper's epoch, which grows at each of its boots (CV2, CV11): a node keeps the latest keeper's word.
+    pub keeper: u64,
+    pub reserved: CapacityResources,
+}
+
+/// What a node's charge learner takes off its fleet's budget for the holders the machine's capacity view serves (C7;
+/// the review's A-10), each state told, never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LearnedReservations {
+    /// No capacity view serves its machine, as its node's configuration says (no `--capacity-view`): no holder reserves
+    /// room there, so none is counted.
+    Unserved,
+    /// A capacity view serves its machine, and its keeper hasn't spoken since its node started: kiln's reservations not
+    /// yet heard, so its VMs are booked whole, at their receipts, and none is learned until it speaks.
+    Unheard,
+    /// Its keeper's word, counted: `reserved` as the keeper of epoch `keeper` holds it, `unconfigured` where its node's
+    /// configuration names no capacity view though a keeper spoke (`--capacity-view` missing).
+    Heard {
+        keeper: u64,
+        reserved: CapacityResources,
+        unconfigured: bool,
+    },
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1777,6 +1843,7 @@ impl Learned {
                 "learned unacted VMs",
                 LearnedUnacted::try_clone,
             )?,
+            reservations: self.reservations,
         })
     }
 }
@@ -2328,7 +2395,18 @@ pub trait Proc: Send {
     /// The caller's ends of the streams its exec asked for ([`crate::Stdio::ask`]), once: a later call gives
     /// none.
     fn streams(&mut self) -> Result<crate::Given, Refusal>;
+
+    /// Its kill, apart from it (goal 2's item 3; ROOT, 2026-11-14): a `Proc` whose [`Proc::wait_for`] holds `&mut` gives
+    /// a killer that another thread can call while the wait goes on, as a node holding it for a remote caller needs (its
+    /// end waited for on a thread of its own; its caller's kill and the disconnect rule from others). Given once. None
+    /// means the `Proc` ends only by its own end or its stdin's close.
+    fn killer(&mut self) -> Option<Killer> {
+        None
+    }
 }
+
+/// [`Proc::killer`]'s kill: [`Proc::kill`] once, from another thread, `Ok` once sent or where it had ended.
+pub type Killer = Box<dyn FnOnce() -> Result<(), Refusal> + Send>;
 
 /// A program and the caller's ends of the streams its exec asked for ([`crate::Stdio::make_asked`]), held
 /// until [`Proc::streams`] takes them: a runtime whose programs take pipes wraps its own `Proc` in it.

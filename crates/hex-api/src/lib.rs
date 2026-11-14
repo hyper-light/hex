@@ -54,12 +54,13 @@ pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, ControlWake,
     Execution, Exit, GpuEligibility, GuestEnd, GuestFailure, GuestTime, HostUse, ImageArch,
-    ImageOs, ImagePlatform, IoKind, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
+    ImageOs, ImagePlatform, IoKind, Killer, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
     LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
-    LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause,
-    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, MachineTime, Membership, NodeRun,
-    NodeVmPhase, NodeVmReceipt, Proc, RateHeld, Refusal, RouteKey, RouteOffer, RouteReceipt,
-    Runtime, RuntimeCost, Signal, StartedFrom, Upstream, Usage, VmSize,
+    LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    LearnedWindow, LifecycleCause, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
+    MachineTime, Membership, NodeRun, NodeVmPhase, NodeVmReceipt, Proc, RateHeld, Refusal,
+    Reserved, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, StartedFrom,
+    Upstream, Usage, VmSize,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, ImageMember,

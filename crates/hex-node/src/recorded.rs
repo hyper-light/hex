@@ -534,6 +534,12 @@ struct Books {
     /// Joint plan step 39, place 1: the last-resort ends a recovery read back from the node VM rows it let go, kept for
     /// the charge learner, which starts after it ([`Recorded::start_charges`]); at most the rows a store scans.
     node_vm_ends: Mutex<Vec<hex_api::LearnedEnd>>,
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10): its keeper's word is then awaited before its charge learner learns ([`Recorded::set_capacity_view`]).
+    capacity_view: std::sync::atomic::AtomicBool,
+    /// The machine's capacity view's latest word, what every holder has reserved through its keeper (the review's A-10),
+    /// kept for the charge learner: none until its keeper speaks ([`Runtime::reserved`]).
+    reserved: Mutex<Option<hex_api::Reserved>>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1977,6 +1983,16 @@ impl Drop for ForwardTurn {
 }
 
 impl<R: Recover> Recorded<R> {
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10, CV10's configured form): where one does, the charge learner learns nothing until its keeper has
+    /// spoken since the node started, its VMs booked whole meanwhile, told; where none does, no holder reserves room
+    /// there. Set before the learner starts.
+    pub fn set_capacity_view(&self, served: bool) {
+        self.books
+            .capacity_view
+            .store(served, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Tells the charge learner a box has begun, or a node VM has booted (joint plan step 14, C1; A-9): one holding no
     /// cap runs a window at once; one waiting out its window reads it at the window's end. Nothing where no learner
     /// runs.
@@ -2060,6 +2076,8 @@ impl<R: Recover> Recorded<R> {
                 last_boot,
                 charges: std::sync::OnceLock::new(),
                 node_vm_ends: Mutex::new(Vec::new()),
+                capacity_view: std::sync::atomic::AtomicBool::new(false),
+                reserved: Mutex::new(None),
             }),
         })
     }
@@ -2590,6 +2608,24 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             learner.failed(why);
             learner.next_window()
         };
+        // What the capacity view's holders have reserved, as the node's configuration and its keeper's word say (A-10):
+        // until the keeper of a view that serves its machine has spoken since the node started, its VMs are booked whole,
+        // none learned, told so, and its keeper's word wakes it.
+        let reservations = match self.books.reservations() {
+            Ok(reservations) => reservations,
+            Err(why) => return fail(why),
+        };
+        let reserved = {
+            let Ok(mut learner) = shared.lock() else {
+                return None;
+            };
+            learner.told_reservations(reservations);
+            match reservations {
+                hex_api::LearnedReservations::Unheard => return learner.next_window(),
+                hex_api::LearnedReservations::Heard { reserved, .. } => reserved,
+                hex_api::LearnedReservations::Unserved => hex_api::CapacityResources::default(),
+            }
+        };
         let read = self.books.store.all().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
@@ -2665,7 +2701,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             &io,
             &sorted.learned,
             unreadable,
-            |held| charges::measured(&io, machine, &sorted.booked, held),
+            |held| charges::measured(&io, machine, &sorted.booked, held, reserved),
             std::time::Instant::now(),
         );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
@@ -2730,6 +2766,19 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
 }
 
 impl Books {
+    /// What the charge learner takes off its fleet's budget for the capacity view's holders now (the review's A-10), as
+    /// the node's configuration and its keeper's latest word say ([`charges::reservations`]).
+    fn reservations(&self) -> Result<hex_api::LearnedReservations, Refusal> {
+        let word = *self
+            .reserved
+            .lock()
+            .map_err(|_| broken("the keeper's word's lock was poisoned"))?;
+        Ok(charges::reservations(
+            self.capacity_view.load(std::sync::atomic::Ordering::SeqCst),
+            word,
+        ))
+    }
+
     /// What a VM class's capacity answer carries of the charge learner (joint plan step 14, C8), fitted to one message:
     /// nothing where no learner runs.
     fn attach_learned(
@@ -3031,6 +3080,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.member(id, member)
     }
 
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.mcp(id, member)
+    }
+
     fn signal_member(
         &self,
         id: &BoxId,
@@ -3075,6 +3128,21 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// such box while its record named devices, as the delete finds it gone then.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
         self.delete_by(id, |runtime| runtime.delete_with_host_use(id), None)
+    }
+
+    /// The machine's capacity view's word, kept for the charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed; the learner then told, so one waiting for its keeper's first word runs a window now.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        charges::keep_word(
+            &mut *self
+                .books
+                .reserved
+                .lock()
+                .map_err(|_| broken("the keeper's word's lock was poisoned"))?,
+            word,
+        )?;
+        self.begun();
+        Ok(())
     }
 }
 
