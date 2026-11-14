@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CLAUDE.md §4 and Ada's rule (2026-11-06): the macOS installer's uninstall waits for a pool user's processes
 # to end after SIGKILL by the fact (pgrep finds none), bounded by the measured kill-to-empty envelope doubled
-# for the user's size, the bound hex_core::drain gives the helper and the process class
-# (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt). Pure: pgrep and pkill are stubs.
+# for the user's size (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt). Pure: pgrep and
+# pkill are stubs.
 # `bash bench/install/macos_drain_test.sh`, exit 0 when every case holds.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -13,7 +13,7 @@ set +e
 FAILS=0
 check() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1: want $3, got $2"; FAILS=1; fi; }
 
-# The same envelope as hex_core::drain::bound: 2 x (0.883 ms + 0.298 ms per member past the first).
+# The envelope: 2 x (0.883 ms + 0.298 ms per member past the first).
 check "one member's bound" "$(drain_bound_s 1)" 0.001766
 check "32 members' bound" "$(drain_bound_s 32)" 0.020242
 check "6,000 members' bound" "$(drain_bound_s 6000)" 3.577170

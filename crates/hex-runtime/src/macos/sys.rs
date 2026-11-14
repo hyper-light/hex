@@ -171,6 +171,13 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
     }))
 }
 
+/// Process `pid`'s effective user id, `proc_bsdinfo`'s `pbi_uid`: XNU fills it with `kauth_cred_getuid`, the id a
+/// `PROC_UID_ONLY` listing matches ([`user_pids`]; `bsd/kern/proc_info.c`). `None` when no process has that pid
+/// (`ESRCH`).
+pub(crate) fn uid_of(pid: i32) -> io::Result<Option<u32>> {
+    Ok(bsdinfo(pid)?.map(|info| info.pbi_uid))
+}
+
 /// `proc_pidinfo(PROC_PIDTBSDINFO)` of `pid`, or `None` when no process has that pid (`ESRCH`).
 fn bsdinfo(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();

@@ -349,7 +349,7 @@ pub(super) fn guest_time(
     };
     let took = began.elapsed();
     match answer {
-        Ok(used) => {
+        Ok(shards_api::ManagedUsed::Running(used)) => {
             USE.answered(took);
             match used.microvm.guest {
                 Ok(times) => super::image::vcpus_ns(
@@ -362,7 +362,11 @@ pub(super) fn guest_time(
             }
         }
         Err(shards_api::Refusal::Unsupported { why, .. }) => Ok(ManagedGuestTime::Unheld(why)),
-        Err(shards_api::Refusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, "host_use")),
+        // Its end, with what its microVM used in all (Shards' D260), or the end alone where it came between: the box
+        // no longer runs.
+        Ok(shards_api::ManagedUsed::Ended(_)) | Err(shards_api::Refusal::Ended(_)) => {
+            Err(Refusal::NotRunning(id.try_clone()?, "host_use"))
+        }
         Err(why) => Err(refusal("asking a managed VM's use", &why)),
     }
 }

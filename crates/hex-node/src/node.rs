@@ -1124,6 +1124,7 @@ impl Node {
                 .saturating_add(self.abandoned.unrecorded(id)?),
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -1647,6 +1648,7 @@ impl Node {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -1918,6 +1920,12 @@ impl Runtime for Node {
         }
         // node_key is stable across this state directory's recovery, shared by both native classes.
         let mut capacity = self.native_capacity()?;
+        // Its boxes' CPU time together, everything under its box root since the root was made (the review's A-8), so
+        // a host reading this node's own CPU (a shared guest's) measures over intervals its boxes come and go in.
+        capacity.own.boxes_cpu_ns = std::fs::read_to_string(self.root.dir().join("cpu.stat"))
+            .ok()
+            .as_deref()
+            .and_then(hex_sim::facts::cgroup_usage_ns);
         if class == Class::Oci {
             capacity.devices = self.attachment_capacity()?;
         }
@@ -2311,6 +2319,7 @@ impl Runtime for Node {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        control: None,
                         credentials: Vec::new(),
                     }),
                     Err(why) => return Err(why),
@@ -2333,6 +2342,7 @@ impl Runtime for Node {
                     abandoned: 0,
                     last_resort: None,
                     ended: None,
+                    control: None,
                     credentials: Vec::new(),
                 });
             }
