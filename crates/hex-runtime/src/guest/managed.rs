@@ -443,6 +443,47 @@ fn told_past<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's threads whose names start with `prefix`, as Linux lists them (`/proc/self/task/*/comm`).
+    #[cfg(target_os = "linux")]
+    fn threads_named(prefix: &str) -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .filter(|comm| comm.trim_end().starts_with(prefix))
+            .count()
+    }
+
+    /// The review's "one run-out watcher" (goal 4's design, ROOT 2026-11-13; decision 9): a managed VM's asks in flight
+    /// at once share one thread that tells each one's run-out past its W*, where a thread of each ask's own was spawned
+    /// and joined, twice a window for each VM. Do: hold eight asks in flight at once, each armed with a W* far off.
+    /// Expect: at most one thread in this process watches them all, whatever other tests ask beside it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn f3_asks_in_flight_share_one_run_out_watcher() {
+        const ASKS: usize = 8;
+        let entered = std::sync::Barrier::new(ASKS + 1);
+        let release = std::sync::Barrier::new(ASKS + 1);
+        let id = BoxId::new("watched").unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..ASKS {
+                scope.spawn(|| {
+                    told_past(&RATE, Duration::from_secs(3_600), &id, || {
+                        entered.wait();
+                        release.wait();
+                    })
+                    .unwrap();
+                });
+            }
+            entered.wait();
+            let watchers = threads_named("hex-managed-ask") + threads_named("hex-run-out");
+            release.wait();
+            assert!(
+                watchers <= 1,
+                "{watchers} threads watch {ASKS} asks in flight"
+            );
+        });
+    }
     use hex_core::record::{BoxRecord, Phase, ProcId};
     #[cfg(unix)]
     use std::sync::Condvar;
