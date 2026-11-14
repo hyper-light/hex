@@ -112,6 +112,7 @@ fn process_boxes_hold_the_contract_and_recover() {
             exercise_clone_into_cgroup(&own);
             exercise_a_delete_beside_a_runs_removal(&own, &cache, &exe);
             exercise_a_signal_beside_a_runs_removal(&own, &cache, &exe);
+            exercise_a_runs_emptying_followed_beside_the_others(&own, &cache, &exe);
         }
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
             let has_systemd = Command::new("systemd-run")
@@ -588,6 +589,133 @@ fn exercise_a_signal_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) 
         node.signal(&id, Signal::TERM),
         Err(Refusal::NoSuchBox(id.clone()))
     );
+}
+
+/// A run's box past W*, followed (the review's E-3): its program's leaving a process in the box, its emptying's follow,
+/// the node's other box's removal beside it, and a delete's wait on its follower: facts no recorded operation makes,
+/// each waited for measuring.
+static LEFT: Patience = Patience::measuring("test.hex_cli.process_box.program_left_a_process");
+static FOLLOWED: Patience = Patience::measuring("test.hex_cli.process_box.emptying_followed");
+static REMOVED_BESIDE: Patience =
+    Patience::measuring("test.hex_cli.process_box.removed_beside_a_follow");
+static WAITS_ON_FOLLOWER: Patience =
+    Patience::measuring("test.hex_cli.process_box.delete_waits_on_a_follower");
+
+/// The review's E-3 (decision 9: a wait follows its party by its life, never on a thread other parties share), runtime
+/// goal 7, AC-T7.4.1: a run's box that doesn't empty within W* is followed to its emptying by a thread of its own, the
+/// supervising thread removing the node's other boxes meanwhile, and a delete of the followed box waits for that
+/// thread's word. Do: hold box A's emptying (its cgroup reads as not yet empty, as one whose last process sleeps
+/// uninterruptibly in the kernel past W* reads); run A, a shell that leaves a waiting process of its own in the box, and
+/// B, a waiting program; once A's box holds both, kill A's shell through its run and leave the run to the supervising
+/// thread; once A's emptying is followed, name the thread that follows it; kill B's program the same way; then hold the
+/// runs' removals, delete A from another thread, and let A's emptying go once the delete waits. Expect: A followed by a
+/// thread of its own, never the supervising thread; B's box removed while A's emptying is held; the delete of A waiting
+/// on the follower rather than answering beside it, then Ok; A's box gone.
+fn exercise_a_runs_emptying_followed_beside_the_others(own: &Path, cache: &Path, exe: &str) {
+    let state = tempfile::Builder::new()
+        .prefix("runfol-")
+        .tempdir_in(cache)
+        .expect("state dir");
+    let root = own.join("hex-boxes-runfol");
+    let node = Node::open(&root, state.path(), state.path()).expect("open a node");
+    let fx = BinFixture {
+        exe: exe.to_owned(),
+    };
+    let a = BoxId::new("runfol-a").unwrap();
+    let b = BoxId::new("runfol-b").unwrap();
+    let emptying = node.hold_emptying(&a).expect("hold A's emptying");
+    let leaves = Program::of(&["/bin/sh", "-c", "\"$0\" selftest-box wait & wait", exe]);
+    let mut run_a = node
+        .run(fx.spec(a.clone(), Bounds::default()), leaves, Stdio::null())
+        .expect("run A's shell");
+    let mut run_b = node
+        .run(
+            fx.spec(b.clone(), Bounds::default()),
+            fx.wait(),
+            Stdio::null(),
+        )
+        .expect("run B's waiting program");
+    let procs = root.join(a.as_str()).join("cgroup.procs");
+    follow::until(
+        &LEFT,
+        "A's shell and the process it leaves, in A's box",
+        || life(&mut *run_a),
+        || std::fs::read_to_string(&procs).is_ok_and(|p| p.lines().count() >= 2),
+    )
+    .unwrap();
+    run_a.kill().expect("kill A's shell");
+    drop(run_a);
+    follow::until(
+        &FOLLOWED,
+        "A's emptying followed past W*",
+        || there(&node, &a),
+        || !emptying.following().unwrap().is_empty(),
+    )
+    .unwrap();
+    assert_eq!(
+        emptying.following().unwrap(),
+        ["hex-run-follow"],
+        "the thread following A's emptying: one of its own, never the supervising thread every box shares"
+    );
+    run_b.kill().expect("kill B's program");
+    drop(run_b);
+    follow::until(
+        &REMOVED_BESIDE,
+        "B's box removed while A's emptying is held",
+        || {
+            if emptying
+                .following()
+                .unwrap()
+                .iter()
+                .any(|t| t == "hex-supervisor")
+            {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        || node.inspect(&b) == Err(Refusal::NoSuchBox(b.clone())),
+    )
+    .unwrap();
+    let removals = node.hold_run_removals().expect("hold the runs' removals");
+    std::thread::scope(|s| {
+        let deleting = s.spawn(|| node.delete(&a));
+        follow::until(
+            &WAITS_ON_FOLLOWER,
+            "the delete's wait on A's follower, or its answer",
+            || there(&node, &a),
+            || removals.waiting().unwrap() == 1 || deleting.is_finished(),
+        )
+        .unwrap();
+        assert!(
+            !deleting.is_finished(),
+            "the delete of A answered beside its follower"
+        );
+        drop(emptying);
+        assert_eq!(
+            deleting.join().unwrap(),
+            Ok(()),
+            "the delete once A's follower took the box apart"
+        );
+    });
+    drop(removals);
+    assert_eq!(node.inspect(&a), Err(Refusal::NoSuchBox(a.clone())));
+}
+
+/// A run's program as a party: live until it ends.
+fn life(proc: &mut dyn hex_api::Proc) -> Party {
+    match proc.try_wait() {
+        Ok(None) => Party::Live,
+        Ok(Some(_)) | Err(_) => Party::Ended,
+    }
+}
+
+/// Box `id` as a party: live while the node holds it, so what's waited for of it may yet come.
+fn there(node: &Node, id: &BoxId) -> Party {
+    match node.inspect(id) {
+        Ok(_) => Party::Live,
+        Err(_) => Party::Ended,
+    }
 }
 
 /// What a program in the box at `dir` can lock at most where its soft RLIMIT_MEMLOCK is unlimited: the tightest
