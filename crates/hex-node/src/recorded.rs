@@ -3030,6 +3030,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.member(id, member)
     }
 
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.mcp(id, member)
+    }
+
     fn signal_member(
         &self,
         id: &BoxId,
@@ -3845,6 +3849,9 @@ fn forward_guest(
         Call::Signal { id, .. } | Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
         _ => return Forward::Back(Box::new((call, stdio))),
     };
+    // HEX-RT-17: a Windows node hands its caller handles alone, never sockets, so it offers an exec's streams to the
+    // caller to open itself, where its guest's link lends the VM's identity; a node VM's lanes lend none, and their
+    // exec's streams are made here on pipes whose ends it hands on (the review's D-10).
     let offer = cfg!(windows)
         && matches!(&call, Call::Exec { .. } | Call::ExecStreams { .. })
         && (stdio.ask.stdin
@@ -3853,19 +3860,14 @@ fn forward_guest(
             || stdio.stdin.is_some()
             || stdio.stdout.is_some()
             || stdio.stderr.is_some());
-    let connected = if offer {
-        guest.program_client_for(id)
-    } else {
-        guest.evented_for(id)
-    };
-    let client = match connected {
-        Ok(Some(client)) => client,
+    let client = match guest.exec_client_for(id, offer) {
+        Ok(Some(hex_runtime::guest::ExecClient::Offered(client))) => client,
+        Ok(Some(hex_runtime::guest::ExecClient::Evented(client))) => {
+            return forward_evented(client, call, stdio, reply, ended);
+        }
         Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
         Err(why) => return Forward::Refused(why),
     };
-    if !offer {
-        return forward_evented(client, call, stdio, reply, ended);
-    }
     let (call, stdio) = match guest_call(call, stdio) {
         Ok(prepared) => prepared,
         Err(why) => return Forward::Refused(why),

@@ -110,10 +110,14 @@ pub fn built(shards: &Path, context: &Path, work: &Path, tag: &str) -> String {
 }
 
 /// A `hex node` with the Shards class, in the waits census, ended by its own PID when dropped: its image VMs' run
-/// hosts then see their channel close and end their VMs (D231's run ends with its owner).
+/// hosts then see their channel close and end their VMs (D231's run ends with its owner). On Windows its keeper, which
+/// outlives a killed node by design and never ends on its own, is ended with it ([`end_keeper`]).
 pub struct Node {
     pub child: Child,
     pub socket: PathBuf,
+    /// The node's keeper's folder (`state\keeper`, hex-cli's `node.rs`), whose `keeper.owner` names it.
+    #[cfg(windows)]
+    keeping: PathBuf,
 }
 
 impl Node {
@@ -177,7 +181,12 @@ impl Node {
             begun.elapsed(),
             child.id()
         );
-        Self { child, socket }
+        Self {
+            child,
+            socket,
+            #[cfg(windows)]
+            keeping: work.join("state").join("keeper"),
+        }
     }
 }
 
@@ -188,6 +197,45 @@ impl Drop for Node {
         }
         let status = self.child.wait().unwrap();
         eprintln!("IMAGE node ended: {status}");
+        #[cfg(windows)]
+        end_keeper(&self.keeping);
+    }
+}
+
+/// Ends the keeper a Windows node keeping its state in `keeping`'s parent started (the keeper `keeper.owner` there
+/// names), as a node going down cleanly asks it, and waits for its end by its life (`u32::MAX`: WaitForSingleObject's
+/// INFINITE): the keeper outlives a killed node by design and never ends on its own (hex-runtime's `windows::keeper`),
+/// and with it the box jobs it held. Nothing where the file names no keeper that still runs. Said, never panicking:
+/// a test's drop may run as it fails.
+#[cfg(windows)]
+pub fn end_keeper(keeping: &Path) {
+    use hex_runtime::windows::keeper::{NodeKeeper, keeper_file};
+    let Ok(owner) = fs::read_to_string(keeper_file(keeping)) else {
+        return;
+    };
+    let mut words = owner.split_whitespace();
+    let (Some(Ok(pid)), Some(Ok(created))) = (
+        words.next().map(str::parse::<u32>),
+        words.next().map(str::parse::<u64>),
+    ) else {
+        eprintln!(
+            "IMAGE {:?} names no keeper: {owner:?}",
+            keeper_file(keeping)
+        );
+        return;
+    };
+    match NodeKeeper::open(pid, created, keeping) {
+        Ok(keeper) => {
+            keeper.stop();
+            match hex_runtime::windows::sys::wait(keeper.process(), u32::MAX) {
+                Ok(true) => eprintln!("IMAGE node keeper ended (pid {pid})"),
+                Ok(false) => eprintln!("IMAGE node keeper, pid {pid}, didn't end"),
+                Err(e) => eprintln!("IMAGE waiting for the node keeper, pid {pid}: {e}"),
+            }
+        }
+        // No process of its pid and creation time runs: it's gone.
+        Err(hex_api::Refusal::Invalid { .. }) => {}
+        Err(e) => eprintln!("IMAGE opening the node keeper, pid {pid}: {e}"),
     }
 }
 

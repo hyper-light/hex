@@ -169,9 +169,8 @@ harness member's):
   (step 5's pipe the orchestrator writes), its arguments after its image's command for it (D256's `args`, kiln's
   step 17: a harness's session flags, `--resume` and `--model`), its MCP bridge as asked (D254's `mcp`) and no
   terminal; the image's other members run as it declares them, their stdin `/dev/null`. A member asking an MCP bridge
-  is refused at create, before any record, as `Invalid` by its field (`members[N].mcp`): a bridge's connections reach
-  the run's controller over its agent-control endpoint alone, which this class asks of no run yet (`CONTROL`), and
-  Shards refuses the same.
+  has it: every run asks its agent-control endpoint of the class's key (goal 2's item 2), over which the bridge's
+  connections reach the run's controller (D254; `Runtime::mcp`, below).
 - `ShardsImage::shares` names the host directories the guest sees (D231's shares, `-v HOST:AT[:ro]`; kiln's step
   18: a person's home volumes and a project at its host path, D235), each a `Mount`: its host directory, checked as
   a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
@@ -199,6 +198,21 @@ harness member's):
   one of files alone, `NotRunning(id, "signal a member")` where the run isn't running, and `Invalid` for a member the
   run declares not. The node's wire carries it (`Call::MemberSignal`, kind `0x001e`, appended), sent by `hex-client`'s
   `Runtime::signal_member`; the simulator's member its caller took ends by it, its echo keeping no handler.
+- `Runtime::mcp(id, member)` (goal 2's item 3; ROOT's mapping, 2026-11-14) takes the next connection a member's harness
+  makes to its MCP bridge (D254: `Execs::mcp`, a lane of the run's endpoint) as a `Proc`: its stdout what the harness
+  sends, its stdin what it is sent, given once, and no stderr; its end the connection's (`ExecControl::wait`), or
+  `Signal(9)` once killed. Its ask waits within `hex.image.mcp`'s W* and past it follows the run's connection, however
+  long the harness takes to connect (§6). Refused, typed, in this order: `Invalid` where the spec asks the member no
+  bridge, before anything of its run; Pending while it boots, held, and `NotRunning(id, "mcp")` before its start and
+  once its stop has begun; `Invalid` for a member its run declares not; `NotRunning(id, "mcp: its member takes no MCP
+  connection")` where Shards says the member takes none (`Unstarted::Refused`); `NotRunning(id, "mcp: its run
+  ended")` where the run's connection ends first; and any other of Shards' faults `Os`, in its words. Two threads of its
+  own pump a connection, one each way, for as long as it lasts, Shards' MCP lane giving no read or write that doesn't
+  wait (`9f5b1f754`'s `try_read` is its socket lanes' alone): a connection's cost, as a stream's copy is one thread
+  (the review's D-10). Its kill aborts what the harness is sent (ECONNRESET), the lane having no hangup of its own at
+  Shards `2737fc4ec`, so a kill made while a record waits for the harness to take it goes once the harness takes it, or
+  the run ends (ROOT's asks of g121, 2026-11-14: a hangup for an exec or MCP lane, and `Output` and `Input` that don't
+  wait).
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -307,6 +321,7 @@ image box: `ImageWaits::new` measures from nothing.
 | `hex.image.started` | a `started` call's ask to the boot of the box it asks answering (§3) | the boot's thread |
 | `hex.image.member` | a member's own lane's first word (D238): whether it runs, its steering then | the run's agent-control connection |
 | `hex.image.signal` | a signal's answer on a member's own lane: taken, or refused | the run's agent-control connection |
+| `hex.image.mcp` | a member's harness's next connection to its MCP bridge (D254), from its ask, which may be never | the run's agent-control connection |
 
 D231's boot waits at most the patience its caller gives: past it, its run host is killed and the boot refused
 (`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and

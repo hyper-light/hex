@@ -45,8 +45,8 @@
 //!
 //! Before a restart, the start before it ends (its node killed, as a crash ends it, or on Linux its node VM stopped)
 //! and the test waits for each of its processes' ends, by their lives, so no VM ending overlaps the next start's
-//! measure. On Windows the node's keeper, which outlives a killed node by design and never ends on its own, is then
-//! asked to stop, as a node going down cleanly asks it. The kernel form's shared guest is released through the node's
+//! measure. On Windows the node's keeper, which outlives a killed node by design and never ends on its own, is ended
+//! by the node's teardown too (image_node's `Node`). The kernel form's shared guest is released through the node's
 //! socket before its node ends; on Linux its box is deleted, and its node's processes' ends are waited for.
 //!
 //! Explicit inputs only, each by its own variable, a missing one failing by name:
@@ -700,35 +700,17 @@ mod suite {
         (node, client, shared)
     }
 
-    /// Ends a start's node, as a crash ends it, then its keeper where its OS's node has one ([`end_keeper`]): the
-    /// processes its tree had, each still to be waited for.
-    pub fn end(node: Node, work: &Path) -> Vec<u32> {
+    /// Ends a start's node by its teardown (image_node's `Node`, which kills it as a crash ends it and, on Windows,
+    /// ends its keeper too): the processes its tree had, each still to be waited for.
+    pub fn end(node: Node) -> Vec<u32> {
         let processes: Vec<u32> = tree(node.child.id()).iter().map(|held| held.pid).collect();
         drop(node);
-        end_keeper(work);
         processes
     }
 
-    /// A Windows node's keeper outlives its killed node by design and never ends on its own ([`keeper`]), so a start's
-    /// end asks it to stop, as a node going down cleanly does (windows_node.rs's `Node`), and waits on its process for
-    /// its end.
-    #[cfg(windows)]
-    fn end_keeper(work: &Path) {
-        if let Some(keeper) = keeper(work) {
-            keeper.stop();
-            // `u32::MAX` is WaitForSingleObject's INFINITE: the wait follows the keeper's life alone.
-            let ended = hex_runtime::windows::sys::wait(keeper.process(), u32::MAX).unwrap();
-            assert!(ended, "the node's keeper, pid {}, didn't end", keeper.pid());
-        }
-    }
-
-    /// A macOS node starts no keeper: its tree's processes end with it, or with their release.
-    #[cfg(target_os = "macos")]
-    fn end_keeper(_: &Path) {}
-
     /// Ends a start's node ([`end`]) and waits for each process of its tree to end.
-    pub fn stop(node: Node, work: &Path) {
-        ended(&end(node, work));
+    pub fn stop(node: Node) {
+        ended(&end(node));
     }
 }
 
@@ -778,7 +760,7 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         release_shared(&client, key);
     }
     drop(client);
-    suite::stop(node, &work);
+    suite::stop(node);
     assert!(
         failures.is_empty(),
         "oci boxes through hex node's socket, its guest's {} form: {failures:#?}",
@@ -789,15 +771,15 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         let (node, client, _) = suite::start(start, form, &work, &fixture, &set);
         say_census(start, &census, &mut seen);
         drop(client);
-        suite::stop(node, &work);
+        suite::stop(node);
     }
 }
 
 /// AC-T7.4.1, item 4 on Windows (joint plan step 39): a start's end leaves no process of its node running, so its wait
 /// for the processes of the node's tree ends, and the next start's measure carries none of them. A Windows node starts
 /// its keeper as its own child, which outlives a killed node by design and never ends on its own (hex-runtime's
-/// `windows::keeper`). Do start a node of this build, no guest given, and end it as a start ends; expect its keeper
-/// ended.
+/// `windows::keeper`). Do start a node of this build, no guest given, and end it as a start ends (its node's teardown,
+/// image_node's `Node`); expect its keeper ended.
 #[cfg(windows)]
 #[test]
 #[ignore = "native Windows: a hex node of this build, no VM"]
@@ -807,7 +789,7 @@ fn w39_a_starts_end_on_windows_ends_its_nodes_keeper() {
     fs::create_dir_all(work.join("state")).unwrap();
     let node = Node::start_with(&work, None, &[]);
     let keeper = keeper(&work).expect("a Windows node's keeper, named by its state's keeper.owner");
-    let processes = suite::end(node, &work);
+    let processes = suite::end(node);
     let running = keeper.alive();
     // Asked to stop either way, so a run that fails leaves it no more running than one that passes.
     keeper.stop();
