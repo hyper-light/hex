@@ -2816,12 +2816,8 @@ fn w39_a6_the_oci_boxes_a_node_vms_last_resort_ended_are_retired_with_why() {
         record.last_resort = end;
         store.put(&record).unwrap();
     }
-    let retired = retire_with_node_vms(
-        store,
-        &store.all().unwrap(),
-        &store.all_node_vms().unwrap(),
-    )
-    .unwrap();
+    let retired =
+        retire_with_node_vms(store, &store.all().unwrap(), &store.all_node_vms().unwrap()).unwrap();
     assert_eq!(
         retired,
         [BoxId::new("oci-1").unwrap(), BoxId::new("oci-2").unwrap()]
@@ -2869,9 +2865,6 @@ fn w39_a6_an_oci_box_its_node_vm_ended_is_kept_with_why_across_a_restart() {
         (record.retired, record.retired_for),
         (true, Some(hex_api::LifecycleCause::NodeVmEnded))
     );
-    let info = node
-        .books
-        .counted(record.retired_info().unwrap())
-        .unwrap();
+    let info = node.books.counted(record.retired_info().unwrap()).unwrap();
     assert_eq!(info.last_resort, Some(node_end(4)));
 }

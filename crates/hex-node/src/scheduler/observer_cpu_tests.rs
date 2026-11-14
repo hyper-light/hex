@@ -666,6 +666,7 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
             LifecycleCause::Busy => "busy",
             LifecycleCause::Uncertain => "uncertain",
             LifecycleCause::Retired => "retired",
+            LifecycleCause::NodeVmEnded => "node-vm-ended",
         };
         assert!(text.ends_with(&format!("cause={name}")));
     }

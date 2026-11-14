@@ -63,8 +63,9 @@ pub struct BoxRecord {
     /// recovery's other rules (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<BootSession>,
-    /// Why the node's last resort ended this VM, where it did (joint plan step 14, C5), which its inspect reports
-    /// across the node's restarts. Outside the spec, so no native commitment covers it. Added within version 1, so a
+    /// Why the node's last resort ended this VM, where it did (joint plan step 14, C5), or an oci box's node VM, which
+    /// ended the box with it, by that node VM's run (joint plan step 39, A-6), which its inspect reports across the
+    /// node's restarts. Outside the spec, so no native commitment covers it. Added within version 1, so a
     /// record without it reads as `None` (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<hex_api::LearnedEnd>,
@@ -81,9 +82,9 @@ pub struct BoxRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
     /// Its backing was retired at its node's start, its identity no longer its node's profile's (joint plan step 14;
-    /// `hex_api::LifecycleCause::Retired`): the box is kept, ready, until its owner's delete, every other call refused
-    /// with why. Outside the spec, so no native commitment covers it. Added within version 1, so a record without it
-    /// reads as not retired (append-only).
+    /// `hex_api::LifecycleCause::Retired`), or its node VM was ended by its node's last resort (`retired_for`, A-6):
+    /// the box is kept, ready, until its owner's delete, every other call refused with why. Outside the spec, so no
+    /// native commitment covers it. Added within version 1, so a record without it reads as not retired (append-only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
     /// How its Shards image VM's microVM started (D253; joint plan step 12), as its run host said it as the run started
@@ -218,17 +219,19 @@ impl BoxRecord {
         self.retired_for = Some(cause);
     }
 
-    /// What every call on a retired box but its inspect and its delete answers: its backing's refusal, `Retired`.
+    /// What every call on a retired box but its inspect and its delete answers: its backing's refusal, `Retired`, or
+    /// what else it was retired for (A-6: `NodeVmEnded`).
     pub fn retired_refusal(&self) -> Result<Refusal, Refusal> {
+        let cause = self.retired_for.unwrap_or(hex_api::LifecycleCause::Retired);
         Ok(match self.spec.route.and_then(|route| route.backing) {
             Some(key) => Refusal::Backing {
                 key,
-                cause: hex_api::LifecycleCause::Retired,
+                cause,
                 why: None,
             },
             None => Refusal::Lifecycle {
                 id: self.spec.id.try_clone()?,
-                cause: hex_api::LifecycleCause::Retired,
+                cause,
                 why: None,
             },
         })

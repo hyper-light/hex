@@ -2065,6 +2065,13 @@ impl<R: Recover> Recorded<R> {
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
         let settled = self.books.store.settle_node_vms()?;
+        // Each oci box a node VM's last-resort end ended, retired with it before recovery plans it (A-6): kept with
+        // why, never removed as a box nothing runs, its node VM's run ended with an earlier node or before it.
+        let retired = charges::retire_with_node_vms(
+            &self.books.store,
+            &records,
+            &self.books.store.all_node_vms()?,
+        )?;
         let mut summary = RecoverySummary {
             boot_unknown: self.books.store.boot_unread().map(str::to_owned),
             node_vms: settled.rows,
@@ -2088,8 +2095,9 @@ impl<R: Recover> Recorded<R> {
                     "its record can't be read, so no cleanup backend can be chosen",
                 )
             })?;
-            // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14).
-            if r.retired {
+            // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14),
+            // one retired with its node VM just now too (A-6).
+            if r.retired || retired.contains(id) {
                 continue;
             }
             // T-T7.1.2: a box this node keeps the record of, written in an earlier boot of the host, ran
@@ -2528,10 +2536,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// fleet's budget). Its failure is kept for the capacity answers. Answers the window it reads over next.
     fn learn_window(&self) -> Option<std::time::Duration> {
         let (shared, _) = self.books.charges.get()?;
-        let read =
-            self.books.store.all().and_then(|records| {
-                Ok((records, self.books.store.all_node_vms()?, self.machine()?))
-            });
+        let read = self.books.store.all().and_then(|records| {
+            let rows = self.books.store.all_node_vms()?;
+            // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
+            // learner's lock as every write into a box's record is.
+            charges::retire_with_node_vms(&self.books.store, &records, &rows)?;
+            Ok((records, rows, self.machine()?))
+        });
         let Ok(mut learner) = shared.lock() else {
             return None;
         };

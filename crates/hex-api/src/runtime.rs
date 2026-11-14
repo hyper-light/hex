@@ -2342,8 +2342,9 @@ pub struct BoxInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published: Vec<crate::Published>,
     /// Why its node's last resort ended it, where it did (joint plan step 14, C5): what it held past its own memory
-    /// budget while its fleet's VMs held more than the fleet's budget. Kept in its record, so a restarted node's
-    /// inspect says it too. After `published`, so absent means none (append-only).
+    /// budget while its fleet's VMs held more than the fleet's budget; an oci box's, its node VM's end, which ended it,
+    /// by that node VM's run (joint plan step 39, A-6). Kept in its record, so a restarted node's inspect says it too.
+    /// After `published`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<LearnedEnd>,
     /// Why its run ended where it failed, in its runtime's words (joint plan step 12): a Shards image VM's whose VM, run

@@ -217,9 +217,7 @@ pub(crate) fn node_band<'r>(
                     unknown: Some(format!("box {id}'s record can't be read: {why}")),
                 };
             }
-            Ok(record)
-                if record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none() =>
-            {
+            Ok(record) if runs_in_node_vm(record) => {
                 band = band.max(record.spec.band);
             }
             Ok(_) => {}
@@ -228,6 +226,24 @@ pub(crate) fn node_band<'r>(
     NodeBand {
         band,
         unknown: None,
+    }
+}
+
+/// Whether `record`'s box runs in its node's node VM where one runs its node's `oci` class (place 3, A-6): an oci box
+/// whose run hasn't ended.
+fn runs_in_node_vm(record: &BoxRecord) -> bool {
+    record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none()
+}
+
+/// The node VM whose last-resort end ended `record`'s box, where its record names one (A-6): an oci box's, not yet
+/// retired, that ran when its node VM was ended.
+fn ended_by_node_vm(record: &BoxRecord) -> Option<hex_api::NodeRun> {
+    if record.retired || !runs_in_node_vm(record) {
+        return None;
+    }
+    match record.last_resort.as_ref()?.id {
+        LearnedHolder::Node(run) => Some(run),
+        LearnedHolder::Box(_) => None,
     }
 }
 
@@ -985,13 +1001,60 @@ pub(crate) fn record_last_resort(
             true
         }),
         LearnedHolder::Node(run) if scope == Scope::Run(*run) => {
-            store.update_node_vm(run, move |row| {
-                row.last_resort = end;
+            let row = end.as_ref().map(LearnedEnd::try_clone).transpose()?;
+            let written = store.update_node_vm(run, move |held| {
+                held.last_resort = row;
                 true
-            })
+            })?;
+            if written {
+                hosted_ends(store, *run, end.as_ref())?;
+            }
+            Ok(written)
         }
         LearnedHolder::Node(_) => Ok(false),
     }
+}
+
+/// Writes `end`, why the last resort is ending node VM `run`, into the record of each oci box it runs, which its end
+/// ends too, or withdraws it (none) from each naming it (A-6; ROOT, 2026-11-13: each box says why), every write waiting
+/// for its box's record turn as [`record_last_resort`]'s does. A record that can't be read can't be written: its band
+/// is told unknown ([`node_band`]).
+fn hosted_ends(
+    store: &Store,
+    run: hex_api::NodeRun,
+    end: Option<&LearnedEnd>,
+) -> Result<(), Refusal> {
+    let node = LearnedHolder::Node(run);
+    let names = |record: &BoxRecord| {
+        record
+            .last_resort
+            .as_ref()
+            .is_some_and(|said| said.id == node)
+    };
+    for (id, record) in store.all()? {
+        let Ok(record) = record else {
+            continue;
+        };
+        let due = match end {
+            Some(_) => runs_in_node_vm(&record) && !record.retired,
+            None => names(&record),
+        };
+        if !due {
+            continue;
+        }
+        let end = end.map(LearnedEnd::try_clone).transpose()?;
+        store.update(&id, |record| {
+            let still = match &end {
+                Some(_) => runs_in_node_vm(record) && !record.retired,
+                None => names(record),
+            };
+            if still {
+                record.last_resort = end;
+            }
+            still
+        })?;
+    }
+    Ok(())
 }
 
 /// A-6 (ROOT, 2026-11-13: ending a node VM ends every oci box it runs, and each must say why): retires each oci box
@@ -1003,8 +1066,34 @@ pub(crate) fn retire_with_node_vms(
     records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
     rows: &[NodeVmRecord],
 ) -> Result<Vec<BoxId>, Refusal> {
-    let _ = (store, records, rows);
-    Ok(Vec::new())
+    let mut retired = Vec::new();
+    for (id, record) in records {
+        let Some(run) = record.as_ref().ok().and_then(ended_by_node_vm) else {
+            continue;
+        };
+        // Its node VM still runs, or still boots: the box may still run in it.
+        if rows
+            .iter()
+            .any(|row| row.run == run && row.phase != hex_api::NodeVmPhase::Ended)
+        {
+            continue;
+        }
+        let done = store.update(id, |record| {
+            if ended_by_node_vm(record) != Some(run) {
+                return false;
+            }
+            record.retire_for(hex_api::LifecycleCause::NodeVmEnded);
+            true
+        })?;
+        if done {
+            retired.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "the boxes retired with their node VMs",
+                bound: records.len(),
+            })?;
+            retired.push(id.try_clone()?);
+        }
+    }
+    Ok(retired)
 }
 
 /// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
