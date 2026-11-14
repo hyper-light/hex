@@ -24,7 +24,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
+    BoxId, BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
     LearnedWindow, MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::record::{BoxRecord, NodeVmRecord, Phase};
@@ -84,7 +84,12 @@ impl Lifetime {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Holder<'a> {
     Box(&'a BoxRecord),
-    Node { row: &'a NodeVmRecord, band: u8 },
+    /// A node VM's row, its band, and why its band is unknown, ranking it above every box, where it is ([`NodeBand`]).
+    Node {
+        row: &'a NodeVmRecord,
+        band: u8,
+        unknown: Option<&'a str>,
+    },
 }
 
 impl<'a> Holder<'a> {
@@ -188,26 +193,95 @@ impl<'a> Holder<'a> {
     }
 }
 
+/// A node VM's band, and why it is unknown where it is (ROOT, 2026-11-13: told, never silent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeBand {
+    pub(crate) band: u8,
+    pub(crate) unknown: Option<String>,
+}
+
 /// A node VM's band (joint plan step 39, place 3; ROOT, 2026-11-13): what ending it ends. It runs its node's `oci`
 /// class, so ending it ends every box of that class whose run hasn't ended, and its band is the highest of theirs among
 /// its node's `records`, none ranking it lowest (it ends no box). A record that can't be read may be of a box it runs,
-/// of any band, so then it ranks above every box: the highest band there is.
+/// of any band, so then it ranks above every box: the highest band there is, and why, naming that box and its record's
+/// words (ROOT, 2026-11-13: an unknown band told, never silent).
 pub(crate) fn node_band<'r>(
-    records: impl IntoIterator<Item = &'r Result<BoxRecord, String>>,
-) -> u8 {
+    records: impl IntoIterator<Item = (&'r BoxId, &'r Result<BoxRecord, String>)>,
+) -> NodeBand {
     let mut band = 0;
-    for record in records {
+    for (id, record) in records {
         match record {
-            Err(_) => return u8::MAX,
-            Ok(record)
-                if record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none() =>
-            {
+            Err(why) => {
+                return NodeBand {
+                    band: u8::MAX,
+                    unknown: Some(format!("box {id}'s record can't be read: {why}")),
+                };
+            }
+            Ok(record) if runs_in_node_vm(record) => {
                 band = band.max(record.spec.band);
             }
             Ok(_) => {}
         }
     }
-    band
+    NodeBand {
+        band,
+        unknown: None,
+    }
+}
+
+/// Whether `record`'s box runs in its node's node VM where one runs its node's `oci` class (place 3, A-6): an oci box
+/// whose run hasn't ended.
+fn runs_in_node_vm(record: &BoxRecord) -> bool {
+    record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none()
+}
+
+/// The node VM whose last-resort end ended `record`'s box, where its record names one (A-6): an oci box's, not yet
+/// retired, that ran when its node VM was ended.
+fn ended_by_node_vm(record: &BoxRecord) -> Option<hex_api::NodeRun> {
+    if record.retired || !runs_in_node_vm(record) {
+        return None;
+    }
+    match record.last_resort.as_ref()?.id {
+        LearnedHolder::Node(run) => Some(run),
+        LearnedHolder::Box(_) => None,
+    }
+}
+
+/// The class a VM of `class` is learned in: a Shards or Firecracker microVM's; none for a native box's.
+fn vm_class(class: hex_api::Class) -> Option<Class> {
+    match class {
+        hex_api::Class::Shards => Some(Class::Shards),
+        hex_api::Class::Firecracker => Some(Class::Firecracker),
+        hex_api::Class::Process | hex_api::Class::Oci => None,
+    }
+}
+
+/// The node VMs of `class` among `running` ranked above every box, their bands unknown, each by its run and why
+/// ([`NodeBand`]; ROOT, 2026-11-13: an unknown band told, never silent).
+fn ranked(class: Class, running: &[Holder<'_>]) -> Result<Vec<hex_api::LearnedRank>, Refusal> {
+    let mut told = Vec::new();
+    for record in running {
+        let Holder::Node {
+            row,
+            unknown: Some(why),
+            ..
+        } = record
+        else {
+            continue;
+        };
+        if vm_class(record.class()) != Some(class) {
+            continue;
+        }
+        told.try_reserve(1).map_err(|_| Refusal::Exhausted {
+            what: "learned ranked VMs",
+            bound: MAX_LEARNED_HOLDINGS,
+        })?;
+        told.push(hex_api::LearnedRank {
+            run: row.run,
+            why: (*why).to_owned(),
+        });
+    }
+    Ok(told)
 }
 
 /// What the node VMs among `rows` that boot (Booting, their runs not ended) book (ROOT, 2026-11-13): each its receipt's
@@ -226,7 +300,10 @@ pub(crate) fn booting(rows: &[NodeVmRecord]) -> Result<CapacityResources, Refusa
 }
 
 /// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
-pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, Refusal> {
+pub(crate) fn nodes<'a>(
+    rows: &'a [NodeVmRecord],
+    band: &'a NodeBand,
+) -> Result<Vec<Holder<'a>>, Refusal> {
     let mut holders = Vec::new();
     holders
         .try_reserve_exact(rows.len())
@@ -236,7 +313,11 @@ pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, 
         })?;
     holders.extend(
         rows.iter()
-            .map(|row| Holder::Node { row, band })
+            .map(|row| Holder::Node {
+                row,
+                band: band.band,
+                unknown: band.unknown.as_deref(),
+            })
             .filter(|holder| holder.image()),
     );
     Ok(holders)
@@ -920,13 +1001,99 @@ pub(crate) fn record_last_resort(
             true
         }),
         LearnedHolder::Node(run) if scope == Scope::Run(*run) => {
-            store.update_node_vm(run, move |row| {
-                row.last_resort = end;
+            let row = end.as_ref().map(LearnedEnd::try_clone).transpose()?;
+            let written = store.update_node_vm(run, move |held| {
+                held.last_resort = row;
                 true
-            })
+            })?;
+            if written {
+                hosted_ends(store, *run, end.as_ref())?;
+            }
+            Ok(written)
         }
         LearnedHolder::Node(_) => Ok(false),
     }
+}
+
+/// Writes `end`, why the last resort is ending node VM `run`, into the record of each oci box it runs, which its end
+/// ends too, or withdraws it (none) from each naming it (A-6; ROOT, 2026-11-13: each box says why), every write waiting
+/// for its box's record turn as [`record_last_resort`]'s does. A record that can't be read can't be written: its band
+/// is told unknown ([`node_band`]).
+fn hosted_ends(
+    store: &Store,
+    run: hex_api::NodeRun,
+    end: Option<&LearnedEnd>,
+) -> Result<(), Refusal> {
+    let node = LearnedHolder::Node(run);
+    let names = |record: &BoxRecord| {
+        record
+            .last_resort
+            .as_ref()
+            .is_some_and(|said| said.id == node)
+    };
+    for (id, record) in store.all()? {
+        let Ok(record) = record else {
+            continue;
+        };
+        let due = match end {
+            Some(_) => runs_in_node_vm(&record) && !record.retired,
+            None => names(&record),
+        };
+        if !due {
+            continue;
+        }
+        let end = end.map(LearnedEnd::try_clone).transpose()?;
+        store.update(&id, |record| {
+            let still = match &end {
+                Some(_) => runs_in_node_vm(record) && !record.retired,
+                None => names(record),
+            };
+            if still {
+                record.last_resort = end;
+            }
+            still
+        })?;
+    }
+    Ok(())
+}
+
+/// A-6 (ROOT, 2026-11-13: ending a node VM ends every oci box it runs, and each must say why): retires each oci box
+/// among `records` whose record names a node VM's last-resort end once that node VM's run has ended, its row among
+/// `rows` Ended or gone, for `NodeVmEnded`: kept, Ready, its end unknown and why on its record, until its owner's
+/// delete. Answers the boxes it retired.
+pub(crate) fn retire_with_node_vms(
+    store: &Store,
+    records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
+    rows: &[NodeVmRecord],
+) -> Result<Vec<BoxId>, Refusal> {
+    let mut retired = Vec::new();
+    for (id, record) in records {
+        let Some(run) = record.as_ref().ok().and_then(ended_by_node_vm) else {
+            continue;
+        };
+        // Its node VM still runs, or still boots: the box may still run in it.
+        if rows
+            .iter()
+            .any(|row| row.run == run && row.phase != hex_api::NodeVmPhase::Ended)
+        {
+            continue;
+        }
+        let done = store.update(id, |record| {
+            if ended_by_node_vm(record) != Some(run) {
+                return false;
+            }
+            record.retire_for(hex_api::LifecycleCause::NodeVmEnded);
+            true
+        })?;
+        if done {
+            retired.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "the boxes retired with their node VMs",
+                bound: records.len(),
+            })?;
+            retired.push(id.try_clone()?);
+        }
+    }
+    Ok(retired)
 }
 
 /// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
@@ -1002,6 +1169,9 @@ struct Vm {
     least: u64,
     /// The room its guest was told last, an image VM's (D188): none until it is first told.
     room: Option<i64>,
+    /// What telling its guest its room awaits, as its runtime answered the first telling (C7; place 4): a managed
+    /// Shards VM's guest, whose init has no room call from Hex, awaits `GuestRoom`; none once a guest was told.
+    awaits: Option<Upstream>,
     /// The period its cap holds over as last read: an image VM's its run's own (D247), a managed VM's its governor's
     /// (D255); none for a managed VM whose governor hasn't answered or whose platform's cap holds it, its platform's
     /// window holding instead.
@@ -1399,6 +1569,7 @@ impl Learner {
                     told: None,
                     least: io.least(record),
                     room: None,
+                    awaits: None,
                     period,
                     held: None,
                     cycle: None,
@@ -1453,23 +1624,27 @@ impl Learner {
             vm.rate = rate;
             vm.told = told;
         }
-        // Each image VM's guest told its room as it moves (C5, C7; D188), a node VM's as an image VM's (joint plan step
-        // 39): its budget less what it holds, everything it holds coming out of it, negative where its budget is short
-        // of that.
+        // Each Shards VM's guest told its room as it moves (C5, C7; D188), a node VM's as an image VM's (joint plan
+        // step 39): its budget less what it holds, everything it holds coming out of it, negative where its budget is
+        // short of that. A guest its runtime can't yet tell (a managed VM's) is kept as awaiting what that needs, told
+        // on its class's answers and never asked again (place 4); a Firecracker guest has no room to be told.
         for (lifetime, budget) in self.node.budgets().map_err(refused)? {
             let scope = lifetime.scope;
             let Some(vm) = self.vms.get_mut(&scope) else {
                 continue;
             };
-            if !matches!(scope, Scope::Started(_) | Scope::Run(_)) || vm.room == Some(budget.room) {
+            if vm.class != Class::Shards || vm.awaits.is_some() || vm.room == Some(budget.room) {
                 continue;
             }
             let record = running
                 .iter()
                 .find(|record| scope_of(record) == Some(scope))
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-            io.set_room(*record, budget.room)?;
-            vm.room = Some(budget.room);
+            match io.set_room(*record, budget.room) {
+                Ok(()) => vm.room = Some(budget.room),
+                Err(Refusal::Awaits { needs }) => vm.awaits = Some(needs),
+                Err(why) => return Err(why),
+            }
         }
         let vms = &self.vms;
         self.last.window(
@@ -1554,7 +1729,64 @@ impl Learner {
             self.told_window()?,
         )?;
         learned.rates = self.rates(class, running)?;
+        learned.unread = self.unread_of(class, running)?;
+        learned.awaits = self.awaits_of(class, running)?;
+        learned.ranked = ranked(class, running)?;
         Ok(Some(learned))
+    }
+
+    /// The VMs of `class` among `running` its last window couldn't read, in their records' order, each with its
+    /// refusal's words (place 4; ROOT, 2026-11-13): each counted whole at its receipt, told where its holding would be.
+    fn unread_of(
+        &self,
+        class: Class,
+        running: &[Holder<'_>],
+    ) -> Result<Vec<hex_api::LearnedUnread>, Refusal> {
+        let mut told = Vec::new();
+        for record in running {
+            if vm_class(record.class()) != Some(class) {
+                continue;
+            }
+            let Some((id, why)) = self.unread.iter().find(|(id, _)| record.is(id)) else {
+                continue;
+            };
+            told.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "learned unread VMs",
+                bound: MAX_LEARNED_HOLDINGS,
+            })?;
+            told.push(hex_api::LearnedUnread {
+                id: id.try_clone()?,
+                why: why.to_string(),
+            });
+        }
+        Ok(told)
+    }
+
+    /// The VMs of `class` among `running` whose guests' rooms can't yet be told, in their records' order, each with
+    /// what that awaits as its runtime answered it (C7; place 4).
+    fn awaits_of(
+        &self,
+        class: Class,
+        running: &[Holder<'_>],
+    ) -> Result<Vec<hex_api::LearnedAwait>, Refusal> {
+        let mut told = Vec::new();
+        for record in running {
+            let Some(vm) = record.scope().and_then(|scope| self.vms.get(&scope)) else {
+                continue;
+            };
+            let Some(needs) = vm.awaits.filter(|_| vm.class == class) else {
+                continue;
+            };
+            told.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "learned awaits",
+                bound: MAX_LEARNED_HOLDINGS,
+            })?;
+            told.push(hex_api::LearnedAwait {
+                id: vm.id.try_clone()?,
+                needs,
+            });
+        }
+        Ok(told)
     }
 
     /// What holds each of `class`'s VMs among `running` at its cap (D255), those its governor doesn't hold alone first:
@@ -1617,7 +1849,8 @@ impl Learner {
 
     /// Gives `capacity`, `class`'s capacity answer, what this learner carries (C2, C8), fitted to one message: the
     /// priors of the profiles it offers (its own and its routes'), and the holdings of its VMs among `records`, managed
-    /// and Shards image VMs alike.
+    /// and Shards image VMs alike, with what it couldn't read, what rooms await and what it ranks above every box
+    /// (place 4); or, where its last window failed, why (A-3).
     pub(crate) fn answer<'a>(
         &self,
         class: Class,
@@ -1638,6 +1871,8 @@ impl Learner {
             .filter(|record| record.managed() || record.image())
             .collect();
         capacity.learned = self.learned(class, &costs, &running)?;
+        // Where its last window failed, why (A-3; ROOT, 2026-11-13): never nothing learned with nothing said.
+        capacity.unlearned = self.fault.as_ref().map(ToString::to_string);
         hex_core::wire::fit_learned(capacity).map_err(|e| Refusal::Invalid {
             what: "a capacity answer",
             why: e.to_string(),
@@ -1744,6 +1979,10 @@ pub(crate) fn learned(
         // What holds each VM's rate its learner tells (`Learner::learned`, D255); Linux's holds each by its cpu.max.
         rates: Vec::new(),
         window,
+        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells.
+        unread: Vec::new(),
+        awaits: Vec::new(),
+        ranked: Vec::new(),
     })
 }
 

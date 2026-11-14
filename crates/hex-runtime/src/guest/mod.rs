@@ -1547,13 +1547,16 @@ impl Runtime for GuestRuntime {
             }
         }
         let images = self.images.image_infos()?;
+        // Each oci box its node retired with its node VM (A-6), from its record, as its inspect answers it.
+        let retired = self.retired_infos()?;
         boxes
-            .try_reserve_exact(images.len())
+            .try_reserve_exact(images.len().saturating_add(retired.len()))
             .map_err(|_| Refusal::Exhausted {
                 what: "guest box listing",
                 bound: crate::MAX_BOXES,
             })?;
         boxes.extend(images);
+        boxes.extend(retired);
         Ok(boxes)
     }
 

@@ -1545,6 +1545,7 @@ mod tests {
                 unavailable: Vec::new(),
                 learned: None,
                 node_vms: Vec::new(),
+                unlearned: None,
             }),
             physical: Some(vec![factual]),
             effects: AtomicUsize::new(0),
@@ -1686,6 +1687,7 @@ mod tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         prefix.check().unwrap();
         assert_ne!(
@@ -2281,6 +2283,7 @@ mod tests {
                 unavailable: Vec::new(),
                 learned: None,
                 node_vms: Vec::new(),
+                unlearned: None,
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
