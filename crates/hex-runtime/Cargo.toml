@@ -59,5 +59,10 @@ tempfile.workspace = true
 # test's, which the guest under shards-init is reached through.
 shards-remote = { path = "../../vendor/shards/crates/remote" }
 
+# src/guest/image_tests.rs on Windows: a lane's ends as Shards' run host makes them there, a plain pipe pair
+# (shards_ipc::Stream), the relay holding its VM's end.
+[target.'cfg(windows)'.dev-dependencies]
+shards-ipc = { path = "../../vendor/shards/crates/ipc" }
+
 [lints]
 workspace = true
