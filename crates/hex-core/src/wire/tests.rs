@@ -90,10 +90,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
-    // C7), no node VM's receipt (joint plan step 39) and no learner's why (A-3); a spec ends with one route option and
-    // its band, 0 here (joint plan step 14).
+    // C7), no node VM's receipt (joint plan step 39), no learner's why (A-3) and its boxes' CPU time unread (A-8); a spec
+    // ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1
+        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1 + 1
     } else {
         3
     };
@@ -210,12 +210,12 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 12..],
-        [0; 12],
-        "the empty list's count, then no learned use, its machine's time unread, no node VM's count and no learner's \
-         why, ends it"
+        cut[cut.len() - 13..],
+        [0; 13],
+        "the empty list's count, then no learned use, its machine's time unread, no node VM's count, no learner's why \
+         and its boxes' CPU time unread, ends it"
     );
-    cut.truncate(cut.len() - 12);
+    cut.truncate(cut.len() - 13);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -474,7 +474,12 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
-        own: Default::default(),
+        // Its machine's time and its boxes' together (joint plan step 14, C7; the review's A-8) cross with it.
+        own: hex_api::MachineTime {
+            cpu_ns: Some(4_000_000_000),
+            uptime_ns: Some(10_000_000_000),
+            boxes_cpu_ns: Some(1_000_000_000),
+        },
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -2963,8 +2968,9 @@ fn route_wire_capacity_bytes(
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
+    // its machine's time unread (C7), no node VM's count (joint plan step 39), no learner's why (A-3) and its boxes' CPU
+    // time unread (A-8), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1 - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2982,10 +2988,11 @@ fn route_wire_capacity_bytes(
     w.u32(0);
     w.u8(0);
     // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39), then no
-    // learner's why (A-3).
+    // learner's why (A-3), then its boxes' CPU time unread (A-8).
     w.u8(0);
     w.u8(0);
     w.u32(0);
+    w.u8(0);
     w.u8(0);
     w.done().unwrap()
 }
@@ -3442,8 +3449,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
+    // its machine's time unread (C7), no node VM's count (joint plan step 39), no learner's why (A-3) and its boxes' CPU
+    // time unread (A-8), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1 - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -4855,9 +4863,10 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 8..],
-        [0; 8],
-        "no learned use, its machine's time unread, then no node VM's count and no learner's why, ends it"
+        cut[cut.len() - 9..],
+        [0; 9],
+        "no learned use, its machine's time unread, then no node VM's count, no learner's why and its boxes' CPU time \
+         unread, ends it"
     );
     cut.truncate(cut.len() - 1);
     assert!(matches!(
@@ -4942,9 +4951,10 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
     twice.node_vms[1].run = twice.node_vms[0].run;
     assert!(twice.check().is_err());
     // The receipts' count, then each receipt: its run, its booking, its phase and its guest's room (V2), the last of
-    // which comes just before the learner's why, none here (A-3), which ends it.
+    // which comes just before the learner's why, none here (A-3), and its boxes' CPU time, unread here (A-8), which
+    // ends it.
     let receipt = 16 + 3 * size_of::<u64>() + 1 + 3 * size_of::<u64>();
-    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1);
+    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1 + 1);
     let mut past = bytes.clone();
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -4953,8 +4963,8 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
         Err(Fault::Value { .. })
     ));
     let mut unknown = bytes;
-    // The last receipt's phase: before its guest's room and the learner's why.
-    let phase = unknown.len() - 2 - 3 * size_of::<u64>();
+    // The last receipt's phase: before its guest's room, the learner's why and the boxes' CPU time.
+    let phase = unknown.len() - 3 - 3 * size_of::<u64>();
     unknown[phase] = 3;
     assert!(matches!(
         read_answer(&received(&unknown, 0), MAX_MESSAGE),
@@ -5096,8 +5106,8 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
     // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
     // (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7), its machine's time unread,
-    // no node VM's count, and no learner's why (A-3).
-    let at = bytes.len() - (11 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
+    // no node VM's count, no learner's why (A-3) and its boxes' CPU time unread (A-8).
+    let at = bytes.len() - (11 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5194,10 +5204,10 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
     // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
     // await's and no ranked VM's (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7),
-    // its machine's time unread, no node VM's count, and no learner's why (A-3): five counts and lengths besides place
-    // 4's three, the unrecorded boxes' one and the unacted VMs' one.
+    // its machine's time unread, no node VM's count, no learner's why (A-3) and its boxes' CPU time unread (A-8): five
+    // counts and lengths besides place 4's three, the unrecorded boxes' one and the unacted VMs' one.
     let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>() + 2 * size_of::<u32>();
-    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
+    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(

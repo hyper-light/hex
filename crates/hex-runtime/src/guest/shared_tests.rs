@@ -1379,10 +1379,7 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
         capacity.free.mem_bytes = free;
         capacity
     };
-    let boxes = |memory: u64| super::Boxes {
-        memory,
-        ..super::Boxes::default()
-    };
+    let boxes = |memory: u64| super::Boxes { memory };
     let first = super::guest_seen(super::Seen::default(), &guest(5 * gib), boxes(2 * gib));
     assert_eq!(first.overhead.mem_bytes, Some(gib));
     let second = super::guest_seen(first, &guest(6 * gib), boxes(3 * gib / 2));
@@ -1391,17 +1388,19 @@ fn w14_a_shared_guests_own_overhead_is_its_use_past_its_boxes_the_most_seen() {
     assert_eq!(third.overhead.mem_bytes, Some(gib));
 }
 
-/// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2): a shared guest's own CPU is its machine's CPU time past its boxes':
-/// at its first answer over its uptime, its boot's work among it, which the first interval between answers replaces;
-/// then the most seen over the intervals. Its disk is its used bytes, its boxes' disk no usage reads. Do measure a
-/// guest of 100 GiB of disk with 40 GiB free, up 10 s with 4 s of CPU and its boxes 1 s; then 1 s on with 0.5 s more
-/// and its boxes 0.3 s more; then 1 s on with 0.1 s more and its boxes none. Expect 300 milli-CPU first (3 s over 10
-/// s), then 200 (the interval's, in the boot's place), then 200 still (100 is less), and 60 GiB of disk throughout.
+/// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2; the review's A-8): a shared guest's own CPU is its machine's CPU
+/// time past its boxes': at its first answer over its uptime, its boot's work among it, which the first interval its
+/// counters resolve replaces; then the most of such intervals. For a guest of 2 CPUs an interval resolves once it spans
+/// 1000 x (5 + 3 x 2) ticks of 10 ms, 110 s. Its disk is its used bytes, its boxes' disk no usage reads. Do measure a
+/// guest of 100 GiB of disk with 40 GiB free, up 10 s with 4 s of CPU and its boxes 1 s; then 1 s on with 0.5 s more and
+/// its boxes 0.3 s more; then 110 s after the first with 55 s more and its boxes 33 s more; then 110 s on with 11 s more
+/// and its boxes none. Expect 300 milli-CPU from boot (3 s over 10 s), still so after 1 s, which no interval resolves;
+/// then 200 (110 s's, in the boot's place); then 200 still (100 is less); and 60 GiB of disk throughout.
 #[test]
-fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_use() {
+fn w14_a_shared_guests_own_cpu_is_its_resolved_intervals_past_its_boxes_and_its_disk_its_use() {
     let gib = 1u64 << 30;
     let second = 1_000_000_000u64;
-    let guest = |cpu_ns: u64, uptime_ns: u64| hex_api::Capacity {
+    let guest = |cpu_ns: u64, uptime_ns: u64, boxes_cpu_ns: u64| hex_api::Capacity {
         id: "guest".into(),
         total: CapacityResources {
             cpu_milli: 2_000,
@@ -1423,34 +1422,100 @@ fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_
         own: hex_api::MachineTime {
             cpu_ns: Some(cpu_ns),
             uptime_ns: Some(uptime_ns),
+            boxes_cpu_ns: Some(boxes_cpu_ns),
         },
         node_vms: Vec::new(),
         unlearned: None,
     };
-    let boxes = |cpu_ns: u64| super::Boxes {
-        cpu_ns,
-        ..super::Boxes::default()
+    let boxes = super::Boxes::default();
+    let first = super::guest_seen(
+        super::Seen::default(),
+        &guest(4 * second, 10 * second, second),
+        boxes,
+    );
+    assert_eq!(
+        (first.overhead.cpu_milli, first.cpu_from_boot),
+        (Some(300), true)
+    );
+    assert_eq!(first.overhead.disk_bytes, Some(60 * gib));
+    let soon = super::guest_seen(
+        first,
+        &guest(
+            4 * second + second / 2,
+            11 * second,
+            second + 3 * second / 10,
+        ),
+        boxes,
+    );
+    assert_eq!(
+        (soon.overhead.cpu_milli, soon.cpu_from_boot),
+        (Some(300), true)
+    );
+    let next = super::guest_seen(soon, &guest(59 * second, 120 * second, 34 * second), boxes);
+    assert_eq!(
+        (next.overhead.cpu_milli, next.cpu_from_boot),
+        (Some(200), false)
+    );
+    let last = super::guest_seen(next, &guest(70 * second, 230 * second, 34 * second), boxes);
+    assert_eq!(last.overhead.cpu_milli, Some(200));
+    assert_eq!(last.overhead.disk_bytes, Some(60 * gib));
+}
+
+/// The review's A-8 (AC-T7.4.1; ROOT, 2026-11-14: no silent hold): an interval spans its guest's boxes' coming and
+/// going, since their CPU time is the guest's own count of everything under its box root, which keeps an ended box's
+/// work (cgroup v2 flushes a removed cgroup's counts into its parent's). Do measure a 2-CPU guest up 10 s with 4 s of
+/// CPU, its boxes 1 s; then 110 s on with 60 s more, its boxes 38 s more, a box having started and another ended
+/// meanwhile (the boxes on its backing read 1 GiB, then 3 GiB). Expect the interval's 200 milli-CPU in place of the boot
+/// reading's 300, the boxes' change no break in it.
+#[test]
+fn a8_an_interval_spans_its_guests_boxes_coming_and_going() {
+    let gib = 1u64 << 30;
+    let second = 1_000_000_000u64;
+    let guest = |cpu_ns: u64, uptime_ns: u64, boxes_cpu_ns: u64| hex_api::Capacity {
+        id: "guest".into(),
+        total: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 100 * gib,
+        },
+        free: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 4 * gib,
+            disk_bytes: 40 * gib,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: hex_api::MachineTime {
+            cpu_ns: Some(cpu_ns),
+            uptime_ns: Some(uptime_ns),
+            boxes_cpu_ns: Some(boxes_cpu_ns),
+        },
+        node_vms: Vec::new(),
+        unlearned: None,
     };
     let first = super::guest_seen(
         super::Seen::default(),
-        &guest(4 * second, 10 * second),
-        boxes(second),
+        &guest(4 * second, 10 * second, second),
+        super::Boxes { memory: gib },
     );
-    assert_eq!(first.overhead.cpu_milli, Some(300));
-    assert_eq!(first.overhead.disk_bytes, Some(60 * gib));
+    assert_eq!(
+        (first.overhead.cpu_milli, first.cpu_from_boot),
+        (Some(300), true)
+    );
     let next = super::guest_seen(
         first,
-        &guest(4 * second + second / 2, 11 * second),
-        boxes(second + 3 * second / 10),
+        &guest(64 * second, 120 * second, 39 * second),
+        super::Boxes { memory: 3 * gib },
     );
-    assert_eq!(next.overhead.cpu_milli, Some(200));
-    let last = super::guest_seen(
-        next,
-        &guest(4 * second + 6 * second / 10, 12 * second),
-        boxes(second + 3 * second / 10),
+    assert_eq!(
+        (next.overhead.cpu_milli, next.cpu_from_boot),
+        (Some(200), false)
     );
-    assert_eq!(last.overhead.cpu_milli, Some(200));
-    assert_eq!(last.overhead.disk_bytes, Some(60 * gib));
 }
 
 /// The review's A-8 (AC-T7.4.1): a shared guest's counters move in 10 ms ticks (`/proc/stat` in USER_HZ, `/proc/uptime`
@@ -1485,14 +1550,12 @@ fn a8_an_interval_its_counters_cant_resolve_reads_nothing() {
         own: hex_api::MachineTime {
             cpu_ns: Some(cpu_ns),
             uptime_ns: Some(uptime_ns),
+            boxes_cpu_ns: Some(second),
         },
         node_vms: Vec::new(),
         unlearned: None,
     };
-    let boxes = super::Boxes {
-        cpu_ns: second,
-        ..super::Boxes::default()
-    };
+    let boxes = super::Boxes::default();
     let first = super::guest_seen(
         super::Seen::default(),
         &guest(4 * second, 10 * second),
@@ -1527,7 +1590,7 @@ fn w14_answers_that_measured_a_shared_guest_at_once_keep_its_boot_reading_until_
             mem_bytes: Some(1 << 30),
             disk_bytes: Some(0),
         },
-        last: None,
+        start: None,
         cpu_from_boot: from_boot,
     };
     let boot = cpu(Some(300), true);
@@ -1625,6 +1688,7 @@ fn w14_a_shared_backing_goes_live_only_measured() {
         own: hex_api::MachineTime {
             cpu_ns: Some(4_000_000_000),
             uptime_ns: Some(10_000_000_000),
+            boxes_cpu_ns: Some(0),
         },
         node_vms: Vec::new(),
         unlearned: None,
