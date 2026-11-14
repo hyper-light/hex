@@ -5,7 +5,6 @@
 //! of it, its footprint and its guest RAM's part of it, what its folders hold), and its own report read from
 //! its agent's `oci` capacity.
 
-use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,9 +13,9 @@ use std::time::{Duration, Instant};
 use hex_api::{CapacityResources, Class};
 use hex_client::guest::{Client, own_link, shards::ShardsLink};
 use hex_runtime::guest::GuestConfig;
-use sha2::{Digest, Sha256};
 use shards_api::Guests as _;
 
+use super::guest::guest_range;
 use super::run::walk;
 use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Patience, Probe, Use};
 
@@ -251,10 +250,7 @@ impl Shards {
     }
 
     fn ram(&self) -> Result<u64, String> {
-        self.config
-            .memory_mib
-            .checked_mul(1 << 20)
-            .ok_or_else(|| "the memory overflows".to_owned())
+        super::guest::ram(&self.config)
     }
 
     fn stop(vm: &dyn shards_api::Guest, deadline: Instant) -> Result<(), String> {
@@ -292,24 +288,6 @@ impl Shards {
     }
 }
 
-/// The SHA-256 of the file at `path`, read in SHA-256's own block multiple.
-fn digest(path: &Path) -> Result<String, String> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read(&mut buffer)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(super::run::hex(&hash.finalize()))
-}
-
 impl Driver for Shards {
     type Guest = Guest;
     type Cpu = VmmCpu;
@@ -320,23 +298,7 @@ impl Driver for Shards {
     }
 
     fn describe(&self) -> Result<Lines, String> {
-        let mut lines = Vec::new();
-        let (kernel, initrd) = self.config.direct().map_err(|e| e.to_string())?;
-        for (name, path) in [
-            ("SHARDS_BIN", self.config.binary.as_path()),
-            ("HEX_GUEST_KERNEL", kernel),
-            ("HEX_GUEST_INITRD", initrd),
-        ] {
-            lines.push((
-                name.to_owned(),
-                format!("{} sha256={}", path.display(), digest(path)?),
-            ));
-        }
-        lines.push(("HEX_GUEST_CPUS".to_owned(), self.config.vcpus.to_string()));
-        lines.push((
-            "HEX_GUEST_MEMORY_MIB".to_owned(),
-            self.config.memory_mib.to_string(),
-        ));
+        let mut lines = super::guest::describe(&self.config)?;
         #[cfg(target_os = "macos")]
         lines.push((
             "host".to_owned(),
@@ -358,27 +320,11 @@ impl Driver for Shards {
     }
 
     fn envelope(&self) -> Result<Envelope, String> {
-        Ok(Envelope {
-            resources: CapacityResources {
-                cpu_milli: u64::from(self.config.vcpus)
-                    .checked_mul(1000)
-                    .ok_or("the vCPUs overflow")?,
-                mem_bytes: self.ram()?,
-                disk_bytes: 0,
-            },
-            vcpus: self.config.vcpus,
-            source: "HEX_GUEST_CPUS and HEX_GUEST_MEMORY_MIB; no disk: the guest's root and state are in its RAM (docs/design/shards-guest.md §4)".to_owned(),
-        })
+        super::guest::envelope(&self.config)
     }
 
     fn patience(&self) -> Result<Patience, String> {
-        Ok(Patience {
-            bound: hex_runtime::guest::recorded_dial_bound().map_err(|e| e.to_string())?,
-            source: format!(
-                "the guest's recorded first dial bound, boot_ready of {} in bench/native/guest/records.tsv with no margin (hex_runtime::guest::recorded_dial_bound, decision 9)",
-                hex_runtime::guest::CLASS
-            ),
-        })
+        super::guest::patience()
     }
 
     fn runtime(&self) -> &Path {
@@ -493,42 +439,6 @@ impl Driver for Shards {
         drop(client);
         Self::stop(vm.as_ref(), deadline)?;
         place.remove(deadline)
-    }
-}
-
-/// The guest RAM's address range among a VMM's map entries (`(start, end, anonymous)`, in address order):
-/// the one run of anonymous entries, each where the one before ends, whose span is the guest's RAM (Shards
-/// maps each RAM range as one private anonymous mapping, `reserve_ram`, which XNU keeps as entries of at
-/// most 128 MiB and Linux splits where its advice differs). `None` while no run is that long (its RAM not
-/// yet mapped); an error where several are, as none is then told apart.
-fn guest_range(entries: &[(u64, u64, bool)], ram: u64) -> Result<Option<(u64, u64)>, String> {
-    let mut found = Vec::new();
-    for (at, &(start, _, anonymous)) in entries.iter().enumerate() {
-        if !anonymous {
-            continue;
-        }
-        let mut end = start;
-        for &(next, next_end, next_anonymous) in entries.iter().skip(at) {
-            if !next_anonymous || next != end {
-                break;
-            }
-            end = next_end;
-            let span = end.saturating_sub(start);
-            if span == ram {
-                found.push((start, end));
-            }
-            if span >= ram {
-                break;
-            }
-        }
-    }
-    match found.as_slice() {
-        [] => Ok(None),
-        [range] => Ok(Some(*range)),
-        runs => Err(format!(
-            "{} runs of the VMM's anonymous memory span its guest's RAM ({ram} bytes), at {runs:x?}: none is told apart",
-            runs.len()
-        )),
     }
 }
 
@@ -985,6 +895,7 @@ impl Probe for VmmHolds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     /// A stand-in VMM's start into its place, a child of the test's own, measuring (decision 9: no record seeds it).
     #[cfg(target_os = "linux")]

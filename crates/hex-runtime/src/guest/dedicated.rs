@@ -1698,35 +1698,19 @@ impl GuestRuntime {
         socket: &std::path::Path,
         budget: managed::Budget,
     ) -> Result<shards_api::PreparedBoot, Refusal> {
-        let mut spec = spec.clone();
-        super::tell_ready(&mut spec.cmdline, budget.remaining()?)?;
-        let spec = &spec;
         let paths = self.native_paths.as_ref().ok_or_else(|| Refusal::Invalid {
             what: "managed Shards runtime paths",
             why: "the node's configured probe and native launch require the same explicit paths"
                 .into(),
         })?;
-        let plan = if let Some(images) = self.native_images {
-            shards_api::prepare_native_boot(
-                spec,
-                &self.config.binary,
-                socket,
-                shards_api::NativeBoot {
-                    paths,
-                    images,
-                    console_kept: shards_api::recorded_console_bytes_at(&spec.kernel, paths),
-                },
-            )
-        } else {
-            shards_api::prepare_boot(
-                spec,
-                &self.config.binary,
-                socket,
-                shards_api::recorded_console_bytes(&spec.kernel),
-            )
-            .and_then(|plan| plan.with_runtime_paths(paths))
-        };
-        plan.map_err(|why| refusal("preparing admitted Shards scope", &why))
+        super::managed_plan(
+            spec,
+            &self.config.binary,
+            socket,
+            paths,
+            self.native_images,
+            budget.remaining()?,
+        )
     }
 
     pub(super) fn prepare_selected_create(&self, id: &BoxId) -> Result<(), Refusal> {

@@ -243,7 +243,12 @@ on hardware (ROOT's fairness run).
   window. Its room, what D188 tells its guest, is its budget less what it holds. On Linux its VMM's cgroup
   `memory.high` is its budget (throttled past it, never OOM-killed: cgroup-v2.rst, `memory.high`).
 - **No hard memory cap** (ROOT, 2026-11-13): a VM has no `memory.max`, cold or warm: its create writes none
-  (`Node::managed_bounds`), and Linux lifts the one a create before this rule wrote at its first window. Hex can't
+  (`Node::managed_bounds`), and Linux lifts the one a create before this rule wrote at its first window. macOS and
+  Windows hold the same rule (A-4): a VM's host bounds hold its CPU alone (each OS's `managed::host_bounds`), so on
+  macOS its VMM's spawn arms no jetsam cap, nor the managed helper's, and its watcher ends it at no footprint; on
+  Windows its job has no commit limit, and a node adopting a job a create before this rule bounded lifts it
+  (`JobBox::adopt_vm`), its CPU rate kept. A macOS VMM spawned before this rule keeps its spawn's jetsam cap until it
+  ends: lifting a running process's cap takes root (docs/research/runtime/macos-spawn-jetsam-cap.md). Hex can't
   read a VMM's own memory apart from its guest's touched RAM (D241's footprint and `memory.stat` both count them
   together), so a hard cap there would be a chosen bound, and one at the most its windows have shown would kill a VMM
   the first time it needs more: a kill can't follow its party as a wait does after a run-out. Its budget's hold, the

@@ -355,6 +355,23 @@ mod tests {
         matches!(result, Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain, .. }) if id == record.spec.id)
     }
 
+    /// AC-T7.4.1, joint plan step 14 (ROOT, 2026-11-13, ruling B; A-4): do prepare a managed VM's scope as its
+    /// launch does, from its record's host bounds. Expect them to hold its CPU at its allocation's and its memory
+    /// at no bound: no jetsam cap at its VMM's spawn and none for its watcher to end it past, so what its VMM
+    /// takes beside its guest's RAM is its budget's to hold, as on Linux, where a VM has no `memory.max`.
+    #[test]
+    fn w14_a4_a_managed_vms_scope_holds_its_cpu_and_no_memory_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let source = source();
+        let native = runtime(root.path());
+        let record = NativeRecord::Pool(&source);
+        let cpu = record.allocation().unwrap().resources.cpu_milli;
+        let bounds = host_bounds(record).unwrap();
+        assert_eq!(bounds.cpu_max_milli, Some(u32::try_from(cpu).unwrap()));
+        assert_eq!(bounds.memory_max, None);
+        assert_eq!(retained(&native, record).bounds().memory_max, None);
+    }
+
     /// AC-T7.4.1: with the Box's launch retained (its scope prepared, before any spawn) and then its
     /// receipt's identity, the host half refuses Uncertain and changes neither. The source's own
     /// retained slot is another owner's: alone, the Box's proof passes.

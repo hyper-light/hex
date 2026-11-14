@@ -36,6 +36,9 @@ tempfile.workspace = true
 shards-testdir = { path = "../../vendor/shards/crates/testdir" }
 # src/guest/lanes/tests.rs: a run's real agent-control endpoint (D251, D252) on loopback, its run host the test's.
 shards-remote = { path = "../../vendor/shards/crates/remote" }
+# A guest's use answered with none of the protocol's (shards_abi::rate::UseBroken), which the refusal test maps as
+# Shards says it (src/guest/shards/connect_original_tests.rs); shards-api names the type without re-exporting it.
+shards-abi = { path = "../../vendor/shards/crates/abi" }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc.workspace = true

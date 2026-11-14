@@ -30,7 +30,7 @@
 //! Each start prints (`NODE-GUEST`):
 //! - its start: from the node's spawn to its ready line (in the image form its node VM booted, ready and greeted by
 //!   then), in the kernel form then its shared guest's grant to Live, and on macOS and Windows its first create through
-//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's;
+//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's, and how its run started;
 //! - the memory of the VM's processes as their OS counts it, read once each is up and, at start 1 on macOS and Windows,
 //!   once the suite is done: macOS's physical footprint and its peak (proc_pid_rusage); Windows' private working set
 //!   (its perf counters) and its peak working set (Win32_Process, through PowerShell's CIM); Linux's anonymous resident
@@ -41,7 +41,9 @@
 //!
 //! Before a restart, the start before it ends (its node killed, as a crash ends it, or on Linux its node VM stopped)
 //! and the test waits for each of its processes' ends, by their lives, so no VM ending overlaps the next start's
-//! measure. The kernel form's shared guest is released through the node's socket before its node ends.
+//! measure. On Windows the node's keeper, which outlives a killed node by design and never ends on its own, is then
+//! asked to stop, as a node going down cleanly asks it. The kernel form's shared guest is released through the node's
+//! socket before its node ends.
 //!
 //! Explicit inputs only, each by its own variable, a missing one failing by name:
 //! - `HEX_NODE_GUEST_FORM`: `image` or `kernel`; `HEX_NODE_GUEST_WORK`: a directory of this run's own, made here;
@@ -412,6 +414,29 @@ fn ended(pids: &[u32]) {
     assert!(waited.success(), "Wait-Process: {waited}");
 }
 
+/// The keeper a Windows node starts as its own child to hold its boxes' jobs (hex-runtime's `windows::keeper`), named
+/// by `keeper.owner` in the `keeper` folder of the node's `--state` (hex-cli's `node.rs`): none where that names none,
+/// or where the process it names is gone.
+#[cfg(windows)]
+fn keeper(work: &Path) -> Option<hex_runtime::windows::keeper::NodeKeeper> {
+    use hex_runtime::windows::keeper::{NodeKeeper, keeper_file};
+    let keeping = work.join("state").join("keeper");
+    let owner = fs::read_to_string(keeper_file(&keeping)).ok()?;
+    let mut words = owner.split_whitespace();
+    let (Some(Ok(pid)), Some(Ok(created))) = (
+        words.next().map(str::parse::<u32>),
+        words.next().map(str::parse::<u64>),
+    ) else {
+        panic!("{:?} names no keeper: {owner:?}", keeper_file(&keeping));
+    };
+    match NodeKeeper::open(pid, created, &keeping) {
+        Ok(keeper) => Some(keeper),
+        // No process of its pid and creation time runs: it's gone.
+        Err(hex_api::Refusal::Invalid { .. }) => None,
+        Err(e) => panic!("opening the node's keeper, pid {pid}: {e}"),
+    }
+}
+
 /// Waits for each of `pids` to end, by its life: its pidfd, which reads ready once it has ended whoever reaps it; one
 /// already gone has none to open.
 #[cfg(target_os = "linux")]
@@ -658,11 +683,35 @@ mod suite {
         (node, client, shared)
     }
 
-    /// Ends a start's node, as a crash ends it, and waits for each process of its tree to end.
-    pub fn stop(node: Node) {
+    /// Ends a start's node, as a crash ends it, then its keeper where its OS's node has one ([`end_keeper`]): the
+    /// processes its tree had, each still to be waited for.
+    pub fn end(node: Node, work: &Path) -> Vec<u32> {
         let processes: Vec<u32> = tree(node.child.id()).iter().map(|held| held.pid).collect();
         drop(node);
-        ended(&processes);
+        end_keeper(work);
+        processes
+    }
+
+    /// A Windows node's keeper outlives its killed node by design and never ends on its own ([`keeper`]), so a start's
+    /// end asks it to stop, as a node going down cleanly does (windows_node.rs's `Node`), and waits on its process for
+    /// its end.
+    #[cfg(windows)]
+    fn end_keeper(work: &Path) {
+        if let Some(keeper) = keeper(work) {
+            keeper.stop();
+            // `u32::MAX` is WaitForSingleObject's INFINITE: the wait follows the keeper's life alone.
+            let ended = hex_runtime::windows::sys::wait(keeper.process(), u32::MAX).unwrap();
+            assert!(ended, "the node's keeper, pid {}, didn't end", keeper.pid());
+        }
+    }
+
+    /// A macOS node starts no keeper: its tree's processes end with it, or with their release.
+    #[cfg(target_os = "macos")]
+    fn end_keeper(_: &Path) {}
+
+    /// Ends a start's node ([`end`]) and waits for each process of its tree to end.
+    pub fn stop(node: Node, work: &Path) {
+        ended(&end(node, work));
     }
 }
 
@@ -712,7 +761,7 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         release_shared(&client, key);
     }
     drop(client);
-    suite::stop(node);
+    suite::stop(node, &work);
     assert!(
         failures.is_empty(),
         "oci boxes through hex node's socket, its guest's {} form: {failures:#?}",
@@ -723,8 +772,35 @@ fn w39_the_oci_suite_passes_through_a_hex_node_in_either_guest_form() {
         let (node, client, _) = suite::start(start, form, &work, &fixture, &set);
         say_census(start, &census, &mut seen);
         drop(client);
-        suite::stop(node);
+        suite::stop(node, &work);
     }
+}
+
+/// AC-T7.4.1, item 4 on Windows (joint plan step 39): a start's end leaves no process of its node running, so its wait
+/// for the processes of the node's tree ends, and the next start's measure carries none of them. A Windows node starts
+/// its keeper as its own child, which outlives a killed node by design and never ends on its own (hex-runtime's
+/// `windows::keeper`). Do start a node of this build, no guest given, and end it as a start ends; expect its keeper
+/// ended.
+#[cfg(windows)]
+#[test]
+#[ignore = "native Windows: a hex node of this build, no VM"]
+fn w39_a_starts_end_on_windows_ends_its_nodes_keeper() {
+    let work = PathBuf::from(input("HEX_NODE_GUEST_WORK"));
+    assert!(!work.exists(), "a run's own directory: {work:?} exists");
+    fs::create_dir_all(work.join("state")).unwrap();
+    let node = Node::start_with(&work, None, &[]);
+    let keeper = keeper(&work).expect("a Windows node's keeper, named by its state's keeper.owner");
+    let processes = suite::end(node, &work);
+    let running = keeper.alive();
+    // Asked to stop either way, so a run that fails leaves it no more running than one that passes.
+    keeper.stop();
+    assert!(
+        !running,
+        "the node's keeper, pid {}, runs on after its start's end, and it never ends on its own: the start's wait for \
+         its node's processes {processes:?} would never end",
+        keeper.pid()
+    );
+    ended(&processes);
 }
 
 /// Linux's half: each form's boot through its own production class, the oci class being native there.
@@ -816,10 +892,11 @@ mod kvm {
             let began = Instant::now();
             let booted = runtime.class().boot_node(&vm).unwrap();
             println!(
-                "NODE-GUEST start={boot} form=image ready_us={} boot_node_us={} ready={:?}",
+                "NODE-GUEST start={boot} form=image ready_us={} boot_node_us={} ready={:?} started_from={:?}",
                 booted.took.as_micros(),
                 began.elapsed().as_micros(),
-                booted.ready
+                booted.ready,
+                booted.started_from
             );
             let used = runtime.class().host_use_node(vm.run).unwrap();
             println!(

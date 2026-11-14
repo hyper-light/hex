@@ -1587,6 +1587,89 @@ fn item2_term_to_a_run_with_no_member_a_signal_reaches_is_refused_not_running() 
     }
 }
 
+/// Goal 2's item 2 (ROOT, 2026-11-14: the node's wire carries a member's signal, `Runtime::signal_member`): a signal to
+/// one member of a running VM rides that member's own lane on its run's agent-control endpoint alone, KILL among them:
+/// the member's, never its VM's, which runs on. Do: a run whose endpoint is Shards' own on loopback, its members a
+/// harness, an agent and files; send the agent TERM, then the harness KILL. Expect: each done; the agent's lane alone
+/// steered with 15, then the harness's with 9; no stop; the box Running.
+#[test]
+fn w2_a_members_signal_rides_its_own_lane_and_the_vm_runs_on() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((Vec::new(), Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-member-signal", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let member = |kind, name: &str| Member {
+        kind,
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "helper"), Signal::TERM),
+        Ok(())
+    );
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Harness, "claude"), Signal::KILL),
+        Ok(())
+    );
+    assert_eq!(*taken.lock().unwrap(), vec![(1, 15), (0, 9)]);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Goal 2's item 2: a member's own signal that reaches no program is refused, typed: NotRunning, "signal a member",
+/// before its run's start; NotRunning, "signal a member: it has ended", for a member that has ended, and "signal a
+/// member: it runs no program" for one of files alone; Invalid for a member its run declares not. Do: a run whose
+/// endpoint is Shards' own on loopback, its agent ended; TERM to the harness before the start, then, after it, TERM to
+/// the agent, the files and a harness the run declares not. Expect: each refused so, no signal taken, the box Running.
+#[test]
+fn w2_a_members_signal_that_reaches_no_program_is_refused_typed() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((vec![1], Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-member-unreached", None))
+        .unwrap()
+        .id;
+    let member = |kind, name: &str| Member {
+        kind,
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Harness, "claude"), Signal::TERM),
+        Err(Refusal::NotRunning(id.clone(), "signal a member"))
+    );
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "helper"), Signal::TERM),
+        Err(Refusal::NotRunning(
+            id.clone(),
+            "signal a member: it has ended"
+        ))
+    );
+    assert_eq!(
+        runtime.signal_member(&id, &member(MemberKind::Agent, "notes"), Signal::TERM),
+        Err(Refusal::NotRunning(
+            id.clone(),
+            "signal a member: it runs no program"
+        ))
+    );
+    let undeclared =
+        runtime.signal_member(&id, &member(MemberKind::Harness, "codex"), Signal::TERM);
+    assert!(
+        matches!(&undeclared, Err(Refusal::Invalid { what: "member", .. })),
+        "{undeclared:?}"
+    );
+    assert!(taken.lock().unwrap().is_empty());
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
 /// Goal 2's item 2 (D238; Shards' #72): a member's own kill rides its own lane on its run's agent-control endpoint,
 /// dialed as it goes, and the member ends killed, Signal(9), never a code. Do: take a harness its caller drives, of a run
 /// whose endpoint is Shards' own on loopback; kill it, its end then told as its run host tells it. Expect: the kill
@@ -3176,6 +3259,14 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
         assert_eq!(shown.exit, Some(Exit::Signal(9)));
         assert!(shown.published.is_empty());
         assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
+        // Why it was stopped outlives the start that said it: the box's end keeps the grants' refusal.
+        assert!(
+            shown
+                .ended
+                .as_deref()
+                .is_some_and(|why| why.contains("grants[0].member harness codex")),
+            "{shown:?}"
+        );
     }
 }
 
@@ -3353,6 +3444,128 @@ fn w12_started_of_a_box_not_booting_answers_as_inspect_at_once() {
         Runtime::started(&runtime.images, &BoxId::new("image-started-none").unwrap()),
         Err(Refusal::NoSuchBox(_))
     ));
+}
+
+/// A box granted a publish of port 1455 to harness codex, which the model's image doesn't run, its port given to
+/// member 0 (none), so the run its boot starts breaks its grants (N6).
+fn granted_codex(name: &str) -> BoxSpec {
+    use hex_api::{Grant, Member, MemberKind, Proto};
+    let mut spec = spec(name, None);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Publish {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            },
+            proto: Proto::Tcp,
+            port: 1455,
+            host: "127.0.0.1".parse().unwrap(),
+            host_port: None,
+        }];
+    }
+    spec
+}
+
+/// Each test's call under way over a run that breaks its grants: these tests' facts alone.
+static STARTED_HOLDS_GRANTS: Patience =
+    Patience::measuring("test.hex_runtime.image_started_holds_grants");
+static INSPECT_HOLDS_GRANTS: Patience =
+    Patience::measuring("test.hex_runtime.image_inspect_holds_grants");
+
+/// Joint plan step 15 (N6), a start past its boot's W* (the person's ruling of 2026-11-13): do start a VM granted a
+/// publish to a harness its image doesn't run, its boot held past a 1 ns W* so its start answers Pending, and ask
+/// `started` as the boot is held, its run then starting. Expect: `started` refused Invalid naming the grant's member,
+/// as a start answers such a run; its run stopped once; and the box ended with KILL's signal, nothing published, its
+/// end keeping why, so no port stays published for a member no grant names whichever call took the boot's answer.
+#[test]
+fn n6_started_over_a_pending_start_stops_a_run_that_breaks_its_grants() {
+    let images = ModelImages::new();
+    images.receive(1455, &[(0, 1455)]);
+    images.gate(Gate::Host);
+    let (runtime, owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_n6_started",
+            "test.hex_runtime.image_started_n6",
+        )),
+    );
+    let id = runtime
+        .create(granted_codex("image-n6-started"))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let refused = started_over_a_held_boot(&runtime, &images, &id, &STARTED_HOLDS_GRANTS);
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { what: "grants", why }) if why.contains("grants[0].member harness codex")),
+        "{refused:?}"
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Signal(9)))
+    );
+    assert!(shown.published.is_empty());
+    assert!(
+        shown
+            .ended
+            .as_deref()
+            .is_some_and(|why| why.contains("grants[0].member harness codex")),
+        "{shown:?}"
+    );
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
+}
+
+/// As above, the boot's answer taken by an inspect, a call that follows nothing. Expect: no look refused or showing it
+/// running free: it shows Running while its stop goes, then Empty with KILL's signal and nothing published, its end
+/// keeping why; its run stopped once; and a `started` asked after it answers its failure in those words.
+#[test]
+fn n6_an_inspect_that_takes_a_pending_boots_answer_stops_a_run_that_breaks_its_grants() {
+    let images = ModelImages::new();
+    images.receive(1455, &[(0, 1455)]);
+    images.gate(Gate::Host);
+    let held = ImageWaits {
+        boot: Patience::seeded(
+            "test.hex_runtime.image_boot_n6_inspect",
+            Duration::from_nanos(1),
+        ),
+        ..waits().unwrap()
+    };
+    let (runtime, _owner) = model_runtime(&images, Ok(held));
+    let id = runtime
+        .create(granted_codex("image-n6-inspect"))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    images.gate(Gate::Open);
+    let ended = shown(&runtime, &id, BoxState::Empty, &INSPECT_HOLDS_GRANTS);
+    assert_eq!(ended.exit, Some(Exit::Signal(9)));
+    assert!(ended.published.is_empty());
+    assert!(
+        ended
+            .ended
+            .as_deref()
+            .is_some_and(|why| why.contains("grants[0].member harness codex")),
+        "{ended:?}"
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+    let late = runtime.started(&id);
+    assert!(
+        matches!(&late, Err(Refusal::Failed { why, .. }) if why.contains("grants[0].member harness codex")),
+        "{late:?}"
+    );
 }
 
 /// Decision 9 (no record is read), joint plan step 12: do make the image waits. Expect: each following its party (no
@@ -3668,6 +3881,50 @@ fn w39_a_node_vm_boots_under_shards_init_through_the_image_class_and_is_never_a_
     );
     assert!(owner.records.lock().unwrap().is_empty());
     assert!(runtime.list().unwrap().is_empty());
+}
+
+/// Joint plan step 39, item 4 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's starts told cold or restored, and its READY an
+/// event line): do boot a node VM whose run host says it restored its image's template, then form its `node_vm_ready`
+/// line, and one for a run that saved its template and said READY late. Expect the boot to answer its run restored and
+/// its READY on time, and each line one line: its run's name, how it started and how its READY came, each a JSON
+/// string, and its READY's time in whole nanoseconds.
+#[test]
+fn w39_a_node_vms_boot_says_how_its_run_started_and_its_ready_line_says_it() {
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Restored;
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    let booted = runtime.images.boot_node(&vm).unwrap();
+    assert_eq!(
+        (booted.started_from, booted.ready),
+        (
+            hex_api::StartedFrom::Restored,
+            shards_api::image::Ready::OnTime
+        )
+    );
+    let run = "01".repeat(16);
+    assert_eq!(
+        node::ready_line(
+            &vm.run,
+            booted.started_from,
+            booted.ready,
+            Duration::from_nanos(1_234)
+        ),
+        format!(
+            "hex.guest event=node_vm_ready run=\"{run}\" started_from=\"restored\" ready=\"on_time\" took_ns=1234"
+        )
+    );
+    assert_eq!(
+        node::ready_line(
+            &vm.run,
+            hex_api::StartedFrom::Saved,
+            shards_api::image::Ready::Late(5),
+            Duration::from_secs(2)
+        ),
+        format!(
+            "hex.guest event=node_vm_ready run=\"{run}\" started_from=\"saved\" ready=\"late\" took_ns=2000000000"
+        )
+    );
 }
 
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is held through its run's rate, D247): do boot a

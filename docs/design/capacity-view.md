@@ -213,10 +213,11 @@ removed from the records, the other holders are hinted, and what was released (i
 sum) is returned for the shell to log on the node's capacity event target: the person says
 `hex schedule forget --socket <path> --holder <name>` (`schedule::Command::Forget`, its own wait, a typed
 `Reply::forget`), and the scheduler logs `hex.capacity event=forgotten holder="<name>" epoch= count= cpu_milli=
-mem_bytes= disk_bytes= gpus=`. Its epoch stays, so a process
-of it from before is still fenced; and if the person was wrong and some of its work still runs, the
-holder's own next sync adopts it (CV5), so the release never hides running work from the view for
-longer than the holder is away.
+mem_bytes= disk_bytes= gpus=`. Its record goes after its reservations' (a crash between leaves
+a holder recorded with none, which the person forgets again), so its place among the holders the host's
+configuration authorizes is free for its replacement (CV8; the review's E-2). A process of it that comes back
+is a new holder; and if the person was wrong and some of its work still runs, that holder's own sync adopts it
+(CV5), so the release never hides running work from the view for longer than the holder is away.
 
 ### CV7. The view reaches every decider, by hints
 
@@ -235,7 +236,7 @@ view, so the next decision is made on the room there is (Omega §3.4: resync, th
 
 | Bound | Value | Derivation | Overflow |
 |---|---|---|---|
-| Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` |
+| Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` for a new holder; a configuration that shrinks below the holders recorded is no damage: each recorded one keeps what it holds until its own word or the person's release frees its place (CV6) |
 | Reservations per holder | `Budget::reservations` | the most one sync lists (`hex_core::capacity::most_held`: the wire's message bound over the widest reservation), so every holder's sync fits one message (CV9); the keeper's records folder is sized to it, whatever runtime classes the host runs of its own (a Mac that places none still keeps a holder's) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
 | A holder's name | `Budget::name_bytes` | the host's wire message bound (`hex_core::wire::MAX_MESSAGE` on Hex's shell), so a hello always fits one message | `Closed { Invalid }` |
 | Hints owed | one per holder | coalesced: the newest view replaces the unsent one | none: a flag |

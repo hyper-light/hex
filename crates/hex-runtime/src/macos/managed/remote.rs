@@ -293,11 +293,7 @@ impl Helper {
         let pools = books.pool_records()?;
         check_restart(completed, &records, &pools)
     }
-    fn start(
-        &self,
-        until: Instant,
-        host_memory: Option<u64>,
-    ) -> Result<(ProcId, OwnedFd), Refusal> {
+    fn start(&self, until: Instant) -> Result<(ProcId, OwnedFd), Refusal> {
         if self
             .books
             .get()
@@ -309,12 +305,6 @@ impl Helper {
             ));
         }
         let prepared = crate::macos::proc::Prepared::new()?;
-        let memory = host_memory.filter(|memory| *memory != 0).ok_or_else(|| {
-            super::configuration("helper startup requires the same admitted host memory envelope")
-        })?;
-        let cap = sys::jetsam_cap_mib(memory).ok_or_else(|| {
-            super::configuration("the admitted helper envelope is not natively representable")
-        })?;
         let (parent, child) = rustix::net::socketpair(
             AddressFamily::UNIX,
             SocketType::STREAM,
@@ -436,7 +426,9 @@ impl Helper {
             ],
             report: None,
             lifeline: None,
-            jetsam_mib: Some(cap),
+            // No jetsam cap (joint plan step 14, ruling B; A-4): the helper holds every managed VM's controller, and a
+            // cap sized by the VM whose launch started it would end them all at a bound of no basis.
+            jetsam_mib: None,
         };
         if Instant::now() >= until {
             return Err(super::configuration(
@@ -676,7 +668,6 @@ impl Helper {
         &self,
         allow_start: bool,
         until: Instant,
-        host_memory: Option<u64>,
     ) -> Result<(ProcId, Option<OwnedFd>), Refusal> {
         // Disk/Store observations precede any short helper-state turn. The native Starting state
         // refuses concurrent starts; no helper-global mutex spans I/O or another Books turn.
@@ -720,7 +711,7 @@ impl Helper {
                     ));
                 }
             }
-            let (process, connection) = self.start(until, host_memory)?;
+            let (process, connection) = self.start(until)?;
             self.remember(process)?;
             if receipt::read(self)?
                 .is_none_or(|snapshot| snapshot.process != process || snapshot.completed.is_some())
@@ -880,7 +871,7 @@ impl Helper {
     }
     pub(in crate::macos) fn census(&self) -> Result<protocol::census::Census, Refusal> {
         let until = self.until(None)?;
-        let (process, _) = self.identity(false, until, None)?;
+        let (process, _) = self.identity(false, until)?;
         let id = self.next()?;
         let request = protocol::census::encode_request(VERSION, id, process)
             .map_err(|_| super::configuration("invalid native census request"))?;
@@ -1441,13 +1432,7 @@ pub(super) fn launch(
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to launch it"))?;
     let launch = make_launch(record, plan, helper.cpu)?;
-    let (process, startup) = helper.identity(
-        true,
-        until,
-        record
-            .allocation()
-            .map(|allocation| allocation.resources.mem_bytes),
-    )?;
+    let (process, startup) = helper.identity(true, until)?;
     let proxy = Proxy::prepared(
         Arc::clone(helper),
         protocol::Key::from_record(record, process)?,
@@ -1561,7 +1546,7 @@ pub(super) fn attach(
             .map_err(|_| record.uncertain("its completed end was published before"))?;
         return Ok(proxy);
     }
-    let (process, _) = helper.identity(false, helper.until(None)?, None)?;
+    let (process, _) = helper.identity(false, helper.until(None)?)?;
     let proxy = Proxy::prepared(
         Arc::clone(helper),
         protocol::Key::from_record(record, process)?,
@@ -1586,7 +1571,7 @@ pub(super) fn set_rate(
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to set its rate"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?, None)?;
+    let (process, _) = helper.identity(false, helper.until(None)?)?;
     let key = protocol::Key::from_record(record, process)?;
     helper.set_rate(key, rate).map_err(CallFailure::refusal)
 }
@@ -1598,7 +1583,7 @@ pub(super) fn stop(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<(),
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to stop it"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?, None)?;
+    let (process, _) = helper.identity(false, helper.until(None)?)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
         .rpc(
@@ -1622,7 +1607,7 @@ pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Us
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to read its usage"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?, None)?;
+    let (process, _) = helper.identity(false, helper.until(None)?)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
         .rpc(
@@ -1675,7 +1660,7 @@ pub(super) fn finalize(
         helper.finish_helper(snapshot.process, until)?;
         return Ok(()); // Receipt retained until canonical Released/remove; new launch fences it.
     }
-    let (process, _) = helper.identity(false, until, None)?;
+    let (process, _) = helper.identity(false, until)?;
     let key = protocol::Key::from_record(record, process)?;
     let result = helper.rpc(
         &protocol::Request::Control {

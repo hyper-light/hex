@@ -18,7 +18,7 @@ use shards_api::image::{
 
 use super::{
     Booted, End, ImageClass, Run, Settled, Slot, Told, admitted_size, boot_on_its_thread,
-    diagnostics_file, host_use_of, timed_stats,
+    diagnostics_file, host_use_of, started_from, timed_stats,
 };
 use crate::devices::Books;
 
@@ -47,6 +47,9 @@ pub struct NodeBooted {
     pub control: ControlAt,
     /// How its init said it.
     pub ready: Ready,
+    /// How its run started, as Shards said it: booted, its image's template saved or restored on the way, or a warm run
+    /// host's, so a cold start is told from a restored one.
+    pub started_from: hex_api::StartedFrom,
     /// From the boot's ask to its READY.
     pub took: Duration,
 }
@@ -177,10 +180,13 @@ impl ImageClass {
         READY.answered(took);
         record.phase = NodeVmPhase::Ready;
         books.put_node_vm(record)?;
+        let from = started_from(guest.started_from());
+        tell(&ready_line(&run, from, ready, took));
         Ok(NodeBooted {
             run,
             control,
             ready,
+            started_from: from,
             took,
         })
     }
@@ -415,6 +421,50 @@ fn run_name(run: &NodeRun) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// `hex.guest event=node_vm_ready run=<a JSON string> started_from=<a JSON string> ready=<a JSON string> took_ns=<n>`
+/// (ROOT, 2026-11-13): node VM `run` Ready, how its run started (hex-api's `StartedFrom`, in its serde names), how its
+/// init said READY (`on_time`, or `late` past its run's ready-by) and from its boot's ask to its READY.
+pub(super) fn ready_line(
+    run: &NodeRun,
+    from: hex_api::StartedFrom,
+    ready: Ready,
+    took: Duration,
+) -> String {
+    use hex_api::event::Value::{Number, Text};
+    let started = match from {
+        hex_api::StartedFrom::Booted => "booted",
+        hex_api::StartedFrom::Saved => "saved",
+        hex_api::StartedFrom::Restored => "restored",
+        hex_api::StartedFrom::Replaced => "replaced",
+        hex_api::StartedFrom::Warm => "warm",
+    };
+    let said = match ready {
+        Ready::OnTime => "on_time",
+        Ready::Late(_) => "late",
+        // follow_ready follows a ready-by passed on to its late READY, so it answers none; said as it is all the same.
+        Ready::Passed(_) => "passed",
+    };
+    hex_api::event::line(
+        "hex.guest",
+        "node_vm_ready",
+        &[
+            ("run", Text(&run_name(run))),
+            ("started_from", Text(started)),
+            ("ready", Text(said)),
+            ("took_ns", Number(took.as_nanos())),
+        ],
+    )
+}
+
+/// Writes event `line` to this process's stderr, the node's log, as the node VM store's lines go: a write that fails
+/// has no other place to say it.
+fn tell(line: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("{line}\n").as_bytes());
 }
 
 /// A call about node VM `run` that isn't running here.
