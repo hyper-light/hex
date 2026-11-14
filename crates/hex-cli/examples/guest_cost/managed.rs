@@ -575,10 +575,15 @@ impl Probe for VmmCpu {
     fn read(&mut self) -> Result<Use, String> {
         // D260's order: what its vCPUs ran of its guest first, then its job's whole, so the whole less the vCPUs' is
         // never less than none.
-        let used = self
-            .vm
-            .host_use(Duration::MAX)
-            .map_err(|e| format!("asking the guest's VM process its use: {e}"))?;
+        let asked =
+            |why: &dyn std::fmt::Display| format!("asking the guest's VM process its use: {why}");
+        let used = match self.vm.host_use(Duration::MAX).map_err(|e| asked(&e))? {
+            shards_api::ManagedUsed::Running(used) => used,
+            // Its end (Shards' D260), in the words its refusal of the ask said it before.
+            shards_api::ManagedUsed::Ended(ended) => {
+                return Err(asked(&shards_api::Refusal::Ended(ended.end)));
+            }
+        };
         let times = used
             .microvm
             .guest

@@ -14,8 +14,8 @@ use hex_api::{
 use hex_core::record::NodeVmRecord;
 use hex_testkit::waits::follow::{self, Party};
 use shards_api::image::{
-    Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
-    Receiving, StartedFrom, VcpuTime,
+    Bound, Channel, ChannelEnd, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName,
+    Microvm, Receiving, StartedFrom, Unused, VcpuTime,
 };
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
@@ -472,7 +472,7 @@ impl ImageGuest for ModelGuest {
     fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
         self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
-            Some(end) => Err(ImageRefusal::Ended(end)),
+            Some(end) => Err(ImageRefusal::Ended(ended(end))),
             None => Ok(self.run.stats.lock().unwrap().clone()),
         }
     }
@@ -480,7 +480,7 @@ impl ImageGuest for ModelGuest {
     // where it is short; it gives no member a terminal (D244), refused as unsupported.
     fn room(&self, room: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
         if let Some(end) = self.run.end.lock().unwrap().clone() {
-            return Err(ImageRefusal::Ended(end));
+            return Err(ImageRefusal::Ended(ended(end)));
         }
         self.run.rooms.lock().unwrap().push(room);
         Ok(room.map(|room| u64::try_from(room.max(0)).unwrap()))
@@ -491,7 +491,7 @@ impl ImageGuest for ModelGuest {
         _: Duration,
     ) -> Result<Option<std::num::NonZeroU64>, ImageRefusal> {
         if let Some(end) = self.run.end.lock().unwrap().clone() {
-            return Err(ImageRefusal::Ended(end));
+            return Err(ImageRefusal::Ended(ended(end)));
         }
         self.run.rates.lock().unwrap().push(rate);
         Ok(rate)
@@ -561,14 +561,61 @@ impl ImageGuest for ModelGuest {
         self.run.diagnostics.lock().unwrap().push(to);
         Ok(())
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
+    fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
         let end = self.run.end.lock().unwrap().clone();
-        Ok(end.or_else(|| {
+        Ok(end.map(ended).or_else(|| {
             self.run.gone.lock().unwrap().as_ref().map(|said| {
-                RunEnd::Failed(format!("the run host exited without its run's end: {said}"))
+                RunEnded::unused(
+                    RunEnd::Failed(format!("the run host exited without its run's end: {said}")),
+                    Unused::Untold,
+                )
             })
         }))
     }
+    // The model tells no channel's end apart from its run's (control-01's `WithRun`), as a host's answers that end
+    // without telling one do; a member that runs nothing is refused as Shards refuses it.
+    fn wait_channel(
+        &self,
+        member: &MemberName,
+        _: Channel,
+        _: Duration,
+    ) -> Result<Option<ChannelEnd>, ImageRefusal> {
+        if !self
+            .members
+            .iter()
+            .any(|m| m.kind == member.kind && m.name == member.name && m.runs)
+        {
+            return Err(ImageRefusal::Image(format!(
+                "{member:?} is files alone, and runs nothing"
+            )));
+        }
+        let ended =
+            self.run.end.lock().unwrap().is_some() || self.run.gone.lock().unwrap().is_some();
+        Ok(if ended {
+            Some(ChannelEnd::WithRun)
+        } else {
+            None
+        })
+    }
+    // No run of the model asks its GPU report (D233): refused as Shards refuses a run that asked none.
+    fn take_gpu_report(
+        &self,
+        _: Duration,
+    ) -> Result<shards_api::physical::GpuReport, ImageRefusal> {
+        Err(ImageRefusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+}
+
+/// `end` as the model's run host says it (image channel v28): its microVM's final use unread, killed where its run was
+/// stopped, else untold. No call of the class reads a final use.
+fn ended(end: RunEnd) -> RunEnded {
+    let why = match end {
+        RunEnd::Stopped => Unused::Killed,
+        RunEnd::Exited(_) | RunEnd::Failed(_) => Unused::Untold,
+    };
+    RunEnded::unused(end, why)
 }
 
 /// Where the model holds a boot, as D231's boot goes: before its run host has started, when its patience
@@ -774,7 +821,10 @@ impl Images for ModelImages {
         }
         if stop.is_stopped() {
             self.stopped.fetch_add(1, Ordering::SeqCst);
-            return Err(ImageRefusal::Ended(RunEnd::Stopped));
+            return Err(ImageRefusal::Ended(RunEnded::unused(
+                RunEnd::Stopped,
+                Unused::NotStarted,
+            )));
         }
         let (gate, _) = self
             .opened
@@ -1890,6 +1940,78 @@ fn r12_a_members_end_tells_a_signal_from_its_exit() {
             .unwrap()
             .insert(name.to_owned(), end);
         assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(exit), "{name}");
+    }
+}
+
+/// Goal 2's r13 (decision 9; Shards' pending lane handles, 155b5ee2e; AC-T7.4.1): a member lane's ask goes once, and
+/// its answer is waited for within the lane wait's W*, past it on, by the run's connection's life. Do wait through
+/// `followed` on a stand-in handle that answers nothing within the patience it is given unless that is `Duration::MAX`:
+/// with a W* learned, then cold, then for the endpoint's refusal and for the connection's end. Expect: a learned wait
+/// given its W* and then, its run-out told, `Duration::MAX` on the same ask, the answer taken and learned; a cold wait
+/// given `Duration::MAX` at once; a refusal learned as a refusal's sample; the connection's end learned as none.
+#[test]
+fn r13_a_lanes_answer_past_its_w_star_is_followed_on_its_one_ask_and_learned() {
+    let party = [Piece::Kind("the test's lane")];
+    let w_star = Duration::from_nanos(1);
+    let learned = Patience::seeded("hex.test.lane", w_star);
+    let given = Mutex::new(Vec::new());
+    assert_eq!(
+        followed(&learned, &party, asked(&given, Ok(7))).unwrap(),
+        Ok(7)
+    );
+    assert_eq!(*given.lock().unwrap(), [w_star, Duration::MAX]);
+    assert!(learned.slowest() >= Some(w_star));
+    assert_eq!(
+        learned.deadline(),
+        learned.slowest(),
+        "answered, no longer following"
+    );
+
+    let cold = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    assert_eq!(
+        followed(&cold, &party, asked(&given, Ok(7))).unwrap(),
+        Ok(7)
+    );
+    assert_eq!(*given.lock().unwrap(), [Duration::MAX]);
+    assert!(cold.slowest().is_some(), "its answer learned");
+
+    let refused = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    let scope = Fault::Refused(shards_api::control::Reason::Scope);
+    assert_eq!(
+        followed(&refused, &party, asked(&given, Err(scope))).unwrap(),
+        Err(scope)
+    );
+    assert!(refused.slowest().is_some(), "a refusal is an answer");
+
+    let lost = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    let gone = Fault::Lost(shards_api::control::Ended::Local);
+    assert_eq!(
+        followed(&lost, &party, asked(&given, Err(gone))).unwrap(),
+        Err(gone)
+    );
+    assert_eq!(
+        lost.slowest(),
+        None,
+        "the connection's end answered nothing"
+    );
+}
+
+/// A lane's handle as `followed` waits on it: each patience it is given noted in `given`, `answer` given only to a wait
+/// with no bound, as an endpoint that answers later than any W* does.
+fn asked(
+    given: &Mutex<Vec<Duration>>,
+    answer: Result<u32, Fault>,
+) -> impl FnMut(Duration) -> Result<Option<u32>, Fault> + '_ {
+    move |patience| {
+        given.lock().unwrap().push(patience);
+        if patience == Duration::MAX {
+            answer.map(Some)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -5351,4 +5473,47 @@ fn b2_a_delete_of_a_booting_box_whose_read_its_start_outdated_answers_once_it_is
     );
     assert_eq!(deleted, Ok(()));
     assert!(record(&owner, &id).is_none());
+}
+
+/// The review's B-7 (AC-T7.4.1): a boot its delete stopped mid-boot (D231's `BootStop`) answers `Ended(Stopped)`, and
+/// where the start that asked it takes that answer (`Runs::booted`) it is no boot's answer: the time to the stop is no
+/// sample of the boot's W* (a boot hung ten minutes and then stopped would make W* ten minutes), and its run ends as the
+/// stop ended it, KILL, as `Runs::settle` records the same answer. Do put a stopped boot's answer in a booting run's
+/// slot and take it as its start does. Expect the stop given back, the boot's wait with no sample, and the run ended by
+/// signal 9.
+#[test]
+fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
+    let runs = Runs::new();
+    let id = BoxId::new("b7-stopped-boot").unwrap();
+    let slot = Arc::new(Slot::<Booted>::new());
+    runs.insert(
+        &id,
+        Run::Booting(Arc::clone(&slot), Arc::new(BootStop::new())),
+    )
+    .unwrap();
+    slot.put(Err(ImageRefusal::Ended(RunEnded::unused(
+        RunEnd::Stopped,
+        Unused::NotStarted,
+    ))));
+    let waits = waits().unwrap();
+    let taken = runs.booted(&id, &slot, &waits).unwrap();
+    assert!(
+        matches!(
+            taken,
+            Err(ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }))
+        ),
+        "{taken:?}"
+    );
+    assert_eq!(
+        waits.boot.slowest(),
+        None,
+        "the stop taken for a boot's answer"
+    );
+    match runs.lock().unwrap().get(Key::Box(&id)) {
+        Some(Run::Ended(end)) => assert_eq!(end.exit, hex_api::Exit::Signal(9)),
+        _ => panic!("the stopped boot's run isn't ended"),
+    }
 }

@@ -39,7 +39,7 @@ use shards_api::control::{
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
+    MemberEnd, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats, StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -105,13 +105,23 @@ pub(super) struct ImageBoot {
 }
 
 /// The agent-control of this class's runs (D238, D252; goal 2's item 2): its own key, made once from the OS's random
-/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); and each box's controller, dialed as the first
+/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); each box's controller, dialed as the first
 /// signal to one of its run's members goes, and kept for the run it was dialed for while that run is held, so later
-/// signals ride its one connection.
-#[derive(Default)]
+/// signals ride its one connection; and the waits its members' lanes make ([`LaneWaits`]).
 struct Control {
     identity: Mutex<Option<Arc<Identity>>>,
     dialed: Mutex<BTreeMap<BoxId, Arc<Steering>>>,
+    waits: LaneWaits,
+}
+
+/// The waits a member's own lane makes (D238), each learned (decision 9): its first word, from its ask until its run's
+/// endpoint says whether the member runs; and a signal's answer, from its send until the member's host takes or refuses
+/// it. Shards sends each ask once and gives a handle its answer is waited for on, within each wait's patience
+/// (`PendingMember`, `MemberSteering::steered`), so past W* the run-out is told once and the same ask is followed on by
+/// the run's connection's life, never asked again.
+struct LaneWaits {
+    lane: Patience,
+    signal: Patience,
 }
 
 /// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
@@ -124,6 +134,18 @@ struct Steering {
 }
 
 impl Control {
+    /// No key yet and no controller, each lane wait following its party until its first answer.
+    fn new() -> Self {
+        Self {
+            identity: Mutex::new(None),
+            dialed: Mutex::new(BTreeMap::new()),
+            waits: LaneWaits {
+                lane: Patience::measuring("hex.image.member"),
+                signal: Patience::measuring("hex.image.signal"),
+            },
+        }
+    }
+
     /// This class's control key, made once.
     fn identity(&self) -> Result<Arc<Identity>, Refusal> {
         let mut kept = self.identity.lock().map_err(poisoned)?;
@@ -201,23 +223,75 @@ impl Steering {
     /// `signal` to member `index` of box `id`'s run, on the member's own lane (D238): `true` where it took it, `false`
     /// where the member had ended, which takes none; a lane refused or lost refused in its words.
     ///
-    /// Its two waits, for the lane and for the signal's answer, follow the run's connection by its life alone:
-    /// decision 9's follow, but untold, with no W* to tell a run-out by, since Shards' `Execs::member` and
-    /// `MemberSteering::signal` take no patience (Hex's ask of Shards, through ROOT, 2026-11-14).
-    fn signal(&self, id: &BoxId, index: u32, signal: u32) -> Result<bool, Refusal> {
+    /// Its two waits, for the lane's first word and for the signal's answer, are decision 9's ([`followed`], `waits`):
+    /// each ask goes once, and its answer is waited for within its W*, past it on by the run's connection's life.
+    fn signal(
+        &self,
+        waits: &LaneWaits,
+        id: &BoxId,
+        index: u32,
+        signal: u32,
+    ) -> Result<bool, Refusal> {
         let refused = |fault: Fault| Refusal::Os {
             op: "signalling a member of a Shards image VM",
             why: format!("box {id}'s member {index}: {fault}"),
         };
-        match self.execs.member(index).map_err(refused)? {
+        let party = [
+            Piece::Kind("the agent-control connection of box "),
+            Piece::Name(id.as_str()),
+            Piece::Kind(", the lane of its member "),
+            Piece::Number(u64::from(index)),
+        ];
+        let mut asked = self.execs.member(index).map_err(refused)?;
+        match followed(&waits.lane, &party, |patience| asked.wait(patience))?.map_err(refused)? {
             MemberLane::Ended(_) => Ok(false),
             MemberLane::Running(MemberControl { mut steering, .. }) => {
-                match steering.signal(signal) {
+                // The first wait sends the signal; a wait after follows its answer, never sending it again.
+                let mut unsent = Some(signal);
+                let answer = followed(&waits.signal, &party, |patience| match unsent.take() {
+                    Some(signal) => steering.signal(signal, patience),
+                    None => steering.steered(patience),
+                })?;
+                match answer {
                     Ok(()) => Ok(true),
                     Err(Fault::Unsteered(Unsteered::Ended)) => Ok(false),
                     Err(fault) => Err(refused(fault)),
                 }
             }
+        }
+    }
+}
+
+/// Decision 9's wait for a lane's answer, its ask sent: `wait` given `patience`'s W* where it has one, its run-out told
+/// once past it (`party` what it follows) and then given `Duration::MAX`, which Shards' handles wait on until the answer
+/// or the connection's end; with no W* (before any answer, and after a run-out), `Duration::MAX` from the start. The
+/// answer, however late, is the sample W* rises to, and a fault the endpoint answered with is a refusal's sample; the
+/// connection's end, which answered nothing, is none.
+fn followed<T>(
+    patience: &Patience,
+    party: &[Piece<'_>],
+    mut wait: impl FnMut(Duration) -> Result<Option<T>, Fault>,
+) -> Result<Result<T, Fault>, Refusal> {
+    let began = Instant::now();
+    let bound = patience.deadline();
+    let mut answer = wait(bound.unwrap_or(Duration::MAX));
+    if let (Ok(None), Some(w_star)) = (&answer, bound) {
+        patience.ran_out(w_star, began.elapsed(), party);
+        answer = wait(Duration::MAX);
+    }
+    let took = began.elapsed();
+    match answer {
+        Ok(Some(answer)) => {
+            patience.answered(took);
+            Ok(Ok(answer))
+        }
+        Ok(None) => Err(Refusal::Broken(
+            "a lane's wait with no bound returned with no answer".to_owned(),
+        )),
+        Err(fault @ Fault::Lost(_)) => Ok(Err(fault)),
+        Err(fault) => {
+            patience.refused(took);
+            Ok(Err(fault))
         }
     }
 }
@@ -560,6 +634,18 @@ impl End {
         stopped
     }
 
+    /// The end of a run whose boot Shards refused, `why`: one its stop ended mid-boot (D231's `BootStop`) as the stop
+    /// ended it, KILL; any other an end Hex can't read the exit of, in Shards' words (the review's B-7).
+    fn of_refused(why: &ImageRefusal) -> Self {
+        match why {
+            ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }) => Self::of(&RunEnd::Stopped),
+            why => Self::unknown(Some(why.to_string())),
+        }
+    }
+
     /// An end Hex can't read the exit of, with why where its runtime said it.
     fn unknown(why: Option<String>) -> Self {
         Self {
@@ -686,6 +772,10 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         // Only a save (D259) is refused so, and this class asks none.
         ImageRefusal::Save(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
+        }
+        // Only a run that asks its GPU report (D233) is refused so, and this class asks none.
+        ImageRefusal::GpuProbe(why) => {
+            Refusal::Broken(format!("Shards refused {op} as a GPU report: {why}"))
         }
     }
 }
@@ -939,10 +1029,10 @@ impl Proc for MemberProc {
             }
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
-                Ok(Some(end)) | Err(ImageRefusal::Ended(end)) => exit_of(&end),
+                Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
                 Ok(None) | Err(_) => Exit::Unknown,
             },
-            Err(ImageRefusal::Ended(end)) => exit_of(&end),
+            Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
             Err(why) => return Err(refused(&self.id, "waiting for a member's end", why)),
         };
         self.ended = Some(exit);
@@ -964,7 +1054,12 @@ impl Proc for MemberProc {
         })?;
         self.control
             .steering(&self.id, &self.guest)?
-            .signal(&self.id, index, signal_number(Signal::KILL)?)
+            .signal(
+                &self.control.waits,
+                &self.id,
+                index,
+                signal_number(Signal::KILL)?,
+            )
             .map(drop)
     }
 
@@ -1085,7 +1180,13 @@ impl Runs {
                 }
                 // Its stop ended it mid-boot, as its delete asked (D231's `BootStop`): its run never started, and the
                 // time to its stop is no boot's answer, so no sample.
-                Some((Err(ImageRefusal::Ended(RunEnd::Stopped)), _)) => {
+                Some((
+                    Err(ImageRefusal::Ended(RunEnded {
+                        end: RunEnd::Stopped,
+                        ..
+                    })),
+                    _,
+                )) => {
                     let end = End::of(&RunEnd::Stopped);
                     *run = Run::Ended(end.clone());
                     Settled::Ends(end)
@@ -1136,8 +1237,18 @@ impl Runs {
                     Ok(())
                 }
                 Some((Err(why), took)) => {
-                    waits.boot.refused(took);
-                    *run = Run::Ended(End::unknown(Some(why.to_string())));
+                    // A boot its delete's stop ended mid-boot, as `settle` finds it, is no boot's answer: the time to
+                    // the stop is no sample (the review's B-7).
+                    if !matches!(
+                        why,
+                        ImageRefusal::Ended(RunEnded {
+                            end: RunEnd::Stopped,
+                            ..
+                        })
+                    ) {
+                        waits.boot.refused(took);
+                    }
+                    *run = Run::Ended(End::of_refused(&why));
                     Err(why)
                 }
                 None => Ok(()),
@@ -1192,8 +1303,10 @@ impl ImageBoot {
         )
     }
 
-    /// Stops `guest` on a thread of its own: D231's stop returns once its run's end is told, its VM gone;
-    /// the guest goes with the thread, and its run host then exits on its own. Its answer is `seen`, the end its run
+    /// Stops `guest` on a thread of its own: D231's stop returns once its run is released (Shards 2737fc4ec): its end
+    /// told, its run host exited and reaped, and every process the host started, its VM, network and share processes,
+    /// gone, so a delete that follows it frees nothing the run still holds (the review's B-4); the guest goes with the
+    /// thread. Its answer is `seen`, the end its run
     /// reached on its own before the stop where one was seen ([`Self::settle_running`]'s, the stop then its host's
     /// reaping): shards-api's stop of a run host that exited without its run's end answers `Stopped`, where its end
     /// before was `Failed` in what the host said last. Else the end its stop leaves.
@@ -1210,7 +1323,7 @@ impl ImageBoot {
                 let stopped = guest.stop();
                 let end = match (seen, stopped, guest.wait_for(Duration::ZERO)) {
                     (Some(seen), _, _) => seen,
-                    (None, _, Ok(Some(end))) => end,
+                    (None, _, Ok(Some(ended))) => ended.end,
                     (None, Err(why), _) | (None, Ok(()), Err(why)) => {
                         RunEnd::Failed(why.to_string())
                     }
@@ -1357,7 +1470,7 @@ impl ImageClass {
             diagnostics,
             runs: Runs::new(),
             session: OnceLock::new(),
-            control: Arc::new(Control::default()),
+            control: Arc::new(Control::new()),
         });
     }
 
@@ -1486,6 +1599,8 @@ impl ImageClass {
             // No upstream root of its own (Shards' D242, image channel v26): its run's injector trusts its host's roots
             // alone.
             upstream_roots: Vec::new(),
+            // No GPU report (Shards' D233, image channel v29): it renders on no GPU.
+            gpu_report: None,
         })
     }
 
@@ -1701,8 +1816,8 @@ impl ImageClass {
         else {
             return Ok(State::Running(guest));
         };
-        let reached = Stop::Ended(End::of(&ended));
-        let slot = image.stop(guest, Some(ended))?;
+        let reached = Stop::Ended(End::of(&ended.end));
+        let slot = image.stop(guest, Some(ended.end))?;
         // Where another call moved it on first, its stop is that call's, and this one's thread returns with the same
         // end.
         image.runs.stop_reached(id, &slot, reached.clone())?;
@@ -1864,7 +1979,7 @@ impl ImageClass {
                 }
             }
             Err(why) => {
-                self.record_end(&id, &End::unknown(Some(why.to_string())))?;
+                self.record_end(&id, &End::of_refused(&why))?;
                 image.runs.forget(&id)?;
                 Err(refused(&id, "booting a Shards image VM", why))
             }
@@ -1951,10 +2066,11 @@ impl ImageClass {
         if !guest.members().iter().any(|member| member.runs) {
             return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
         }
-        let steering = self.image()?.control.steering(id, &guest)?;
+        let control = &self.image()?.control;
+        let steering = control.steering(id, &guest)?;
         let mut reached = false;
         for member in guest.members().iter().filter(|member| member.runs) {
-            reached |= steering.signal(id, member.index, number)?;
+            reached |= steering.signal(&control.waits, id, member.index, number)?;
         }
         if !reached {
             return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
@@ -1999,7 +2115,9 @@ impl ImageClass {
             ));
         }
         let index = declared.index;
-        let taken = self.image()?.control.steering(&id, &guest)?.signal(
+        let control = &self.image()?.control;
+        let taken = control.steering(&id, &guest)?.signal(
+            &control.waits,
             &id,
             index,
             signal_number(signal)?,

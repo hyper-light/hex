@@ -307,6 +307,7 @@ fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refus
             report_cleanup: ReportCleanup::Complete,
             ended_cpu: None,
             rate_period: None,
+            final_use: None,
         }),
         changed: Condvar::new(),
         tail: Mutex::new(Tail {
@@ -438,13 +439,14 @@ fn launch(
     if let Some(environment) = environment {
         environment.environment(&mut command)?;
     }
-    let child = command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .map_err(|e| Refusal::Boot(format!("{}: {e}", binary.display())))?;
+    let child = shards_ipc::spawn_std(
+        command
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr),
+    )
+    .map_err(|e| Refusal::Boot(format!("{}: {e}", binary.display())))?;
     // Shared: the guest, its drain and its watcher, threads that outlive this call, each hold it.
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
@@ -461,6 +463,7 @@ fn launch(
             report_cleanup: ReportCleanup::Complete,
             ended_cpu: None,
             rate_period: None,
+            final_use: None,
         }),
         changed: Condvar::new(),
         tail: Mutex::new(Tail {
@@ -874,6 +877,9 @@ struct State {
     /// The period a managed guest's governor holds a rate over, as its VM process said it
     /// with its last rate's answer (D255); none until one.
     rate_period: Option<Duration>,
+    /// A managed guest's final use (D260), read from its record once it has ended, kept as
+    /// first read.
+    final_use: Option<crate::image::FinalUse>,
 }
 
 #[derive(Debug)]
@@ -1237,19 +1243,15 @@ fn said(what: &str, said: &str) -> String {
     }
 }
 
-/// The wait before dialing again, `p = sqrt(2 c w)`: pacing that balances one dial's cost `c`
-/// against the waiting so far `w`, both measured as this connect runs.
+/// The wait before dialing again, `p = sqrt(2 c w)` (`shards_abi::pace`, shared with the
+/// VMM's and the guest's looks): pacing that balances one dial's cost `c` against the
+/// waiting so far `w`, both measured as this connect runs.
 ///
 /// - `c` is the last refused dial's own work, its connect and its ask, measured each dial;
 ///   not its wait for the guest's answer, which costs this thread nothing (a muxer holding a
 ///   request for a guest whose vsock is not up yet waits seconds). On HVF (M464) 5.5 µs at
 ///   p50 to a socket not bound yet.
 /// - `w` is how long this connect has waited so far, and stands for the wait still to come.
-/// - Pausing `p` between dials, a wait of `w` takes `w / p` dials, `c w / p` of dialing; and a
-///   guest that starts to listen at a uniform moment within a pause is reached `p / 2` late on
-///   average. Both are seconds, of this thread and of its caller.
-/// - Their sum `f(p) = c w / p + p / 2` is least where `f'(p) = -c w / p² + 1 / 2 = 0`, that
-///   is `p² = 2 c w`: `p = sqrt(2 c w)`.
 ///
 /// So a few dials go out early and fewer as the wait grows: at 150 ms waited, 1.3 ms with a
 /// 5.5 µs dial and 3.6 ms with a 44 µs one, which dialing holds 0.4% and 1.2% of. A dial to a
@@ -1258,15 +1260,7 @@ fn said(what: &str, said: &str) -> String {
 /// Any wait that looks for its answer, each look a cost of its own, is paced the same way
 /// (`c` its look's cost): shards' engine ring E2E looks at a guest's pinned pages so
 /// (crates/shards/tests/engine_ring.rs, D230).
-pub fn pause(dialed: Duration, waited: Duration, left: Duration) -> Duration {
-    let product = dialed
-        .as_nanos()
-        .checked_mul(waited.as_nanos())
-        .and_then(|p| p.checked_mul(2))
-        .unwrap_or(u128::MAX);
-    let nanos = u64::try_from(product.isqrt()).unwrap_or(u64::MAX);
-    Duration::from_nanos(nanos).min(left)
-}
+pub use shards_abi::pace::pause;
 
 /// Why a handshake failed: worth asking again, or not.
 enum Attempt {
@@ -1337,13 +1331,16 @@ impl HandshakeError {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum HandshakeWait {
+enum HandshakeWait<'a> {
     Ready,
     Until(Instant),
     Unbounded,
+    /// No clock, and each wait also on the end of a held process (a borrowed connect's), which
+    /// ends the handshake `Closed`: its caller refuses it as that end.
+    Watched(stream::Exit<'a>),
 }
 
-fn remaining(wait: HandshakeWait, phase: HandshakePhase) -> Result<Option<Duration>, HandshakeError> {
+fn remaining(wait: HandshakeWait<'_>, phase: HandshakePhase) -> Result<Option<Duration>, HandshakeError> {
     match wait {
         HandshakeWait::Until(at) => {
             let left = at.saturating_duration_since(Instant::now());
@@ -1353,7 +1350,16 @@ fn remaining(wait: HandshakeWait, phase: HandshakePhase) -> Result<Option<Durati
                 Ok(Some(left))
             }
         }
-        HandshakeWait::Ready | HandshakeWait::Unbounded => Ok(None),
+        HandshakeWait::Ready | HandshakeWait::Unbounded | HandshakeWait::Watched(_) => Ok(None),
+    }
+}
+
+/// A watched step's I/O, or `Closed` where the held process ended first.
+fn watched(step: io::Result<Option<usize>>) -> Result<io::Result<usize>, HandshakeError> {
+    match step {
+        Ok(Some(n)) => Ok(Ok(n)),
+        Ok(None) => Err(HandshakeError::Closed),
+        Err(e) => Ok(Err(e)),
     }
 }
 
@@ -1404,7 +1410,7 @@ fn owned_handshake_error(error: HandshakeError) -> Attempt {
 fn handshake_until(
     vsock: &Path,
     port: u32,
-    wait: HandshakeWait,
+    wait: HandshakeWait<'_>,
     cost: &mut Duration,
 ) -> Result<Socket, HandshakeError> {
     use HandshakePhase::{ClearTimeouts, Dial, Read, Write};
@@ -1413,7 +1419,9 @@ fn handshake_until(
     let connected = match wait {
         HandshakeWait::Ready => stream::connect_nowait(vsock),
         HandshakeWait::Until(at) => stream::connect_until(vsock, Some(at)),
-        HandshakeWait::Unbounded => stream::connect_until(vsock, None),
+        // Unix's connect never waits on its listener; Windows' ends as afunix.sys ends it, and
+        // a VM process's end closes the listener it dials.
+        HandshakeWait::Unbounded | HandshakeWait::Watched(_) => stream::connect_until(vsock, None),
     };
     // A dial its deadline passed in is expired, as a write's and a read's are, whatever the
     // dial said: Windows' connect waits for its connection to complete, to the deadline, and
@@ -1434,6 +1442,7 @@ fn handshake_until(
     while !ask.is_empty() {
         let sent = match wait {
             HandshakeWait::Ready => s.write_nowait(ask),
+            HandshakeWait::Watched(exit) => watched(s.write_watched(ask, exit))?,
             _ => {
                 Stream::set_write_timeout(&s, remaining(wait, Write)?)
                     .map_err(|source| HandshakeError::io(Write, source))?;
@@ -1457,6 +1466,7 @@ fn handshake_until(
             .ok_or(HandshakeError::Reply(ReplyError::TooLong))?;
         let read = match wait {
             HandshakeWait::Ready => s.read_nowait(byte),
+            HandshakeWait::Watched(exit) => watched(s.read_watched(byte, exit))?,
             _ => {
                 Stream::set_read_timeout(&s, remaining(wait, Read)?)
                     .map_err(|source| HandshakeError::io(Read, source))?;
@@ -1496,10 +1506,12 @@ fn handshake_until(
 /// Zero patience makes one readiness-only attempt: connect and every handshake
 /// operation must complete without waiting. Pending or interrupted I/O returns
 /// its typed phase/cause and closes the connection. Positive patience starts one
-/// deadline before identity validation; unrepresentable patience returns Bounds
-/// before identity or dial. There is one dial and no retry. Dropping the returned stream
-/// closes only that connection. The supplied identity/socket remain trusted input;
-/// matching a PID/start is not authentication of the socket's peer.
+/// deadline before identity validation; unrepresentable patience (`Duration::MAX`
+/// included) returns Bounds before identity or dial: a connect with no clock is
+/// [`connect_borrowed_before`]'s, with no deadline. There is one dial and no retry.
+/// Dropping the returned stream closes only that connection. The supplied
+/// identity/socket remain trusted input; matching a PID/start is not authentication
+/// of the socket's peer.
 ///
 /// Synchronous OS calls and scheduling are not hard real-time bounded. Readiness
 /// waits use the original deadline, and late completion is refused.
@@ -1509,25 +1521,59 @@ pub fn connect_borrowed(
     patience: Duration,
 ) -> Result<Box<dyn Stream>, Refusal> {
     let began = Instant::now();
+    if patience.is_zero() {
+        return borrowed(identity, port, HandshakeWait::Ready);
+    }
+    let deadline = began
+        .checked_add(patience)
+        .filter(|_| patience != Duration::MAX)
+        .ok_or_else(|| {
+            message(format_args!("{}", BorrowFailure::DeadlineOverflow))
+                .map(|why| Refusal::Bounds {
+                    what: "patience",
+                    why,
+                })
+                .unwrap_or(Refusal::Allocation {
+                    what: "connection diagnostic",
+                })
+        })?;
+    borrowed(identity, port, HandshakeWait::Until(deadline))
+}
+
+/// Connect to a running guest without acquiring its lifetime, by `deadline`, or with none.
+///
+/// `Some(at)`: [`connect_borrowed`]'s positive patience, to the caller's instant: each
+/// handshake step waits to it, and an answer completed at or past it is refused
+/// `Borrowed { failure: Expired }`, its socket closed. An instant already past expires
+/// before the dial.
+///
+/// `None`: no clock. Its one dial's handshake waits for the guest's `OK`, and an `OK` that
+/// comes however late is taken. It ends only at that `OK`, at the end of the connection
+/// (`Borrowed { failure: Channel(..) }`), or at the end of the identity's VM process, which it
+/// waits on as it waits on the socket, through the process held by its pid and start before
+/// the dial (a pidfd on Linux, a kqueue with its exit registered on macOS, a process handle on
+/// Windows): refused `Process { failure: ProcessFailure::Exited }`, whatever the connection
+/// said as it ended. A pid that names another process (another start) is refused
+/// `DifferentStart` before the dial, never followed.
+///
+/// Either way there is one dial and no retry, and the identity and socket remain trusted
+/// input, as [`connect_borrowed`]'s.
+pub fn connect_borrowed_before(
+    identity: &Identity,
+    port: u32,
+    deadline: Option<Instant>,
+) -> Result<Box<dyn Stream>, Refusal> {
+    borrowed(
+        identity,
+        port,
+        deadline.map_or(HandshakeWait::Unbounded, HandshakeWait::Until),
+    )
+}
+
+/// A borrowed connect's one dial, its handshake waiting as `wait` says, `Unbounded` waiting
+/// on the held process's end too (`Watched`).
+fn borrowed(identity: &Identity, port: u32, wait: HandshakeWait<'_>) -> Result<Box<dyn Stream>, Refusal> {
     let refused = |failure| Refusal::Borrowed { port, failure };
-    let wait = if patience.is_zero() {
-        HandshakeWait::Ready
-    } else {
-        let deadline = began
-            .checked_add(patience)
-            .filter(|_| patience != Duration::MAX)
-            .ok_or_else(|| {
-                message(format_args!("{}", BorrowFailure::DeadlineOverflow))
-                    .map(|why| Refusal::Bounds {
-                        what: "patience",
-                        why,
-                    })
-                    .unwrap_or(Refusal::Allocation {
-                        what: "connection diagnostic",
-                    })
-            })?;
-        HandshakeWait::Until(deadline)
-    };
     let process_failure = |failure| Refusal::Process {
         pid: identity.pid,
         expected_started: identity.started,
@@ -1537,8 +1583,18 @@ pub fn connect_borrowed(
     let held = crate::taken::Held::find(identity.pid, identity.started).map_err(process_failure)?;
     #[cfg(windows)]
     let held = borrowed_windows::Held::find(identity.pid, identity.started).map_err(process_failure)?;
+    let wait = match wait {
+        HandshakeWait::Unbounded => HandshakeWait::Watched(held.exit()),
+        wait => wait,
+    };
     let mut cost = Duration::ZERO;
     let stream = handshake_until(&identity.vsock, port, wait, &mut cost).map_err(|cause| {
+        // With no clock, the held process's end is the refusal, whatever the channel said of it.
+        if matches!(wait, HandshakeWait::Watched(_))
+            && let Err(failure) = held.check()
+        {
+            return process_failure(failure);
+        }
         refused(match cause {
             HandshakeError::Io {
                 kind: io::ErrorKind::OutOfMemory,
@@ -1610,6 +1666,12 @@ mod borrowed_windows {
             Ok(held)
         }
 
+        /// What its end is waited on through beside a socket: the handle, signalled once
+        /// its process has exited.
+        pub(super) fn exit(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+            std::os::windows::io::AsHandle::as_handle(&self.0)
+        }
+
         pub(super) fn check(&self) -> Result<(), ProcessFailure> {
             // SAFETY: a zero-time state observation of the held synchronize handle,
             // not a lifecycle wait or periodic process probe.
@@ -1653,6 +1715,74 @@ pub struct ManagedUse {
     pub microvm: crate::image::Microvm,
     pub asked: Instant,
     pub answered: Instant,
+}
+
+/// A managed guest's end and what its microVM used in all (D260's final use), as its VM process
+/// recorded it once its machine was down ([`final_use_file`]), the same form as an image run's
+/// ([`RunEnded`](crate::image::RunEnded)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedEnded {
+    pub end: End,
+    pub final_use: crate::image::FinalUse,
+}
+
+/// What [`ManagedGuest::host_use`] answers: a sample while the guest runs, or its end and its
+/// final use once it has ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedUsed {
+    Running(ManagedUse),
+    Ended(ManagedEnded),
+}
+
+/// The file a managed guest's final use is recorded in (D260): beside its vsock socket
+/// `vsock`, its name the socket's and `.used`, in the directory its launcher made for the
+/// guest, which goes with it. Written whole, by rename, before its VM process exits, by its
+/// keeper (`shards final-use` on Unix, the CLI that waits for its VM on Windows): the VM
+/// process, confined, writes no file.
+pub fn final_use_file(vsock: &Path) -> PathBuf {
+    let mut name = vsock.as_os_str().to_owned();
+    name.push(".used");
+    PathBuf::from(name)
+}
+
+/// The final use a managed guest's record says (D260), its read `read`: its parts as its VM
+/// process told them, an answer none of the protocol's typed by what breaks it; none where
+/// there is no record, its VM killed (`stopping`, its stop asked) or ended without it.
+fn final_use_of(read: io::Result<Vec<u8>>, stopping: bool) -> Result<crate::image::FinalUse, Refusal> {
+    use crate::image::{FinalUse, Unused};
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(_) if stopping => return Ok(FinalUse::Unread(Unused::Killed)),
+        Err(_) => return Ok(FinalUse::Unread(Unused::Untold)),
+    };
+    let used = match shards_abi::rate::read_used(&bytes) {
+        Ok(used) => used,
+        Err(broken) => return Ok(FinalUse::Unread(Unused::Broken(broken))),
+    };
+    let words = |why: &str| managed_words(format_args!("{why}"));
+    Ok(FinalUse::Read(crate::image::Microvm {
+        guest: match used.guest {
+            Ok(times) => Ok(times),
+            Err(why) => Err(words(why)?),
+        },
+        host: match used.host {
+            Ok(host) => Ok(host),
+            Err(why) => Err(words(why)?),
+        },
+    }))
+}
+
+/// A managed guest's record of its final use ([`final_use_file`]), read whole up to the
+/// longest use answer and a byte past it, so that a longer one reads as broken
+/// (`UseBroken::Long`) without being read whole.
+fn read_final_use(vsock: &Path) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(final_use_file(vsock))?;
+    let most = u64::try_from(shards_abi::rate::ANSWER_MOST)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(file, most), &mut bytes)?;
+    Ok(bytes)
 }
 
 /// The existing API protocol around a receipt the native owner already owns.
@@ -1704,6 +1834,7 @@ fn managed_shared(
             report_cleanup,
             ended_cpu: None,
             rate_period: None,
+            final_use: None,
         }),
         changed: Condvar::new(),
         tail: Mutex::new(Tail {
@@ -2051,13 +2182,13 @@ impl ManagedGuest {
     /// not booted `--host-managed`, or a shards before D260) or does not answer within
     /// `patience`; [`Refusal::ManagedIo`] where its socket fails; and [`Refusal::Ended`] once
     /// the guest has ended.
-    pub fn host_use(&self, patience: Duration) -> Result<ManagedUse, Refusal> {
+    pub fn host_use(&self, patience: Duration) -> Result<ManagedUsed, Refusal> {
         let gone = || {
             self.end(&mut lock(&self.shared.state))
                 .map(|end| end.map(Refusal::Ended))
         };
-        if let Some(ended) = gone()? {
-            return Err(ended);
+        if let Some(ended) = self.ended()? {
+            return Ok(ManagedUsed::Ended(ended));
         }
         let deadline = (patience != Duration::MAX)
             .then(|| Instant::now().checked_add(patience))
@@ -2071,7 +2202,12 @@ impl ManagedGuest {
             patience,
         ) {
             Ok(answer) => answer,
-            Err(refused) => return Err(gone()?.unwrap_or(refused)),
+            Err(refused) => {
+                return match self.ended()? {
+                    Some(ended) => Ok(ManagedUsed::Ended(ended)),
+                    None => Err(gone()?.unwrap_or(refused)),
+                };
+            }
         };
         let answered = Instant::now();
         let used = shards_abi::rate::read_used(&answer).map_err(Refusal::HostUse)?;
@@ -2086,11 +2222,42 @@ impl ManagedGuest {
                 Err(why) => Err(words(why)?),
             },
         };
-        Ok(ManagedUse {
+        Ok(ManagedUsed::Running(ManagedUse {
             microvm,
             asked,
             answered,
-        })
+        }))
+    }
+
+    /// Its end, once it has come, waiting at most `timeout` (`Duration::MAX`: until it comes),
+    /// with what its microVM used in all (D260's final use), as its VM process recorded it
+    /// before it exited ([`final_use_file`]): [`Unused::Killed`](crate::image::Unused::Killed)
+    /// where its stop came first and nothing was recorded, `Untold` where it ended without one.
+    pub fn wait_ended(&self, timeout: Duration) -> Result<Option<ManagedEnded>, Refusal> {
+        if Guest::wait_for(self, timeout)?.is_none() {
+            return Ok(None);
+        }
+        self.ended()
+    }
+
+    /// Its end and its final use, once it has ended: its record read the first time, and kept.
+    fn ended(&self) -> Result<Option<ManagedEnded>, Refusal> {
+        let mut state = lock(&self.shared.state);
+        let Some(end) = self.end(&mut state)? else {
+            return Ok(None);
+        };
+        let final_use = match &state.final_use {
+            Some(used) => used.clone(),
+            None => {
+                let stopping = state.stopping;
+                drop(state);
+                let used = final_use_of(read_final_use(&self.process.identity()?.vsock), stopping)?;
+                state = lock(&self.shared.state);
+                state.final_use.get_or_insert(used).clone()
+            }
+        };
+        drop(state);
+        Ok(Some(ManagedEnded { end, final_use }))
     }
 
     /// The room a budget leaves the guest, as an image run's (`ImageGuest::room`, D188, D241):
@@ -2985,7 +3152,7 @@ mod tests {
         );
         let (guest, _native) = managed_model_at(false, socket);
         let before = Instant::now();
-        let used = guest.host_use(Duration::MAX).unwrap();
+        let used = running(guest.host_use(Duration::MAX));
         assert!(before <= used.asked && used.asked <= used.answered);
         let times = crate::image::GuestTimes {
             vcpus: vec![
@@ -3015,11 +3182,11 @@ mod tests {
             }
         );
         assert_eq!(used.microvm.vmm_ns(), Some(1500 - 1005));
-        let unstarted = guest.host_use(Duration::MAX).unwrap().microvm;
+        let unstarted = running(guest.host_use(Duration::MAX)).microvm;
         assert_eq!(unstarted.guest, Err("the microVM has not started".to_string()));
         assert_eq!(unstarted.host.as_ref().map(|h| h.cpu_ns), Ok(70));
         assert_eq!(unstarted.vmm_ns(), None, "no guest time read");
-        let unhosted = guest.host_use(Duration::MAX).unwrap().microvm;
+        let unhosted = running(guest.host_use(Duration::MAX)).microvm;
         assert_eq!(unhosted.host, Err("its VM process: denied".to_string()));
         assert_eq!(unhosted.guest.map(|g| g.total_ns()), Ok(9));
         for broken in [UseBroken::Guest, UseBroken::Text, UseBroken::Word] {
@@ -3035,6 +3202,84 @@ mod tests {
         ));
         let asks = stand_in.join().unwrap();
         assert_eq!(asks, vec![b"USE\n".to_vec(); 7]);
+    }
+
+    /// A managed guest's use while it runs ([`ManagedUsed::Running`]).
+    fn running(used: Result<ManagedUsed, Refusal>) -> ManagedUse {
+        match used {
+            Ok(ManagedUsed::Running(used)) => used,
+            other => panic!("not a running guest's use: {other:?}"),
+        }
+    }
+
+    /// D260's final use, a managed guest's: once it has ended, its use is its end and its final
+    /// use as its record says, asking nothing, the same through `wait_ended` and `host_use`,
+    /// kept as first read; a record none of the protocol's typed by what breaks it; none
+    /// recorded, untold, or killed where its stop came first.
+    #[test]
+    fn a_managed_guests_final_use_is_its_record_once_it_has_ended() {
+        use crate::image::{FinalUse, Unused};
+        let dir = shards_testdir::TempDir::new("api-final").unwrap();
+        let socket = dir.join("v");
+        let used = shards_abi::rate::used(
+            Ok(&crate::image::GuestTimes {
+                vcpus: vec![crate::image::VcpuTime {
+                    index: 0,
+                    guest_ns: 700,
+                    unread: None,
+                }],
+                departed_ns: 0,
+            }),
+            Ok(&crate::image::HostUse {
+                cpu_ns: 900,
+                resident_bytes: 1,
+                footprint_bytes: 2,
+            }),
+        );
+        std::fs::write(final_use_file(&socket), &used).unwrap();
+        let (guest, native) = managed_model_at(false, socket.clone());
+        assert_eq!(guest.wait_ended(Duration::ZERO), Ok(None), "it runs");
+        native.publish(crate::TerminalScope::Released);
+        let read = shards_abi::rate::read_used(used.as_bytes()).unwrap();
+        let ended = ManagedEnded {
+            end: End::PowerOff,
+            final_use: FinalUse::Read(crate::image::Microvm {
+                guest: Ok(read.guest.unwrap()),
+                host: Ok(read.host.unwrap()),
+            }),
+        };
+        assert_eq!(guest.wait_ended(Duration::MAX), Ok(Some(ended.clone())));
+        std::fs::remove_file(final_use_file(&socket)).unwrap();
+        assert_eq!(
+            guest.host_use(Duration::MAX),
+            Ok(ManagedUsed::Ended(ended)),
+            "kept as first read"
+        );
+        let other = dir.join("w");
+        std::fs::write(final_use_file(&other), b"USED\nhost 1 2").unwrap();
+        let (guest, native) = managed_model_at(false, other);
+        native.publish(crate::TerminalScope::Released);
+        assert_eq!(
+            guest.wait_ended(Duration::MAX).map(|e| e.map(|e| e.final_use)),
+            Ok(Some(FinalUse::Unread(Unused::Broken(
+                shards_abi::rate::UseBroken::Text
+            ))))
+        );
+        let (guest, native) = managed_model_at(false, dir.join("x"));
+        native.publish(crate::TerminalScope::Released);
+        assert_eq!(
+            guest.wait_ended(Duration::MAX).map(|e| e.map(|e| e.final_use)),
+            Ok(Some(FinalUse::Unread(Unused::Untold)))
+        );
+        let (guest, _native) = managed_model_at(false, dir.join("y"));
+        guest.stop().unwrap();
+        assert_eq!(
+            guest.wait_ended(Duration::MAX),
+            Ok(Some(ManagedEnded {
+                end: End::Stopped,
+                final_use: FinalUse::Unread(Unused::Killed),
+            }))
+        );
     }
 
     /// D260: a use its VM process does not answer within its caller's patience is refused as
@@ -3053,7 +3298,13 @@ mod tests {
         drop(listener);
         native.publish(crate::TerminalScope::Released);
         assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::PowerOff));
-        assert_eq!(guest.host_use(Duration::MAX), Err(Refusal::Ended(End::PowerOff)));
+        assert_eq!(
+            guest.host_use(Duration::MAX),
+            Ok(ManagedUsed::Ended(ManagedEnded {
+                end: End::PowerOff,
+                final_use: crate::image::FinalUse::Unread(crate::image::Unused::Untold),
+            }))
+        );
     }
 
     /// D255: a managed guest's room is refused, typed, as nothing holds a managed guest
