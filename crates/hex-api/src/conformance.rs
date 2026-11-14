@@ -1080,7 +1080,8 @@ fn image_made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str) -> Result<BoxId, S
     Ok(id)
 }
 
-/// Runs `case` on box `id`, then deletes it whatever the case found: a failed case leaves no VM.
+/// Runs `case` on box `id`, then deletes it whatever the case found: a failed case leaves no VM, and names every
+/// refusal, its own and its delete's (ROOT, 2026-11-14: the HVF run's HEX-IMG-4 told its KILL's alone).
 fn deleting(
     rt: &dyn Runtime,
     id: &BoxId,
@@ -1088,7 +1089,10 @@ fn deleting(
 ) -> Result<(), String> {
     let outcome = case();
     let deleted = rt.delete(id).map_err(|e| format!("delete: {e}"));
-    outcome.and(deleted)
+    match (outcome, deleted) {
+        (Err(own), Err(delete)) => Err(format!("{own}; {delete}")),
+        (outcome, deleted) => outcome.and(deleted),
+    }
 }
 
 fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
