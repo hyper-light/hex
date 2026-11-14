@@ -49,12 +49,12 @@ use hex_api::{
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
     LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead,
-    LearnedPrior, LearnedRank, LearnedRate, LearnedUnread, LearnedUse, LearnedWindow,
-    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice,
-    PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal, Rootfs,
-    RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream,
-    Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
+    LearnedPrior, LearnedRank, LearnedRate, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
+    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
+    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -2312,6 +2312,9 @@ const LEARNED_AWAIT_BYTES: usize = 1;
 const LEARNED_AWAIT_MIN_BYTES: usize = HOLDER_MIN_BYTES + LEARNED_AWAIT_BYTES;
 /// One node VM ranked above every box at its least (place 4): its run's 16 bytes, then its reason's length.
 const LEARNED_RANK_MIN_BYTES: usize = 16 + size_of::<u32>();
+/// One box whose record can't be read at its least (the review's dropped records): its holder at its least, then its
+/// reason's length.
+const LEARNED_UNRECORDED_MIN_BYTES: usize = HOLDER_MIN_BYTES + size_of::<u32>();
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
@@ -2328,6 +2331,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
     let unread = std::mem::take(&mut learned.unread);
     let awaits = std::mem::take(&mut learned.awaits);
     let ranked = std::mem::take(&mut learned.ranked);
+    let unrecorded = std::mem::take(&mut learned.unrecorded);
     let probe = capacity
         .try_clone()
         .map_err(|e| Fault::value("capacity", e.to_string()))?;
@@ -2377,7 +2381,8 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
         told.push(rate);
     }
     // Then, in the room the rates leave, as many of the VMs it couldn't read, then of the rooms' awaits, then of the
-    // node VMs it ranks above every box, as fit (place 4), each list in its order.
+    // node VMs it ranks above every box, as fit (place 4), then of the boxes whose records can't be read (the review's
+    // dropped records), each list in its order.
     let unread = fitted(unread, &mut room, "learned unread VMs", |unread| {
         holder_bytes(&unread.id).saturating_add(words_bytes(&unread.why))
     })?;
@@ -2387,6 +2392,9 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
     let ranked = fitted(ranked, &mut room, "learned ranked VMs", |ranked| {
         16usize.saturating_add(words_bytes(&ranked.why))
     })?;
+    let unrecorded = fitted(unrecorded, &mut room, "learned unrecorded boxes", |told| {
+        holder_bytes(&told.id).saturating_add(words_bytes(&told.why))
+    })?;
     if let Some(learned) = capacity.learned.as_mut() {
         learned.holdings = kept;
         learned.ended = ends;
@@ -2394,6 +2402,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
         learned.unread = unread;
         learned.awaits = awaits;
         learned.ranked = ranked;
+        learned.unrecorded = unrecorded;
     }
     Ok(())
 }
@@ -2478,7 +2487,7 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
         w.u64(window.window_ns);
         w.option_with(window.slowed_by.as_ref(), put_holder)
     })?;
-    // Last (place 4; ROOT, 2026-11-13): each VM its window couldn't read and why, each guest's room's await, and each
+    // Then (place 4; ROOT, 2026-11-13): each VM its window couldn't read and why, each guest's room's await, and each
     // node VM it ranks above every box and why.
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.unread.len(), LEARNED_UNREAD_MIN_BYTES)?;
@@ -2499,6 +2508,13 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
         w.reserve_fixed(16)?;
         w.raw(ranked.run.bytes());
         w.string(&ranked.why)?;
+    }
+    // Last (the review's dropped records; ROOT, 2026-11-14): each box whose record can't be read and why.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.unrecorded.len(), LEARNED_UNRECORDED_MIN_BYTES)?;
+    for told in &learned.unrecorded {
+        put_holder(w, &told.id)?;
+        w.string(&told.why)?;
     }
     Ok(())
 }
@@ -2777,6 +2793,17 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
                 Ok(LearnedRank {
                     run: hex_api::NodeRun::from_bytes(r.array::<16>()?),
                     why: r.string("why a node VM ranks above every box")?,
+                })
+            },
+        )?,
+        unrecorded: r.bounded_list(
+            LEARNED_UNRECORDED_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned unrecorded boxes",
+            |r| {
+                Ok(LearnedUnrecorded {
+                    id: holder(r)?,
+                    why: r.string("why a node couldn't read a box's record")?,
                 })
             },
         )?,
