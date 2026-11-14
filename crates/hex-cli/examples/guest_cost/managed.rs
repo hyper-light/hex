@@ -660,3 +660,49 @@ impl Probe for VmmHolds {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::run::{Plan, Windows, produce};
+    use super::*;
+
+    /// AC-T7.4.1 (light smoke, few boots), Windows' managed driver natively under WHP: produce a pair over the
+    /// configured Shards guest with SEEDABLE two, through the same census, evidence and output the measurement uses:
+    /// the governed window's guest booted, held and ended, then two guests each launched, read from their launch,
+    /// held idle at the census's rate and torn down. Expect the pair written and loaded as a node loads it, its
+    /// envelope the configured guest's, its window the governor's period, and two guests in its evidence. Needs
+    /// SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS, HEX_GUEST_MEMORY_MIB and GUEST_COST_SMOKE_OUT (a
+    /// folder of the run's own under the user's profile).
+    #[test]
+    #[ignore = "boots three real guests under WHP: run with --ignored where a Shards guest is configured"]
+    fn two_managed_guests_make_a_pair_the_node_loads() {
+        let out =
+            PathBuf::from(std::env::var_os("GUEST_COST_SMOKE_OUT").expect("GUEST_COST_SMOKE_OUT"));
+        let mut driver = Managed::from_env(&out).unwrap();
+        let envelope = driver.envelope().unwrap().resources;
+        let made = produce(
+            &mut driver,
+            &Plan { seedable: 2 },
+            &out,
+            &Windows::Governed,
+            &[],
+        )
+        .unwrap();
+        let (cost, _, rows) = hex_runtime::guest::load_runtime_evidence(
+            &made.cost_file,
+            made.cost_sha256,
+            &made.evidence_file,
+        )
+        .unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!((cost.floor, cost.ceiling), (envelope, envelope));
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("window ") && l.contains("governor")),
+            "{text}"
+        );
+        assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        println!("{}\n{text}", made.summary);
+    }
+}
