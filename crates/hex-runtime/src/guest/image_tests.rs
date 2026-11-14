@@ -668,6 +668,10 @@ struct ModelImages {
     /// the members it says ended, and where each signal its host takes is told ([`serve_members`]); none, and it
     /// serves none.
     steered: Mutex<Option<(Vec<u32>, Taken)>>,
+    /// Where the model's run host serves its members' MCP bridges (D254) on Shards' real agent-control endpoint: the
+    /// members whose bridge takes no connection, each other's connection its harness echoing what it is sent
+    /// ([`serve_mcp`]); none, and it serves none.
+    bridged: Mutex<Option<Vec<u32>>>,
 }
 
 impl ModelImages {
@@ -690,6 +694,7 @@ impl ModelImages {
             answered: AtomicUsize::new(0),
             serve: Mutex::new(None),
             steered: Mutex::new(None),
+            bridged: Mutex::new(None),
         })
     }
 
@@ -900,11 +905,15 @@ impl Images for ModelImages {
                 spec.control.as_ref(),
                 self.serve.lock().unwrap().clone(),
                 self.steered.lock().unwrap().clone(),
+                self.bridged.lock().unwrap().clone(),
             ) {
                 (None, ..) => None,
-                (Some(ask), _, Some((ended, taken))) => Some(serve_members(ask, ended, taken)),
-                (Some(ask), Some(dir), None) => Some(serve_lanes(ask, dir)),
-                (Some(_), None, None) => Some(model_control()),
+                (Some(ask), _, _, Some(refused)) => Some(serve_mcp(ask, refused)),
+                (Some(ask), _, Some((ended, taken)), None) => {
+                    Some(serve_members(ask, ended, taken))
+                }
+                (Some(ask), Some(dir), None, None) => Some(serve_lanes(ask, dir)),
+                (Some(_), None, None, None) => Some(model_control()),
             },
             nesting: spec.nesting,
         }))
@@ -4373,6 +4382,95 @@ fn serve_members(
     }
 }
 
+/// A run's real agent-control endpoint (D238, D252) on loopback, Shards' own, its microVM's key the model's, taking
+/// `ask`'s controller alone and admitting its execs; its host serves each MCP ask as a run host serves a member's bridge
+/// (D254): one for a member in `refused` its run asked no bridge of, `Unstarted(Refused)`; any other, a connection as its
+/// harness makes one, started, the harness echoing every byte it is sent until what it is sent ends, then finishing its
+/// output and saying it ended, `Exited(0)` (Shards' own stand-in, `control.rs`' `mcp_stand_in`). A model run's endpoint
+/// and host live while the test does.
+fn serve_mcp(
+    ask: &shards_api::image::ControlAsk,
+    refused: Vec<u32>,
+) -> shards_api::image::ControlAt {
+    use shards_api::control::exec;
+    let vm = shards_api::control::Identity::generate().unwrap();
+    let (endpoint, served) = shards_remote::control::Endpoint::bind(
+        &vm,
+        ask.controller,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        shards_remote::control::Streams {
+            outputs: &[],
+            inputs: &[],
+            execs: Some(shards_api::control::exec_admissions()),
+            sockets: None,
+        },
+    )
+    .unwrap();
+    let address = endpoint.address;
+    std::thread::spawn(move || endpoint.run());
+    let starts = served.execs.unwrap();
+    let revoke = served.revoke;
+    std::thread::spawn(move || {
+        // Held for the endpoint's life: let go, it would end every lane.
+        let _revoke = revoke;
+        for start in starts {
+            assert_eq!(start.ask.kind, exec::Kind::Mcp);
+            if refused.contains(&start.ask.member) {
+                start
+                    .replies
+                    .tell(exec::Reply::Unstarted(exec::Unstarted::Refused));
+                continue;
+            }
+            std::thread::spawn(move || echo_harness(start));
+        }
+    });
+    shards_api::image::ControlAt {
+        address,
+        vm: vm.fingerprint(),
+    }
+}
+
+/// An MCP connection's host (D254) as Shards' stand-in makes one: says it started, its harness echoing what it is sent;
+/// as that ends, finishes its output and says it ended, keeping its streams' controls until its steering closes.
+fn echo_harness(start: shards_api::control::exec::Start) {
+    use shards_remote::managed::input::Next;
+    let shards_api::control::exec::Start {
+        stdout,
+        stdin,
+        steer,
+        replies,
+        ..
+    } = start;
+    replies.tell(shards_api::control::exec::Reply::Started);
+    let (relay, input) = stdin.unwrap();
+    let mut written = 0u64;
+    loop {
+        match relay.next() {
+            Next::Record { bytes, .. } => {
+                written += bytes.len() as u64;
+                stdout.0.wait_capacity().unwrap();
+                let mut record = stdout.0.take_buffer().unwrap().unwrap();
+                record.extend_from_slice(&bytes);
+                stdout.0.submit(record).unwrap();
+                relay.delivered(bytes);
+            }
+            Next::End => {
+                input.ended(written, shards_abi::run::managed::InputEnd::Closed);
+                break;
+            }
+            Next::Abort(errno) => {
+                input.ended(written, shards_abi::run::managed::InputEnd::Aborted(errno));
+                break;
+            }
+            Next::Gone => break,
+        }
+    }
+    stdout.1.finish().unwrap();
+    replies.tell(shards_api::control::exec::Reply::Exited(0));
+    while steer.recv().is_ok() {}
+    drop((stdout, input));
+}
+
 /// A run's real agent-control endpoint (D252) on loopback, its microVM's key the model's own, taking `ask`'s controller
 /// alone and admitting the lanes it grants; its host connects each lane to the socket it names in `dir`, as
 /// shards-init's relay host does (D251), and answers with its run host's end of it ([`lane_to`]). A model run's
@@ -5653,4 +5751,182 @@ fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
         Some(Run::Ended(end)) => assert_eq!(end.exit, hex_api::Exit::Signal(9)),
         _ => panic!("the stopped boot's run isn't ended"),
     }
+}
+
+/// A box whose spec asks `bridged` a bridge (D254), each a member its caller drives.
+fn bridged_spec(name: &str, bridged: &[&Member]) -> BoxSpec {
+    let mut boxed = spec(name, None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members = bridged
+            .iter()
+            .map(|member| ImageMember {
+                mcp: true,
+                ..ImageMember::new((*member).clone())
+            })
+            .collect();
+    }
+    boxed
+}
+
+fn agent(name: &str) -> Member {
+    Member {
+        kind: MemberKind::Agent,
+        name: name.to_owned(),
+    }
+}
+
+/// An MCP connection's end once its output has finished: no recorded operation makes it, so measuring, for its fact
+/// alone (hex_testkit::waits).
+static MCP_END: Patience = Patience::measuring("test.hex_runtime.image_mcp_end");
+
+/// `proc`'s end as an MCP connection's comes, as [`MCP_END`] waits, by the test's own run, which lives while it does.
+fn mcp_end(proc: &mut Box<dyn Proc>) -> Exit {
+    follow::within(
+        &MCP_END,
+        "an MCP connection's end",
+        || Party::Live,
+        |by| {
+            let wait = by.map_or(Duration::MAX, |at| {
+                at.saturating_duration_since(Instant::now())
+            });
+            proc.wait_for(wait).unwrap()
+        },
+    )
+    .unwrap()
+}
+
+/// Goal 2's item 3 (D254; ROOT, 2026-11-14; AC-T7.4.1): a member's MCP connection is its caller's program. Do: a run
+/// whose agent-control endpoint is Shards' own on loopback, its spec asking the agent `helper` a bridge; take the next
+/// connection its harness makes, write a request on its stdin and end it, then read its stdout to its end. Expect: a
+/// program of no host process, its stdin and stdout given once and no stderr; the request echoed back whole, then the
+/// end; its end the connection's, `Exit::Code(0)`; the box Running, its VM never stopped.
+#[test]
+fn w2_mcp_a_members_bridge_connection_is_its_callers_program() {
+    use std::io::{Read, Write};
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    *images.bridged.lock().unwrap() = Some(Vec::new());
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let helper = agent("helper");
+    let id = runtime
+        .create(bridged_spec("image-mcp-connection", &[&helper]))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.mcp(&id, &helper).unwrap();
+    assert!(!proc.on_this_host(), "an MCP connection is its guest's");
+    let given = proc.streams().unwrap();
+    assert!(given.stderr.is_none(), "an MCP connection has no stderr");
+    assert!(
+        proc.streams().unwrap().stdin.is_none(),
+        "its streams are given once"
+    );
+    let mut to = hex_api::OwnedStream::from(given.stdin.unwrap());
+    let mut from = hex_api::OwnedStream::from(given.stdout.unwrap());
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n";
+    to.write_all(request).unwrap();
+    drop(to);
+    let mut heard = Vec::new();
+    from.read_to_end(&mut heard).unwrap();
+    assert_eq!(
+        heard, request,
+        "what its harness sends, whole, then its end"
+    );
+    assert_eq!(mcp_end(&mut proc), Exit::Code(0));
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Goal 2's item 3 (ROOT's mapping, 2026-11-14; AC-T7.4.1): an MCP connection that can't be taken is refused, typed.
+/// Do: a box whose spec asks the agents `helper`, `notes` and `ghost` a bridge, its run declaring no `ghost` and its
+/// host refusing `notes`'s bridge (as Shards refuses one a run asked none of); ask for `helper`'s before its start;
+/// after it, ask for the harness `claude`'s (its spec asks none), `ghost`'s and `notes`'s; then stop the VM and ask for
+/// `helper`'s. Expect: `NotRunning(id, "mcp")` before the start; `Invalid` naming the spec for `claude`, the run for
+/// `ghost`; `NotRunning(id, "mcp: its member takes no MCP connection")` for `notes`; and `NotRunning(id, "mcp")` once the
+/// VM has stopped.
+#[test]
+fn w2_mcp_a_connection_that_cant_be_taken_is_refused_typed() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    *images.bridged.lock().unwrap() = Some(vec![2]);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let (helper, notes, ghost) = (agent("helper"), agent("notes"), agent("ghost"));
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let id = runtime
+        .create(bridged_spec(
+            "image-mcp-refused",
+            &[&helper, &notes, &ghost],
+        ))
+        .unwrap()
+        .id;
+    let refused = |member: &Member| runtime.mcp(&id, member).map(drop);
+    assert_eq!(
+        refused(&helper),
+        Err(Refusal::NotRunning(id.clone(), "mcp"))
+    );
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        refused(&claude),
+        Err(Refusal::Invalid {
+            what: "mcp",
+            why: format!("box {id}'s spec asks no MCP bridge of harness claude"),
+        })
+    );
+    assert_eq!(
+        refused(&ghost),
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!("box {id}'s run declares no agent ghost"),
+        })
+    );
+    assert_eq!(
+        refused(&notes),
+        Err(Refusal::NotRunning(
+            id.clone(),
+            "mcp: its member takes no MCP connection"
+        ))
+    );
+    runtime.signal(&id, Signal::KILL).unwrap();
+    assert_eq!(
+        refused(&helper),
+        Err(Refusal::NotRunning(id.clone(), "mcp"))
+    );
+}
+
+/// Goal 2's item 3 (ROOT's mapping, 2026-11-14; AC-T7.4.1): a member's MCP connection's kill resets it. Do: take
+/// `helper`'s next connection, write a request and read its echo, then kill it and read its stdout to its end. Expect:
+/// the echo; the kill done; its stdout's end; its end `Exit::Signal(9)`, the box Running, its VM never stopped; and its
+/// kill again, once it has ended, done at once.
+#[test]
+fn w2_mcp_a_connections_kill_resets_it_and_its_end_reads_killed() {
+    use std::io::{Read, Write};
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    *images.bridged.lock().unwrap() = Some(Vec::new());
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let helper = agent("helper");
+    let id = runtime
+        .create(bridged_spec("image-mcp-kill", &[&helper]))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.mcp(&id, &helper).unwrap();
+    let given = proc.streams().unwrap();
+    let mut to = hex_api::OwnedStream::from(given.stdin.unwrap());
+    let mut from = hex_api::OwnedStream::from(given.stdout.unwrap());
+    to.write_all(b"ping\n").unwrap();
+    let mut echo = [0u8; 5];
+    from.read_exact(&mut echo).unwrap();
+    assert_eq!(&echo, b"ping\n");
+    assert_eq!(proc.kill(), Ok(()));
+    let mut rest = Vec::new();
+    from.read_to_end(&mut rest).unwrap();
+    assert!(rest.is_empty(), "{rest:?}");
+    assert_eq!(mcp_end(&mut proc), Exit::Signal(9));
+    assert_eq!(proc.kill(), Ok(()));
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
 }
