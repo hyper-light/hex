@@ -781,10 +781,10 @@ impl Store {
     /// rather than crash (T-T7.1.2).
     pub fn get(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
         for file in self.files(id) {
-            match fs::read(file) {
-                Ok(bytes) => return Ok(Some(BoxRecord::decode(&bytes))),
+            match File::open(file) {
+                Ok(file) => return Ok(Some(BoxRecord::decode(&read_record_bytes(file)?))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("reading a record", e)),
+                Err(e) => return Err(Refusal::os("opening a record", e)),
             }
         }
         Ok(None)
@@ -979,7 +979,9 @@ impl Store {
                         .map_err(|error| Refusal::os("opening a retained record", error))?;
                     Ok(read_record_bytes(file)?)
                 } else {
-                    fs::read(path)
+                    File::open(&path)
+                        .map_err(|error| Refusal::os("opening a record", error))
+                        .and_then(read_record_bytes)
                 };
                 let record = match bytes {
                     Ok(bytes) => BoxRecord::decode(&bytes),
@@ -1045,41 +1047,37 @@ impl Store {
     }
 }
 
-/// The same bounded file reader for scoped Pool rows and whole-owner retained Box preflight.
-/// Reserve before reading; a torn/oversized row remains a decoder refusal, never an absent owner.
-fn read_record_bytes(mut file: File) -> Result<Vec<u8>, Refusal> {
+/// Every record kind's one reader, for box records, node VM rows and pool records alike: a buffer the file's own length,
+/// read through `take(bound + 1)`, so a read costs the record's bytes and an oversized file is read only as far as its
+/// decoder needs to refuse it, past [`hex_core::record::MAX_RECORD_BYTES`] (the review's per-window reads). A torn or
+/// oversized row remains a decoder refusal, never an absent owner.
+fn read_record_bytes(file: File) -> Result<Vec<u8>, Refusal> {
     use std::io::Read;
     let bound = hex_core::record::MAX_RECORD_BYTES;
-    let room = bound.checked_add(1).ok_or(Refusal::Exhausted {
-        what: "retained record bytes",
+    let past = bound.checked_add(1).ok_or(Refusal::Exhausted {
+        what: "record bytes",
         bound,
     })?;
+    let length = file
+        .metadata()
+        .map_err(|error| Refusal::os("reading a record's length", error))?
+        .len();
+    // A length past what this host's `usize` holds is past the bound too.
+    let room = usize::try_from(length).map_or(past, |length| length.min(past));
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(room)
         .map_err(|_| Refusal::Exhausted {
-            what: "retained record bytes",
+            what: "record bytes",
             bound: room,
         })?;
-    bytes.resize(room, 0);
-    let mut used = 0usize;
-    while used < room {
-        let tail = bytes.get_mut(used..).ok_or(Refusal::Exhausted {
-            what: "retained record bytes",
-            bound: room,
-        })?;
-        let read = file
-            .read(tail)
-            .map_err(|error| Refusal::os("reading a retained record", error))?;
-        if read == 0 {
-            break;
-        }
-        used = used.checked_add(read).ok_or(Refusal::Exhausted {
-            what: "retained record bytes",
-            bound: room,
-        })?;
-    }
-    bytes.truncate(used);
+    let limit = u64::try_from(past).map_err(|_| Refusal::Exhausted {
+        what: "record bytes",
+        bound,
+    })?;
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Refusal::os("reading a record", error))?;
     Ok(bytes)
 }
 
@@ -1998,6 +1996,60 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert!(all[&BoxId::new("a").unwrap()].is_ok());
         assert!(all[&BoxId::new("d").unwrap()].is_err());
+    }
+
+    /// The review's per-window reads (AC-T7.4.1): do read a box record's file, then a file twice the record bound, through
+    /// the store's record reader, which every node VM row, pool record and retained box record is read by. Expect: each
+    /// read's one allocation, its buffer, the file's own length, no more: never the bound's MiB for a record of a few
+    /// hundred bytes; the oversized file read to the bound and one byte, all its decoder needs to refuse it.
+    #[test]
+    fn a_records_read_allocates_its_files_length_never_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let small = dir.path().join("small.json");
+        let encoded = record("small").encode().unwrap();
+        fs::write(&small, &encoded).unwrap();
+        let read = read_record_bytes(File::open(&small).unwrap()).unwrap();
+        assert_eq!(read, encoded);
+        assert!(
+            read.capacity() <= encoded.len(),
+            "a {}-byte record's read allocated {} bytes",
+            encoded.len(),
+            read.capacity()
+        );
+        let large = dir.path().join("large.json");
+        fs::write(&large, vec![b' '; bound * 2]).unwrap();
+        let read = read_record_bytes(File::open(&large).unwrap()).unwrap();
+        assert_eq!(read.len(), bound + 1);
+        assert!(
+            read.capacity() <= bound + 1,
+            "a {}-byte file's read allocated {} bytes",
+            bound * 2,
+            read.capacity()
+        );
+    }
+
+    /// The review's per-window reads (AC-T7.4.1): do write a file twice the record bound where a box's record goes, then
+    /// get it, list every record, and list them as recovery does. Expect: each refuses it as damaged having read the
+    /// bound and one byte, never the rest of the file.
+    #[test]
+    fn an_oversized_box_record_is_read_no_further_than_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let id = BoxId::new("oversized").unwrap();
+        fs::write(
+            record_file(&dir.path().join("state"), &id),
+            vec![b' '; bound * 2],
+        )
+        .unwrap();
+        let refused = format!("{} bytes, over {bound}", bound + 1);
+        assert_eq!(store.get(&id).unwrap(), Some(Err(refused.clone())));
+        assert_eq!(store.all().unwrap().get(&id), Some(&Err(refused.clone())));
+        assert_eq!(
+            store.retained_records().unwrap().get(&id),
+            Some(&Err(refused))
+        );
     }
 
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
