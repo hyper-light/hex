@@ -351,7 +351,7 @@ fn only_the_holders_its_host_authorizes_are_served() {
         lines
             .iter()
             .all(|line| line.starts_with("hex.capacity event=refused ")
-                && line.ends_with(" why=not-authorized")),
+                && line.ends_with(" why=\"not-authorized\"")),
         "{lines:?}"
     );
     assert!(
@@ -362,5 +362,17 @@ fn only_the_holders_its_host_authorizes_are_served() {
                 .iter()
                 .any(|line| line.contains("holder=\"kiln-a.capacity.test\"")),
         "{lines:?}"
+    );
+}
+
+/// The lane's refused line (CLAUDE.md §10; ROOT, 2026-11-14): its values JSON strings or whole numbers, so a holder's
+/// name can't split it. Do: form it for a name holding a quote, a backslash and a newline. Expect: one line, the name a
+/// JSON string, the peer and the link whole numbers.
+#[test]
+fn a_refused_holders_line_is_one_line_its_name_a_json_string() {
+    assert_eq!(
+        super::refused_line(7, 3, "mallory \"x\" \\\nhex.capacity event=forged"),
+        "hex.capacity event=refused peer=7 link=3 holder=\"mallory \\\"x\\\" \\\\\\nhex.capacity event=forged\" \
+         why=\"not-authorized\""
     );
 }

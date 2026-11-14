@@ -686,3 +686,211 @@ fn a_holders_name_at_its_bound_fills_its_record_at_the_widest_epoch() {
         }
     );
 }
+
+/// An oci box's demand and payload: `cpu_milli` and the least memory a box holds, as [`demand_of`]'s process box, its
+/// image Linux on x86_64, as a routed oci box names its image's platform.
+fn oci_of(cpu_milli: u64) -> (Demand, Payload) {
+    let (mut demand, mut payload) = demand_of(cpu_milli);
+    demand.ask.os = Some(hex_sim::model::Os::Linux);
+    demand.ask.arch = Some(hex_sim::model::Arch::X86_64);
+    payload.spec.class = ClassSpec::Oci(Box::new(hex_api::OciSpec {
+        rootfs: hex_api::Rootfs::Dir(std::path::PathBuf::from("/images/agent")),
+        init: hex_api::Program::of(&["/bin/true"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: hex_api::Network::Private,
+        hosts: Vec::new(),
+    }));
+    (demand, payload)
+}
+
+/// A node's routes when its oci class runs in its node VM (joint plan step 39, V2): a process box's native one and an oci
+/// box's NodeVm one.
+fn node_vm_routes() -> Vec<hex_api::RouteOffer> {
+    let route = |class, execution| hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch: hex_api::ImageArch::Amd64,
+            },
+            execution,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    };
+    vec![
+        route(hex_api::Class::Process, hex_api::Execution::Native),
+        route(hex_api::Class::Oci, hex_api::Execution::NodeVm),
+    ]
+}
+
+/// A runtime offering [`node_vm_routes`] as a node VM's node answers them, its boxes made as their routes ask.
+struct Routed(hex_api::sim::SimRuntime);
+
+impl Runtime for Routed {
+    fn classes(&self) -> Vec<hex_api::Class> {
+        vec![hex_api::Class::Process, hex_api::Class::Oci]
+    }
+    fn capacity(&self, _: hex_api::Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        Ok(Some(hex_api::Capacity {
+            own: Default::default(),
+            id: "node-vm-host".into(),
+            total: hex_api::CapacityResources::default(),
+            free: hex_api::CapacityResources::default(),
+            devices: Vec::new(),
+            cost: None,
+            routes: node_vm_routes(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            unavailable: Vec::new(),
+            learned: None,
+            node_vms: Vec::new(),
+            unlearned: None,
+        }))
+    }
+    fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.start(id)
+    }
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.exec(id, program, stdio)
+    }
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.run(spec, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
+        self.0.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<hex_api::Usage, Refusal> {
+        self.0.usage(id)
+    }
+    fn list(&self) -> Result<Vec<hex_api::BoxInfo>, Refusal> {
+        self.0.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.delete(id)
+    }
+}
+
+/// A node of `room` whose oci class runs in its node VM (joint plan step 39, V2): its routes [`node_vm_routes`], its
+/// Ready node VM's guest admitted at 1.5 CPUs and 3 of the least boxes' memory.
+fn node_vm_node(room: Resources) -> NodeSpec {
+    let mut spec = NodeSpec::new(NodeId(0), room);
+    spec.routes = Some(
+        hex_sim::model::RuntimeRoutes {
+            admit: None,
+            offers: node_vm_routes(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            node_vm_room: Some(hex_api::CapacityResources {
+                cpu_milli: 1_500,
+                mem_bytes: 3 * hex_api::MIN_MEMORY,
+                disk_bytes: 0,
+            }),
+        }
+        .share()
+        .unwrap(),
+    );
+    spec
+}
+
+/// A node of four CPUs whose oci class runs in its node VM ([`node_vm_node`]), its view open for one holder, and its node
+/// VM, run 39, booked at 2 CPUs and 4 of the least boxes' memory.
+fn node_vm_booted(dir: &std::path::Path) -> (Driver, Holder) {
+    let runtime: Arc<dyn Runtime> = Arc::new(Routed(hex_api::sim::SimRuntime::default()));
+    let driver = Driver::boot(
+        NodeId(0),
+        &[node_vm_node(four_cpus())],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir,
+        Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+    )
+    .unwrap();
+    driver.refresh_node(node_vm_node(four_cpus())).unwrap();
+    driver.open_view(&dir.join("capacity"), 1).unwrap();
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let hello = kiln.connect().unwrap();
+    let joined = talk(&driver, &mut kiln, vec![hello]);
+    assert!(
+        matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{joined:?}"
+    );
+    driver
+        .book_nodes(&std::collections::BTreeMap::from([(
+            hex_api::NodeRun::from_bytes([39; 16]),
+            Resources {
+                cpu_milli: 2_000,
+                mem_bytes: 4 * hex_api::MIN_MEMORY,
+                ..Resources::default()
+            },
+        )]))
+        .unwrap();
+    (driver, kiln)
+}
+
+/// V2 (a) (ROOT, 2026-11-13: the scheduler's ledger booked a node VM beside the oci boxes it hosts, A-5's double count
+/// at the scheduler): an oci box in its node's node VM is charged nothing at its host, the node VM's receipt holding it.
+/// Do book node VM 39 at 2 of a node's 4 CPUs, then place an oci box of 1 CPU through its NodeVm route. Expect it
+/// started, and the node's view holding the node VM's 2 CPUs alone.
+#[test]
+fn v2_an_oci_box_in_its_node_vm_is_held_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, _kiln) = node_vm_booted(dir.path());
+    let (d, p) = oci_of(1_000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    let notices = quiesce(&driver, step);
+    assert!(started(&notices), "{notices:?}");
+    assert_eq!(driver.view().unwrap().held.cpu_milli, 2_000);
+}
+
+/// V2 (ROOT, 2026-11-13: the node VM's route's room is its guest, the host-side pool, so a placement is right the first
+/// time): oci boxes are placed within their node VM's guest. Do book node VM 39, its guest admitted at 1.5 CPUs, then
+/// place an oci box of 1 CPU, then another. Expect the first started, and the second refused: 2 CPUs past the guest's
+/// 1.5.
+#[test]
+fn v2_oci_boxes_are_placed_within_their_node_vms_guest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, _kiln) = node_vm_booted(dir.path());
+    let (d, p) = oci_of(1_000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    let notices = quiesce(&driver, step);
+    assert!(started(&notices), "{notices:?}");
+    let (d, p) = oci_of(1_000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(!started(&quiesce(&driver, step)));
+}
+
+/// V2 (b) (ROOT, 2026-11-13: a node VM's receipt never reached its node's own admissions): a host box gets only the room
+/// past its node's node VM. Do book node VM 39 at 2 of a node's 4 CPUs, then place a process box of 3 CPUs on the host,
+/// then one of 2. Expect the first refused, 3 CPUs past the 2 the node VM leaves, and the second started.
+#[test]
+fn v2_a_host_box_gets_only_the_room_past_its_nodes_node_vm() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, _kiln) = node_vm_booted(dir.path());
+    let (d, p) = demand_of(3_000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(!started(&quiesce(&driver, step)));
+    let (d, p) = demand_of(2_000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    let notices = quiesce(&driver, step);
+    assert!(started(&notices), "{notices:?}");
+}

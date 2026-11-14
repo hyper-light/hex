@@ -680,3 +680,10 @@ fn hex_quic_29_the_nodes_report_names_each_peer_with_its_suite_and_group() {
         "{refused:?}"
     );
 }
+
+/// The log's missed line (CLAUDE.md §10; ROOT, 2026-11-14): its count a whole number. Do: form it for three lines.
+/// Expect: `hex.log event=missed lines=3`.
+#[test]
+fn a_readers_missed_line_counts_its_lines() {
+    assert_eq!(super::missed_line(3), "hex.log event=missed lines=3");
+}

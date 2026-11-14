@@ -1935,8 +1935,9 @@ fn readmit(state: &mut State) -> Result<(), Error> {
 
 /// The spec this node's ledger admits against (joint plan steps 13 and 14): its facts, the machine's
 /// physical room less every holder's reservations (CV3), plus what its boxes' learned holdings leave of the
-/// receipts its ledger books, less what they take past them, so its free room is the physical room less what
-/// everything holds. None before its first facts.
+/// receipts its ledger books, less what they take past them, and less each node VM it runs for itself at its
+/// receipt (joint plan step 39, V2), which no box's admission books, so its free room is the physical room less
+/// what everything holds. None before its first facts.
 fn admission_spec(state: &State) -> Result<Option<NodeSpec>, Stop> {
     let Some(facts) = state.facts.as_ref() else {
         return Ok(None);
@@ -1948,11 +1949,15 @@ fn admission_spec(state: &State) -> Result<Option<NodeSpec>, Stop> {
     let booked = hex_api::capacity::Amounts::from_array(state.node.booked()?);
     let held = hex_api::capacity::Amounts::from_array(state.node.held()?);
     let (credit, debit) = (booked.less(held), held.less(booked));
-    let room = |physical: u64, credit: u64, foreign: u64, debit: u64| {
+    // Its node VMs' receipts are in both what it books and what it holds, so they cancel above: taken here, a host box
+    // gets only the room past them, and their learned holdings move the credit or debit as a box's do.
+    let nodes = hex_api::capacity::Amounts::from_array(state.node.nodes_booked()?);
+    let room = |physical: u64, credit: u64, foreign: u64, debit: u64, nodes: u64| {
         physical
             .saturating_add(credit)
             .saturating_sub(foreign)
             .saturating_sub(debit)
+            .saturating_sub(nodes)
     };
     let mut spec = facts
         .try_clone()
@@ -1963,18 +1968,21 @@ fn admission_spec(state: &State) -> Result<Option<NodeSpec>, Stop> {
             credit.cpu_milli,
             foreign.cpu_milli,
             debit.cpu_milli,
+            nodes.cpu_milli,
         ),
         mem_bytes: room(
             facts.capacity.mem_bytes,
             credit.mem_bytes,
             foreign.mem_bytes,
             debit.mem_bytes,
+            nodes.mem_bytes,
         ),
         disk_bytes: room(
             facts.capacity.disk_bytes,
             credit.disk_bytes,
             foreign.disk_bytes,
             debit.disk_bytes,
+            nodes.disk_bytes,
         ),
         // A holder holds no GPU (CV3) and a holding none past its receipt: the devices still agree.
         gpus: facts.capacity.gpus,
