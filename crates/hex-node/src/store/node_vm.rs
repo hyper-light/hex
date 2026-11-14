@@ -695,9 +695,10 @@ impl Store {
         self.remove_node_vm(&record.run)
     }
 
-    /// The handle of node VM `run`'s lock this process holds, a second descriptor of its one open file description:
-    /// for a test's child to share it as a forked child would, Unix's case.
-    #[cfg(all(test, unix))]
+    /// The handle of node VM `run`'s lock this process holds, a second one of its lock file: on Unix a descriptor of its
+    /// one open file description, which a child forked without an exec shares; on Windows a handle of its one file
+    /// object, which a child that inherited it holds (the review's C-13). For a test's child to hold it so.
+    #[cfg(test)]
     fn node_vm_lock(&self, run: &NodeRun) -> Option<File> {
         self.node_vm_owners
             .lock()
