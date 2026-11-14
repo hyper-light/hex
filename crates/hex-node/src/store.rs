@@ -51,7 +51,7 @@ use crate::turns::{Turn, Turns};
 
 mod node_vm;
 mod pool;
-pub use node_vm::NodeVmSettled;
+pub use node_vm::{NodeVmEnds, NodeVmSettled, NodeVmsSettled};
 use pool::scoped_paths;
 
 /// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's

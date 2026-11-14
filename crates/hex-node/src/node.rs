@@ -1118,7 +1118,16 @@ impl Node {
         // has been dispatched through the same Store/turn authority.
         let mut summary = self.recover_backends(&records)?;
         summary.boot_unknown = self.store.boot_unread().map(str::to_owned);
-        summary.node_vms = self.store.settle_node_vms()?;
+        let settled = self.store.settle_node_vms()?;
+        summary.node_vms = settled.rows;
+        summary.node_vm_ends = crate::store::NodeVmEnds::of(&settled.ends)?;
+        // Its learner, made with its backends above, carries what the rows kept (joint plan step 39, place 1).
+        if let Some(learner) = self.backends.get().and_then(|b| b.learner.as_ref()) {
+            learner
+                .lock()
+                .map_err(|_| Refusal::Broken("the charge learner's lock was poisoned".into()))?
+                .carry_ended(settled.ends)?;
+        }
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();

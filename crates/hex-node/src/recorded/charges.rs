@@ -33,11 +33,13 @@ use hex_sim::model::Class;
 use crate::store::Store;
 
 /// One VM's lifetime, as its record names it (C3): a managed VM's native scope, its random bytes, or a Shards image VM's
-/// place in its node's start order (`BoxRecord::started`), which its node gives each lifetime once.
+/// place in its node's start order (`BoxRecord::started`), which its node gives each lifetime once; or a node VM's run,
+/// which its node's store mints once a boot (joint plan step 39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Scope {
     Native([u8; 16]),
     Started(u64),
+    Run(hex_api::NodeRun),
 }
 
 impl Scope {
@@ -670,6 +672,15 @@ impl LastResort {
         Ok(())
     }
 
+    /// Carries `ends`, the last-resort ends of the node VMs its node's start read back from their rows before letting
+    /// them go (joint plan step 39, place 1), into its ends, each a Shards VM's.
+    pub(crate) fn carry(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
+        for end in &ends {
+            self.remember(Class::Shards, end)?;
+        }
+        Ok(())
+    }
+
     /// Keeps why the last resort ended a VM of `class`, for its class's capacity answers, forgetting the oldest past the
     /// bound.
     fn remember(&mut self, class: Class, end: &LearnedEnd) -> Result<(), Refusal> {
@@ -772,31 +783,32 @@ impl LastResort {
 /// write waits for the box's record turn as every change of its record does (`Store::update`), by decision 9's rule
 /// (the person's, 2026-11-13; ROOT's item 2b): following the change under way, this process's own thread, until it
 /// lets go, a hold past the slowest seen told to the census as a run-out (`store.turns`), never refused at a bound of
-/// its own (`turns::tests::a_wait_past_the_slowest_hold_follows_the_holder_and_learns_its_hold`).
+/// its own (`turns::tests::a_wait_past_the_slowest_hold_follows_the_holder_and_learns_its_hold`). A node VM's goes into
+/// its row (joint plan step 39, place 1), its lifetime its run, under the lock every write of its row takes
+/// (`Store::update_node_vm`).
 pub(crate) fn record_last_resort(
     store: &Store,
     id: &LearnedHolder,
     scope: Scope,
     end: Option<&LearnedEnd>,
 ) -> Result<bool, Refusal> {
-    let id = match id {
-        LearnedHolder::Box(id) => id,
-        // A node VM's row keeps its own (step 39); no learner holds one yet.
-        LearnedHolder::Node(_) => {
-            return Err(Refusal::Broken(
-                "a node VM's last resort is kept in its row, which no learner here holds"
-                    .to_owned(),
-            ));
-        }
-    };
     let end = end.map(LearnedEnd::try_clone).transpose()?;
-    store.update(id, move |record| {
-        if Scope::of(record) != Some(scope) {
-            return false;
+    match id {
+        LearnedHolder::Box(id) => store.update(id, move |record| {
+            if Scope::of(record) != Some(scope) {
+                return false;
+            }
+            record.last_resort = end;
+            true
+        }),
+        LearnedHolder::Node(run) if scope == Scope::Run(*run) => {
+            store.update_node_vm(run, move |row| {
+                row.last_resort = end;
+                true
+            })
         }
-        record.last_resort = end;
-        true
-    })
+        LearnedHolder::Node(_) => Ok(false),
+    }
 }
 
 /// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
@@ -1314,6 +1326,11 @@ impl Learner {
     /// Keeps `left`, writes that failed, for the next window (C5).
     pub(crate) fn keep_unrecorded(&mut self, left: Writes) {
         self.last.keep_unrecorded(left);
+    }
+
+    /// Carries the last-resort ends its node's start read back from node VM rows into its ends (joint plan step 39).
+    pub(crate) fn carry_ended(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
+        self.last.carry(ends)
     }
 
     /// The window's failure is `why`, which no read reached.
