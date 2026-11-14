@@ -131,6 +131,19 @@ impl<'a> Holder<'a> {
         }
     }
 
+    /// Its class as its learner learns it: a node VM's a class of its own, never its profile's box VMs' (ROOT,
+    /// 2026-11-13), as it runs every oci box of its node.
+    pub(crate) fn key(
+        self,
+        class: Class,
+        allocation: hex_api::Allocation,
+    ) -> Result<ClassKey, Refusal> {
+        match self {
+            Self::Box(_) => ClassKey::of(class, allocation),
+            Self::Node { .. } => ClassKey::node(class, allocation),
+        }
+    }
+
     /// Its priority band.
     pub(crate) fn band(self) -> u8 {
         match self {
@@ -370,7 +383,8 @@ pub(crate) fn running_image(record: &BoxRecord) -> bool {
 }
 
 /// A window's view of the node's records (C3, C4): the VMs it learns; what each VM it doesn't books, whole, its
-/// receipt's allocation, as no cap holds it below; and what the native boxes book, their caps.
+/// receipt's allocation, as no cap holds it below; and what the native boxes book, their caps: its process boxes', and
+/// its oci boxes' where no node VM runs them (A-5).
 #[derive(Debug, Default)]
 pub(crate) struct Sorted<'a> {
     pub(crate) learned: Vec<Holder<'a>>,
@@ -380,15 +394,21 @@ pub(crate) struct Sorted<'a> {
 
 /// Sorts `records` for a window of a learner ([`Sorted`]): it learns each VM whose cap's period it reads over (C1), a
 /// managed VM where `learns` says so ([`Learner::learns`]) and every image VM, its cap's period its run's own
-/// ([`crate::recorded::Recover::image_rate_period`]).
+/// ([`crate::recorded::Recover::image_rate_period`]). A native box books its caps, an oci box only where no node VM on
+/// record (`rows`) runs the node's oci class (A-5; ROOT, 2026-11-13): a node VM holds the boxes it runs, in its
+/// footprint while it runs and its booking while it boots, and nothing holds them once it has ended, so their caps are
+/// never counted beside it.
 pub(crate) fn sort<'a>(
     records: impl IntoIterator<Item = &'a BoxRecord>,
+    rows: &[NodeVmRecord],
     learns: impl Fn(Holder<'_>) -> bool,
 ) -> Result<Sorted<'a>, Refusal> {
     let overflow = || Refusal::Invalid {
         what: "a node's boxes' bookings",
         why: "they overflow".into(),
     };
+    // A node VM on record runs the node's oci class: its guest is the one that serves it (`Store::put_node_vm`).
+    let hosted = !rows.is_empty();
     let mut sorted = Sorted::default();
     for record in records {
         let kind = if running(record) {
@@ -407,10 +427,11 @@ pub(crate) fn sort<'a>(
                     .ok_or_else(overflow)?;
             }
             _ if record.phase == Phase::Ready
-                && matches!(
-                    record.spec.class.class(),
-                    hex_api::Class::Process | hex_api::Class::Oci
-                ) =>
+                && match record.spec.class.class() {
+                    hex_api::Class::Process => true,
+                    hex_api::Class::Oci => !hosted,
+                    hex_api::Class::Shards | hex_api::Class::Firecracker => false,
+                } =>
             {
                 let caps = CapacityResources {
                     cpu_milli: record.spec.bounds.cpu_max_milli.map_or(0, u64::from),
@@ -680,7 +701,8 @@ impl LastResort {
     /// nothing more, so one end is never two; else an end a node before this one decided, as it decided it; else the
     /// core's verdict on `node`, why written into the chosen VM's record before `reach` ends it, or refused, typed,
     /// where the node can't act. An end refused withdraws its intent; an intent that couldn't be written holds no end,
-    /// and is written after it. `vm` names each VM the learner holds: its class and box.
+    /// and is written after it, its write's refusal the window's. `vm` names each VM the learner holds: its class and
+    /// box.
     pub(crate) fn window<'a>(
         &mut self,
         node: &charge::Node<Lifetime>,
@@ -709,6 +731,8 @@ impl LastResort {
             };
             return Ok(());
         }
+        // An intent whose write was refused, told as the window's refusal once its end is decided.
+        let mut unwritten = None;
         self.resort = match node.last_resort().map_err(refused)? {
             charge::Resort::Held => Resort::Held,
             charge::Resort::Within(fleet) => Resort::Refused(Refusal::Exhausted {
@@ -732,7 +756,16 @@ impl LastResort {
                 };
                 // What was kept for the VM's record before is this end's to say now.
                 self.unrecorded.retain(|(_, kept, _)| *kept != scope);
-                let written = matches!(reach.intend(id, scope, &end), Ok(true));
+                // Its intent first. A write refused doesn't hold the end, the fleet's room coming first: the VM is
+                // ended, why written after the window, and the window refused with the write's own refusal, typed, as
+                // a write after it is when it fails ([`write_ends`]; ROOT, 2026-11-13).
+                let written = match reach.intend(id, scope, &end) {
+                    Ok(written) => written,
+                    Err(why) => {
+                        unwritten = Some(why);
+                        false
+                    }
+                };
                 match reach.end(&scope) {
                     Ok(()) => {
                         if !written {
@@ -754,7 +787,7 @@ impl LastResort {
                 }
             }
         };
-        Ok(())
+        unwritten.map_or(Ok(()), Err)
     }
 
     /// Carries `ends`, the last-resort ends of the node VMs its node's start read back from their rows before letting
@@ -1337,7 +1370,7 @@ impl Learner {
             self.node
                 .track(
                     lifetime,
-                    ClassKey::of(class, allocation)?,
+                    record.key(class, allocation)?,
                     record.band(),
                     vcpus(allocation)?,
                     receipt,
