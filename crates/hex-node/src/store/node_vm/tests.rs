@@ -58,7 +58,9 @@ fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
     NodeVmRecord {
         version: RECORD_VERSION,
         run: NodeRun::from_bytes([run; 16]),
-        image: "hex-node:rev@sha256:00".to_owned(),
+        image:
+            "hex-node:rev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
         allocation: allocation(),
         phase,
         diagnostics: None,

@@ -25,6 +25,7 @@
 //!   wait spends at most half its time looking.
 
 use std::fmt;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 pub use hex_core::patience::Party;
@@ -219,28 +220,40 @@ impl Waiting {
     }
 }
 
-/// A thread a test follows: captured on the thread itself ([`Thread::current`]) and looked at from any other
-/// ([`Thread::party`]).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Thread(sys::Id);
+/// A thread a test follows: made on the thread itself ([`Thread::current`]) and looked at from any other
+/// ([`Thread::party`]), on every OS alike. It holds a weak reference to a token that the thread's own thread-locals hold,
+/// so it names no thread id a later thread could reuse, nor any other process's thread.
+#[derive(Debug, Clone)]
+pub struct Thread(Weak<()>);
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl Thread {
-    /// The calling thread.
-    pub fn current() -> std::io::Result<Self> {
-        sys::current().map(Self)
-    }
-
-    /// The thread as a party: ended once it has gone, which comes a moment after its join, as its task exits; live
-    /// until then. Linux reads `/proc/self/task/<tid>/stat`; macOS `proc_pidinfo`'s `PROC_PIDTHREADID64INFO`.
-    pub fn party(&self) -> Party {
-        sys::party(self.0)
-    }
+thread_local! {
+    /// The calling thread's token: its thread-locals hold the one strong reference, which std drops as the thread ends.
+    static TOKEN: Arc<()> = Arc::new(());
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod sys;
+impl Thread {
+    /// The calling thread. Refused only while its thread-locals are being dropped, as it ends.
+    pub fn current() -> std::io::Result<Self> {
+        TOKEN
+            .try_with(Arc::downgrade)
+            .map(Self)
+            .map_err(std::io::Error::other)
+    }
+
+    /// The thread as a party: ended once std has dropped its thread-locals, as the thread ends, after its code has run
+    /// (a panic's unwinding included) and before its join returns; live until then. std drops a thread's locals as it
+    /// ends on every OS but for a Unix process's main thread, and on Windows the other threads of a process that exits
+    /// (`std::thread::LocalKey`'s platform notes): neither is a thread a test follows. Its other thread-locals may be
+    /// dropped after the token, so a wait takes one last look at its fact once the party reads ended ([`until`],
+    /// [`within`]).
+    pub fn party(&self) -> Party {
+        if self.0.strong_count() == 0 {
+            Party::Ended
+        } else {
+            Party::Live
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

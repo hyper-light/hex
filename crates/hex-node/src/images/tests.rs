@@ -5,8 +5,8 @@ use std::sync::{Condvar, Mutex};
 
 use hex_api::{Allocation, Bounds, BoxState, ClassSpec, ShardsImage};
 use shards_api::image::{
-    Bound, Channel, ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberInfo, MemberName, Ready,
-    RunEnd, StartedFrom, Stats, StatsScope,
+    Bound, Channel, ChannelEnd, ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberInfo,
+    MemberName, Ready, RunEnd, RunEnded, StartedFrom, Stats, StatsScope, Unused,
 };
 
 use super::*;
@@ -125,11 +125,30 @@ impl ImageGuest for Held {
         self.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         Ok(())
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.end.lock().unwrap().clone())
+    fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
+        Ok(self
+            .end
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|end| RunEnded::unused(end, Unused::Killed)))
     }
     fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
         Ok(())
+    }
+    fn wait_channel(
+        &self,
+        _: &MemberName,
+        _: Channel,
+        _: Duration,
+    ) -> Result<Option<ChannelEnd>, ImageRefusal> {
+        Err(unasked())
+    }
+    fn take_gpu_report(
+        &self,
+        _: Duration,
+    ) -> Result<shards_api::physical::GpuReport, ImageRefusal> {
+        Err(unasked())
     }
 }
 
@@ -455,4 +474,71 @@ fn w33_a_runtime_made_leasing_leases_its_vms_credentials_and_one_made_new_refuse
     let leased = lessor.0.lease("anthropic/ada", None).unwrap();
     assert_eq!(leased.value.0, b"sk-ant-api03-real");
     assert!(broker.holds(&leased.lease).unwrap());
+}
+
+/// The review's B-13 (AC-T7.4.1; T-T7.1.2): an image runtime opens its records as a node recovers its own. Do open an
+/// image runtime and create an image VM; end it, and leave beside the VM's record what a crash leaves: a record write's
+/// temporary file, a record torn in the runtime place in this boot of the host, and a node VM row an earlier process
+/// left Ready, its lock held by none; then open the runtime again, as kiln's restart does, and list. Expect the
+/// temporary file removed, the node VM row let go, and the torn record kept, its name never reused, and listed by its
+/// id, Empty, beside the VM, never hidden. Then name an earlier boot in the host's boot marker, as a reboot leaves it,
+/// and open the runtime again. Expect the torn record removed, its run having ended with that boot, and the VM listed.
+#[test]
+fn b13_an_image_runtime_recovers_its_records_as_a_node_does_and_lists_one_it_cant_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = dir.path().join("records");
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    images.create(image_box("kiln-kept")).unwrap();
+    drop(images);
+    let torn = BoxId::new("kiln-torn").unwrap();
+    let place = crate::store::runtime_record(&records.join("run"), &torn);
+    std::fs::write(&place, b"{\"spec\":").unwrap();
+    let temporary = place.with_file_name(".kiln-cut.tmp");
+    std::fs::write(&temporary, b"{\"spec\":").unwrap();
+    let row = hex_core::record::NodeVmRecord {
+        version: hex_core::record::RECORD_VERSION,
+        run: hex_api::NodeRun::from_bytes([7; 16]),
+        image: hex_api::sim::SIM_IMAGE.to_owned(),
+        allocation: allocation(),
+        phase: hex_api::NodeVmPhase::Ready,
+        diagnostics: None,
+        exit: None,
+        last_resort: None,
+        started: Some(1),
+    };
+    let rows = records.join("state").join(".node-vms");
+    std::fs::create_dir_all(&rows).unwrap();
+    std::fs::write(
+        rows.join(format!("{}.json", "07".repeat(16))),
+        row.encode().unwrap(),
+    )
+    .unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    assert!(!temporary.exists(), "a crash's temporary file left");
+    assert_eq!(Books::all_node_vms(images.as_ref()).unwrap(), []);
+    let listed = |images: &ImageRuntime| -> Vec<(String, BoxState)> {
+        images
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|info| (info.id.as_str().to_owned(), info.state))
+            .collect()
+    };
+    assert_eq!(
+        listed(&images),
+        [
+            ("kiln-kept".to_owned(), BoxState::Created),
+            ("kiln-torn".to_owned(), BoxState::Empty)
+        ]
+    );
+    let reused = images.create(image_box("kiln-torn"));
+    assert!(reused.is_err() && place.exists(), "{reused:?}");
+    drop(images);
+    std::fs::write(records.join("state").join("@boot"), b"an-earlier-boot\n").unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    assert!(!place.exists(), "a torn record of an earlier boot kept");
+    assert_eq!(
+        listed(&images),
+        [("kiln-kept".to_owned(), BoxState::Created)]
+    );
 }

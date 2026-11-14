@@ -196,6 +196,12 @@ pub struct Runs {
 pub struct Node {
     /// Its lessors over its wire, where its image VMs lease through them ([`Node::lease_over_wire`]).
     wire_lessors: OnceLock<Arc<crate::serve::WireLessors>>,
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10): its keeper's word is then awaited before its charge learner learns ([`Node::with_capacity_view`]).
+    capacity_view: bool,
+    /// The machine's capacity view's latest word, what every holder has reserved through its keeper (the review's A-10),
+    /// kept for its charge learner: none until its keeper speaks ([`Runtime::reserved`]).
+    reserved: Mutex<Option<hex_api::Reserved>>,
     attachments: hex_runtime::devices::SharedCatalog,
     attachment_turns: Turns,
     backends: OnceLock<backends::Backends>,
@@ -443,6 +449,8 @@ impl Node {
         let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
             wire_lessors: OnceLock::new(),
+            capacity_view: false,
+            reserved: Mutex::new(None),
             attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
                 |_| Refusal::Exhausted {
                     what: "shared runtime device catalog owners",
@@ -623,6 +631,27 @@ impl Node {
     pub fn with_lsm(mut self, policy: hex_runtime::linux::oci::lsm::Policy) -> Self {
         self.lsm = policy;
         self
+    }
+
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10, CV10's configured form): where one does, its charge learner learns nothing until its keeper has
+    /// spoken since the node started, its VMs booked whole meanwhile, told; where none does, no holder reserves room there.
+    pub fn with_capacity_view(mut self, served: bool) -> Self {
+        self.capacity_view = served;
+        self
+    }
+
+    /// What its charge learner takes off its fleet's budget for the capacity view's holders now (the review's A-10), as
+    /// its configuration and its keeper's latest word say.
+    fn reservations(&self) -> Result<hex_api::LearnedReservations, Refusal> {
+        let word = *self
+            .reserved
+            .lock()
+            .map_err(|_| Refusal::Broken("the keeper's word's lock was poisoned".into()))?;
+        Ok(crate::recorded::charges::reservations(
+            self.capacity_view,
+            word,
+        ))
     }
 
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
@@ -1124,6 +1153,7 @@ impl Node {
                 .saturating_add(self.abandoned.unrecorded(id)?),
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -1647,6 +1677,7 @@ impl Node {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -1918,6 +1949,12 @@ impl Runtime for Node {
         }
         // node_key is stable across this state directory's recovery, shared by both native classes.
         let mut capacity = self.native_capacity()?;
+        // Its boxes' CPU time together, everything under its box root since the root was made (the review's A-8), so
+        // a host reading this node's own CPU (a shared guest's) measures over intervals its boxes come and go in.
+        capacity.own.boxes_cpu_ns = std::fs::read_to_string(self.root.dir().join("cpu.stat"))
+            .ok()
+            .as_deref()
+            .and_then(hex_sim::facts::cgroup_usage_ns);
         if class == Class::Oci {
             capacity.devices = self.attachment_capacity()?;
         }
@@ -2197,6 +2234,23 @@ impl Runtime for Node {
         })
     }
 
+    /// A VM box's backend gives its member's next MCP connection (goal 2's item 3); any other box has none, refused as the
+    /// trait refuses it.
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.mcp(id, member);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "mcp",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+            ),
+        })
+    }
+
     /// A VM box's backend signals its member (goal 2's item 2); any other box has none, refused as the trait refuses it.
     fn signal_member(
         &self,
@@ -2311,6 +2365,7 @@ impl Runtime for Node {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        control: None,
                         credentials: Vec::new(),
                     }),
                     Err(why) => return Err(why),
@@ -2333,6 +2388,7 @@ impl Runtime for Node {
                     abandoned: 0,
                     last_resort: None,
                     ended: None,
+                    control: None,
                     credentials: Vec::new(),
                 });
             }
@@ -2382,6 +2438,18 @@ impl Runtime for Node {
             }
             supervise::Taken::NoRun => self.delete_box(id),
         }
+    }
+
+    /// The machine's capacity view's word, kept for its charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed. Its learner reads it at its next window, each `cpu.max` period.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        crate::recorded::charges::keep_word(
+            &mut *self
+                .reserved
+                .lock()
+                .map_err(|_| Refusal::Broken("the keeper's word's lock was poisoned".into()))?,
+            word,
+        )
     }
 }
 

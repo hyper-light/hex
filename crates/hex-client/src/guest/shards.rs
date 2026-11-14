@@ -271,6 +271,11 @@ impl Link for ShardsLink {
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
     }
 
+    /// A Shards guest's vsock socket takes a borrowed CONNECT from any caller its identity names (HEX-RT-17).
+    fn lends_identity(&self) -> bool {
+        true
+    }
+
     /// The learned bound on a boot to ready, whose ready includes the CONNECT/OK exchange: what each
     /// attempt of a dial with no caller deadline waits ([`ShardsLink::dial_following`]), and what a
     /// stream offer carries for a caller's borrowed CONNECTs (HEX-RT-17).
