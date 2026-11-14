@@ -138,9 +138,13 @@ Sources, read at the revisions named:
   names `state/image-diagnostics/<box>.log` in its record with its boot's intent and makes the file before the boot;
   the booted run's host writes every part of its diagnostics, its VM's among them, there from then on, after what it
   kept until then (a run whose host can't is dropped, which ends it, and its boot is refused in those words). The file
-  is kept whole, with no bound of Hex's: it is for diagnosing the run. A failed run's `BoxInfo.ended` carries its
-  words, then the file's last bytes, as many as Shards quotes of a VM's end (`shards_abi::bounds::console_said` over
-  the kernel's console records, as the dedicated guest reads them). The node Store keeps the file's name, the run's
+  is bounded by the disk the box's allocation was admitted with (ROOT, 2026-11-14; the review's B-9): the diagnostics
+  are the box's own output on the node's disk, so they are charged to it, and no number is picked. Past that bound the
+  file is cut back to the tail Shards keeps for quoting, and its run host's words go on after it, through Shards'
+  bounded `keep_diagnostics(to, bound)`, asked of Shards and owed: until Hex vendors it and passes the bound, the file
+  has no bound of Hex's. A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
+  quotes of a VM's end (`shards_abi::bounds::console_said` over the kernel's console records, as the dedicated guest
+  reads them). The node Store keeps the file's name, the run's
   words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the
   box's delete removes the file before its record.
 
