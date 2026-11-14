@@ -2397,11 +2397,8 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
             charges::Holder::Box(record) => {
                 self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
             }
-            // Its guest isn't told its room here yet: the learner tells an image box's alone (D188).
-            charges::Holder::Node { .. } => Err(Refusal::Invalid {
-                what: "a node VM's room",
-                why: "the charge learner tells an image box's guest its room alone".to_owned(),
-            }),
+            // Its guest told its room through its run, as an image VM's is (D188).
+            charges::Holder::Node { row, .. } => self.runtime.node_vm_room(row.run, room),
         }
     }
 
@@ -3483,6 +3480,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// Joint plan step 39 (place 3): its node VM's run stopped, its end kept in its row.
     fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
         self.guest().stop_node_vm(run)
+    }
+
+    /// Joint plan step 39: its node VM's guest told its room through its run (D188).
+    fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.guest().node_vm_room(run, room)
     }
 
     fn launch_managed(
