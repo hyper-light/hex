@@ -227,8 +227,11 @@ impl Cap<'_> {
     /// VMM's own where read, its whole share while not; [`GOVERNOR_LEAST`] where its VMM's own took the whole share,
     /// which [`Cap::held`] tells.
     pub(crate) fn governor(self) -> NonZeroU64 {
-        let _ = self.own;
-        NonZeroU64::new(self.share).unwrap_or(GOVERNOR_LEAST)
+        let rate = match self.own {
+            Own::Read(own) => self.share.saturating_sub(own),
+            Own::Unheld(_) => self.share,
+        };
+        NonZeroU64::new(rate).unwrap_or(GOVERNOR_LEAST)
     }
 
     /// What holds the VM at its share, its governor holding its vCPUs to [`Cap::governor`], on a platform whose `job`
@@ -236,10 +239,14 @@ impl Cap<'_> {
     /// VMM's own taking the whole share, a finding; and while its VMM's own isn't read apart, its governor at the whole
     /// share under its job, or with nothing holding its VMM's own, why told.
     pub(crate) fn held(self, job: bool) -> hex_api::RateHeld {
-        if job {
-            hex_api::RateHeld::GovernorUnderJob
-        } else {
-            hex_api::RateHeld::Governor
+        match self.own {
+            Own::Read(own) if own >= self.share => hex_api::RateHeld::OwnTakesShare {
+                own,
+                share: self.share,
+            },
+            Own::Read(_) => hex_api::RateHeld::Governor,
+            Own::Unheld(_) if job => hex_api::RateHeld::GovernorUnderJob,
+            Own::Unheld(why) => hex_api::RateHeld::GovernorOwnUnheld(why.to_owned()),
         }
     }
 }
@@ -397,13 +404,20 @@ impl Read {
                 life: Some(host.window),
             });
         }
-        let _ = first;
+        let guest_ns = match io.guest_time(holder)? {
+            ManagedGuestTime::PerVcpu(times) => Ok(times),
+            ManagedGuestTime::Unheld(why) => Err(why),
+        };
         let usage = io.usage(holder)?;
+        let life = match (&guest_ns, first) {
+            (Ok(_), true) => Some(io.life(holder)?),
+            _ => None,
+        };
         Ok(Self {
             cpu_ns: usage.cpu_usec.saturating_mul(1_000),
             memory_bytes: usage.memory_bytes,
-            guest_ns: Err("its use isn't asked".to_owned()),
-            life: None,
+            guest_ns,
+            life,
         })
     }
 
@@ -1171,8 +1185,18 @@ impl Learner {
                     .unwrap_or(u64::MAX);
                 used.insert(vm.lifetime, (milli, vm.rate));
                 vm.last = (read.cpu_ns, now);
-                let _ = own;
-                vm.guest_ns = read.guest_ns.ok();
+                match read.guest_ns {
+                    Ok(guest) => {
+                        vm.guest_ns = Some(guest);
+                        if let Some(own) = own {
+                            vm.own = Ok(own);
+                        }
+                    }
+                    Err(why) => {
+                        vm.guest_ns = None;
+                        vm.own = Err(why);
+                    }
+                }
                 vm.period = period;
                 continue;
             }
@@ -1193,8 +1217,14 @@ impl Learner {
                 )
                 .map_err(refused)?;
             // Its first split, from its first reading holding its guest time: over its life so far (D260).
-            let guest_ns = read.guest_ns.ok();
-            let own = Err("its use isn't asked".to_owned());
+            let own = read.own_over_life();
+            let (guest_ns, own) = match read.guest_ns {
+                Ok(guest) => (
+                    Some(guest),
+                    own.ok_or_else(|| "its life so far reads none".to_owned()),
+                ),
+                Err(why) => (None, Err(why)),
+            };
             self.vms.insert(
                 scope,
                 Vm {
@@ -1240,7 +1270,7 @@ impl Learner {
                 Own::Read(own) => Some(own),
                 Own::Unheld(_) => None,
             };
-            if vm.rate == rate {
+            if vm.held.is_some() && vm.rate == rate && vm.told == told {
                 continue;
             }
             let record = running

@@ -313,8 +313,29 @@ pub(super) fn guest_time(
     id: &BoxId,
     vcpus: u32,
 ) -> Result<ManagedGuestTime, Refusal> {
-    let _ = (guest, id, vcpus);
-    Ok(ManagedGuestTime::Unheld("its use isn't asked".to_owned()))
+    let began = Instant::now();
+    let answer = match USE.deadline() {
+        Some(bound) => told_past(&USE, bound, || guest.host_use(Duration::MAX))?,
+        None => guest.host_use(Duration::MAX),
+    };
+    let took = began.elapsed();
+    match answer {
+        Ok(used) => {
+            USE.answered(took);
+            match used.microvm.guest {
+                Ok(times) => super::image::vcpus_ns(
+                    &times,
+                    vcpus,
+                    "reading a managed VM's guest time per vCPU",
+                )
+                .map(ManagedGuestTime::PerVcpu),
+                Err(why) => Ok(ManagedGuestTime::Unheld(why)),
+            }
+        }
+        Err(shards_api::Refusal::Unsupported { why, .. }) => Ok(ManagedGuestTime::Unheld(why)),
+        Err(shards_api::Refusal::Ended(_)) => Err(Refusal::NotRunning(id.try_clone()?, "host_use")),
+        Err(why) => Err(refusal("asking a managed VM's use", &why)),
+    }
 }
 
 /// Answers `ask`, a watcher telling `patience`'s run-out once `bound` passes with no answer while the ask goes on.
