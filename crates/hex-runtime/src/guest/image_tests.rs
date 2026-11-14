@@ -5474,3 +5474,37 @@ fn b2_a_delete_of_a_booting_box_whose_read_its_start_outdated_answers_once_it_is
     assert_eq!(deleted, Ok(()));
     assert!(record(&owner, &id).is_none());
 }
+
+/// The review's B-7 (AC-T7.4.1): a boot its delete stopped mid-boot (D231's `BootStop`) answers `Ended(Stopped)`, and
+/// where the start that asked it takes that answer (`Runs::booted`) it is no boot's answer: the time to the stop is no
+/// sample of the boot's W* (a boot hung ten minutes and then stopped would make W* ten minutes), and its run ends as the
+/// stop ended it, KILL, as `Runs::settle` records the same answer. Do put a stopped boot's answer in a booting run's
+/// slot and take it as its start does. Expect the stop given back, the boot's wait with no sample, and the run ended by
+/// signal 9.
+#[test]
+fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
+    let runs = Runs::new();
+    let id = BoxId::new("b7-stopped-boot").unwrap();
+    let slot = Arc::new(Slot::<Booted>::new());
+    runs.insert(
+        &id,
+        Run::Booting(Arc::clone(&slot), Arc::new(BootStop::new())),
+    )
+    .unwrap();
+    slot.put(Err(ImageRefusal::Ended(RunEnd::Stopped)));
+    let waits = waits().unwrap();
+    let taken = runs.booted(&id, &slot, &waits).unwrap();
+    assert!(
+        matches!(taken, Err(ImageRefusal::Ended(RunEnd::Stopped))),
+        "{taken:?}"
+    );
+    assert_eq!(
+        waits.boot.slowest(),
+        None,
+        "the stop taken for a boot's answer"
+    );
+    match runs.lock().unwrap().get(Key::Box(&id)) {
+        Some(Run::Ended(end)) => assert_eq!(end.exit, hex_api::Exit::Signal(9)),
+        _ => panic!("the stopped boot's run isn't ended"),
+    }
+}

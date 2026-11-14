@@ -634,6 +634,15 @@ impl End {
         stopped
     }
 
+    /// The end of a run whose boot Shards refused, `why`: one its stop ended mid-boot (D231's `BootStop`) as the stop
+    /// ended it, KILL; any other an end Hex can't read the exit of, in Shards' words (the review's B-7).
+    fn of_refused(why: &ImageRefusal) -> Self {
+        match why {
+            ImageRefusal::Ended(RunEnd::Stopped) => Self::of(&RunEnd::Stopped),
+            why => Self::unknown(Some(why.to_string())),
+        }
+    }
+
     /// An end Hex can't read the exit of, with why where its runtime said it.
     fn unknown(why: Option<String>) -> Self {
         Self {
@@ -1225,8 +1234,12 @@ impl Runs {
                     Ok(())
                 }
                 Some((Err(why), took)) => {
-                    waits.boot.refused(took);
-                    *run = Run::Ended(End::unknown(Some(why.to_string())));
+                    // A boot its delete's stop ended mid-boot, as `settle` finds it, is no boot's answer: the time to
+                    // the stop is no sample (the review's B-7).
+                    if !matches!(why, ImageRefusal::Ended(RunEnd::Stopped)) {
+                        waits.boot.refused(took);
+                    }
+                    *run = Run::Ended(End::of_refused(&why));
                     Err(why)
                 }
                 None => Ok(()),
@@ -1957,7 +1970,7 @@ impl ImageClass {
                 }
             }
             Err(why) => {
-                self.record_end(&id, &End::unknown(Some(why.to_string())))?;
+                self.record_end(&id, &End::of_refused(&why))?;
                 image.runs.forget(&id)?;
                 Err(refused(&id, "booting a Shards image VM", why))
             }

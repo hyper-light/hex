@@ -142,7 +142,7 @@ impl ImageClass {
         }
         if let Err(why) = image.runs.booted(vm.run, &slot, waits)? {
             image.runs.forget(vm.run)?;
-            end_record(books.as_ref(), &mut record, Exit::Unknown)?;
+            end_record(books.as_ref(), &mut record, End::of_refused(&why).exit)?;
             return Err(refused(BOOTING, why));
         }
         // Its run is up: from here a failure stops it (C-2), so no node VM runs held by no one, its record unwritten,

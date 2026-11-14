@@ -11,8 +11,12 @@
 //! |---|---|
 //! | 0..4 | `HEXW` |
 //! | 4..12 | the sender's wire identity ([`IDENTITY`]) |
-//! | 12..14 | kind: a request below `0x8000`, an answer from it |
+//! | 12..14 | kind: a request below `0x8000`, an answer from it; [`SEALED`] marks a sealed body |
 //! | 14..22 | id: a request's, chosen by its client; its answer, and an exec'd program's end, carry it |
+//!
+//! A message that carries a secret ([`carries_secret`]) goes sealed on a connection that seals ([`seal`], [`open`]: a
+//! node's over QUIC, docs/design/hex-quic.md Q13): its header, its kind marked, then its nonce, its body sealed and its
+//! tag, the header bound to the body.
 //!
 //! Integers are little-endian. A string or a path is a `u32` length and its bytes, an option a byte
 //! (0 none, 1 some) before the value, a list a `u32` count before its items, and an enum a byte naming
@@ -573,6 +577,32 @@ pub enum Fault {
     DescriptorsCut,
     #[error("{what} storage for {bound} bytes is unavailable")]
     Storage { what: &'static str, bound: usize },
+    /// Its seal ([`seal`], [`open`]): docs/design/hex-quic.md Q13.
+    #[error("its seal: {0}")]
+    Seal(SealFault),
+}
+
+/// Why a message wasn't sealed or opened, typed (docs/design/hex-quic.md Q13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SealFault {
+    /// Its kind carries a secret, and it came unsealed on a connection that seals every message that does.
+    #[error("kind {kind:#06x} carries a secret, and came unsealed on a connection that seals it")]
+    Unsealed { kind: u16 },
+    /// It came sealed, or was given to be sealed, yet its kind carries no secret: a connection seals only those that do.
+    #[error("kind {kind:#06x} carries no secret, and only a message that does is sealed")]
+    NoSecret { kind: u16 },
+    /// It came sealed on a connection that seals nothing.
+    #[error("kind {kind:#06x} came sealed on a connection that seals nothing")]
+    Unsealing { kind: u16 },
+    /// Its seal doesn't open under the peer's key: its header, nonce, body or tag isn't what was sealed.
+    #[error("its seal doesn't open under the peer's key")]
+    Broken,
+    /// This side's nonces are spent: one more would repeat one, so nothing more is sealed under its key.
+    #[error("this side's nonces under its key are spent")]
+    Spent,
+    /// The cipher refused what it was given.
+    #[error("the cipher refused {what}")]
+    Cipher { what: &'static str },
 }
 
 impl Fault {
@@ -601,6 +631,7 @@ impl From<Fault> for Refusal {
             fault => {
                 let what = match &fault {
                     Fault::Wire { .. } => "wire",
+                    Fault::Seal(_) => "seal",
                     _ => "message",
                 };
                 Refusal::Invalid {
@@ -706,19 +737,171 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
     w.done()
 }
 
-/// Whether `message` carries a lease's value ([`Request::Leased`]), so whoever held its bytes wipes them as it lets them
-/// go (docs/design/credential-grants.md C7): read from its kind alone, before or without reading the rest.
+/// Whether `message` carries a secret, a lease's value ([`Request::Leased`]) or a sign-in's tokens, so whoever holds its
+/// bytes in the clear wipes them as it lets them go (docs/design/credential-grants.md C7, C8), and a connection that
+/// seals seals it ([`seal`]): read from its kind alone, before or without reading the rest. A sealed one's kind says
+/// none: it holds its secret sealed.
 pub fn carries_secret(message: &[u8]) -> bool {
-    message.get(12..14).is_some_and(|got| {
-        [
-            kind::LEASED,
-            kind::CAPTURED,
-            kind::REFRESHED,
-            kind::CAPTURE_ASK,
-        ]
-        .iter()
-        .any(|secret| got == &secret.to_le_bytes()[..])
-    })
+    kind_of(message).is_some_and(secret_kind)
+}
+
+/// Whether a message of kind `of` carries a secret.
+fn secret_kind(of: u16) -> bool {
+    matches!(
+        of,
+        kind::LEASED | kind::CAPTURED | kind::REFRESHED | kind::CAPTURE_ASK
+    )
+}
+
+/// `message`'s kind as its header has it, its [`SEALED`] mark among it; none for one too short to name one.
+fn kind_of(message: &[u8]) -> Option<u16> {
+    message
+        .get(12..14)
+        .and_then(|got| <[u8; 2]>::try_from(got).ok())
+        .map(u16::from_le_bytes)
+}
+
+/// The mark of a sealed message's kind ([`seal`]; docs/design/hex-quic.md Q13): bit 14, which no kind this wire defines
+/// has (its requests run up from `0x0001` and its answers from `0x8001`, each far short of it), so a sealed kind is
+/// never another kind.
+pub const SEALED: u16 = 0x4000;
+/// A sealed body's nonce: AES-GCM's 96 bits, the length NIST SP 800-38D §5.2.1.1 recommends, which needs no hash of its
+/// own to make a counter.
+pub const NONCE_BYTES: usize = 12;
+/// A sealed body's tag: AES-GCM's whole 128 bits (NIST SP 800-38D §5.2.1.2).
+pub const TAG_BYTES: usize = 16;
+/// What sealing adds to a message: its nonce and its tag.
+pub const SEAL_BYTES: usize = NONCE_BYTES + TAG_BYTES;
+
+/// What seals and opens the bodies of the messages a connection carries that carry a secret (docs/design/hex-quic.md
+/// Q13): AES-256-GCM, a key each way, hex-quic's from the connection's TLS session. The seal keeps a secret out of the
+/// buffers beneath Hex's lanes in the clear, which Hex can't wipe; it is no second channel security, the connection's TLS
+/// being that.
+pub trait Seal: Send + Sync {
+    /// Seals `body` into `sealed`, as long as it, under this side's key with `aad` bound to it: the nonce it took, this
+    /// side's next, never one taken before, and its tag.
+    fn seal(
+        &self,
+        aad: &[u8],
+        body: &[u8],
+        sealed: &mut [u8],
+    ) -> Result<([u8; NONCE_BYTES], [u8; TAG_BYTES]), SealFault>;
+    /// Opens `sealed`, which the peer sealed under its key with `nonce` and `aad` bound to it, into `body`, as long as
+    /// it, checked against `tag`.
+    fn open(
+        &self,
+        aad: &[u8],
+        nonce: &[u8; NONCE_BYTES],
+        sealed: &[u8],
+        tag: &[u8; TAG_BYTES],
+        body: &mut [u8],
+    ) -> Result<(), SealFault>;
+}
+
+/// Whether `message` came sealed: its kind marked [`SEALED`].
+pub fn sealed(message: &[u8]) -> bool {
+    kind_of(message).is_some_and(|marked| marked & SEALED != 0)
+}
+
+/// `message`, which carries a secret, as a connection that seals sends it (docs/design/hex-quic.md Q13): its header,
+/// its kind marked [`SEALED`], then its nonce, its body sealed under `seal` with that header bound to it, and its tag, at
+/// most [`MAX_MESSAGE`] in all. `message` stays its holder's to wipe; the sealed copy holds none of its body in the
+/// clear. One whose kind carries no secret is refused ([`SealFault::NoSecret`]): it goes as it is.
+pub fn seal(message: &[u8], seal: &dyn Seal) -> Result<Vec<u8>, Fault> {
+    let short = || Fault::Truncated {
+        need: HEADER_BYTES,
+        have: message.len(),
+    };
+    let kind = kind_of(message).ok_or_else(short)?;
+    if !secret_kind(kind) {
+        return Err(Fault::Seal(SealFault::NoSecret { kind }));
+    }
+    let (header, body) = message.split_at_checked(HEADER_BYTES).ok_or_else(short)?;
+    let size = [NONCE_BYTES, body.len(), TAG_BYTES]
+        .into_iter()
+        .try_fold(HEADER_BYTES, usize::checked_add)
+        .filter(|size| *size <= MAX_MESSAGE)
+        .ok_or(Fault::Oversized {
+            bytes: message.len().saturating_add(SEAL_BYTES),
+            bound: MAX_MESSAGE,
+        })?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(size).map_err(|_| Fault::Storage {
+        what: "a sealed message",
+        bound: size,
+    })?;
+    out.extend_from_slice(header);
+    out.resize(size, 0);
+    let laid = || Fault::value("a sealed message", "its parts don't fit its length");
+    let (head, rest) = out.split_at_mut_checked(HEADER_BYTES).ok_or_else(laid)?;
+    if let Some(at) = head.get_mut(12..14) {
+        at.copy_from_slice(&(kind | SEALED).to_le_bytes());
+    }
+    let (nonce_at, rest) = rest
+        .split_first_chunk_mut::<NONCE_BYTES>()
+        .ok_or_else(laid)?;
+    let (body_at, tag_at) = rest.split_last_chunk_mut::<TAG_BYTES>().ok_or_else(laid)?;
+    let (nonce, tag) = seal.seal(head, body, body_at).map_err(Fault::Seal)?;
+    *nonce_at = nonce;
+    *tag_at = tag;
+    Ok(out)
+}
+
+/// `message` as it came on a connection that seals under `seal`, or seals nothing (none; docs/design/hex-quic.md Q13):
+/// one that came sealed opened, its header back as it was before its kind was marked; any other as it came. Refused,
+/// typed: one whose kind carries a secret and that came unsealed where the connection seals ([`SealFault::Unsealed`]),
+/// wiped as it goes; one sealed where the connection seals nothing ([`SealFault::Unsealing`]) or whose kind carries no
+/// secret ([`SealFault::NoSecret`]); one whose seal doesn't open under the peer's key ([`SealFault::Broken`]), its
+/// header, nonce, body or tag not what was sealed. A message too short to name its kind comes back as it came, for its
+/// reader to refuse.
+pub fn open(mut message: Vec<u8>, seal: Option<&dyn Seal>) -> Result<Vec<u8>, Fault> {
+    let Some(marked) = kind_of(&message) else {
+        return Ok(message);
+    };
+    let kind = marked & !SEALED;
+    let Some(seal) = seal else {
+        if marked == kind {
+            return Ok(message);
+        }
+        return Err(Fault::Seal(SealFault::Unsealing { kind }));
+    };
+    if marked == kind {
+        if secret_kind(kind) {
+            hex_api::lease::wipe(&mut message);
+            return Err(Fault::Seal(SealFault::Unsealed { kind }));
+        }
+        return Ok(message);
+    }
+    if !secret_kind(kind) {
+        return Err(Fault::Seal(SealFault::NoSecret { kind }));
+    }
+    let short = || Fault::Truncated {
+        need: HEADER_BYTES.saturating_add(SEAL_BYTES),
+        have: message.len(),
+    };
+    let (header, rest) = message.split_at_checked(HEADER_BYTES).ok_or_else(short)?;
+    let (nonce, rest) = rest.split_first_chunk::<NONCE_BYTES>().ok_or_else(short)?;
+    let (sealed, tag) = rest.split_last_chunk::<TAG_BYTES>().ok_or_else(short)?;
+    let size = HEADER_BYTES.saturating_add(sealed.len());
+    let mut opened = Vec::new();
+    opened.try_reserve_exact(size).map_err(|_| Fault::Storage {
+        what: "an opened message",
+        bound: size,
+    })?;
+    opened.extend_from_slice(header);
+    if let Some(at) = opened.get_mut(12..14) {
+        at.copy_from_slice(&kind.to_le_bytes());
+    }
+    opened.resize(size, 0);
+    let read = match opened.get_mut(HEADER_BYTES..) {
+        Some(body) => seal.open(header, nonce, sealed, tag, body),
+        None => Err(SealFault::Broken),
+    };
+    if let Err(why) = read {
+        hex_api::lease::wipe(&mut opened);
+        return Err(Fault::Seal(why));
+    }
+    Ok(opened)
 }
 
 /// A lease as [`Request::Leased`] carries it: given (0), its name, its life, then its value last, so nothing can refuse

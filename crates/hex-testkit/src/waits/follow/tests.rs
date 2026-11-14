@@ -110,33 +110,28 @@ fn a_call_is_sliced_at_w_star_and_past_it_waits_for_its_own_answer() {
     assert!(wait.slowest().is_some_and(|slowest| slowest > window));
 }
 
-/// A thread as a party: live while it sleeps, ended once it has gone. Do: a thread that names itself, then sleeps on a
-/// channel; read it, then wake it to its end, join it, and read it until it reads ended (a joined thread's task can
-/// show for a moment as it exits: run r435 read it asleep once). Expect: live; then ended.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// A thread as a party, made on the thread itself (the review's C-14; AC-T7.4.1), on every OS: live while it runs, ended
+/// once it has finished, a thread that panicked too. Do: a thread that names itself, then waits on a channel; read it,
+/// then wake it to its end (the second round, to a panic), and join it. Expect: live; then, as its join returns, ended.
 #[test]
-fn a_thread_reads_live_while_it_sleeps_and_ended_once_gone() {
+fn a_thread_reads_live_while_it_runs_and_ended_once_it_finished_or_panicked() {
     use std::sync::mpsc;
-    let (named, name) = mpsc::sync_channel(1);
-    let (wake, woken) = mpsc::sync_channel::<()>(1);
-    let sleeper = std::thread::spawn(move || {
-        named.send(Thread::current().unwrap()).unwrap();
-        let _ = woken.recv();
-    });
-    let thread = name.recv().unwrap();
-    assert_eq!(thread.party(), Party::Live);
-    wake.send(()).unwrap();
-    sleeper.join().unwrap();
-    // Its task's exit, after its join, is the kernel's to finish: the fact always comes, its party this test, which
-    // reads it while it runs (a task that never exits leaves the test for libtest to name).
-    let wait = Patience::measuring("test.testkit.follow.joined_thread_gone");
-    until(
-        &wait,
-        "the joined thread read as ended",
-        || Party::Live,
-        || thread.party() == Party::Ended,
-    )
-    .unwrap();
+    for panics in [false, true] {
+        let (named, name) = mpsc::sync_channel(1);
+        let (wake, woken) = mpsc::sync_channel::<()>(1);
+        let runner = std::thread::spawn(move || {
+            named.send(Thread::current().unwrap()).unwrap();
+            let _ = woken.recv();
+            if panics {
+                panic!("the followed thread panics, as the test asks");
+            }
+        });
+        let thread = name.recv().unwrap();
+        assert_eq!(thread.party(), Party::Live, "panics: {panics}");
+        wake.send(()).unwrap();
+        assert_eq!(runner.join().is_err(), panics);
+        assert_eq!(thread.party(), Party::Ended, "panics: {panics}");
+    }
 }
 
 /// ROOT's ask of 2026-11-14 (the review's C-5): what a look-based wait ([`until`]) costs in CPU while its fact is far

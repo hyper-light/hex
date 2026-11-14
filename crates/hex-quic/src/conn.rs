@@ -20,6 +20,7 @@ use hex_core::lanes::{self, Why};
 use hex_wait::{Condvar, Mutex, MutexGuard};
 
 use crate::driver::{Command, Commands};
+use crate::seal::Keys;
 
 /// The frames that wait for the owner at most: its credit's worth, one being read and the next
 /// ([`hex_core::lanes::INITIAL_CREDIT`]).
@@ -64,6 +65,8 @@ pub(crate) struct Shared {
     commands: Commands,
     /// Told whenever what the owner may do changed: an owner that waits in an event loop of its own.
     notify: Mutex<Option<Notify>>,
+    /// Its QUIC connection's seal, which the node's wire's secrets go under on it (docs/design/hex-quic.md Q13).
+    keys: Arc<Keys>,
 }
 
 /// What an evented owner is told when a connection's state changes.
@@ -118,11 +121,13 @@ impl Shared {
         key: lanes::Conn,
         port: u32,
         commands: Commands,
+        keys: Arc<Keys>,
     ) -> Self {
         Self {
             peer,
             key,
             port,
+            keys,
             wipes: lanes::data_kind(port) == Some(lanes::Kind::ControlData),
             state: Mutex::new(State {
                 inbound: std::collections::VecDeque::with_capacity(HELD_AT),
@@ -390,6 +395,12 @@ impl Conn {
     /// The peer it is with.
     pub fn peer(&self) -> hyper_transport::PeerId {
         self.shared.peer
+    }
+
+    /// Its QUIC connection's seal, which a message of the node's wire that carries a secret goes under on it
+    /// ([`hex_core::wire::seal`], [`hex_core::wire::open`]; docs/design/hex-quic.md Q13).
+    pub fn keys(&self) -> &Keys {
+        &self.shared.keys
     }
 
     /// Whether the peer is done: its half ended and all of it was read, or the connection went while its half was
