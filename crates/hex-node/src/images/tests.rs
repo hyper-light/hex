@@ -14,7 +14,7 @@ use super::*;
 /// Shards' image boot in the model: each boot answered at once with a run that holds until its stop, but while the
 /// test holds the model's boots, when each waits until it lets them go, and where the test has it refuse the next.
 #[derive(Default)]
-struct Model {
+pub(crate) struct Model {
     asked: Mutex<Vec<ImageSpec>>,
     held: Mutex<bool>,
     let_go: Condvar,
@@ -140,7 +140,7 @@ fn allocation() -> Allocation {
     hex_api::sim::sim_vm_allocation().unwrap()
 }
 
-fn image_box(id: &str) -> BoxSpec {
+pub(crate) fn image_box(id: &str) -> BoxSpec {
     BoxSpec {
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),

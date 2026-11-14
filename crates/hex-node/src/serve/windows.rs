@@ -149,7 +149,8 @@ struct State {
 }
 
 struct Message {
-    bytes: Vec<u8>,
+    /// Its bytes, wiped as they drop if it carries a lease's value or a sign-in's tokens, read or not.
+    bytes: hex_api::lease::Wiped,
     /// Its declared size, when it was past the bound and not kept.
     size: usize,
 }
@@ -488,7 +489,12 @@ impl Windows {
                     events.push(Event::Listener);
                 }
             }
-            Done::Received { tag, mut buf, n } => {
+            Done::Received { tag, buf, n } => {
+                // What a receive read may carry a lease's value: once framed, or let go unread, its bytes are wiped,
+                // and the buffer read into again; a buffer let go goes wiped whole (docs/design/credential-grants.md
+                // C7; the review's E-6).
+                let mut buf = hex_api::lease::Wiped::new(buf, true);
+                let read = n.as_ref().map_or(0, |k| *k);
                 let Some((conn, interest)) = self.completed(tag)? else {
                     return Ok(());
                 };
@@ -496,7 +502,8 @@ impl Windows {
                 st.receiving = false;
                 if st.ending {
                     // An ended connection reads only for its peer's close; what else comes is let go.
-                    st.buf = Some(buf);
+                    buf.wipe_read(read);
+                    st.buf = Some(buf.lend());
                     if matches!(n, Ok(k) if k > 0)
                         && let Some(again) = st.buf.take()
                     {
@@ -522,19 +529,17 @@ impl Windows {
                 match n {
                     Ok(0) => st.ended = true,
                     Ok(n) => {
-                        frame(&mut st, buf.get(..n).unwrap_or_default());
+                        frame(&mut st, buf.bytes().get(..n).unwrap_or_default());
                         // Framed into the messages it holds now: what was read here, which may carry a lease's
                         // value, wiped (docs/design/credential-grants.md C7).
-                        if let Some(held) = buf.get_mut(..n) {
-                            hex_api::lease::wipe_in_place(held);
-                        }
+                        buf.wipe_read(n);
                     }
                     Err(e) => {
                         st.reset = socket::is_reset(&e);
                         st.ended = true;
                     }
                 }
-                st.buf = Some(buf);
+                st.buf = Some(buf.lend());
                 conn.read_on(&mut st);
                 if matches!(interest, Interest::Read)
                     && (!st.ready.is_empty() || st.ended || st.broken)
@@ -543,6 +548,9 @@ impl Windows {
                 }
             }
             Done::Sent { tag, buf, n } => {
+                // What a send held, given back: wiped whole as it goes, as its message's secrecy didn't come back with
+                // it (docs/design/credential-grants.md C7, C8; the review's E-6).
+                let buf = hex_api::lease::Wiped::new(buf, true);
                 let Some((conn, interest)) = self.completed(tag)? else {
                     return Ok(());
                 };
@@ -552,10 +560,12 @@ impl Windows {
                     Ok(n) if n >= buf.len() => {}
                     Ok(n) => {
                         // Taken in part: the rest goes now, and the core's next send waits for it.
-                        let rest = buf.get(n..).unwrap_or_default().to_vec();
-                        match socket::send_all(&conn.socket, tag, rest) {
+                        match socket::send_all(&conn.socket, tag, buf.rest(n).lend()) {
                             Ok(()) => st.sending = true,
-                            Err(_) => st.ended = true,
+                            Err((_, rest)) => {
+                                drop(hex_api::lease::Wiped::new(rest, true));
+                                st.ended = true;
+                            }
                         }
                     }
                     Err(_) => st.ended = true,
@@ -610,9 +620,10 @@ fn frame(st: &mut State, mut input: &[u8]) {
             Ok((took, done)) => {
                 input = input.get(took..).unwrap_or_default();
                 if let Some(message) = done {
+                    let secret = wire::carries_secret(&message);
                     st.ready.push_back(Message {
                         size: message.len(),
-                        bytes: message,
+                        bytes: hex_api::lease::Wiped::new(message, secret),
                     });
                 }
             }
@@ -630,8 +641,9 @@ fn frame(st: &mut State, mut input: &[u8]) {
                 } else {
                     Vec::new()
                 };
+                let secret = wire::carries_secret(&header);
                 st.ready.push_back(Message {
-                    bytes: header,
+                    bytes: hex_api::lease::Wiped::new(header, secret),
                     size: bytes,
                 });
                 st.broken = true;
@@ -805,15 +817,13 @@ impl Os for Windows {
         let Ok(mut st) = conn.state.lock() else {
             return Recv::Gone;
         };
-        if let Some(mut m) = st.ready.pop_front() {
+        if let Some(m) = st.ready.pop_front() {
             let n = m.bytes.len().min(buf.len());
-            if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.get(..n)) {
+            if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.bytes().get(..n)) {
                 into.copy_from_slice(from);
             }
-            // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
-            if wire::carries_secret(&m.bytes) {
-                hex_api::lease::wipe(&mut m.bytes);
-            }
+            // A lease's value crosses in the core's buffer alone from here: the message's bytes here are wiped as they
+            // drop (docs/design/credential-grants.md C7).
             conn.read_on(&mut st);
             return Recv::Message {
                 size: m.size,
@@ -863,19 +873,30 @@ impl Os for Windows {
                 }
             }
         }
+        // Its enveloped and framed copies wiped as each goes where the message carries a lease's value or a sign-in's
+        // tokens; the framed one is the kernel's to send until its completion gives it back, wiped there
+        // (docs/design/credential-grants.md C7, C8; the review's E-6).
+        let secret = wire::carries_secret(bytes);
         let framed = socket::envelope(&given, bytes)
             .ok()
-            .and_then(|enveloped| stream::frame(&enveloped, FRAME_BOUND).ok());
+            .map(|enveloped| hex_api::lease::Wiped::new(enveloped, secret))
+            .and_then(|enveloped| stream::frame(enveloped.bytes(), FRAME_BOUND).ok())
+            .map(|framed| hex_api::lease::Wiped::new(framed, secret));
         let Some(framed) = framed else {
             take_back(peer, &given);
             return Sent::Gone;
         };
-        match socket::send_all(&conn.socket, conn.token.load(Ordering::SeqCst), framed) {
+        match socket::send_all(
+            &conn.socket,
+            conn.token.load(Ordering::SeqCst),
+            framed.lend(),
+        ) {
             Ok(()) => {
                 st.sending = true;
                 Sent::Sent
             }
-            Err(_) => {
+            Err((_, framed)) => {
+                drop(hex_api::lease::Wiped::new(framed, secret));
                 take_back(peer, &given);
                 Sent::Gone
             }

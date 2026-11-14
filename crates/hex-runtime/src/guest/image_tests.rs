@@ -29,14 +29,21 @@ struct Owner {
     scans: AtomicUsize,
     /// The node's state's own directory for its image boxes' diagnostics, gone with the owner.
     state: tempfile::TempDir,
-    /// Its next write of a Deleting record, held once written where the test asks it ([`Owner::hold_deleting`]), until
-    /// the test lets it go: a delete's intent as slow to return as its disk's flush may be, so another call moves the
-    /// box on meanwhile.
-    deleting: Mutex<Hold>,
-    deleting_moved: Condvar,
+    /// Its next write of a Deleting record, held once written where the test asks it, until the test lets it go: a
+    /// delete's intent as slow to return as its disk's flush may be, so another call moves the box on meanwhile.
+    deleting: Holding,
+    /// Its next scan of every record ([`Books::records`]), held once read where the test asks it, until the test lets it
+    /// go: a call whose read other calls' writes then outdate, as its thread's preemption may leave it.
+    reading: Holding,
+    /// Its next write of a run's end, the first its record has, held before it is written where the test asks it, until
+    /// the test lets it go: an end as slow to be recorded as its disk's flush may be, so another call reads the record
+    /// without it meanwhile.
+    ending: Holding,
+    /// Whether it refuses node VMs' Ready rows, as the test sets it: as a Store whose disk is full refuses a write.
+    refuse_ready: AtomicBool,
 }
 
-/// Where the owner's hold of a Deleting write stands ([`Owner::hold_deleting`]).
+/// Where one of the owner's holds stands ([`Holding`]).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Hold {
     #[default]
@@ -46,6 +53,44 @@ enum Hold {
     LetGo,
 }
 
+/// One of the owner's holds of a kind of call, as the test asks it: the next such call waits where it is held until the
+/// test lets it go.
+#[derive(Default)]
+struct Holding {
+    state: Mutex<Hold>,
+    moved: Condvar,
+}
+
+impl Holding {
+    /// Holds the next such call once it comes.
+    fn ask(&self) {
+        *self.state.lock().unwrap() = Hold::Asked;
+    }
+
+    /// Whether such a call is held now.
+    fn holds(&self) -> bool {
+        *self.state.lock().unwrap() == Hold::Holding
+    }
+
+    fn let_go(&self) {
+        *self.state.lock().unwrap() = Hold::LetGo;
+        self.moved.notify_all();
+    }
+
+    /// The calling thread held here where the test asked it, until the test lets it go.
+    fn here(&self) {
+        let mut hold = self.state.lock().unwrap();
+        if *hold == Hold::Asked {
+            *hold = Hold::Holding;
+            drop(
+                self.moved
+                    .wait_while(hold, |hold| *hold == Hold::Holding)
+                    .unwrap(),
+            );
+        }
+    }
+}
+
 impl Owner {
     fn new() -> Self {
         Self {
@@ -53,42 +98,16 @@ impl Owner {
             node_vms: Mutex::default(),
             scans: AtomicUsize::new(0),
             state: tempfile::tempdir().unwrap(),
-            deleting: Mutex::default(),
-            deleting_moved: Condvar::new(),
+            deleting: Holding::default(),
+            reading: Holding::default(),
+            ending: Holding::default(),
+            refuse_ready: AtomicBool::new(false),
         }
     }
 
     /// Where the class keeps its runs' diagnostics ([`GuestRuntime::with_images`]).
     fn diagnostics(&self) -> std::path::PathBuf {
         self.state.path().join("image-diagnostics")
-    }
-
-    /// Holds the next write of a Deleting record once it is written, its writer waiting until [`Owner::let_deleting_go`].
-    fn hold_deleting(&self) {
-        *self.deleting.lock().unwrap() = Hold::Asked;
-    }
-
-    /// Whether a Deleting write's writer is held now.
-    fn holds_deleting(&self) -> bool {
-        *self.deleting.lock().unwrap() == Hold::Holding
-    }
-
-    fn let_deleting_go(&self) {
-        *self.deleting.lock().unwrap() = Hold::LetGo;
-        self.deleting_moved.notify_all();
-    }
-
-    /// The writer of a Deleting record, held where the test asked it, until the test lets it go.
-    fn held_if_asked(&self, record: &BoxRecord) {
-        let mut hold = self.deleting.lock().unwrap();
-        if record.phase == Phase::Deleting && *hold == Hold::Asked {
-            *hold = Hold::Holding;
-            drop(
-                self.deleting_moved
-                    .wait_while(hold, |hold| *hold == Hold::Holding)
-                    .unwrap(),
-            );
-        }
     }
 }
 
@@ -133,6 +152,16 @@ impl Transaction for Owner {
             .map(|row| row.as_ref().unwrap().clone()))
     }
     fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let ends = record.exit.is_some()
+            && self
+                .records
+                .lock()
+                .unwrap()
+                .get(&record.spec.id)
+                .is_some_and(|current| current.as_ref().unwrap().exit.is_none());
+        if ends {
+            self.ending.here();
+        }
         let mut records = self.records.lock().unwrap();
         let allowed = match records.get(&record.spec.id) {
             None => record.phase == Phase::Creating,
@@ -153,7 +182,9 @@ impl Transaction for Owner {
         }
         records.insert(record.spec.id.clone(), Ok(record.clone()));
         drop(records);
-        self.held_if_asked(record);
+        if record.phase == Phase::Deleting {
+            self.deleting.here();
+        }
         Ok(())
     }
     fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -191,7 +222,9 @@ impl Transaction for Owner {
 impl Books for Owner {
     fn records(&self) -> Result<Records, Refusal> {
         self.scans.fetch_add(1, Ordering::SeqCst);
-        Transaction::records(self)
+        let read = Transaction::records(self);
+        self.reading.here();
+        read
     }
     fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
         Ok(Vec::new())
@@ -248,6 +281,12 @@ impl Books for Owner {
     }
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         record.check()?;
+        if record.phase == NodeVmPhase::Ready && self.refuse_ready.load(Ordering::SeqCst) {
+            return Err(Refusal::Os {
+                op: "writing a node VM's row",
+                why: "no space left on the device, as the test asked".to_owned(),
+            });
+        }
         self.node_vms
             .lock()
             .unwrap()
@@ -4466,20 +4505,20 @@ fn b1_a_deletes_wait_for_a_stop_whose_answer_another_call_took_sees_it_given() {
         stopping(&runtime, &id).is_some(),
         "the inspect reaped no run"
     );
-    owner.hold_deleting();
+    owner.deleting.ask();
     let (answered, taught) = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
         follow::until(
             &B1_DELETE_HELD,
             "the delete's intent held",
             || spawned(&deleting),
-            || deleting.is_finished() || owner.holds_deleting(),
+            || deleting.is_finished() || owner.deleting.holds(),
         )
         .unwrap();
         images.run.hold_stops(false);
         shown(&runtime, &id, BoxState::Empty, &B1_STOP_TAKEN);
         let taught = image_waits(&runtime).stop.deadline();
-        owner.let_deleting_go();
+        owner.deleting.let_go();
         (deleting.join().unwrap(), taught)
     });
     assert_eq!(answered, Ok(()));
@@ -4863,4 +4902,260 @@ fn b6_with_guest_passes_started_and_delete_with_host_use_to_its_guest() {
         "{:?}",
         started.map(|info| info.state)
     );
+}
+
+/// C-2 (Hex audit, 2026-11-14; joint plan step 39; AC-T7.4.1): a node VM whose boot fails once its run has started has
+/// that run stopped, so none runs held by no one, its row unwritten, beside the one the node's next boot starts. Do:
+/// boot a node VM whose Ready row the record owner refuses, as a full disk would. Expect: the boot refused in the owner's
+/// words; its run stopped once, its end `Stopped`; no run of it held here; its row Ended with its stop's exit.
+#[test]
+fn c2_a_node_vm_whose_ready_row_is_refused_has_its_run_stopped_and_its_row_ended() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    owner.refuse_ready.store(true, Ordering::SeqCst);
+    let vm = node_vm();
+    let refused = runtime.images.boot_node(&vm).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("no space left on the device")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        images.run.stops.load(Ordering::SeqCst),
+        1,
+        "its run wasn't stopped"
+    );
+    assert_eq!(*images.run.end.lock().unwrap(), Some(RunEnd::Stopped));
+    assert!(
+        !runtime.images.node_runs(vm.run).unwrap(),
+        "its run is still held"
+    );
+    let row = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (row.phase, row.exit),
+        (
+            NodeVmPhase::Ended,
+            Some(Exit::Signal(Signal::KILL.number()))
+        )
+    );
+}
+
+/// C-2, before its boot: a node VM whose run this process can't hold, its runs at their bound (`MAX_BOXES`, the most VMs
+/// a node holds), is refused with its row Ended, never left Booting and booked for as long as its node runs. Do: fill
+/// this process's runs with ended ones, then boot a node VM. Expect: the boot refused Full at that bound, no boot asked,
+/// its row Ended, its exit unknown.
+#[test]
+fn c2_a_node_vm_whose_run_cant_be_held_is_refused_with_its_row_ended() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let runs = &runtime.images.image().unwrap().runs;
+    let vm = node_vm();
+    for n in 0..crate::MAX_BOXES {
+        let mut run = [0xff; 16];
+        run[..8].copy_from_slice(&u64::try_from(n).unwrap().to_le_bytes());
+        assert_ne!(NodeRun::from_bytes(run), vm.run);
+        runs.insert(NodeRun::from_bytes(run), Run::Ended(End::unknown(None)))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.images.boot_node(&vm),
+        Err(Refusal::Full(crate::MAX_BOXES))
+    );
+    assert!(images.asked.lock().unwrap().is_empty(), "a boot was asked");
+    let row = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (row.phase, row.exit),
+        (NodeVmPhase::Ended, Some(Exit::Unknown))
+    );
+}
+
+/// Whether box `id`'s boot under way, as this process's runs hold it, has been asked to stop (D231's `BootStop`).
+fn boot_stopped(runtime: &GuestRuntime, id: &BoxId) -> bool {
+    matches!(
+        runtime
+            .images
+            .image()
+            .unwrap()
+            .runs
+            .lock()
+            .unwrap()
+            .get(Key::Box(id)),
+        Some(Run::Booting(_, stop)) if stop.is_stopped()
+    )
+}
+
+/// The facts B-2's tests wait on, each its own (hex_testkit::waits): a call's scan of the records held once read, the
+/// run's end recorded by another call (the box shown Empty), a delete's intent written, a boot asked and its stop
+/// asked, and a delete's scan and a start's write of its run's end both held.
+static B2_INSPECT_HELD: Patience = Patience::measuring("test.hex_runtime.b2_inspect_held");
+static B2_INSPECT_ENDED: Patience = Patience::measuring("test.hex_runtime.b2_inspect_ended");
+static B2_STOP_INTENT: Patience = Patience::measuring("test.hex_runtime.b2_stop_intent");
+static B2_STOP_HELD: Patience = Patience::measuring("test.hex_runtime.b2_stop_held");
+static B2_STOP_ENDED: Patience = Patience::measuring("test.hex_runtime.b2_stop_ended");
+static B2_BOOT_ASKED: Patience = Patience::measuring("test.hex_runtime.b2_boot_asked");
+static B2_BOOT_STOP: Patience = Patience::measuring("test.hex_runtime.b2_boot_stop");
+static B2_BOOT_HELD: Patience = Patience::measuring("test.hex_runtime.b2_boot_held");
+
+/// B-2 (Hex audit, 2026-11-14; joint plan step 12; AC-T7.4.1): a box this process ran is never taken for an earlier
+/// node process's, held, because its call read the record before another call recorded the run's end and let go of
+/// the run. Do: end a running VM's run on its own, its stop held, so an inspect reaps it through its stop; inspect it
+/// again, that call held once it has read the records; let the stop answer, and a third inspect record the end (the box
+/// Empty); then let the held inspect go on. Expect: it answers the box Empty with its run's exit, as recorded, never
+/// Awaits(AttachAfterCrash).
+#[test]
+fn b2_an_inspect_whose_read_another_call_outdated_answers_the_recorded_end() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = Some(vec!["exit".into(), "3".into()]);
+    let id = runtime
+        .create(spec("image-b2-inspect", command))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    images.run.hold_stops(true);
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    assert!(
+        stopping(&runtime, &id).is_some(),
+        "the inspect reaped no run"
+    );
+    owner.reading.ask();
+    let late = std::thread::scope(|scope| {
+        let inspecting = scope.spawn(|| runtime.inspect(&id));
+        follow::until(
+            &B2_INSPECT_HELD,
+            "the inspect's read held",
+            || spawned(&inspecting),
+            || inspecting.is_finished() || owner.reading.holds(),
+        )
+        .unwrap();
+        images.run.hold_stops(false);
+        shown(&runtime, &id, BoxState::Empty, &B2_INSPECT_ENDED);
+        owner.reading.let_go();
+        inspecting.join().unwrap()
+    });
+    assert_eq!(
+        late.map(|info| (info.state, info.exit)),
+        Ok((BoxState::Empty, Some(Exit::Code(3))))
+    );
+}
+
+/// B-2, kiln's choice (b): a delete answers once the box is gone, never refused Uncertain because its read of the
+/// record after its stop answered was outdated by another call that recorded the run's end and let go of the run. Do:
+/// end a running VM's run on its own, its stop held, so an inspect reaps it; delete it, and once its intent is written,
+/// hold its next scan of the records once read; let the stop answer, so the delete reads, and an inspect record the end
+/// (the box Empty); then let the delete go on. Expect: the delete answers Ok, the box gone.
+#[test]
+fn b2_a_delete_whose_read_another_call_outdated_answers_once_the_box_is_gone() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = Some(vec!["exit".into(), "3".into()]);
+    let id = runtime
+        .create(spec("image-b2-stopping", command))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    images.run.hold_stops(true);
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    let answered = std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        follow::until(
+            &B2_STOP_INTENT,
+            "the delete's intent written",
+            || spawned(&deleting),
+            || {
+                deleting.is_finished()
+                    || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
+            },
+        )
+        .unwrap();
+        owner.reading.ask();
+        images.run.hold_stops(false);
+        follow::until(
+            &B2_STOP_HELD,
+            "the delete's read held",
+            || spawned(&deleting),
+            || deleting.is_finished() || owner.reading.holds(),
+        )
+        .unwrap();
+        shown(&runtime, &id, BoxState::Empty, &B2_STOP_ENDED);
+        owner.reading.let_go();
+        deleting.join().unwrap()
+    });
+    assert_eq!(answered, Ok(()));
+    assert!(record(&owner, &id).is_none());
+}
+
+/// B-2, as the review found it: a delete of a booting box answers once the box is gone, never refused Uncertain because
+/// its read of the record was outdated by the box's start, which took the stopped boot's answer, recorded the run's end
+/// and let go of the run. Do: start a VM with no boot answer seen, its boot held before its run host's start; delete
+/// it, and once it has asked the boot to stop, hold the next scan of the records once read and the next write of a
+/// run's end before it is written; let the boot see its stop, so the delete reads the records and the start writes the
+/// end; let the end's write go, then the delete. Expect: one boot stopped and the start refused; the delete answers Ok,
+/// the box gone.
+#[test]
+fn b2_a_delete_of_a_booting_box_whose_read_its_start_outdated_answers_once_it_is_gone() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-b2-booting", None)).unwrap().id;
+    let (started, deleted) = std::thread::scope(|scope| {
+        let starting = scope.spawn(|| runtime.start(&id));
+        follow::until(
+            &B2_BOOT_ASKED,
+            "the boot asked",
+            || spawned(&starting),
+            || starting.is_finished() || !images.asked.lock().unwrap().is_empty(),
+        )
+        .unwrap();
+        let deleting = scope.spawn(|| runtime.delete(&id));
+        follow::until(
+            &B2_BOOT_STOP,
+            "the boot's stop asked",
+            || spawned(&deleting),
+            || deleting.is_finished() || boot_stopped(&runtime, &id),
+        )
+        .unwrap();
+        owner.reading.ask();
+        owner.ending.ask();
+        images.poke();
+        // Each held by the other's: the delete's read by the end the start writes, so either thread's end ends it.
+        follow::until(
+            &B2_BOOT_HELD,
+            "the delete's read and the start's end held",
+            || match (spawned(&deleting), spawned(&starting)) {
+                (Party::Live, Party::Live) => Party::Live,
+                _ => Party::Ended,
+            },
+            || {
+                deleting.is_finished()
+                    || starting.is_finished()
+                    || (owner.reading.holds() && owner.ending.holds())
+            },
+        )
+        .unwrap();
+        owner.ending.let_go();
+        let started = starting.join().unwrap();
+        owner.reading.let_go();
+        (started, deleting.join().unwrap())
+    });
+    assert_eq!(images.stopped.load(Ordering::SeqCst), 1);
+    assert!(
+        started.is_err(),
+        "a start whose boot was stopped: {started:?}"
+    );
+    assert_eq!(deleted, Ok(()));
+    assert!(record(&owner, &id).is_none());
 }

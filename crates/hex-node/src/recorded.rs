@@ -1745,6 +1745,17 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         let _method = self.books.lifecycle.try_take_devices(id, devices)?;
         self.native_transaction(TransactionOwner::Box(id), devices, callback)
     }
+    /// Waits for a turn of the box under way, following its holder (decision 9), where a method's or a native
+    /// transaction's is refused the overlap: it makes no native call (`hex_runtime::devices::with_record_transaction`
+    /// refuses each), so no holder waits on it.
+    fn with_record_transaction(
+        &self,
+        id: &BoxId,
+        callback: &mut dyn FnMut(&dyn hex_runtime::devices::Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let _turn = self.books.lifecycle.take(id)?;
+        self.native_transaction(TransactionOwner::Box(id), &[], callback)
+    }
     fn pool_records(&self) -> Result<Vec<PoolRecord>, Refusal> {
         self.books.store.all_pools()
     }
@@ -2031,8 +2042,9 @@ impl<R: Recover> Recorded<R> {
                     "changing a recorded box's lifecycle",
                     "recorded lifecycle methods",
                     crate::store::TURNS,
-                    // try_take never waits: an overlap is refused at once, no timeout guessed; the existing
-                    // Turns owner records the method's actual hold.
+                    // A method's turn never waits (try_take): an overlap is refused at once, no timeout guessed. A
+                    // record transaction's waits for its holder (take), bounded by the slowest hold seen and following
+                    // the holder past it (decision 9); the existing Turns owner records each hold.
                     hex_core::patience::Patience::measuring("recorded.lifecycle"),
                 ),
                 abandoned: Abandoned::default(),
@@ -4016,6 +4028,9 @@ mod shared_outer_original_tests;
 
 #[cfg(test)]
 mod answers_tests;
+
+#[cfg(test)]
+mod image_turn_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod macos_unsubmitted_tests {
