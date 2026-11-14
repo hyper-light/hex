@@ -4,7 +4,8 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `37ddeb080`, image channel v26 (`2f55dccf`, no upstream root named; `097ec0047` before
+Merged on Hex's main at Shards `16451e19f`, image channel v27 (`cf844022`, a member's end typed, a member a signal killed
+`Exit::Signal(n)`, never its 128-plus status; `37ddeb080` before it, v26, at `2f55dccf`, no upstream root named; `097ec0047` before
 it, v25, at `1314e5f2`, a member's MCP bridge refused by its field while the class asks no agent-control endpoint with
 `2f5d20e7`; `3114e082f` before that, at `8dfe6df8`, a delete stopping a
 boot under way with `31c651fb`; `db4168345` before that, at `1d60abad`, each credential grant's placeholder with `1c4d11b3`; `740fa372` before
@@ -16,7 +17,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
-  `db4168345`, `3114e082f`, `097ec0047` and `37ddeb080`) and
+  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080` and `16451e19f`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -48,8 +49,9 @@ Sources, read at the revisions named:
   upstream roots (`ImageSpec::upstream_roots`, `b6814785d`), none named here, so a run's injector trusts its host's
   roots alone (and, since then, no `SSL_CERT_FILE` or `SSL_CERT_DIR` on any OS); and an orchestrator's member lanes
   served by the run host (D238, `c1773281f`: `Execs::member`, a member's signals steered through init), which a
-  member's signal is to ride.
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047` and `37ddeb080`: `crates/api/src/image.rs` (`Images`, its `boot` and
+  member's signal is to ride. At `16451e19f`, version 27: a member's end typed (#72, `7aab838e0`,
+  `MemberEnd::Signaled`), the signal that killed it apart from an exit's code.
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080` and `16451e19f`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -294,8 +296,8 @@ census its run-out, never where a boot ends, and the answer, when a later call t
 stats ask is given `Duration::MAX` too and followed by its run's life alone, its W* where the census is told a run-out.
 D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
 past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's
-follows it to its end (§3). The waits census (`hex_node::census`) measures every wait, unarmed
-(`hex_core::patience::measures_all`). `crates/hex-cli/tests/image_record.rs` times the three on a host class (a harness
+follows it to its end (§3). The waits census (`hex_node::census`) records each wait's answers and run-outs with every
+wait armed, as anywhere: it disarms none (decision 9). `crates/hex-cli/tests/image_record.rs` times the three on a host class (a harness
 image booted, its stats read and stopped n times through D231 as this class does, each series' first boot an
 upgrade's, a fresh cache): evidence of decision 9's rule that the census keeps, never a seed.
 `crates/hex-cli/tests/image_real.rs` runs the class's cases (`IMAGE_CASES`) through a real `hex node` in the census,
@@ -325,7 +327,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `37ddeb080` or later (image channel version 26: Hex's `shards`, rebuilt on each host by
+  `16451e19f` or later (image channel version 27: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and signals

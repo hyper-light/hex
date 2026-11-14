@@ -33,9 +33,9 @@
 //!   job's box beside the agents. macOS holds a process box at no CPU cap (refused, typed): there the box books its
 //!   memory alone and its spinners ask a CPU each, taking what the scheduler gives them;
 //! - no wait of its own is a timer (the person's rule, 2026-11-13, and Shards' R03 for test waits): each call waits
-//!   for its answer while the node's connection stands, every wait of the run unarmed
-//!   (`hex_core::patience::measure_all`), and the node's start waits for its ready line while the node runs, its end
-//!   the refusal; the node's own waits refuse, typed, as theirs do. No boot record is read;
+//!   for its answer while the node's connection stands, a wait past its W* telling its run-out and following its party
+//!   (decision 9), and the node's start waits for its ready line while the node runs, its end the refusal; the node's
+//!   own waits refuse, typed, as theirs do. No boot record is read;
 //! - the run's window: the node's learner's, as the node says it at its start, or as the class's capacity answers tell
 //!   it as the caps it holds move.
 //!
@@ -652,8 +652,8 @@ const BOX: u32 = u32::MAX;
 #[test]
 #[ignore = "ROOT's run on a real host: VMs, a delegated cgroup on Linux, recorded traces (module docs)"]
 fn the_learned_charge_holds_density_and_fairness_on_this_host() {
-    // Every wait of the run measures, unarmed: each call waits for its answer while the node's connection stands.
-    hex_core::patience::measure_all();
+    // Each call waits for its answer while the node's connection stands: past its W*, its run-out told and its party
+    // followed (decision 9).
     let kind = Kind::named();
     let class = kind.class();
     let out = PathBuf::from(input("HEX_CHARGE_OUT"));
@@ -1079,8 +1079,9 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
 }
 
 /// Joint plan step 14 (AC-T7.4.1; the person's rule, 2026-11-13, and Shards' R03 for test waits): the driver times
-/// none of its waits and reads no record. Each client call waits for its answer while the node's connection stands, its
-/// waits unarmed (`hex_core::patience::measure_all`), and the node's start for its ready line while the node runs.
+/// none of its waits and reads no record. Each client call waits for its answer while the node's connection stands, past
+/// its W* telling its run-out and following it (decision 9), and the node's start for its ready line while the node
+/// runs.
 /// Do read the driver's own source; expect no caller deadline, no timed receive and no record of boots read.
 #[test]
 fn w14_the_driver_times_no_wait_and_reads_no_record() {

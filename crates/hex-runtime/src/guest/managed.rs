@@ -5,7 +5,7 @@ use std::cell::RefCell;
 
 use super::*;
 use crate::devices::{ManagedLaunch, Transaction};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 /// One create/attach attempt spends one existing measured boot bound. Native
 /// launch and the first relay dial consume its remainder rather than restarting it.
@@ -226,7 +226,24 @@ pub(crate) fn wait_stopped(
         Some(bound) => match process.wait_for(bound)? {
             Some(end) => Some(end),
             None => {
-                STOP.ran_out(bound);
+                match process.identity() {
+                    Ok(identity) => STOP.ran_out(
+                        bound,
+                        began.elapsed(),
+                        &[
+                            Piece::Kind("managed scope pid "),
+                            Piece::Pid(i64::from(identity.pid)),
+                            Piece::Kind(", by its observer"),
+                        ],
+                    ),
+                    Err(_) => STOP.ran_out(
+                        bound,
+                        began.elapsed(),
+                        &[Piece::Kind(
+                            "a managed scope with no identity yet, by its observer",
+                        )],
+                    ),
+                }
                 process.wait_for(Duration::MAX)?
             }
         },
@@ -270,7 +287,7 @@ pub(super) fn rate(
     let asked = std::num::NonZeroU64::new(rate);
     let began = Instant::now();
     let answer = match RATE.deadline() {
-        Some(bound) => told_past(&RATE, bound, || guest.rate(asked, Duration::MAX))?,
+        Some(bound) => told_past(&RATE, bound, id, || guest.rate(asked, Duration::MAX))?,
         None => guest.rate(asked, Duration::MAX),
     };
     let took = began.elapsed();
@@ -327,7 +344,7 @@ pub(super) fn guest_time(
 ) -> Result<ManagedGuestTime, Refusal> {
     let began = Instant::now();
     let answer = match USE.deadline() {
-        Some(bound) => told_past(&USE, bound, || guest.host_use(Duration::MAX))?,
+        Some(bound) => told_past(&USE, bound, id, || guest.host_use(Duration::MAX))?,
         None => guest.host_use(Duration::MAX),
     };
     let took = began.elapsed();
@@ -350,10 +367,12 @@ pub(super) fn guest_time(
     }
 }
 
-/// Answers `ask`, a watcher telling `patience`'s run-out once `bound` passes with no answer while the ask goes on.
+/// Answers `ask`, box `id`'s VM's, a watcher telling `patience`'s run-out once `bound` passes with no answer while the
+/// ask goes on.
 fn told_past<T>(
     patience: &'static Patience,
     bound: Duration,
+    id: &BoxId,
     ask: impl FnOnce() -> T,
 ) -> Result<T, Refusal> {
     let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
@@ -370,7 +389,15 @@ fn told_past<T>(
                     waiting.recv_timeout(bound),
                     Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    patience.ran_out(bound);
+                    patience.ran_out(
+                        bound,
+                        bound,
+                        &[
+                            Piece::Kind("the managed VM process of box "),
+                            Piece::Name(id.as_str()),
+                            Piece::Kind(", its ask on its vsock socket"),
+                        ],
+                    );
                 }
             })
             .map_err(|why| Refusal::os("starting a managed VM ask's watcher", why))?;

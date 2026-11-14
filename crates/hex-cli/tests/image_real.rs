@@ -306,9 +306,8 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     let work = PathBuf::from(input("HEX_IMAGE_WORK"));
     assert!(!work.exists(), "a run's own directory: {work:?} exists");
     fs::create_dir_all(work.join("state")).unwrap();
-    // A VM's start boots it, which the client's learned bounds (an OCI box's records) would refuse first: every
-    // wait here measures, and the run's deadline bounds the whole suite instead.
-    hex_core::patience::measure_all();
+    // A VM's start boots it: a wait past its W* tells its run-out and follows its party (decision 9), and the run's
+    // deadline bounds the whole suite.
     assert!(
         hex_core::patience::census(step),
         "a census sink was installed before this one"

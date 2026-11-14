@@ -1503,6 +1503,43 @@ fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
     );
 }
 
+/// Shards' #72 (image channel v27, `MemberEnd::Signaled`): a member's end is typed, a signal that killed it its own end
+/// beside its exit, never folded into the status `docker run` reports (128 plus its number), which an exit can be too.
+/// Do: take three members of a running VM; have one killed by TERM, one by KILL, and one exit 143. Expect
+/// `Exit::Signal(15)`, `Exit::Signal(9)` and `Exit::Code(143)`, each its own.
+#[test]
+fn r12_a_members_end_tells_a_signal_from_its_exit() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let harness = |name: &str| Member {
+        kind: MemberKind::Harness,
+        name: name.to_owned(),
+    };
+    let ends = [
+        ("termed", MemberEnd::Signaled(15), Exit::Signal(15)),
+        ("killed", MemberEnd::Signaled(9), Exit::Signal(9)),
+        ("exited", MemberEnd::Exited(143), Exit::Code(143)),
+    ];
+    let mut boxed = spec("image-member-ends", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        for (name, _, _) in &ends {
+            image.members.push(ImageMember::new(harness(name)));
+        }
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    for (name, end, exit) in ends {
+        let mut proc = runtime.member(&id, &harness(name)).unwrap();
+        images
+            .run
+            .member_ends
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), end);
+        assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(exit), "{name}");
+    }
+}
+
 /// What a run's microVM ran of its guest, as D241's run host reads it: `vcpus` vCPUs by index, vCPU `n` having run
 /// `1_000 * (n + 1)` ns, and none departed.
 fn guest_times(vcpus: u32) -> GuestTimes {

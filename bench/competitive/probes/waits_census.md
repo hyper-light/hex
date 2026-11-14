@@ -7,7 +7,9 @@ distribution for the host class, at twice its slowest; the records are now the e
 no build. This probe records those distributions. Each wait is a named `hex_core::patience::Patience`; with
 `HEX_WAITS_CENSUS` naming a file (and `HEX_WAITS_CENSUS_MAX` its most lines), the node and its client append every
 answer each wait records, `name nanos`, from the wait's own timing point (`hex_node::census`), so nothing here
-re-implements a wait.
+re-implements a wait. From 2026-11-14 the node's census disarms no wait (the review's C-1; runs 3 to 5 ran every
+wait unarmed, `patience::measure_all`, which is gone): a wait past its W* tells its run-out, `name >nanos`, and
+follows its party to its answer, which comes in uncensored, so a row keeps its tail with the node's waits armed.
 
 Run on fedora under hex-slot, its timed part under `fedora-timed.lock`:
 `[N=10000] [CPUSET=4-15] [LIST_BOXES=N] [LISTS=100] [RESTART_BOXES=N] bash bench/competitive/probes/waits_census.sh <hex> <seam_oci>`.
