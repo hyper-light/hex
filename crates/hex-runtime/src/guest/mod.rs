@@ -16,6 +16,8 @@ pub mod hosted;
 mod image;
 mod leases;
 mod managed;
+#[cfg(target_os = "linux")]
+pub(crate) use managed::wait_stopped;
 pub use managed::{ManagedGuestTime, ManagedRate};
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;

@@ -30,7 +30,9 @@ use hex_runtime::linux::cgroup::BoxRoot;
 const HEX: &str = env!("CARGO_BIN_EXE_hex");
 
 /// How long a run's child cgroup may take to read empty once its wrapper is reaped (it stays a member
-/// until the kernel's last switch away from it, box_run.rs): `hex box run`'s own CLEANUP_PATIENCE.
+/// until the kernel's last switch away from it, box_run.rs): 10 s, `hex box run`'s old cleanup patience,
+/// itself picked and gone from it (the review's (c)); a test's wait on a time, owed its party
+/// (docs/research/runtime/learned-waits.md, the audit's item 9).
 const EMPTY_PATIENCE: Duration = Duration::from_secs(10);
 
 fn have_systemd() -> bool {
