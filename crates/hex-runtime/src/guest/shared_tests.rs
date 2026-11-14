@@ -1453,6 +1453,67 @@ fn w14_a_shared_guests_own_cpu_is_its_intervals_past_its_boxes_and_its_disk_its_
     assert_eq!(last.overhead.disk_bytes, Some(60 * gib));
 }
 
+/// The review's A-8 (AC-T7.4.1): a shared guest's counters move in 10 ms ticks (`/proc/stat` in USER_HZ, `/proc/uptime`
+/// in hundredths), so an interval of a few ticks says nothing of its share, and the most of such intervals only climbs
+/// on their noise. Do measure a 2-CPU guest up 10 s with 4 s of CPU and its boxes 1 s; then an answer 20 ms on in which
+/// its CPU time moved one tick, its boxes' none. Expect 300 milli-CPU read since its boot, and still that, from its
+/// boot, after the 20 ms interval (which read 500 milli-CPU, and kept it).
+#[test]
+fn a8_an_interval_its_counters_cant_resolve_reads_nothing() {
+    let gib = 1u64 << 30;
+    let second = 1_000_000_000u64;
+    let tick = 10_000_000u64;
+    let guest = |cpu_ns: u64, uptime_ns: u64| hex_api::Capacity {
+        id: "guest".into(),
+        total: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 100 * gib,
+        },
+        free: CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 8 * gib,
+            disk_bytes: 40 * gib,
+        },
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        own: hex_api::MachineTime {
+            cpu_ns: Some(cpu_ns),
+            uptime_ns: Some(uptime_ns),
+        },
+        node_vms: Vec::new(),
+        unlearned: None,
+    };
+    let boxes = super::Boxes {
+        cpu_ns: second,
+        ..super::Boxes::default()
+    };
+    let first = super::guest_seen(
+        super::Seen::default(),
+        &guest(4 * second, 10 * second),
+        boxes,
+    );
+    assert_eq!(
+        (first.overhead.cpu_milli, first.cpu_from_boot),
+        (Some(300), true)
+    );
+    let next = super::guest_seen(
+        first,
+        &guest(4 * second + tick, 10 * second + 2 * tick),
+        boxes,
+    );
+    assert_eq!(
+        (next.overhead.cpu_milli, next.cpu_from_boot),
+        (Some(300), true),
+        "an interval of two ticks read as a share"
+    );
+}
+
 /// Joint plan step 14 (C7; ROOT, 2026-11-13, pin 2): two answers that measured a shared guest at once keep pin 2 as one
 /// does: the guest's CPU read since its boot gives way to the first interval, whichever answer stored first, and the
 /// intervals keep their most. Do merge an answer's first interval, 200 milli-CPU, with a kept boot reading of 300, each
