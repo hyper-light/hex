@@ -365,6 +365,151 @@ fn a_lane_cut_while_its_owner_sends_keeps_the_bytes_before_the_cut_for_a_later_r
     assert_eq!(got, b"before the cut\n", "the bytes before the cut");
     let cut = end.expect_err("a cut read as the lane's end in order");
     assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
+
+/// The relay's token on its control connection for these cases.
+const TOKEN: u64 = 0x6c61_6e65;
+
+/// The next framed request on `conn`: its bytes, or its end, which fails the case.
+fn next_request(conn: &mut impl Read) -> (hex_core::wire::Header, hex_core::wire::Request) {
+    let mut d = stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
+    let mut byte = [0u8; 1];
+    loop {
+        conn.read_exact(&mut byte).unwrap();
+        if let (_, Some(m)) = d.take(&byte).unwrap() {
+            return hex_core::wire::read_request_apart(&m, hex_core::wire::MAX_MESSAGE).unwrap();
+        }
+    }
+}
+
+fn send_answer(conn: &mut impl Write, id: u64, answer: &hex_core::wire::Answer) {
+    let bytes = hex_core::wire::answer(id, answer, hex_core::wire::MAX_MESSAGE).unwrap();
+    conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+        .unwrap();
+}
+
+/// The node's relay in the guest as far as one exec with streams needs it: its control connection's token, the
+/// hello answered, the exec answered started; then its two named stdio connections taken, its stdin's bytes echoed
+/// into its stdout to stdin's end, stdout's own half ended, and the exec answered exited; held until the client goes.
+/// Each stdio connection's name, as it came.
+fn exec_relay(control: Listener, stdio: Listener) -> JoinHandle<Vec<stream::Named>> {
+    use hex_core::wire::{Answer, Budgets, Call, Hello, Limits, Request};
+    std::thread::spawn(move || {
+        let mut conn = control.accept();
+        conn.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let (h, request) = next_request(&mut conn);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        // The stand-in's own limits, inputs rather than tuning: past what this case makes.
+        let hello = Hello {
+            build: hex_core::wire::build(),
+            classes: vec![hex_api::Class::Oci],
+            limits: Limits {
+                connections: 1,
+                message_bytes: hex_core::wire::MAX_MESSAGE,
+                in_flight: 4,
+                programs: 4,
+            },
+            budgets: Budgets {
+                in_flight: 4,
+                programs: 4,
+            },
+        };
+        send_answer(&mut conn, h.id, &Answer::Hello(hello));
+        let (h, request) = next_request(&mut conn);
+        let Request::Call(Call::Exec { streams, .. }) = request else {
+            panic!("expected an exec, got {request:?}");
+        };
+        assert!(streams.stdin && streams.stdout && !streams.stderr);
+        send_answer(&mut conn, h.id, &Answer::Started { pid: 42 });
+        let mut names = Vec::new();
+        let mut named = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let mut s = stdio.accept();
+            let mut name = [0u8; stream::NAME_BYTES];
+            s.read_exact(&mut name).unwrap();
+            let n = stream::read_name(&name).unwrap();
+            names.push(n);
+            named.insert(n.stream, s);
+        }
+        let mut input = named.remove(&stream::Stdio::In).unwrap();
+        let mut output = named.remove(&stream::Stdio::Out).unwrap();
+        std::io::copy(&mut input, &mut output).unwrap();
+        output.shutdown(Shutdown::Write).unwrap();
+        send_answer(&mut conn, h.id, &Answer::Exited(hex_api::Exit::Code(0)));
+        let _ = conn.read(&mut [0u8; 1]);
+        names
+    })
+}
+
+/// The review's D-10 (HEX-RT-17; AC-T7.4.1), on every OS: exec, through a node VM's lanes, a program whose stdin and
+/// stdout its caller asks for, its relay echoing one into the other. Expect each stream's end one its node can hand
+/// a caller in another process (on Windows a handle, as the Windows node gives none but handles: never a socket),
+/// each stream named for the exec on its own lane, the bytes written to stdin read back from stdout to its end, and
+/// the program's end as its relay sent it.
+#[test]
+fn ac_t7_4_1_an_execs_asked_streams_through_lanes_are_ends_its_node_hands_on() {
+    use hex_api::{Ask, BoxId, Exit, Program, Runtime, Stdio};
+    let dir = socket_dir();
+    let relay = exec_relay(
+        listen(dir.path(), stream::CONTROL_PORT),
+        listen(dir.path(), stream::STDIO_PORT),
+    );
+    let Run {
+        link,
+        host,
+        revoke,
+        _dir,
+    } = Run::new(dir, admission(4));
+    let client = crate::guest::Client::connect(super::super::own_link(link).unwrap()).unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["cat"]),
+            Stdio {
+                ask: Ask {
+                    stdin: true,
+                    stdout: true,
+                    stderr: false,
+                },
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    let given = proc.streams().unwrap();
+    let (stdin, stdout) = (given.stdin.unwrap(), given.stdout.unwrap());
+    #[cfg(windows)]
+    assert!(
+        stdin.file_handle().is_some() && stdout.file_handle().is_some(),
+        "a stream's end is a socket, which the Windows node can't hand its caller: {stdin:?}, {stdout:?}"
+    );
+    let mut stdin = hex_api::OwnedStream::from(stdin);
+    let mut stdout = hex_api::OwnedStream::from(stdout);
+    stdin.write_all(b"both ways through the lanes\n").unwrap();
+    drop(stdin);
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).unwrap();
+    assert_eq!(out, "both ways through the lanes\n");
+    assert_eq!(
+        proc.wait_for(std::time::Duration::MAX).unwrap(),
+        Some(Exit::Code(0))
+    );
+    drop(proc);
+    drop(client);
+    let names = relay.join().unwrap();
+    assert_eq!(names.len(), 2);
+    for n in &names {
+        assert_eq!(
+            n.exec.conn, TOKEN,
+            "a stream names its connection's token: {n:?}"
+        );
+    }
+    assert_eq!(names[0].exec.id, names[1].exec.id, "both name one exec");
+    drop(revoke);
+    let asked = host.join().unwrap();
+    assert_eq!(
+        asked.iter().filter(|name| *name == "stdio.sock").count(),
+        2,
+        "{asked:?}"
+    );
 }
 
 /// The person's directive, and Shards' D239: a node's control link holds TLS13_AES_256_GCM_SHA384 at both ends. Do:

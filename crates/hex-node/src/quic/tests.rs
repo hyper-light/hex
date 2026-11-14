@@ -687,3 +687,177 @@ fn hex_quic_29_the_nodes_report_names_each_peer_with_its_suite_and_group() {
 fn a_readers_missed_line_counts_its_lines() {
     assert_eq!(super::missed_line(3), "hex.log event=missed lines=3");
 }
+
+/// What the node sends on control connection `conn` once a hello goes with id `id`: each answer in order, through the
+/// hello's answer, or until the connection ends.
+fn through_hello(conn: &hex_quic::Conn, id: u64) -> Vec<wire::Answer> {
+    let hello = wire::request(
+        id,
+        &Request::Hello {
+            build: wire::build(),
+        },
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    let mut answers = Vec::new();
+    if write_all(
+        &ROOM,
+        conn,
+        &stream::frame(&hello, wire::MAX_MESSAGE).unwrap(),
+    )
+    .is_err()
+    {
+        return answers;
+    }
+    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+    let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
+    loop {
+        let n = match read(&READ, conn, &mut buf) {
+            Ok(0) | Err(_) => return answers,
+            Ok(n) => n,
+        };
+        let mut input = &buf[..n];
+        while !input.is_empty() {
+            let (took, whole) = deframer.take(input).unwrap();
+            input = &input[took..];
+            if let Some(message) = whole {
+                let received = wire::Received {
+                    bytes: &message,
+                    size: message.len(),
+                    descriptors: 0,
+                    descriptors_cut: false,
+                };
+                let (_, answer) = wire::read_answer(&received, wire::MAX_MESSAGE).unwrap();
+                let hello = matches!(answer, wire::Answer::Hello(_));
+                answers.push(answer);
+                if hello {
+                    return answers;
+                }
+            }
+        }
+    }
+}
+
+/// HEX-QUIC-33 (Q13; the review's E-6; ROOT's note (3), 2026-11-14; AC-T7.4.1): the node takes a message that carries a
+/// secret over QUIC sealed alone. Do open three control connections to a node over QUIC, read each one's token and have
+/// its hello answered, then send a lease's answer on each: sealed under the connection's seal on the first, unsealed on
+/// the second, and on the third an inspect sealed as a secret is, its kind marked; then a hello again on each. Expect the
+/// first's lease read, named as the node gives it back (no ask waited for it), and its hello answered, its connection
+/// kept; the second and third connections ended by the node with nothing more said, as bytes that aren't the node's wire
+/// end one.
+#[test]
+fn hex_quic_33_the_node_takes_a_secret_over_quic_sealed_alone() {
+    let ca = SimCa::new().unwrap();
+    let limits = limits();
+    let node = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled(&ca, "node.seal.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: true,
+            serves: ports(false),
+            shape: shape(&limits, false),
+        })
+        .unwrap(),
+    );
+    let dir = scratch("q-");
+    let socket = dir.path().join("node.sock");
+    let quic = Quic::new(
+        Native::bind(&socket).unwrap(),
+        Arc::clone(&node),
+        Bounds::of(&limits),
+        None,
+    )
+    .unwrap();
+    let host = Arc::new(Simulated(SimRuntime::new()));
+    let _server = Server::with_os(quic, host, limits, limits.in_flight, &socket).unwrap();
+    let client = Endpoint::start(Config {
+        credentials: enrolled(&ca, "client.seal.test"),
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        listen: false,
+        serves: Vec::new(),
+        shape: Shape {
+            connections: 1,
+            lanes: 8,
+        },
+    })
+    .unwrap();
+    let peer = dial(&DIAL, &client, "node.seal.test", node.local_addr()).unwrap();
+    let keys = client.keys(peer).unwrap();
+    let leased = wire::request(
+        9,
+        &Request::Leased {
+            run: 1,
+            answer: Ok(hex_api::lease::Lease {
+                lease: "lease-33".to_owned(),
+                value: hex_api::lease::Value::new(b"hex-33-value".to_vec()),
+                life: None,
+            }),
+        },
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    let mut inspect = wire::request(
+        10,
+        &Request::Call(Call::Inspect(BoxId::new("q13-box").unwrap())),
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    // An inspect marked sealed, its body sealed under the connection's seal as a secret's would be.
+    let kind = u16::from_le_bytes([inspect[12], inspect[13]]);
+    inspect[12..14].copy_from_slice(&(kind | wire::SEALED).to_le_bytes());
+    let mut sealed_inspect = inspect[..wire::HEADER_BYTES].to_vec();
+    let mut body = vec![0u8; inspect.len() - wire::HEADER_BYTES];
+    let (nonce, tag) = wire::Seal::seal(
+        &*keys,
+        &inspect[..wire::HEADER_BYTES],
+        &inspect[wire::HEADER_BYTES..],
+        &mut body,
+    )
+    .unwrap();
+    sealed_inspect.extend_from_slice(&nonce);
+    sealed_inspect.extend_from_slice(&body);
+    sealed_inspect.extend_from_slice(&tag);
+    let sends = [
+        (
+            "a lease's answer sealed",
+            wire::seal(&leased, &*keys).unwrap(),
+            true,
+        ),
+        ("a lease's answer unsealed", leased.clone(), false),
+        ("an inspect marked sealed", sealed_inspect, false),
+    ];
+    for (n, (what, message, kept)) in sends.into_iter().enumerate() {
+        let conn = client.open(peer, stream::CONTROL_PORT).unwrap();
+        let mut token = [0u8; stream::TOKEN_BYTES];
+        let mut got = 0;
+        while got < token.len() {
+            let read = read(&READ, &conn, &mut token[got..]).unwrap();
+            assert_ne!(read, 0, "{what}: the token");
+            got += read;
+        }
+        let first = 100 + 10 * n as u64;
+        let hello = through_hello(&conn, first);
+        assert!(
+            matches!(hello.as_slice(), [wire::Answer::Hello(_)]),
+            "{what}: the hello: {hello:?}"
+        );
+        write_all(
+            &ROOM,
+            &conn,
+            &stream::frame(&message, wire::MAX_MESSAGE).unwrap(),
+        )
+        .unwrap();
+        let after = through_hello(&conn, first + 1);
+        if kept {
+            assert!(
+                matches!(
+                    after.as_slice(),
+                    [wire::Answer::LeaseGiven(lease), wire::Answer::Hello(_)] if lease == "lease-33"
+                ),
+                "{what}: its lease read and its connection kept: {after:?}"
+            );
+        } else {
+            assert!(after.is_empty(), "{what}: its connection ended: {after:?}");
+        }
+    }
+}

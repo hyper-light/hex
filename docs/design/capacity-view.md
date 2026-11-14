@@ -486,7 +486,7 @@ window, which would under-count Hex here.
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them in one case, ending with them in the
   other: kiln states neither), drops links with
-  what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
+  what was on them, partitions and heals them, has a runner let go of a reserve before its answer, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
@@ -498,7 +498,8 @@ window, which would under-count Hex here.
   records of its runners' links (topo's drops, time up and outage, read 2026-11-14). A step is one event of that
   continuous-time chain, each kind as likely as its rate in the machine's state (Gillespie's direct method), delivery
   at the least rate that drains the links (each kind's rate times the deliveries the protocol has it say). The faults no
-  record times (the keeper's crash between messages and at its next write, the write lost or landed; a wait run out; the
+  record times (the keeper's crash between messages and at its next write, the write lost or landed; a reserve let go
+  of before its answer, no wait of a holder's ending at a time (CV6); the
   person's wrong release; a retirement) each strike once a run, at a step drawn for them or the first after where they
   can. What the code does on its own trigger, the nemesis does there: a runner dials again as soon as its link can open
   (kiln's `links`), the keeper's hints go out after each message it hears and each command of its host, and Hex's node
@@ -526,10 +527,15 @@ window, which would under-count Hex here.
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md
   section 13; Shards R05, R13). Against `hex node` and `hex schedule serve` as processes of their own, the scheduler
   enrolled by `hex node enroll` and a CA's answer: HEX-CV-L1 (`capacity_view::hex_cv_l1`, a normal test on every OS,
-  over loopback): a peer the lane doesn't name refused at its handshake, Hex's boxes and the holder's runs filling the
+  over loopback): a peer the lane doesn't name refused at its handshake, Hex's box and the holder's runs filling the
   room and refused past it, the scheduler killed and started again, a link dropped, kiln-shaped work, every view's CPU
   held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
-  records once it has ended, the holder's own. Hex's boxes are `process` boxes, placed where its scheduler places one
+  records once it has ended, the holder's own. Every size is a record's and no step is counted (ROOT's ruling 7,
+  2026-11-14): the holder asks kiln's recorded legs in recorded order (hex-sim's `kiln_needs`) until the room refuses
+  one, ends every run, and asks again until refused, ending with that set held, so a loss after it and the books it
+  ends with hold the holder's runs, never nothing; Hex's own box is the first recorded `oci` leg (`oci_needs`), one
+  being the fewest that puts Hex's admission in the view and hints it (the recorded fleet ran 0.045 at once on an `oci`
+  host, by Little's law). Hex's box is a `process` box, placed where its scheduler places one
   under its `oci` class: on Linux and Windows, whose `oci` form offers a `process` route beside its `oci` one; not on a
   Mac, which places Shards microVMs alone, where the holder meets the machine's room alone. HEX-CV-2H
   (`capacity_view::two_hosts`, ignored phases, ROOT's): the same

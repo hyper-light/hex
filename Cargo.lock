@@ -653,6 +653,7 @@ dependencies = [
 name = "hex-quic"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "hex-api",
  "hex-client",
  "hex-core",
