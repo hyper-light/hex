@@ -29,8 +29,8 @@ use hex_sim::model::Class;
 
 use super::Node;
 use crate::recorded::charges::{
-    Carried, Decision, LastResort, Lease, Lifetime, Reach, Scope, Writes, bounds, ran,
-    record_last_resort, write_ends,
+    Carried, Decision, LastResort, Lease, Lifetime, Reach, Scope, Writes, between, bounds, mid,
+    ran, record_last_resort, timed, write_ends,
 };
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
@@ -183,7 +183,8 @@ struct Vm {
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
     cgroup: BoxCgroup,
-    /// Its VMM's CPU so far, in microseconds, and when it was read.
+    /// Its VMM's CPU so far, in microseconds, and the instant it holds at: its VM process's sample of its guest time, or
+    /// its cgroup's read where none came (the review's A-11).
     last: (u64, Instant),
     /// Each vCPU's guest time at that reading, where its VM process answered it (D260).
     guest_ns: Option<Vec<u64>>,
@@ -504,7 +505,7 @@ impl Learner {
             record,
             held,
             |reads| given(budget, reads),
-            now,
+            || now,
         )
     }
 
@@ -535,13 +536,13 @@ impl Learner {
         })
     }
 
-    /// Learns a window's `reads` at `now` (C1 to C5, C7; under its lock, A-2), within the fleet's `budget`: the
-    /// placement's writes and its last resort's decision, which it then acts on outside its lock ([`act`]).
+    /// Learns a window's `reads`, each at its own reads' instants (C1 to C5, C7; under its lock, A-2; the review's A-11),
+    /// within the fleet's `budget`: the placement's writes and its last resort's decision, which it then acts on outside
+    /// its lock ([`act`]).
     fn learn(
         &mut self,
         reads: Reads,
         budget: CapacityResources,
-        now: Instant,
     ) -> Result<Acts, Refusal> {
         let present: BTreeSet<Scope> = reads.vms.iter().map(|answer| answer.scope).collect();
         let gone: Vec<Scope> = self
@@ -575,7 +576,7 @@ impl Learner {
             // its booking as it was, and the failure told (no holding on the capacity answers, so the scheduler counts
             // it at its receipt). One that ended since its listing is ended by the next. D260: either of its guest
             // time's and its cgroup's reads failing counts the VM whole, as above.
-            let (guest, usage) = match read {
+            let (guest, usage, read_at) = match read {
                 Ok(read) => read,
                 Err(why) => {
                     // Its class, where its record names one, which class's answers tell it (place 4).
@@ -636,14 +637,15 @@ impl Learner {
                         vm.lifetime,
                         &Sample {
                             cpu,
-                            span: now.saturating_duration_since(at),
+                            // Over the span between its own reads (the review's A-11).
+                            span: read_at.saturating_duration_since(at),
                             mem_bytes: usage.memory_bytes,
                             disk_bytes: None,
                             cap_milli: vm.cap,
                         },
                     )
                     .map_err(refused)?;
-                vm.last = (usage.cpu_usec, now);
+                vm.last = (usage.cpu_usec, read_at);
                 vm.guest_ns = guest_ns;
                 continue;
             }
@@ -693,7 +695,7 @@ impl Learner {
                     class,
                     receipt,
                     cgroup,
-                    last: (usage.cpu_usec, now),
+                    last: (usage.cpu_usec, read_at),
                     guest_ns,
                     written: hex_core::cgroup::writes(&created, &[])?
                         .into_iter()
@@ -1049,7 +1051,9 @@ struct Answer {
     id: LearnedHolder,
     scope: Scope,
     cgroup: BoxCgroup,
-    read: Result<(ManagedGuestTime, Usage), Refusal>,
+    /// Its guest time and its cgroup's use, its CPU taken at its VM process's sample, and the instant that holds at (the
+    /// review's A-11).
+    read: Result<(ManagedGuestTime, Usage, Instant), Refusal>,
     /// Its reclaimable file pages, which the machine's free memory counts already ([`file_pages`]): none where its
     /// `memory.stat` can't be read (the review's A-10).
     file: Option<u64>,
@@ -1130,14 +1134,14 @@ fn window(
     record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
     held: &[u64],
     budget: impl FnOnce(&Reads) -> Result<CapacityResources, Refusal>,
-    now: Instant,
+    clock: impl Fn() -> Instant,
 ) -> Result<(), Refusal> {
     let asks = learner.take()?.asks(running);
     let read = asks
-        .and_then(|asks| ask(io, asks, &record, held))
+        .and_then(|asks| ask(io, asks, &record, held, &clock))
         .and_then(|reads| Ok((budget(&reads)?, reads)));
     let learned = match read {
-        Ok((budget, reads)) => learner.take()?.learn(reads, budget, now),
+        Ok((budget, reads)) => learner.take()?.learn(reads, budget),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, acts));
@@ -1168,7 +1172,7 @@ fn measured(
     };
     let mut held = 0u64;
     for answer in &reads.vms {
-        if let (Ok((_, usage)), Some(file)) = (&answer.read, answer.file) {
+        if let (Ok((_, usage, _)), Some(file)) = (&answer.read, answer.file) {
             held = held
                 .checked_add(usage.memory_bytes.saturating_sub(file))
                 .ok_or_else(overflow)?;
@@ -1231,6 +1235,7 @@ fn ask(
     asks: Asks,
     record: &impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
     held: &[u64],
+    clock: &impl Fn() -> Instant,
 ) -> Result<Reads, Refusal> {
     let mut vms = Vec::new();
     vms.try_reserve_exact(asks.vms.len())
@@ -1245,11 +1250,24 @@ fn ask(
         known,
     } in asks.vms
     {
-        // D260: a managed VM's vCPUs' guest time first, then its cgroup's use, so its VMM's own (the cgroup's less its
-        // vCPUs') is never less than none.
-        let read = io
-            .guest_time(&id)
-            .and_then(|guest| Ok((guest, io.usage(&cgroup)?)));
+        // D260: a managed VM's vCPUs' guest time between two reads of its cgroup's use, its CPU taken at the instant its
+        // VM process sampled them, so its VMM's own (the cgroup's less its vCPUs') counts nothing its vCPUs ran between
+        // the reads (the review's A-11).
+        let read = timed(clock, || io.usage(&cgroup)).and_then(|(before, from)| {
+            let guest = io.guest_time(&id)?;
+            let (usage, to) = timed(clock, || io.usage(&cgroup))?;
+            let (cpu_usec, at) = match &guest {
+                ManagedGuestTime::PerVcpu {
+                    asked, answered, ..
+                } => between(
+                    (before.cpu_usec, from),
+                    (usage.cpu_usec, to),
+                    mid(*asked, *answered),
+                ),
+                ManagedGuestTime::Unheld(_) => (usage.cpu_usec, to),
+            };
+            Ok((guest, Usage { cpu_usec, ..usage }, at))
+        });
         // Its reclaimable file pages, which the machine's free memory counts already (the review's A-10).
         let file = io
             .read(cgroup.dir(), "memory.stat")
@@ -1423,7 +1441,7 @@ pub(super) fn one_window(
     read: impl FnOnce() -> Result<Running, Refusal>,
     record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
     reserved: CapacityResources,
-    now: impl FnOnce() -> Instant,
+    clock: impl Fn() -> Instant,
 ) {
     let (running, held, machine) = match read() {
         Ok(read) => read,
@@ -1442,7 +1460,7 @@ pub(super) fn one_window(
         record,
         &held,
         |reads| measured(machine, reserved, reads),
-        now(),
+        clock,
     );
     // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
     // is kept for the next window and fails this one.

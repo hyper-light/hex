@@ -94,9 +94,13 @@ contention rule and the predictors; they do not hold the step up.
   learner takes the split (`Cpu::Split`, its VMM's own the whole less its vCPUs', never less than none), which the core
   checks against the VM's vCPUs (two readings naming different vCPU counts are refused, typed, never paired). A
   managed VM's VM process answers its vCPUs' guest time on its socket (D260, `ManagedGuest::host_use`, read through
-  `Recover::managed_guest_time` in a measured wait of its own, `managed.use`), asked before its native owner reads its
-  scope's CPU, so its VMM's own (the scope's less its vCPUs') is never less than none; one whose microVM hasn't started
-  or whose process answers no use is read whole, why told. The charge needs only the sum; the split's own is what its
+  `Recover::managed_guest_time` in a measured wait of its own, `managed.use`), sampled between the ask and the answer
+  that Shards' `ManagedUse` gives; its native owner reads its scope's CPU on each side of that ask, and the learner takes
+  the scope's CPU at the sample's instant (the midpoint of the ask's span) between the two reads, so its VMM's own (the
+  scope's less its vCPUs', never less than none) counts nothing its busy vCPUs ran while the answer came back (the
+  review's A-11). One whose microVM hasn't started or whose process answers no use is read whole, why told. Each VM's
+  window is the span between its own readings' instants, never between the windows' starts, as the reads of the VMs
+  before it take time (A-11). The charge needs only the sum; the split's own is what its
   governor leaves out (C4). Memory is the most the VMM held in the window
   as the census reads it (Linux `memory.stat` anon plus kernel; macOS its physical footprint), its guest's touched
   RAM included; disk is its folders' bytes.

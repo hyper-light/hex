@@ -369,7 +369,7 @@ fn a10_a_linux_fleets_budget_is_what_is_free_its_page_cache_counted_once() {
         shards,
         &[],
         |reads| measured(machine(), CapacityResources::default(), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     assert_eq!(
@@ -397,7 +397,7 @@ fn a10_a_linux_keepers_word_comes_off_the_fleets_budget() {
         shards,
         &[],
         |reads| measured(machine(), res(0, 4 * GIB), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     assert_eq!(
@@ -429,7 +429,7 @@ fn a10_a_linux_nodes_own_boxes_are_never_counted_twice() {
                 shards,
                 &[],
                 |reads| measured(machine(), CapacityResources::default(), reads),
-                Instant::now(),
+                Instant::now,
             )
             .unwrap();
             io.file(&fleet().join("vm-1"), "memory.high")
@@ -459,7 +459,7 @@ fn a10_a_linux_window_reads_what_is_free_after_its_vms_and_its_boxes() {
         shards,
         &[],
         |reads| measured(machine(), CapacityResources::default(), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     let reads = io.reads.borrow().clone();
