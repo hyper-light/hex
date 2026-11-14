@@ -11,6 +11,7 @@ fn total(all: Report, r: Report) -> Report {
         runs_granted: all.runs_granted + r.runs_granted,
         runs_refused: all.runs_refused + r.runs_refused,
         runs_unanswered: all.runs_unanswered + r.runs_unanswered,
+        runs_let_go: all.runs_let_go + r.runs_let_go,
         link_drops: all.link_drops + r.link_drops,
         keeper_crashes: all.keeper_crashes + r.keeper_crashes,
         crashes_at_write: all.crashes_at_write + r.crashes_at_write,
@@ -90,6 +91,7 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.runs_granted > 0
             && all.runs_refused > 0
             && all.runs_unanswered > 0
+            && all.runs_let_go > 0
             && all.link_drops > 0
             && all.keeper_crashes > 0
             && all.crashes_at_write > 0
@@ -253,8 +255,8 @@ fn quiet(runners: usize) -> World {
 }
 
 /// AC-T7.4.1, joint plan step 13 (CLAUDE.md §2: a loop's bound derived, never picked): do have one runner, synced, ask
-/// for one run more than its reservation bound and let each one's wait run out before its answer, so two words each
-/// wait on its link to the keeper, more than twice the bound, then settle; expect it to settle with the books agreeing:
+/// for one run more than its reservation bound and let go of each before its answer (CV5), so two words each wait on
+/// its link to the keeper, more than twice the bound, then settle; expect it to settle with the books agreeing:
 /// settling is bounded by the protocol's own count of what its links carry, not by a multiple of a runner's
 /// reservations.
 #[test]
@@ -263,7 +265,7 @@ fn a_backlog_on_a_link_settles_within_the_protocols_own_bound() {
     let asks = world.budget.reservations + 1;
     for _ in 0..asks {
         world.ask(Some(0)).unwrap();
-        world.ran_out(Some(0)).unwrap();
+        world.let_go(Some(0)).unwrap();
     }
     assert_eq!(world.runners[0].link.to_keeper.len(), 2 * asks);
     let settled = world.settle();
