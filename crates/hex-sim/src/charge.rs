@@ -265,8 +265,9 @@ impl Tail {
     }
 }
 
-/// A VM's class (C2): VMs of one runtime class and cost profile, admitted at one envelope: one Agentfile image and
-/// size. Its ceiling is no part of it: learned from its VMs' windows (C1), it would split the class as it rose.
+/// A VM's class (C2): VMs of one runtime class and cost profile, admitted at one envelope, that run one kind of thing:
+/// one Agentfile image and size. Its ceiling is no part of it: learned from its VMs' windows (C1), it would split the
+/// class as it rose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassKey {
     class: Class,
@@ -274,22 +275,42 @@ pub struct ClassKey {
     /// What its VMs' workload is admitted at, their guest envelope: a cold class's prior, and its ceiling until its
     /// VMs' windows show their VMM's own past it (C1; ROOT, 2026-11-13: no census number is a ceiling).
     admission: [u64; 3],
+    runs: Runs,
+}
+
+/// What a class's VMs run (joint plan step 39; ROOT, 2026-11-13): a box's workload, or a node's own guest, its node VM,
+/// which runs every oci box of its node. A node VM's windows are a container host's use, no box's workload, so it
+/// learns apart from the box VMs of its profile and envelope, never raising their priors or ceilings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Runs {
+    Box,
+    Node,
 }
 
 impl ClassKey {
-    /// The class of VMs of `class` and cost `profile`, each admitted at `admission`.
+    /// The class of box VMs of `class` and cost `profile`, each admitted at `admission`.
     pub fn new(class: Class, profile: [u8; 32], admission: Amounts) -> Self {
         Self {
             class,
             profile,
             admission: dims(admission),
+            runs: Runs::Box,
         }
     }
 
-    /// The class of the VMs `allocation` admits for `class`: its cost profile, and its guest envelope
+    /// The class of the box VMs `allocation` admits for `class`: its cost profile, and its guest envelope
     /// ([`hex_api::Allocation::guest`]) the admission. Refused where the receipt holds no envelope.
     pub fn of(class: Class, allocation: hex_api::Allocation) -> Result<Self, hex_api::Refusal> {
         Ok(Self::new(class, allocation.cost.id, allocation.guest()?))
+    }
+
+    /// The class of node VMs `allocation` admits for `class` (joint plan step 39): as [`ClassKey::of`], apart from
+    /// every class of box VMs, as a node VM runs every oci box of its node.
+    pub fn node(class: Class, allocation: hex_api::Allocation) -> Result<Self, hex_api::Refusal> {
+        Ok(Self {
+            runs: Runs::Node,
+            ..Self::of(class, allocation)?
+        })
     }
 
     /// What its VMs are admitted at.
