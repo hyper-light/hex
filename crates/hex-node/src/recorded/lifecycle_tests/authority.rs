@@ -382,6 +382,7 @@ fn native_offers_require_same_provider_identity_and_use_actual_metadata_without_
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     let mut report = capacity();
     native_metadata(&mut report, vec![native.try_clone().unwrap()]).unwrap();

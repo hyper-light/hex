@@ -6,9 +6,10 @@
 //! weighed by the budgets of every fleet under it. Every other child of the node's cgroup is on the same scale: each
 //! process and OCI box weighs its booking and `.oci` its boxes' weights together, and the fleet's budget is what they
 //! leave, so each child under contention gets at least min(its need, its booking or budget) (`Scale`). A capacity
-//! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be held within
-//! its room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
-//! VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
+//! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`), with each VM it couldn't read and why,
+//! and, where a window failed, why (place 4, A-3). A Shards guest can't yet be held within its room: shards-api has no
+//! call that sends init's `ROOM` (D188), so its class's answers name it awaiting `GuestRoom` (`Learned::awaits`) while
+//! its VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
 //! D230) (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -201,7 +202,7 @@ pub(super) struct Learner {
     /// The last resort (C5), which ends a VM by killing its cgroup.
     last: LastResort,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
-    unread: Vec<(LearnedHolder, Refusal)>,
+    unread: Vec<(LearnedHolder, Option<Class>, Refusal)>,
 }
 
 /// A VM's vCPUs: its admitted guest's CPU in whole CPUs, rounded up.
@@ -414,7 +415,7 @@ impl Learner {
     /// The VMs its last window couldn't read, and why: each counted whole, at its receipt, against the fleet's budget
     /// until a read succeeds (joint plan step 14; ROOT, 2026-11-13).
     #[cfg(test)]
-    pub(super) fn unread(&self) -> &[(LearnedHolder, Refusal)] {
+    pub(super) fn unread(&self) -> &[(LearnedHolder, Option<Class>, Refusal)] {
         &self.unread
     }
 
@@ -475,7 +476,10 @@ impl Learner {
             let (guest, usage) = match read {
                 Ok(read) => read,
                 Err(why) => {
-                    if let Some(met) = record(&id)? {
+                    // Its class, where its record names one, which class's answers tell it (place 4).
+                    let met = record(&id)?;
+                    let class = met.as_ref().map(|met| met.class);
+                    if let Some(met) = met {
                         let booked = self
                             .vms
                             .get(&scope)
@@ -507,7 +511,7 @@ impl Learner {
                         what: "the charge learner's unread VMs",
                         bound: MAX_LEARNED_HOLDINGS,
                     })?;
-                    self.unread.push((id, why));
+                    self.unread.push((id, class, why));
                     continue;
                 }
             };
@@ -743,6 +747,11 @@ impl Learner {
         self.fault = Some(why);
     }
 
+    /// Why its classes' capacity answers carry nothing learned (A-3): its last window's refusal, in its words.
+    pub(super) fn unlearned(&self) -> Option<String> {
+        self.fault.as_ref().map(ToString::to_string)
+    }
+
     /// What `class`'s capacity answer carries (C2, C5, C8): the priors of `costs` (its own and its routes'), the
     /// class's learned use, each of its running VMs' holdings, those most past their receipts first (memory, then CPU,
     /// then disk), and the VMs of the class the last resort ended and why, latest first. None after a failed window,
@@ -763,7 +772,7 @@ impl Learner {
             })?;
         for vm in self.vms.values() {
             // One its last window couldn't read carries no holding, so the scheduler counts it at its receipt (C8).
-            if vm.class == class && !self.unread.iter().any(|(id, _)| *id == vm.id) {
+            if vm.class == class && !self.unread.iter().any(|(id, _, _)| *id == vm.id) {
                 vms.push((vm.lifetime, &vm.id, vm.receipt));
             }
         }
@@ -772,15 +781,50 @@ impl Learner {
             window_ns: u64::try_from(WINDOW.as_nanos()).unwrap_or(u64::MAX),
             slowed_by: None,
         };
-        crate::recorded::charges::learned(
+        let mut learned = crate::recorded::charges::learned(
             &self.node,
             class,
             costs,
             vms,
             self.last.ended(class)?,
             Some(window),
-        )
-        .map(Some)
+        )?;
+        // What it couldn't read and why, and what each guest's room of the class awaits, in its VMs' order (place 4).
+        for (id, of, why) in &self.unread {
+            if *of != Some(class) {
+                continue;
+            }
+            learned
+                .unread
+                .try_reserve(1)
+                .map_err(|_| Refusal::Exhausted {
+                    what: "learned unread VMs",
+                    bound: MAX_LEARNED_HOLDINGS,
+                })?;
+            learned.unread.push(hex_api::LearnedUnread {
+                id: id.try_clone()?,
+                why: why.to_string(),
+            });
+        }
+        for (scope, needs) in &self.rooms {
+            let Some(vm) = self.vms.get(scope).filter(|vm| vm.class == class) else {
+                continue;
+            };
+            for needs in needs.iter() {
+                learned
+                    .awaits
+                    .try_reserve(1)
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "learned awaits",
+                        bound: MAX_LEARNED_HOLDINGS,
+                    })?;
+                learned.awaits.push(hex_api::LearnedAwait {
+                    id: vm.id.try_clone()?,
+                    needs: *needs,
+                });
+            }
+        }
+        Ok(Some(learned))
     }
 
     /// The last resort's state (C5).
@@ -899,10 +943,13 @@ impl Node {
             })?;
         costs.extend(capacity.cost);
         costs.extend(capacity.routes.iter().filter_map(|route| route.cost));
-        capacity.learned = learner
+        let learner = learner
             .lock()
-            .map_err(|_| Refusal::Broken("the charge learner's lock was poisoned".into()))?
-            .learned(class, &costs)?;
+            .map_err(|_| Refusal::Broken("the charge learner's lock was poisoned".into()))?;
+        capacity.learned = learner.learned(class, &costs)?;
+        // Where its last window failed, why (A-3; ROOT, 2026-11-13): never nothing learned with nothing said.
+        capacity.unlearned = learner.unlearned();
+        drop(learner);
         hex_core::wire::fit_learned(capacity).map_err(|e| Refusal::Invalid {
             what: "a capacity answer",
             why: e.to_string(),

@@ -1760,6 +1760,7 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     let runtime = capacity_runtime(Some(reported.try_clone().unwrap()), config);
     let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
@@ -1821,6 +1822,7 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         },
         &configured,
         "guest:123:1230".to_owned(),
