@@ -1161,7 +1161,7 @@ mod release_frame {
 #[test]
 fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!((KINDS, BOX_KINDS, CLASSES), (20, 12, 4));
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (20, 13, 4));
     for (request, index) in [
         (
             Request::Hello {
@@ -1242,6 +1242,8 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
             }),
             BoxKind::Signal,
         ),
+        // A start followed to its end (ROOT, 2026-11-14): its own kind, timed apart from a start's answer.
+        (Request::Call(Call::Started(b.clone())), BoxKind::Started),
     ] {
         assert!(kind_of(waits, &request).is_none(), "{request:?}");
         assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));
@@ -1321,6 +1323,7 @@ fn every_kind_and_class_has_its_own_census_name() {
             "run",
             "capacity",
             "member",
+            "started",
         ];
         for wait in T::answers() {
             assert!(seen.insert(wait.name()), "{} twice", wait.name());
@@ -1618,25 +1621,22 @@ mod queued_deadline_probe {
     }
 }
 
-/// The review's B-6 (kiln's HexVms adapter; goal 54's change 3): a remote node's client has no wire call for `started`
-/// nor for a delete answering its VM's host use, so it refuses each, typed, naming the call and what its wire lacks,
-/// before anything is sent: never the trait's defaults, which answered `started` as an inspect, at once, and a delete
-/// with host use as a plain delete answering none, read as a run that never started, so kiln charged nothing. Do: ask
-/// both of a client whose node answers every request at once. Expect: each `Invalid`, naming its call; nothing sent.
+/// The review's B-6 (kiln's HexVms adapter; goal 54's change 3): a remote node's client follows a box's start through its
+/// node (`Call::Started`, appended; ROOT, 2026-11-14), never the trait's default, which answered `started` as an
+/// inspect, at once; and its wire has no call yet for a delete answering its VM's host use, so it refuses that, typed,
+/// naming the call and what its wire lacks, before anything is sent: never a plain delete answering none, read as a run
+/// that never started, so kiln charged nothing. Do: ask both of a client whose node refuses every request at once, the
+/// box unknown to it. Expect: `started` sent as `Call::Started` and answered with the node's own refusal; the delete
+/// `Invalid`, naming its call; nothing else sent.
 #[test]
-fn b6_a_client_refuses_started_and_delete_with_host_use_typed_before_anything_is_sent() {
+fn b6_a_client_follows_started_on_its_node_and_refuses_delete_with_host_use_unsent() {
     let client = client();
-    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Done);
     let id = BoxId::new("b6-remote").unwrap();
+    *client.conn.shared.transport.reply.lock().unwrap() =
+        Some(Answer::Refused(Refusal::NoSuchBox(id.clone())));
     let started = client.started(&id);
     assert!(
-        matches!(
-            &started,
-            Err(Refusal::Invalid {
-                what: "started",
-                ..
-            })
-        ),
+        matches!(&started, Err(Refusal::NoSuchBox(got)) if *got == id),
         "{started:?}"
     );
     let deleted = client.delete_with_host_use(&id);
@@ -1650,14 +1650,11 @@ fn b6_a_client_refuses_started_and_delete_with_host_use_typed_before_anything_is
         ),
         "{deleted:?}"
     );
+    let outbound = client.conn.shared.transport.outbound.lock().unwrap();
+    assert_eq!(outbound.len(), 1, "started alone is sent");
+    let (_, request) = sent_request(&outbound[0]);
     assert!(
-        client
-            .conn
-            .shared
-            .transport
-            .outbound
-            .lock()
-            .unwrap()
-            .is_empty()
+        matches!(&request, Request::Call(Call::Started(got)) if *got == id),
+        "{request:?}"
     );
 }

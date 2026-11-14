@@ -612,6 +612,27 @@ fn w2_a_members_signal_goes_through_quic() {
     vm.client.delete(&vm.id).unwrap();
 }
 
+/// Goal 2 (ROOT, 2026-11-14: the node's wire carries `started`): a remote caller follows a VM's start through `started`
+/// as a caller in the node's own process does, waiting on the fact, never looking. Do: through a simulator node served
+/// over QUIC in this process, ask `started` of a VM it started, and of an id it holds no box of. Expect: the VM's info,
+/// Running; and NoSuchBox for the other.
+#[test]
+fn w2_a_vms_start_is_followed_through_started_over_quic() {
+    use hex_api::Runtime as _;
+    let vm = member_vm("node.started.test", "started-over-quic");
+    let started = vm.client.started(&vm.id).unwrap();
+    assert_eq!(
+        (started.id, started.state),
+        (vm.id.clone(), hex_api::BoxState::Running)
+    );
+    let none = BoxId::new("started-over-quic-none").unwrap();
+    assert_eq!(
+        vm.client.started(&none),
+        Err(hex_api::Refusal::NoSuchBox(none.clone()))
+    );
+    vm.client.delete(&vm.id).unwrap();
+}
+
 /// The calls in flight the node named `name` at `address` runs at once, as its hello says (its budget): how a client that
 /// doesn't know its node learns it before it shapes its own endpoint (`hex_quic::limits::client_lanes`), over an
 /// endpoint of `credentials` bound at `bind`, shaped for that hello alone (its control connection's one lane).
