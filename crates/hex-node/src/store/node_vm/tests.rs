@@ -515,3 +515,19 @@ fn w39_a_node_holds_one_node_vm_ready_at_a_time() {
         Some(NodeVmPhase::Ready)
     );
 }
+
+/// The node VM store's node_vm_unfollowed line (CLAUDE.md §10; ROOT, 2026-11-14): its run and its why JSON strings.
+/// Do: form it for run 0xab's owner, refused in words holding a quote, a backslash and a newline. Expect: one line, the
+/// run's name and the words JSON strings.
+#[test]
+fn an_unfollowed_node_vms_line_is_one_line_its_values_json_strings() {
+    let why = hex_api::Refusal::Broken("a \"b\" \\ c\nd".into());
+    assert_eq!(
+        unfollowed_line(&run(0xab), &why),
+        format!(
+            "hex.guest event=node_vm_unfollowed run=\"{}\" why=\"the node agent's state is unusable: a \\\"b\\\" \\\\ \
+             c\\nd\"",
+            "ab".repeat(16)
+        )
+    );
+}
