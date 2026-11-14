@@ -226,25 +226,33 @@ fn wait(
 ) -> Result<[bool; 2], Refusal> {
     use rustix::event::{PollFd, PollFlags};
     loop {
-        let left = crate::guest::managed::gpu_remaining(budget)?;
-        // macOS poll's signed millisecond timeout is the smallest supported
-        // Unix ABI ceiling; only that ABI can split a larger finite wait.
-        let ceiling =
-            std::time::Duration::from_millis(u64::try_from(i32::MAX).map_err(|_| exhausted(2))?);
-        let timeout = rustix::event::Timespec::try_from(left.min(ceiling)).map_err(|_| {
-            invalid("guest observer native wait cannot represent its remaining budget")
-        })?;
+        // A budget that follows its guest waits with no timeout, as its output comes or ends (the review's C-9); a
+        // finite one within what is left, macOS poll's signed millisecond timeout the smallest supported Unix ABI
+        // ceiling, which only splits a larger finite wait.
+        let timeout = match budget.remaining()? {
+            None => None,
+            Some(left) => {
+                let ceiling = std::time::Duration::from_millis(
+                    u64::try_from(i32::MAX).map_err(|_| exhausted(2))?,
+                );
+                Some(
+                    rustix::event::Timespec::try_from(left.min(ceiling)).map_err(|_| {
+                        invalid("guest observer native wait cannot represent its remaining budget")
+                    })?,
+                )
+            }
+        };
         let result = match (stdout, stderr) {
             (Some(stdout), Some(stderr)) => {
                 let mut sources = [
                     PollFd::new(stdout, PollFlags::IN),
                     PollFd::new(stderr, PollFlags::IN),
                 ];
-                rustix::event::poll(&mut sources, Some(&timeout))
+                rustix::event::poll(&mut sources, timeout.as_ref())
             }
             (Some(source), None) | (None, Some(source)) => {
                 let mut sources = [PollFd::new(source, PollFlags::IN)];
-                rustix::event::poll(&mut sources, Some(&timeout))
+                rustix::event::poll(&mut sources, timeout.as_ref())
             }
             (None, None) => return Err(invalid("guest observer has no open output to wait for")),
         };
@@ -267,7 +275,7 @@ fn wait(
     use std::os::windows::io::AsSocket as _;
     crate::windows::sys::readable_pair(
         [stdout.map(Socket::as_socket), stderr.map(Socket::as_socket)],
-        crate::guest::managed::gpu_remaining(budget)?,
+        budget.remaining()?,
     )
     .map_err(|why| Refusal::os("waiting for guest observer output", why))
 }
@@ -294,37 +302,52 @@ mod tests {
         assert_eq!(capture.bytes().unwrap(), b"ab");
     }
 
-    /// AC-T7.4.1: actual asked-socket data and independent EOFs drain without a
-    /// copier/extra reader owner. This is a local pipe control, not GPU proof.
-    #[cfg(unix)]
+    /// The review's C-9, (c2) (decision 9): a GPU create's observer drain whose budget follows its guest waits with no
+    /// timeout, as its output comes and ends, on every OS; actual asked-socket data and independent EOFs drain without a
+    /// copier or another reader (AC-T7.4.1; a local stream control, not GPU proof). Do: write to two stream pairs and close their writers, then
+    /// drain them with a budget that follows. Expect both streams' bytes and both EOFs, with no refusal.
     #[test]
-    fn two_actual_guest_style_sockets_require_both_stream_ends() {
+    fn c9_c2_a_following_drain_waits_for_its_output_with_no_timeout() {
         use std::io::Write as _;
-        use std::os::fd::OwnedFd;
-        let (out, mut out_writer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (err, mut err_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (out, mut out_writer) = stream_pair();
+        let (err, mut err_writer) = stream_pair();
         out_writer.write_all(b"out").unwrap();
         err_writer.write_all(b"err").unwrap();
         drop((out_writer, err_writer));
         let mut streams = Streams::new(hex_api::Given {
             stdin: None,
-            stdout: Some(OwnedFd::from(out)),
-            stderr: Some(OwnedFd::from(err)),
+            stdout: Some(out),
+            stderr: Some(err),
         })
         .unwrap();
         let mut stdout = Captured::new(3).unwrap();
         let mut stderr = Captured::new(3).unwrap();
-        // The drain spends its observer attempt's budget, a GPU create's (`managed::gpu_create`).
         streams
-            .drain(
-                &mut stdout,
-                &mut stderr,
-                crate::guest::managed::gpu_create().unwrap(),
-            )
+            .drain(&mut stdout, &mut stderr, Budget::following())
             .unwrap();
         assert_eq!(stdout.bytes().unwrap(), b"out");
         assert_eq!(stderr.bytes().unwrap(), b"err");
         assert_eq!((stdout.end, stderr.end), (End::Eof, End::Eof));
         assert!(streams.stdout.is_none() && streams.stderr.is_none());
+    }
+
+    /// A connected stream pair: its reader's end as a guest observer's output is given, and its writer.
+    #[cfg(unix)]
+    fn stream_pair() -> (hex_api::End, std::os::unix::net::UnixStream) {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        (std::os::fd::OwnedFd::from(reader), writer)
+    }
+
+    /// A connected loopback socket pair: its reader's end as a guest observer's output is given (a relay socket), and its
+    /// writer.
+    #[cfg(windows)]
+    fn stream_pair() -> (hex_api::End, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let writer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        (
+            hex_api::End::Socket(std::os::windows::io::OwnedSocket::from(reader)),
+            writer,
+        )
     }
 }

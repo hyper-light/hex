@@ -83,7 +83,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
   of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
-  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `0290f1e9f` or later).
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `fa953e3ce` or later).
   Every run asks its agent-control endpoint of the class's own key (D238, D252): a signal but KILL reaches each member
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire

@@ -347,16 +347,14 @@ fn observed(dir: &std::path::Path, deleted: bool) -> Observed {
     })
     .unwrap();
     let native_calls = Arc::new(AtomicUsize::new(0));
-    // One observer attempt's budget, a GPU create's (`managed::gpu_create`).
-    let budget = managed::gpu_create().unwrap();
+    // One observer attempt's budget, which follows its guest as a GPU create's does (the review's C-9, (c2)).
+    let budget = managed::Budget::following();
     let worker = std::thread::Builder::new()
         .name("observer-known-facts".into())
         .spawn(move || failed_workload(peer, stdout, stderr, budget, deleted))
         .unwrap();
-    let connected = Client::connect_before(
-        triomphe::Arc::clone(&link),
-        managed::gpu_deadline(budget).unwrap(),
-    );
+    // A GPU create's budget follows its guest (the review's C-9): its connection is made with no deadline.
+    let connected = Client::connect(triomphe::Arc::clone(&link));
     let setup_ok = connected.is_ok();
     let result = match connected {
         Ok(client) => {
