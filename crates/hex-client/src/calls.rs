@@ -614,6 +614,12 @@ pub(crate) fn protocol_ready(
     }
 }
 
+/// Waits until `conn` has something to read or has ended, at most `wait` (none: until it does), for a read that follows
+/// its connection rather than a deadline (decision 9). An interrupted wait finds nothing.
+pub(crate) fn readable(conn: Handle<'_>, wait: Option<Duration>) -> Result<(), Refusal> {
+    poll_for(conn, PollFlags::IN, None, wait).map(drop)
+}
+
 fn poll_for(
     conn: Handle<'_>,
     flags: PollFlags,
