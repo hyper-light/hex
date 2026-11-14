@@ -643,15 +643,26 @@ fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, R
 /// read before, which no longer says the vCPU's time now), a count other than the VM's size, or time of vCPUs the
 /// VM no longer has, which no vCPU of its size holds.
 fn per_vcpu(stats: &Stats, vcpus: u32) -> Result<Vec<u64>, Refusal> {
-    let unread = |why: String| Refusal::Os {
-        op: "reading a Shards image VM's guest time per vCPU",
-        why,
-    };
+    let op = "reading a Shards image VM's guest time per vCPU";
+    let unread = |why: String| Refusal::Os { op, why };
     let microvm = stats
         .microvm
         .as_ref()
         .ok_or_else(|| unread("its run host told nothing of its microVM".to_owned()))?;
     let times = microvm.guest.as_ref().map_err(|why| unread(why.clone()))?;
+    vcpus_ns(times, vcpus, op)
+}
+
+/// What each of a VM's `vcpus` vCPUs has run of its guest, by index, as its VM process read it (`GUEST_TIME`; an image
+/// run's stats, D241, and a managed guest's use, D260, one form): each only grows. Refused, naming why under `op`, never
+/// read as none: time of vCPUs the VM no longer has, which no vCPU of its size holds; a count other than the VM's size;
+/// or a vCPU this read missed (Shards keeps the most it read before, which no longer says the vCPU's time now).
+pub(super) fn vcpus_ns(
+    times: &shards_api::image::GuestTimes,
+    vcpus: u32,
+    op: &'static str,
+) -> Result<Vec<u64>, Refusal> {
+    let unread = |why: String| Refusal::Os { op, why };
     if times.departed_ns != 0 {
         return Err(unread(format!(
             "{} ns ran on vCPUs the VM no longer has",
@@ -660,7 +671,7 @@ fn per_vcpu(stats: &Stats, vcpus: u32) -> Result<Vec<u64>, Refusal> {
     }
     if u32::try_from(times.vcpus.len()).ok() != Some(vcpus) {
         return Err(unread(format!(
-            "its run host told {} vCPUs' guest time for a VM of {vcpus} vCPUs",
+            "{} vCPUs' guest time told for a VM of {vcpus} vCPUs",
             times.vcpus.len()
         )));
     }

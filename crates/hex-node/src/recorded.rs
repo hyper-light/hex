@@ -50,6 +50,19 @@ pub struct RecoverySummary {
     pub node_vm_ends: crate::store::NodeVmEnds,
 }
 
+/// Why a native owner that runs no node VM refuses `call` about node VM `run` (joint plan step 39).
+fn no_node_vm(run: hex_api::NodeRun, call: &str) -> Refusal {
+    let name: String = run
+        .bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Refusal::Invalid {
+        what: "node VM",
+        why: format!("run {name}: this native owner runs no node VM, so it has no {call} of one"),
+    }
+}
+
 /// Why recovery keeps a Shards image box's record and claim: its run is an earlier node process's, which
 /// Shards' image boot can neither take back nor prove ended (docs/design/shards-image-class.md §5).
 pub(crate) const IMAGE_HELD: &str = "a Shards image VM's run of an earlier node process: Shards' image \
@@ -290,6 +303,35 @@ pub trait Recover: Runtime {
         })
     }
 
+    /// Joint plan step 39 (place 3): what node VM `run` costs its host, its run's microVM part (D241), read as an image
+    /// VM's is. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<hex_api::HostUse, Refusal> {
+        Err(no_node_vm(run, "host_use"))
+    }
+
+    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D191, D247), its run's own
+    /// as its run host said it as the run started. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+        Err(no_node_vm(run, "rate_period"))
+    }
+
+    /// Joint plan step 39 (place 3): holds node VM `run`'s vCPUs together to `rate` milli-CPU through its run's rate
+    /// (D247), as an image VM's are held. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(no_node_vm(run, "rate"))
+    }
+
+    /// Joint plan step 39 (place 3): stops node VM `run`'s run, the charge learner's last resort (C5), its end kept in
+    /// its row. Refused, typed, by a native owner that runs no node VM.
+    fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
+        Err(no_node_vm(run, "stop"))
+    }
+
     /// Joint plan step 14 (D255): asks the governor of managed VM `record` to hold its vCPUs to `rate` milli-CPU, through
     /// the guest this owner boots it in (`GuestRuntime::managed_rate`). An owner that boots no managed guest has no
     /// governor to ask: its platform's cap is to hold the VM, told why.
@@ -316,6 +358,30 @@ pub trait Recover: Runtime {
     ) -> Result<Option<std::time::Duration>, Refusal> {
         let _ = record;
         Ok(None)
+    }
+
+    /// Joint plan step 14 (D260): managed VM `record`'s vCPUs' guest time, as its VM process answers its use, through
+    /// the guest this owner boots it in (`GuestRuntime::managed_guest_time`). An owner that boots no managed guest reads
+    /// none apart, told why.
+    fn managed_guest_time(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        let _ = record;
+        Ok(hex_runtime::guest::ManagedGuestTime::Unheld(
+            "this native owner boots no managed guest whose use it asks".to_owned(),
+        ))
+    }
+
+    /// Joint plan step 14 (D260): how long managed VM `record`'s VM process has run, from its start as its record names
+    /// it (`init`, on its OS's own clock) to now. Refused, typed, by an owner that holds no managed VM.
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        let _ = record;
+        Err(Refusal::Platform {
+            what: "a managed VM's life",
+            platform: std::env::consts::OS,
+            why: "this native owner holds no managed VM".to_owned(),
+        })
     }
 
     /// Joint plan step 14 (C4): caps the managed VM's CPU at `rate` milli-CPU, its share as the charge learner
@@ -509,6 +575,19 @@ fn uncertain(id: &BoxId, why: &str) -> Refusal {
         },
         Err(error) => error,
     }
+}
+
+/// Joint plan step 14 (D260): the start of managed VM `record`'s VM process, as its record names it (`init`, on its OS's
+/// own clock, Shards' `Identity::started`): refused, typed, for a record that names none.
+#[cfg(any(target_os = "macos", windows))]
+fn started(record: &BoxRecord) -> Result<u64, Refusal> {
+    record
+        .init
+        .map(|init| init.start_ticks)
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a managed VM's life",
+            why: format!("box {}'s record names no VM process", record.spec.id),
+        })
 }
 
 fn broken(message: &'static str) -> Refusal {
@@ -2206,64 +2285,124 @@ struct Managed<'a, R> {
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
     fn usage(&self, holder: charges::Holder<'_>) -> Result<Usage, Refusal> {
-        let charges::Holder::Box(record) = holder;
-        self.runtime.managed_usage(NativeRecord::Box(record))
+        match holder {
+            charges::Holder::Box(record) => self.runtime.managed_usage(NativeRecord::Box(record)),
+            // A node VM is read by its run's host use alone, as an image VM is (`charges::Read::of`).
+            charges::Holder::Node { .. } => Err(Refusal::Invalid {
+                what: "a node VM's use",
+                why: "a node VM is read by its run's host use, as an image VM is".to_owned(),
+            }),
+        }
+    }
+
+    fn guest_time(
+        &self,
+        holder: charges::Holder<'_>,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        match holder {
+            charges::Holder::Box(record) => self.runtime.managed_guest_time(record),
+            // A node VM's vCPUs' guest time comes with its run's host use, as an image VM's does (D241).
+            charges::Holder::Node { .. } => Err(Refusal::Invalid {
+                what: "a node VM's guest time",
+                why: "a node VM's guest time comes with its run's host use".to_owned(),
+            }),
+        }
+    }
+
+    fn life(&self, holder: charges::Holder<'_>) -> Result<std::time::Duration, Refusal> {
+        match holder {
+            charges::Holder::Box(record) => self.runtime.managed_life(record),
+            // A node VM's life comes with its run's host use, its window, as an image VM's does.
+            charges::Holder::Node { .. } => Err(Refusal::Invalid {
+                what: "a node VM's life",
+                why: "a node VM's life comes with its run's host use".to_owned(),
+            }),
+        }
     }
 
     fn host_use(&self, holder: charges::Holder<'_>) -> Result<hex_api::HostUse, Refusal> {
-        let charges::Holder::Box(record) = holder;
-        self.runtime.host_use(&record.spec.id)
+        match holder {
+            charges::Holder::Box(record) => self.runtime.host_use(&record.spec.id),
+            charges::Holder::Node { row, .. } => self.runtime.node_vm_host_use(row.run),
+        }
     }
 
     fn rate_period(
         &self,
         holder: charges::Holder<'_>,
     ) -> Result<Option<std::time::Duration>, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let record = match holder {
+            charges::Holder::Box(record) => record,
+            charges::Holder::Node { row, .. } => {
+                return self.runtime.node_vm_rate_period(row.run).map(Some);
+            }
+        };
         if charges::running_image(record) {
             return self.runtime.image_rate_period(record).map(Some);
         }
         self.runtime.managed_rate_period(record)
     }
 
-    /// D255: a managed VM's governor first, through the guest its node boots it in. Where its VM process takes no rate,
-    /// its platform's cap holds it, told why. On Windows its job's CPU rate is set at the same rate besides, the hard
-    /// ceiling: the job covers the VMM's own CPU too, so it binds first, the learner holding none apart (owed on
-    /// Shards: a managed guest's per-vCPU guest time). On macOS the CPU control stays at the VM's ceiling, a backstop.
+    /// D255, D260: the VM's governor holds its vCPUs to its share less its VMM's own (`Cap::governor`): an image VM's
+    /// through its rate (D247), a managed VM's through the guest its node boots it in. On Windows a managed VM's job's
+    /// CPU rate is set at the share beside, the hard ceiling over its VMM's own and its vCPUs' together, which binds
+    /// only while its VMM's own isn't read apart; on macOS the CPU control stays at the VM's ceiling, a backstop. Where
+    /// its VM process takes no rate, its platform's cap holds it at the share, told why.
     fn set_rate(
         &self,
         holder: charges::Holder<'_>,
-        rate: u64,
+        cap: charges::Cap<'_>,
     ) -> Result<hex_api::RateHeld, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let record = match holder {
+            charges::Holder::Box(record) => record,
+            // A node VM is a D231 image run, held through its run's rate as an image VM is (place 3).
+            charges::Holder::Node { row, .. } => {
+                return self
+                    .runtime
+                    .node_vm_rate(row.run, Some(cap.governor()))
+                    .map(|_| cap.held(false));
+            }
+        };
         if charges::running_image(record) {
             return self
                 .runtime
-                .rate(&record.spec.id, std::num::NonZeroU64::new(rate))
-                .map(|_| hex_api::RateHeld::Governor);
+                .rate(&record.spec.id, Some(cap.governor()))
+                .map(|_| cap.held(false));
         }
-        match self.runtime.managed_rate(record, rate)? {
-            hex_runtime::guest::ManagedRate::Governor { .. } if cfg!(windows) => {
-                self.runtime
-                    .set_managed_rate(NativeRecord::Box(record), rate)?;
-                Ok(hex_api::RateHeld::GovernorUnderJob)
+        match self.runtime.managed_rate(record, cap.governor().get())? {
+            hex_runtime::guest::ManagedRate::Governor { .. } => {
+                if cfg!(windows) {
+                    self.runtime
+                        .set_managed_rate(NativeRecord::Box(record), cap.share)?;
+                }
+                Ok(cap.held(cfg!(windows)))
             }
-            hex_runtime::guest::ManagedRate::Governor { .. } => Ok(hex_api::RateHeld::Governor),
             hex_runtime::guest::ManagedRate::Platform(why) => {
                 self.runtime
-                    .set_managed_rate(NativeRecord::Box(record), rate)?;
+                    .set_managed_rate(NativeRecord::Box(record), cap.share)?;
                 Ok(hex_api::RateHeld::Platform(why.to_string()))
             }
         }
     }
 
     fn set_room(&self, holder: charges::Holder<'_>, room: i64) -> Result<(), Refusal> {
-        let charges::Holder::Box(record) = holder;
-        self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
+        match holder {
+            charges::Holder::Box(record) => {
+                self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
+            }
+            // Its guest isn't told its room here yet: the learner tells an image box's alone (D188).
+            charges::Holder::Node { .. } => Err(Refusal::Invalid {
+                what: "a node VM's room",
+                why: "the charge learner tells an image box's guest its room alone".to_owned(),
+            }),
+        }
     }
 
     fn stop(&self, holder: charges::Holder<'_>) -> Result<(), Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let record = match holder {
+            charges::Holder::Box(record) => record,
+            charges::Holder::Node { row, .. } => return self.runtime.stop_node_vm(row.run),
+        };
         if charges::running_image(record) {
             return self.runtime.signal(&record.spec.id, Signal::KILL);
         }
@@ -2354,26 +2493,27 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         Ok(crate::facts::capacity(self.books.store.directory(), self.books.authority_id()?)?.total)
     }
 
-    /// One window of the charge learner (joint plan step 14): the running managed VMs in the node's records, within the
-    /// machine less what its native boxes are capped at (C4: their bookings off the fleet's budget). Its failure is
-    /// kept for the capacity answers. Answers the window it reads over next.
+    /// One window of the charge learner (joint plan step 14): the running managed VMs in the node's records, and its node
+    /// VMs (step 39, place 3), within the machine less what its native boxes are capped at (C4: their bookings off the
+    /// fleet's budget). Its failure is kept for the capacity answers. Answers the window it reads over next.
     fn learn_window(&self) -> Option<std::time::Duration> {
         let (shared, _) = self.books.charges.get()?;
-        let read = self
-            .books
-            .store
-            .all()
-            .and_then(|records| Ok((records, self.machine()?)));
+        let read =
+            self.books.store.all().and_then(|records| {
+                Ok((records, self.books.store.all_node_vms()?, self.machine()?))
+            });
         let Ok(mut learner) = shared.lock() else {
             return None;
         };
-        let (records, machine) = match read {
+        let (records, rows, machine) = match read {
             Ok(read) => read,
             Err(why) => {
                 learner.failed(why);
                 return learner.next_window();
             }
         };
+        // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
+        let band = charges::node_band(records.values());
         let records: Vec<BoxRecord> = records.into_values().flatten().collect();
         let io = Managed {
             runtime: &self.runtime,
@@ -2387,13 +2527,31 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let sorted = match charges::sort(&records, |holder| learner.learns(holder)) {
+        let mut sorted = match charges::sort(&records, |holder| learner.learns(holder)) {
             Ok(sorted) => sorted,
             Err(why) => {
                 learner.failed(why);
                 return learner.next_window();
             }
         };
+        // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
+        let nodes = charges::nodes(&rows, band).and_then(|nodes| {
+            sorted
+                .learned
+                .try_reserve(nodes.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "a window's VMs",
+                    bound: nodes.len(),
+                })?;
+            Ok(nodes)
+        });
+        match nodes {
+            Ok(nodes) => sorted.learned.extend(nodes),
+            Err(why) => {
+                learner.failed(why);
+                return learner.next_window();
+            }
+        }
         let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
             dim(&sorted.native).saturating_add(dim(&sorted.whole))
         };
@@ -2479,13 +2637,20 @@ impl Books {
         let Some((learner, _)) = self.charges.get() else {
             return Ok(());
         };
+        // Its node VMs' holdings too, each by its run (joint plan step 39, place 3).
+        let rows = self.store.all_node_vms()?;
+        let nodes = charges::nodes(&rows, charges::node_band(records.values()))?;
         learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
             .answer(
                 class,
                 capacity,
-                records.values().flatten().map(charges::Holder::Box),
+                records
+                    .values()
+                    .flatten()
+                    .map(charges::Holder::Box)
+                    .chain(nodes),
             )
     }
 
@@ -2935,6 +3100,10 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::set_managed_rate(self, record, rate)
     }
 
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        hex_runtime::macos::MacRuntime::managed_life(self, started(record)?)
+    }
+
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::stop_managed(self, record)
     }
@@ -3043,6 +3212,10 @@ impl Recover for hex_runtime::windows::WinRuntime {
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         hex_runtime::windows::WinRuntime::set_managed_rate(self, record, rate)
+    }
+
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        hex_runtime::windows::WinRuntime::managed_life(self, started(record)?)
     }
 
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
@@ -3252,6 +3425,18 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.guest().managed_rate_period(record)
     }
 
+    /// D260: the box's managed VM is booted in its guest runtime, whose use ask it is.
+    fn managed_guest_time(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        self.guest().managed_guest_time(record)
+    }
+
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        self.host().managed_life(record)
+    }
+
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         self.host().set_managed_rate(record, rate)
     }
@@ -3267,6 +3452,30 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247).
     fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
         self.guest().rate_period(&record.spec.id)
+    }
+
+    /// Joint plan step 39 (place 3): its node VM's host use, through its guest runtime's image class (D241).
+    fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<hex_api::HostUse, Refusal> {
+        self.guest().node_vm_host_use(run)
+    }
+
+    /// Joint plan step 39 (place 3): its node VM's run's rate period (D247).
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+        self.guest().node_vm_rate_period(run)
+    }
+
+    /// Joint plan step 39 (place 3): its node VM held through its run's rate (D247).
+    fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.guest().node_vm_rate(run, rate)
+    }
+
+    /// Joint plan step 39 (place 3): its node VM's run stopped, its end kept in its row.
+    fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
+        self.guest().stop_node_vm(run)
     }
 
     fn launch_managed(

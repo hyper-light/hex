@@ -77,6 +77,7 @@ is wired:
 | `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
+| `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
 alone ("Life alone at the node's local sites", above). A seed past its hang bound is waited for until it answers or
