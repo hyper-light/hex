@@ -1082,7 +1082,8 @@ fn image_made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str) -> Result<BoxId, S
     Ok(id)
 }
 
-/// Runs `case` on box `id`, then deletes it whatever the case found: a failed case leaves no VM.
+/// Runs `case` on box `id`, then deletes it whatever the case found: a failed case leaves no VM, and names every
+/// refusal, its own and its delete's (ROOT, 2026-11-14: the HVF run's HEX-IMG-4 told its KILL's alone).
 fn deleting(
     rt: &dyn Runtime,
     id: &BoxId,
@@ -1090,7 +1091,10 @@ fn deleting(
 ) -> Result<(), String> {
     let outcome = case();
     let deleted = rt.delete(id).map_err(|e| format!("delete: {e}"));
-    outcome.and(deleted)
+    match (outcome, deleted) {
+        (Err(own), Err(delete)) => Err(format!("{own}; {delete}")),
+        (outcome, deleted) => outcome.and(deleted),
+    }
 }
 
 fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
@@ -1874,6 +1878,20 @@ mod tests {
             still_running().is_some_and(|watch| took < watch),
             "HEX-RT-4 took {took:?}"
         );
+    }
+
+    /// ROOT, 2026-11-14 (the HVF run's HEX-IMG-4, whose delete's refusal went untold; AC-T7.4.1): a case that fails, and
+    /// whose delete of its box is refused too, names both refusals. Do: run a failing case on a box the runtime holds no
+    /// record of, so its delete is refused NoSuchBox. Expect: the failure names the case's own words and the delete's
+    /// refusal.
+    #[test]
+    fn a_failing_case_whose_delete_is_refused_names_both_refusals() {
+        let rt = SimRuntime::new();
+        let id = BoxId::new("never-made").unwrap();
+        let why = deleting(&rt, &id, || Err("the case's own failure".to_owned())).unwrap_err();
+        assert!(why.contains("the case's own failure"), "{why}");
+        let delete = format!("delete: {}", Refusal::NoSuchBox(id));
+        assert!(why.contains(&delete), "{why}");
     }
 
     /// The simulator, every KILL it takes answered `Lifecycle { Pending }`, and where `starts` every start too, as a
