@@ -131,6 +131,17 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with
   `closesocket`; native pipe ends keep their file ownership.
 
+  A guest whose link lends no VM identity (`guest::Link::lends_identity`), a node VM under shards-init, whose run's
+  endpoint takes this node's key alone (node-under-shards-init.md §5), has nothing to offer (the review's D-10). Its
+  exec goes as on Unix, the node's event-form client making the streams asked for, but each is a lane carried on a
+  pipe (`guest::lanes::Lanes::piped`): the stream's name written on the lane, then one thread copying the lane into
+  the pipe (stdout, stderr: the lane's own half ended once named) or the pipe into the lane (stdin). The caller gets
+  the pipe's end, a handle the Windows node gives as it gives a host box's. Its cost is one thread a stream, and the
+  cause is Shards': its socket lanes block per lane, each reader and writer waiting on a channel of its own, with no
+  try-read and no waker, so each stream's bridge holds a thread until Shards gives an evented lane API; then one
+  loop per node VM drives every lane and its pipes. That is half what each lane's bridge to a socket pair holds
+  (two threads), with no loopback TCP pair.
+
   Each offer consumes the existing in-flight and program budgets. A guest answer, cancellation and disconnect
   share one admission owner, including when the guest fails before the offer is registered. Failed/late offers
   queue `Release` in the program-bounded acknowledgement queue. Cancelling an uncommitted offer drops its
