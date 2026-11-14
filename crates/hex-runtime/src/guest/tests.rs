@@ -775,6 +775,11 @@ enum Boots {
     /// Shards backend: macOS and Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     Hung,
+    /// Its relay unanswered within any bound a dial gives, answering a dial that follows the guest with no clock
+    /// (`connect(port, Duration::MAX)`, Shards' `connect_while_runs` for a guest with no VM process of its own): a boot
+    /// slower than the slowest seen (the review's C-9).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    Late,
 }
 
 /// A stand-in for Shards whose guests boot as `plan` says, one entry a boot, recording each first
@@ -978,7 +983,9 @@ impl shards_api::Guest for PlannedGuest {
         match self.boots {
             Boots::Ready => Ok(Box::new(Looped(ready_relay()))),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            Boots::Hung => Err(shards_api::Refusal::Channel {
+            Boots::Late if patience == Duration::MAX => Ok(Box::new(Looped(ready_relay()))),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Boots::Hung | Boots::Late => Err(shards_api::Refusal::Channel {
                 port: _port,
                 why: format!("unanswered in {patience:?}"),
             }),
@@ -1237,6 +1244,34 @@ fn a_hung_guest_is_retired_and_booted_again() {
     assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
     assert_eq!(guests.stops.load(Ordering::SeqCst), 1);
     assert_eq!(rt.retired(), 1);
+}
+
+/// The review's C-9 (1) (AC-T7.4.1; decision 9: past W* the run-out is told and the wait follows its party, never a
+/// verdict at the bound): boot a guest whose relay answers no dial within a bound, only a dial that follows it, as a
+/// boot slower than the slowest seen does. Expect it followed to its answer: one boot, never stopped and booted again;
+/// and told no boot deadline on its command line (`hex.ready-ms`), so its relay keeps its own learned bounds.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn c9_a_first_boot_slower_than_w_star_is_followed_never_stopped_and_booted_again() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Late, Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.guest().unwrap();
+    assert_eq!(
+        (
+            guests.boots.load(Ordering::SeqCst),
+            guests.stops.load(Ordering::SeqCst)
+        ),
+        (1, 0),
+        "boots and stops"
+    );
+    let cmdlines = guests.cmdlines.lock().unwrap();
+    assert!(
+        cmdlines.iter().all(|line| !line.contains(READY_MS)),
+        "{cmdlines:?}"
+    );
 }
 
 /// HEX-GUEST-34: boot two guests that both hang: expect the caller refused by type, naming the boot and
