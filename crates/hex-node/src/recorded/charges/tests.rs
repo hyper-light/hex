@@ -512,6 +512,7 @@ fn books(dir: &std::path::Path) -> crate::recorded::Books {
         adopted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         last_boot: None,
         charges: std::sync::OnceLock::new(),
+        node_vm_ends: std::sync::Mutex::new(Vec::new()),
     }
 }
 
@@ -1597,7 +1598,11 @@ fn node_row(n: u8, phase: hex_api::NodeVmPhase) -> hex_core::record::NodeVmRecor
         allocation: cost().allocate(CapacityResources::default()).unwrap(),
         phase,
         diagnostics: None,
-        exit: (phase == hex_api::NodeVmPhase::Ended).then(|| hex_api::Exit::Signal(9)),
+        exit: if phase == hex_api::NodeVmPhase::Ended {
+            Some(hex_api::Exit::Signal(9))
+        } else {
+            None
+        },
         last_resort: None,
     }
 }
@@ -1647,14 +1652,18 @@ fn w39_the_last_resorts_intent_for_a_node_vm_is_written_into_its_row() {
     assert!(record_last_resort(&store, &holder, scope, None).unwrap());
     assert_eq!(row(&store).last_resort, None);
     assert!(
-        !record_last_resort(&store, &holder, Scope::Run(node_run(8)), Some(&node_end(7)))
-            .unwrap()
+        !record_last_resort(&store, &holder, Scope::Run(node_run(8)), Some(&node_end(7))).unwrap()
     );
     assert_eq!(row(&store).last_resort, None);
     let rowless = hex_api::LearnedHolder::Node(node_run(9));
     assert!(
-        !record_last_resort(&store, &rowless, Scope::Run(node_run(9)), Some(&node_end(9)))
-            .unwrap()
+        !record_last_resort(
+            &store,
+            &rowless,
+            Scope::Run(node_run(9)),
+            Some(&node_end(9))
+        )
+        .unwrap()
     );
 }
 
@@ -1672,8 +1681,9 @@ fn w39_a_node_vms_last_resort_end_is_read_back_at_start_into_the_learners_ends()
     unowned.last_resort = Some(node_end(5));
     leave_node_row(dir.path(), &ended);
     leave_node_row(dir.path(), &unowned);
-    let node =
-        std::sync::Arc::new(crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap());
+    let node = std::sync::Arc::new(
+        crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap(),
+    );
     let recovered = node.recover().unwrap();
     assert_eq!(
         recovered.node_vm_ends,

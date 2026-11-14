@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use hex_api::{Allocation, Exit, LearnedEnd, NodeRun, NodeVmPhase, Refusal};
+use hex_api::{Allocation, Exit, LearnedEnd, LearnedHolder, NodeRun, NodeVmPhase, Refusal};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_RECORD_BYTES, RECORD_VERSION};
@@ -43,8 +43,8 @@ fn damaged(why: &str) -> Refusal {
 }
 
 impl NodeVmRecord {
-    /// A record whole: this format's version, an image named, its receipt whole, and an exit where and only where its
-    /// run ended. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
+    /// A record whole: this format's version, an image named, its receipt whole, an exit where and only where its run
+    /// ended, and a last-resort end of its own VM's alone. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
     /// and units) and to booking no more than it charges: the node sized the VM, so no workload of a box's is kept
     /// for it to be rederived from.
     pub fn check(&self) -> Result<(), Refusal> {
@@ -61,6 +61,13 @@ impl NodeVmRecord {
             .is_some_and(|booked| !self.allocation.resources.holds(booked))
         {
             return Err(damaged("its receipt books past what it charges"));
+        }
+        if self
+            .last_resort
+            .as_ref()
+            .is_some_and(|end| end.id != LearnedHolder::Node(self.run))
+        {
+            return Err(damaged("its last-resort end names another holder"));
         }
         match (self.phase, self.exit.is_some()) {
             (NodeVmPhase::Ended, false) => Err(damaged("an ended run with no exit")),

@@ -449,6 +449,9 @@ struct Books {
         Mutex<charges::Learner>,
         Mutex<hex_wait::mpsc::SyncSender<()>>,
     )>,
+    /// Joint plan step 39, place 1: the last-resort ends a recovery read back from the node VM rows it let go, kept for
+    /// the charge learner, which starts after it ([`Recorded::start_charges`]); at most the rows a store scans.
+    node_vm_ends: Mutex<Vec<hex_api::LearnedEnd>>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1941,6 +1944,7 @@ impl<R: Recover> Recorded<R> {
                 adopted: Mutex::new(BTreeSet::new()),
                 last_boot,
                 charges: std::sync::OnceLock::new(),
+                node_vm_ends: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -1965,11 +1969,18 @@ impl<R: Recover> Recorded<R> {
         self.runtime.initialize_native()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
+        let settled = self.books.store.settle_node_vms()?;
         let mut summary = RecoverySummary {
             boot_unknown: self.books.store.boot_unread().map(str::to_owned),
-            node_vms: self.books.store.settle_node_vms()?.rows,
+            node_vms: settled.rows,
+            node_vm_ends: crate::store::NodeVmEnds::of(&settled.ends)?,
             ..RecoverySummary::default()
         };
+        self.books
+            .node_vm_ends
+            .lock()
+            .map_err(|_| broken("the node VM ends' lock was poisoned"))?
+            .extend(settled.ends);
         let torn = self.remove_torn_before_this_boot(torn, &mut summary)?;
         self.recover_orphans(&records, torn, &mut summary)?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
@@ -2280,7 +2291,15 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         self: &Arc<Self>,
     ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
         let managed = self.runtime.charge_window();
-        let learner = charges::Learner::new(managed.as_ref().ok().copied(), self.machine()?)?;
+        let mut learner = charges::Learner::new(managed.as_ref().ok().copied(), self.machine()?)?;
+        // What its node's recovery read back from the node VM rows it let go (joint plan step 39, place 1).
+        learner.carry_ended(std::mem::take(
+            &mut *self
+                .books
+                .node_vm_ends
+                .lock()
+                .map_err(|_| broken("the node VM ends' lock was poisoned"))?,
+        ))?;
         let window = learner.next_window();
         let mut unheld = Vec::new();
         unheld

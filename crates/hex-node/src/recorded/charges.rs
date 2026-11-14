@@ -576,7 +576,9 @@ impl LastResort {
     /// Carries `ends`, the last-resort ends of the node VMs its node's start read back from their rows before letting
     /// them go (joint plan step 39, place 1), into its ends, each a Shards VM's.
     pub(crate) fn carry(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
-        let _ = ends;
+        for end in &ends {
+            self.remember(Class::Shards, end)?;
+        }
         Ok(())
     }
 
@@ -682,31 +684,32 @@ impl LastResort {
 /// write waits for the box's record turn as every change of its record does (`Store::update`), by decision 9's rule
 /// (the person's, 2026-11-13; ROOT's item 2b): following the change under way, this process's own thread, until it
 /// lets go, a hold past the slowest seen told to the census as a run-out (`store.turns`), never refused at a bound of
-/// its own (`turns::tests::a_wait_past_the_slowest_hold_follows_the_holder_and_learns_its_hold`).
+/// its own (`turns::tests::a_wait_past_the_slowest_hold_follows_the_holder_and_learns_its_hold`). A node VM's goes into
+/// its row (joint plan step 39, place 1), its lifetime its run, under the lock every write of its row takes
+/// (`Store::update_node_vm`).
 pub(crate) fn record_last_resort(
     store: &Store,
     id: &LearnedHolder,
     scope: Scope,
     end: Option<&LearnedEnd>,
 ) -> Result<bool, Refusal> {
-    let id = match id {
-        LearnedHolder::Box(id) => id,
-        // A node VM's row keeps its own (step 39); no learner holds one yet.
-        LearnedHolder::Node(_) => {
-            return Err(Refusal::Broken(
-                "a node VM's last resort is kept in its row, which no learner here holds"
-                    .to_owned(),
-            ));
-        }
-    };
     let end = end.map(LearnedEnd::try_clone).transpose()?;
-    store.update(id, move |record| {
-        if Scope::of(record) != Some(scope) {
-            return false;
+    match id {
+        LearnedHolder::Box(id) => store.update(id, move |record| {
+            if Scope::of(record) != Some(scope) {
+                return false;
+            }
+            record.last_resort = end;
+            true
+        }),
+        LearnedHolder::Node(run) if scope == Scope::Run(*run) => {
+            store.update_node_vm(run, move |row| {
+                row.last_resort = end;
+                true
+            })
         }
-        record.last_resort = end;
-        true
-    })
+        LearnedHolder::Node(_) => Ok(false),
+    }
 }
 
 /// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
