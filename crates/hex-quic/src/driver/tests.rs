@@ -69,3 +69,36 @@ fn an_endpoint_that_names_its_peers_admits_their_connections_alone() {
     );
     assert_eq!(identify(&mut enrolled, &kiln, Some(peer_id(MALLORY))), None);
 }
+
+/// The review's E-1 (a holder that stops reading, then reads again), AC-T7.4.1, Q3: a lane whose owner reads faster than
+/// the lane carries holds back the Credit its reads grant, and keeps its peer. Do: hold back on one lane what the driver
+/// holds back while QUIC hasn't taken the lane's last frame as its owner reads frame after frame: a Credit each, of
+/// each frame's bytes, two more than the lane holds back of other frames ([`super::WAITING`]). Expect: none refused, and
+/// what the lane holds back grants the peer every byte read.
+#[test]
+fn a_lane_its_owner_reads_faster_than_it_carries_holds_back_its_credit_and_keeps_its_peer() {
+    use std::collections::VecDeque;
+
+    use hex_core::lanes::{DATA_BOUND, Kind};
+
+    use super::{WAITING, hold_back};
+
+    let frame = u64::try_from(DATA_BOUND).unwrap();
+    let reads = WAITING + 2;
+    let mut waiting = VecDeque::new();
+    for read in 0..reads {
+        assert_eq!(
+            hold_back(&mut waiting, Kind::Credit, frame.to_be_bytes().to_vec()),
+            Ok(()),
+            "the Credit of read {read} refused: its peer would be refused Busy and the connection closed"
+        );
+    }
+    let granted: u64 = waiting
+        .iter()
+        .map(|(kind, payload)| {
+            assert_eq!(*kind, Kind::Credit);
+            u64::from_be_bytes(payload.as_slice().try_into().unwrap())
+        })
+        .sum();
+    assert_eq!(granted, frame * u64::try_from(reads).unwrap());
+}

@@ -232,6 +232,24 @@ struct PeerState {
 /// last is gone. Past it the peer reads no lane while ending connections, and its connection is closed.
 const WAITING: usize = 6;
 
+/// A lane that holds back more than [`WAITING`] frames: its peer is refused Busy, and its connection closed.
+#[derive(Debug, PartialEq, Eq)]
+struct Overfull;
+
+/// Holds `kind`'s `payload` back behind what lane's `waiting` holds, in order, while QUIC hasn't taken its last frame;
+/// refused past [`WAITING`].
+fn hold_back(
+    waiting: &mut VecDeque<(Kind, Vec<u8>)>,
+    kind: Kind,
+    payload: Vec<u8>,
+) -> Result<(), Overfull> {
+    if waiting.len() >= WAITING {
+        return Err(Overfull);
+    }
+    waiting.push_back((kind, payload));
+    Ok(())
+}
+
 /// Connections accepted for a port and not yet taken by its owner.
 #[derive(Default)]
 pub(crate) struct Accepts {
@@ -889,13 +907,11 @@ impl Driver {
                 }
             }
         }
-        if waiting.len() >= WAITING {
+        if hold_back(waiting, kind, payload).is_err() {
             self.ep
                 .refuse(Instant::now(), peer, hyper_transport::Refusal::Busy);
             self.peer_gone(peer, Refused::Broken);
-            return;
         }
-        waiting.push_back((kind, payload));
     }
 }
 
