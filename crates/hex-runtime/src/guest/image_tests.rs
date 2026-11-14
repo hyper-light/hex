@@ -5491,11 +5491,20 @@ fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
         Run::Booting(Arc::clone(&slot), Arc::new(BootStop::new())),
     )
     .unwrap();
-    slot.put(Err(ImageRefusal::Ended(RunEnd::Stopped)));
+    slot.put(Err(ImageRefusal::Ended(RunEnded::unused(
+        RunEnd::Stopped,
+        Unused::NotStarted,
+    ))));
     let waits = waits().unwrap();
     let taken = runs.booted(&id, &slot, &waits).unwrap();
     assert!(
-        matches!(taken, Err(ImageRefusal::Ended(RunEnd::Stopped))),
+        matches!(
+            taken,
+            Err(ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }))
+        ),
         "{taken:?}"
     );
     assert_eq!(

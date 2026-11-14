@@ -638,7 +638,10 @@ impl End {
     /// ended it, KILL; any other an end Hex can't read the exit of, in Shards' words (the review's B-7).
     fn of_refused(why: &ImageRefusal) -> Self {
         match why {
-            ImageRefusal::Ended(RunEnd::Stopped) => Self::of(&RunEnd::Stopped),
+            ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }) => Self::of(&RunEnd::Stopped),
             why => Self::unknown(Some(why.to_string())),
         }
     }
@@ -1236,7 +1239,13 @@ impl Runs {
                 Some((Err(why), took)) => {
                     // A boot its delete's stop ended mid-boot, as `settle` finds it, is no boot's answer: the time to
                     // the stop is no sample (the review's B-7).
-                    if !matches!(why, ImageRefusal::Ended(RunEnd::Stopped)) {
+                    if !matches!(
+                        why,
+                        ImageRefusal::Ended(RunEnded {
+                            end: RunEnd::Stopped,
+                            ..
+                        })
+                    ) {
                         waits.boot.refused(took);
                     }
                     *run = Run::Ended(End::of_refused(&why));
