@@ -2927,8 +2927,8 @@ pub enum Upstream {
     NestedChannel,
     /// The period a Shards VM's rate holds over (D247's hold is D191's governor, its period CFS's), as Shards' API
     /// says it. Given since Shards 1acbf2cb9 (`ImageGuest::rate_period`, image channel version 17): each run's own, as
-    /// its run host said it as the run started, which the charge learner reads each window (joint plan step 14, C1), so
-    /// no call awaits it now. Its tag stays, the wire being append-only.
+    /// its VM says it with each rate's answer since image channel version 31, which the charge learner reads each window
+    /// (joint plan step 14, C1), so no call awaits it now. Its tag stays, the wire being append-only.
     RatePeriod,
 }
 

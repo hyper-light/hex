@@ -292,10 +292,13 @@ pub trait Recover: Runtime {
     }
 
     /// Joint plan step 14 (C1): the period Shards image VM `record`'s rate holds over (Shards' D247, its hold D191's
-    /// governor), its run's own as its run host said it as the run started: the window the charge learner caps it
-    /// through its rate over, read each window, never a number of Hex's. Refused, typed, by a native owner that runs
-    /// no image VM.
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+    /// governor), its run's own as its VM said it with its last rate's answer, none before its first (Shards' image
+    /// channel v31): the window the charge learner caps it through its rate over, read each window, never a number of
+    /// Hex's. Refused, typed, by a native owner that runs no image VM.
+    fn image_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         Err(Refusal::Invalid {
             what: "rate_period",
             why: format!(
@@ -313,8 +316,12 @@ pub trait Recover: Runtime {
     }
 
     /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D191, D247), its run's own
-    /// as its run host said it as the run started. Refused, typed, by a native owner that runs no node VM.
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+    /// as its VM said it with its last rate's answer, none before its first (Shards' image channel v31). Refused, typed,
+    /// by a native owner that runs no node VM.
+    fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         Err(no_node_vm(run, "rate_period"))
     }
 
@@ -2440,11 +2447,11 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         let record = match holder {
             charges::Holder::Box(record) => record,
             charges::Holder::Node { row, .. } => {
-                return self.runtime.node_vm_rate_period(row.run).map(Some);
+                return self.runtime.node_vm_rate_period(row.run);
             }
         };
         if charges::running_image(record) {
-            return self.runtime.image_rate_period(record).map(Some);
+            return self.runtime.image_rate_period(record);
         }
         self.runtime.managed_rate_period(record)
     }
@@ -3697,8 +3704,12 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().cap_cycle(rate)
     }
 
-    /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247).
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247): its last
+    /// rate's answer's, none before its first (Shards' image channel v31).
+    fn image_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         self.guest().rate_period(&record.spec.id)
     }
 
@@ -3707,8 +3718,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.guest().node_vm_host_use(run)
     }
 
-    /// Joint plan step 39 (place 3): its node VM's run's rate period (D247).
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 39 (place 3): its node VM's run's rate period (D247), none before its first rate's answer.
+    fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         self.guest().node_vm_rate_period(run)
     }
 

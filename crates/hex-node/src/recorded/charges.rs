@@ -411,7 +411,8 @@ pub(crate) trait Managed {
     /// The machine's memory and disk free now, as its facts read them (C7; the review's A-10), read after a window's VMs
     /// and boxes: a VM's or a box's growth between the reads shrinks the fleet's budget, never swells it.
     fn free(&self) -> Result<CapacityResources, Refusal>;
-    /// The period the VM's rate holds over: a Shards image VM's its run's own (D247's `ImageGuest::rate_period`); a
+    /// The period the VM's rate holds over: a Shards image VM's its run's own, as its last rate's answer said it, none
+    /// before its first (D247's `ImageGuest::rate_period`; Shards' image channel v31); a
     /// managed VM's its governor's, as its VM process last answered (D255), none before its first answer or while its
     /// platform's cap holds it.
     fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal>;

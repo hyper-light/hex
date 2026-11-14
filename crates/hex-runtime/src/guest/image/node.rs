@@ -114,7 +114,16 @@ impl ImageClass {
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
             return Err(why);
         }
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Party(Arc::clone(&slot)), stop) {
+        // Its diagnostics held within the disk its allocation was admitted with, as an image box's are (the review's B-9).
+        let kept_within = vm.allocation.resources.disk_bytes;
+        if let Err(why) = boot_on_its_thread(
+            images,
+            spec,
+            kept,
+            kept_within,
+            Party(Arc::clone(&slot)),
+            stop,
+        ) {
             image.runs.insert(vm.run, Run::Ended(End::unknown(None)))?;
             image.runs.forget(vm.run)?;
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
@@ -332,9 +341,10 @@ impl ImageClass {
         }
     }
 
-    /// The period node VM `run`'s governor holds its rate over (joint plan step 39, place 3; D191, D247), as its run host
-    /// said it as the run started: the window its node's learner caps it over, never a number of Hex's.
-    pub fn rate_period_node(&self, run: NodeRun) -> Result<Duration, Refusal> {
+    /// The period node VM `run`'s governor holds its rate over (joint plan step 39, place 3; D191, D247), as its VM said
+    /// it with its last rate's answer (Shards' image channel v31), none before its first: the window its node's learner
+    /// caps it over, never a number of Hex's.
+    pub fn rate_period_node(&self, run: NodeRun) -> Result<Option<Duration>, Refusal> {
         Ok(self.node_guest(run)?.rate_period())
     }
 

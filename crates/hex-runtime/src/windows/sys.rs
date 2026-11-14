@@ -712,55 +712,6 @@ impl Job {
         Ok(list)
     }
 
-    /// The ids of the processes live in the job now (`JobObjectBasicProcessIdList`), read with room for as many as a
-    /// first read counts ([`Self::live_processes`]'s), so the list is bounded by the job's own count (CLAUDE.md §2); a
-    /// member that came between the two reads isn't listed, and is at the next read. Its header, two DWORDs, takes one
-    /// ULONG_PTR on the 64-bit Windows Hex runs on (CLAUDE.md §12), its ids one each after it, and the buffer is never
-    /// less than the structure itself, a header and one id, which a smaller one Windows refuses (ERROR_BAD_LENGTH).
-    pub fn member_ids(&self) -> io::Result<Vec<u32>> {
-        let invalid = || io::Error::from(io::ErrorKind::InvalidData);
-        let count = usize::try_from(self.process_list()?.NumberOfAssignedProcesses)
-            .map_err(|_| invalid())?;
-        let room = count.max(1).checked_add(1).ok_or_else(invalid)?;
-        let mut list: Vec<usize> = Vec::new();
-        list.try_reserve_exact(room)
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
-        list.resize(room, 0);
-        let bytes = room
-            .checked_mul(size_of::<usize>())
-            .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(invalid)?;
-        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `list`, which is alive and that long for
-        // this call; it writes the header and as many ids as fit, saying how many in the header.
-        let ok = unsafe {
-            QueryInformationJobObject(
-                self.0.raw(),
-                JobObjectBasicProcessIdList,
-                list.as_mut_ptr().cast(),
-                bytes,
-                null_mut(),
-            )
-        };
-        if ok == 0 {
-            let error = last_error();
-            if error.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
-                return Err(error);
-            }
-        }
-        let header = list.first().copied().ok_or_else(invalid)?.to_ne_bytes();
-        let listed = header
-            .get(4..8)
-            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-            .map(u32::from_ne_bytes)
-            .and_then(|listed| usize::try_from(listed).ok())
-            .ok_or_else(invalid)?;
-        list.iter()
-            .skip(1)
-            .take(listed)
-            .map(|&id| u32::try_from(id).map_err(|_| invalid()))
-            .collect()
-    }
-
     /// Ends every process in the job with `code`, at once. Idempotent: an already-empty job is fine.
     pub fn terminate(&self, code: u32) -> io::Result<()> {
         // SAFETY: self owns a valid job handle; TerminateJobObject ends its processes and returns.
@@ -1606,40 +1557,6 @@ mod tests {
         );
         assert_eq!(assigned, listed);
         drop(started);
-    }
-
-    /// AC-T7.4.1 (the guest-cost producer finds its guest's RAM in the job member that maps it): do start two members
-    /// in a job, held suspended; expect `member_ids` to list both, and nothing once the job is ended.
-    #[test]
-    fn a_jobs_member_ids_are_each_of_its_live_processes() {
-        let job = Job::create().unwrap();
-        let system = std::env::var("SystemRoot").unwrap();
-        let mut started = Vec::new();
-        for _ in 0..2 {
-            let mut spawn = Spawn {
-                command_line: format!("{system}\\System32\\cmd.exe /c exit 0")
-                    .encode_utf16()
-                    .chain([0])
-                    .collect(),
-                environment: hex_core::job::environment(&[(
-                    "SystemRoot".to_owned(),
-                    system.clone(),
-                )]),
-                cwd: None,
-                stdio: [nul(), nul(), nul()],
-            };
-            started.push(create(&mut spawn, &[job.raw()]).unwrap());
-        }
-        let mut ids = job.member_ids().unwrap();
-        ids.sort_unstable();
-        let mut pids: Vec<u32> = started.iter().map(|s| s.pid).collect();
-        pids.sort_unstable();
-        assert_eq!(ids, pids);
-        job.terminate(1).unwrap();
-        for member in &started {
-            assert!(wait(&member.process, u32::MAX).unwrap());
-        }
-        assert_eq!(job.member_ids().unwrap(), Vec::<u32>::new());
     }
 
     /// T-T7.1.2 (native plan step 8), the evidence for how a Windows box outlives its node: do make a named
