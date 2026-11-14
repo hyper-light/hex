@@ -21,7 +21,10 @@ use std::time::Instant;
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
+use hex_core::patience::Patience;
 use hex_runtime::windows::WinRuntime;
+use hex_testkit::waits::follow::{self, Party};
+use hex_testkit::waits::until;
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -398,14 +401,13 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     assert_eq!(exit, Exit::Code(7));
     // Once the member has ended and its exit is read, the box is empty (wait on the fact: the ended
     // process leaves the job once its handle is closed).
-    wait_until(
-        || {
-            rt.inspect(&id)
-                .map(|i| i.state == hex_api::BoxState::Empty)
-                .unwrap_or(false)
-        },
-        "the box is empty after its program ends",
-    );
+    // Its party is the runtime, which lives while the test holds it: the wait follows the fact.
+    until(&EMPTIED, "the box empty after its program ends", || {
+        rt.inspect(&id)
+            .map(|i| i.state == hex_api::BoxState::Empty)
+            .unwrap_or(false)
+    })
+    .expect("the box empties");
     rt.delete(&id).expect("delete");
     assert_eq!(rt.inspect(&id), Err(hex_api::Refusal::NoSuchBox(id)));
 }
@@ -422,14 +424,17 @@ fn a_box_takes_a_named_signal() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Wait), Stdio::null())
         .expect("exec wait");
-    wait_until(
+    follow::until(
+        &RUNS,
+        "the box running",
+        || life(&mut *p),
         || {
             rt.inspect(&id)
                 .map(|i| i.state == hex_api::BoxState::Running)
                 .unwrap_or(false)
         },
-        "the box runs",
-    );
+    )
+    .expect("the box runs");
     rt.signal(&id, Signal::TERM).expect("signal TERM");
     let exit = end_of(&mut *p, "the program ends");
     rt.delete(&id).expect("delete");
@@ -497,10 +502,19 @@ fn a_node_started_process_past_the_bound_is_refused_and_counted() {
                 .expect("exec within the bound"),
         );
     }
-    wait_until(
+    follow::until(
+        &MEMBERS,
+        "the box holding its two members",
+        || {
+            if held.iter_mut().all(|p| life(&mut **p) == Party::Live) {
+                Party::Live
+            } else {
+                Party::Ended
+            }
+        },
         || rt.usage(&id).map(|u| u.pids >= 2).unwrap_or(false),
-        "the box holds its two members",
-    );
+    )
+    .expect("the box holds its two members");
     // The third member would exceed the bound: the node's own start is refused. (Match without
     // formatting the Ok, whose Box<dyn Proc> has no Debug.)
     match rt.exec(&id, fx.act(&Act::Wait), Stdio::null()) {
@@ -542,10 +556,13 @@ fn delete_ends_a_boxs_grandchildren() {
     // The grandchild's pid, from the member's first line.
     let grandchild = read_grandchild_pid(&mut r);
     // Both the member and its grandchild are in the box now.
-    wait_until(
+    follow::until(
+        &MEMBERS,
+        "the box holding the member and its grandchild",
+        || life(&mut *p),
         || rt.usage(&id).map(|u| u.pids >= 2).unwrap_or(false),
-        "the box holds the member and its grandchild",
-    );
+    )
+    .expect("the box holds the member and its grandchild");
     assert!(
         alive(grandchild),
         "the grandchild {grandchild} isn't running"
@@ -554,7 +571,11 @@ fn delete_ends_a_boxs_grandchildren() {
     let exit = end_of(&mut *p, "the member ends");
     assert!(matches!(exit, Exit::Signal(_)), "member exit {exit:?}");
     // The grandchild is ended too: wait on the fact (its pid gone), not a guessed delay.
-    wait_until(|| !alive(grandchild), "the grandchild ends with the box");
+    // The delete ended the box's job, every process in it with it: the kernel's to finish, followed to the fact.
+    until(&GONE, "the grandchild's end with the box", || {
+        !alive(grandchild)
+    })
+    .expect("the grandchild ends with the box");
 }
 
 /// The grandchild's pid from the member's `grandchild=<pid>` line, read from the pipe (blocking until
@@ -595,10 +616,18 @@ fn end_of(p: &mut dyn hex_api::Proc, what: &str) -> Exit {
     exit
 }
 
-/// Waits for `cond`, the fact `what`, as a test's wait waits for its fact (decision 9): until it holds.
-fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-    let _ = what;
-    while !cond() {
-        std::thread::yield_now();
+/// The facts these tests wait for that no recorded operation makes, each waited for as decision 9 waits (the person's
+/// ruling of 2026-11-13; `hex_testkit::waits`): measured, past the slowest answer seen its run-out told once, and
+/// followed by its party's life where the test holds one (the program, the members), else by the fact alone.
+static EMPTIED: Patience = Patience::measuring("test.hex_cli.windows_process_box.emptied");
+static RUNS: Patience = Patience::measuring("test.hex_cli.windows_process_box.runs");
+static MEMBERS: Patience = Patience::measuring("test.hex_cli.windows_process_box.members");
+static GONE: Patience = Patience::measuring("test.hex_cli.windows_process_box.grandchild_gone");
+
+/// A program as a party: live until it has ended.
+fn life(p: &mut dyn hex_api::Proc) -> Party {
+    match p.try_wait() {
+        Ok(None) => Party::Live,
+        Ok(Some(_)) | Err(_) => Party::Ended,
     }
 }
