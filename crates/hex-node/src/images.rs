@@ -251,7 +251,7 @@ impl Transaction for Kept<'_> {
         &self,
         _: &hex_runtime::devices::ManagedLaunch<'_>,
         _: shards_api::LaunchIo,
-        _: Duration,
+        _: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         Err(unasked("native launch"))
     }

@@ -215,7 +215,7 @@ impl Transaction for Owner {
         &self,
         _: &crate::devices::ManagedLaunch<'_>,
         _: shards_api::LaunchIo,
-        _: Duration,
+        _: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         Err(broken("an image box launches through Shards' image boot"))
     }

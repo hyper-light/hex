@@ -1666,12 +1666,10 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    // A link's bound names a finite deadline (HEX-GUEST-33): the first dial's, as the node gives it before any boot
-    // (`first_dial_bound`), the guest's recorded boot to ready, the boot and listen it waits on (decision 9).
-    let bound = shards::recorded_boot().unwrap();
+    // A first dial as the node makes one before any boot: no record's bound, its W* its own (decision 9; the
+    // review's C-9).
     let transport =
-        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), Some(bound))).unwrap())
-            .unwrap();
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), None)).unwrap()).unwrap();
     let given = transport
         .asks(
             1,

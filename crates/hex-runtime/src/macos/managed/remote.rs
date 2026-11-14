@@ -1438,7 +1438,7 @@ pub(super) fn launch(
     record: NativeRecord<'_>,
     launch: &crate::devices::ManagedLaunch<'_>,
     io: shards_api::LaunchIo,
-    patience: Duration,
+    patience: Option<Duration>,
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     let crate::devices::ManagedLaunch::Shards(plan) = launch else {
@@ -1455,10 +1455,15 @@ pub(super) fn launch(
     {
         return Err(record.uncertain("it isn't a fresh creation as it is launched"));
     }
-    let until = Instant::now()
-        .checked_add(patience)
-        .filter(|_| patience != Duration::MAX && !patience.is_zero())
-        .ok_or_else(|| record.uncertain("its launch's patience isn't a finite time"))?;
+    // None: a launch that follows its guest, each ask of its helper bounded by the helper's own wait (the review's C-9).
+    let deadline = patience
+        .map(|patience| {
+            Instant::now()
+                .checked_add(patience)
+                .filter(|_| patience != Duration::MAX && !patience.is_zero())
+                .ok_or_else(|| record.uncertain("its launch's patience isn't a finite time"))
+        })
+        .transpose()?;
     let request = plan.gpu_report_request();
     if request.is_some() != io.gpu_report.is_some()
         || request.is_some() != !record.devices().is_empty()
@@ -1468,13 +1473,17 @@ pub(super) fn launch(
     {
         return Err(record.uncertain("its launch's report scope isn't its record's"));
     }
-    let until = request.map_or(until, |request| until.min(request.deadline()));
+    let deadline = request.map_or(deadline, |request| {
+        Some(deadline.map_or(request.deadline(), |deadline| {
+            deadline.min(request.deadline())
+        }))
+    });
     let helper = runtime
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to launch it"))?;
     let launch = make_launch(record, plan, helper.cpu)?;
-    let (process, startup) = helper.identity(true, until)?;
+    let (process, startup) = helper.identity(true, helper.until(deadline)?)?;
     let proxy = Proxy::prepared(
         Arc::clone(helper),
         protocol::Key::from_record(record, process)?,
@@ -1500,7 +1509,7 @@ pub(super) fn launch(
                 launch,
             },
             &descriptors,
-            Some(until),
+            deadline,
             startup.as_ref().map(AsFd::as_fd),
         )
         .map_err(CallFailure::refusal)?;
@@ -1514,14 +1523,15 @@ pub(super) fn launch(
         .identity
         .get()
         .ok_or_else(|| record.uncertain("its launched controller published no identity"))?;
-    if identity.vsock != plan.vsock() || until <= Instant::now() {
+    if identity.vsock != plan.vsock() || deadline.is_some_and(|deadline| deadline <= Instant::now())
+    {
         return Err(record.uncertain(
             "its launched controller's vsock isn't its plan's, or its deadline passed",
         ));
     }
     publish(identity)?;
     let (answer, _) = proxy
-        .control(protocol::Action::Resume, Some(until))
+        .control(protocol::Action::Resume, deadline)
         .map_err(CallFailure::refusal)?;
     if !matches!(answer, protocol::Answer::Done { .. }) {
         return Err(record.uncertain("its helper answered its resume with another reply"));

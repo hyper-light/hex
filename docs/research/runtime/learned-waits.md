@@ -86,7 +86,7 @@ follows, and what is wired:
 | `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
 | `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | `hex.image.member`, `hex.image.signal` (hex-runtime `guest::image`, `Steering::signal`) | a member's own lane on its run's agent-control endpoint (D238): its first word, then a signal's answer | the run's connection: Shards' handle for the one ask (`PendingMember::wait`, `MemberSteering::steered`, Shards `155b5ee2e`), given W*, then `Duration::MAX` on the same ask, answered or ended with the connection | none | liveness alone past W*, the run-out told (goal 2's r13) |
-| the guest's first boot (`GuestRuntime::guest`, its first dial `client.guest.link.dial`) | the guest's VM | Shards' `connect_while_runs`: its VM process's end, or `Stalled` where it ran no CPU for a whole W* of Shards' own (Part B) | its CPU time, Shards' | liveness past W*, the slowest boot its node has seen, counted from the boot's start; before any, following from its start, told once; one boot, never stopped and booted again (the review's C-9, 2026-11-14). The managed creates' budgets still read records.tsv ("Owed", 1) |
+| the guest's first boot (`GuestRuntime::guest`, its first dial `client.guest.link.dial`) | the guest's VM | Shards' `connect_while_runs`: its VM process's end, or `Stalled` where it ran no CPU for a whole W* of Shards' own (Part B) | its CPU time, Shards' | liveness past W*, the slowest boot its node has seen, counted from the boot's start; before any, following from its start, told once; one boot, never stopped and booted again (the review's C-9, 2026-11-14). A managed create or attach follows its guest too; a GPU create's budget still reads records.tsv ("Owed", 1) |
 | `oci.start` (hex-runtime `linux::oci::run`'s start) | a created container's init, taking the start | its pidfd, polled with the exec FIFO: its byte, or its end without it | none: a local site | liveness alone past W* (the review's (c), 2026-11-14: it was 10 s, a stopped init refused Broken there) |
 | `oci.delete.exit`, `oci.delete.emptying`, `oci.shim.exit` (hex-runtime `linux::oci::run`) | a killed init with no cgroup; a killed container's cgroup; a create's shim once its container is ready | the init's pidfd; the cgroup's `cgroup.events`; the shim's pidfd, which it exits by itself, never killed at a time | none: a local site | liveness alone past W* (the review's (c): each was 10 s) |
 | `boxrun.emptying` (hex-cli `box_run`) | a `hex box run` box whose strays it killed | its `cgroup.events` | none: a local site | liveness alone past W*, only after a kill that went (the review's (c): it was 10 s) |
@@ -125,9 +125,15 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    bytes). The cleaner end is a Shards dial whose wait ends at the guest's answer
    or its VM's end (`Option<Instant>`, `None` for "until either"), with no slices; Shards is ROOT's to change. Then
    `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
-   alone. Done for the guest's own boot (the review's C-9, 2026-11-14), with no slices: Shards' `connect_while_runs`
-   follows the VM past W* (`ShardsLink::dial_following`), and its boot no longer reads the record
-   (`GuestRuntime::boot_bound`, none before its first). The managed budgets are what still reads it.
+   alone. Done (the review's C-9, 2026-11-14), with no slices: Shards' `connect_while_runs` follows the VM past W*
+   (`ShardsLink::dial_following`); the guest's own boot reads no record (`GuestRuntime::boot_bound`, none before its
+   first); and a managed create's or attach's budget follows its guest (`managed::Budget::following`, its deadline an
+   `Option<Instant>`), its native launch taking none (`Transaction::launch_managed`'s `Option<Duration>`; on Linux the
+   held child's gate then waits with no clock, ended by its peer's byte or EOF, Ada's approval of 2026-11-14). Owed: a
+   GPU create's budget keeps the record (`managed::gpu_create`) until Shards' GPU report takes no deadline, ROOT's ask;
+   the macOS managed helper's control patience, next; and hex-cli's measurement tools' own waits (guest_cost's stop,
+   place removal, end, window boot and census; macos_cpu_response's top arm): the producer's waits follow their
+   parties.
 2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
    goal 12's macOS checks had failed hex_quic_20, HEX-RT-2 "still running after 939ms", macOS's record). The pure
    core moved down: `hex_api::patience`, with `pub use hex_api::patience;` in hex-core, so every `hex_core::patience`
@@ -214,8 +220,9 @@ Production, a W* that still ends something:
 6. **`guest.hosted.ready`** (hex-runtime `guest::image::node::follow_ready`): past W* a node VM's boot is refused where a
    whole W* window shows no CPU time of its VM's process: a VM's boot, the one place a stall of measured progress is
    judged ("Life alone at the node's local sites"), to become Shards' Part B once vendored.
-7. **The guest's first boot** ("Owed", 1), done 2026-11-14 for the guest's own boot (the review's C-9): within W*, the
-   slowest boot its node has seen, past it told and followed, never booted again. The managed creates' budgets owed.
+7. **The guest's first boot** ("Owed", 1), done 2026-11-14 (the review's C-9): the guest's own boot within W*, the
+   slowest boot its node has seen, past it told and followed, never booted again; managed creates and attaches follow
+   their guests. A GPU create's budget owed until Shards' GPU report takes no deadline.
 
 Production, holding the rule: `node.listing` (run-out told, the listing goes on), `node.turns` and `store.turns`
 (the holder followed to its let-go), `client.answer.*` (only a caller's deadline fails a call), `recorded.lifecycle`

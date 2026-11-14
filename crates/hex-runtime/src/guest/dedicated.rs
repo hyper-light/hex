@@ -187,7 +187,7 @@ mod tests {
             &self,
             _: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: Duration,
+            _: Option<Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("cleanup cannot launch")
         }
@@ -739,7 +739,7 @@ mod tests {
             &self,
             plan: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
-            _: Duration,
+            _: Option<Duration>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             assert!(matches!(plan, crate::devices::ManagedLaunch::Shards(_)));
             self.launches.fetch_add(1, Ordering::SeqCst);
@@ -872,7 +872,7 @@ mod tests {
             });
             let books: Arc<dyn crate::devices::Books> = owner.clone();
             runtime.bind_books(Arc::downgrade(&books)).unwrap();
-            let budget = managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
+            let budget = managed::gpu_create().unwrap();
             let result = runtime.create_selected(spec.clone(), owner.as_ref(), budget);
             let allowed = current == Some(9u64.to_le_bytes());
             assert_eq!(
@@ -1481,15 +1481,20 @@ impl GuestRuntime {
         backing: Option<shared::Binding>,
         budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
+        budget.remaining()?;
         let link: LinkOwner = own_link(ShardsLink::managed(
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
-            // HEX-GUEST-33: a later dial without its caller's deadline spends the whole learned bound,
-            // not what this create had left; the create's own dials carry its deadline.
-            Some(budget.remaining().and_then(|_| self.first_dial_bound())?),
+            // HEX-GUEST-33: a later dial without its caller's deadline waits its own W*, never what this
+            // create had left; the create's own dials carry its deadline, where it has one.
+            self.boot_bound()?,
         ))?;
-        let client = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline())?;
+        // With no deadline its first dial, token and hello follow the guest (the review's C-9).
+        let client = match budget.deadline() {
+            Some(at) => Client::connect_before(triomphe::Arc::clone(&link), at)?,
+            None => Client::connect(triomphe::Arc::clone(&link))?,
+        };
         let booted = booted_owner(Booted {
             guest: GuestHandle::Managed(guest),
             link,
@@ -1658,7 +1663,8 @@ impl GuestRuntime {
             return self.cached_selected(id);
         }
         let reservation = self.reserve(id, Operation::Loading)?;
-        let budget = managed::Budget::new(self.first_dial_bound()?)?;
+        // An attach launches nothing: it follows its guest (the review's C-9).
+        let budget = managed::Budget::following();
         let receipt = selected::read(&self.selected_path(id)?)?
             .ok_or(super::books::uncertain(id, "it has no selected receipt")?)?;
         receipt.matches_record(record)?;
@@ -1856,7 +1862,7 @@ impl GuestRuntime {
                 "its selected receipt has no scope",
             )?)?;
             plan = plan
-                .with_gpu_report(*scope.bytes(), budget.deadline())
+                .with_gpu_report(*scope.bytes(), managed::gpu_deadline(budget)?)
                 .map_err(|why| refusal("preparing selected renderer report", &why))?;
         }
         budget.remaining()?;
@@ -1870,12 +1876,15 @@ impl GuestRuntime {
         managed::same_init(&record, &identity)?;
         receipt.matches_record(&record)?;
         if !receipt.physical.is_empty() {
-            let report = guest.take_gpu_report(budget.remaining()?).map_err(|why| {
-                refusal(
-                    "observing the selected renderer in its original scope",
-                    &why,
-                )
-            })?;
+            // Its report's own deadline bounds it where its budget has none left to give.
+            let report = guest
+                .take_gpu_report(budget.remaining()?.unwrap_or(Duration::MAX))
+                .map_err(|why| {
+                    refusal(
+                        "observing the selected renderer in its original scope",
+                        &why,
+                    )
+                })?;
             receipt.report = Some(report);
             let report = receipt.checked_report()?.ok_or(super::books::uncertain(
                 &receipt.id,

@@ -186,13 +186,20 @@ impl Node {
         record: NativeRecord<'_>,
         plan: &ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: Duration,
+        patience: Option<Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        let until = Instant::now()
-            .checked_add(patience)
-            .filter(|_| !patience.is_zero() && patience != Duration::MAX)
-            .ok_or_else(|| record.uncertain("its managed launch's patience isn't a finite time"))?;
+        // None: a launch that follows its guest, with no deadline of its caller's (the review's C-9).
+        let until = patience
+            .map(|patience| {
+                Instant::now()
+                    .checked_add(patience)
+                    .filter(|_| !patience.is_zero() && patience != Duration::MAX)
+                    .ok_or_else(|| {
+                        record.uncertain("its managed launch's patience isn't a finite time")
+                    })
+            })
+            .transpose()?;
         let bounds = Self::managed_bounds(record)?;
         self.backend(plan.class())?.ok_or_else(|| {
             record.uncertain("its node configures no backend for its launch's class")
@@ -258,24 +265,36 @@ impl Node {
             stderr: Some(stderr),
             ..Stdio::default()
         };
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(record.uncertain(
-                "its managed launch's deadline passed before its controller was bound",
-            ));
-        }
+        let left = until
+            .map(|until| {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(record.uncertain(
+                        "its managed launch's deadline passed before its controller was bound",
+                    ));
+                }
+                Ok(left)
+            })
+            .transpose()?;
         // A Firecracker VM given a device whole has its VMM's soft RLIMIT_MEMLOCK raised to its hard one, which its
         // create found holds the RAM its VMM pins for DMA.
         let memlock = match plan {
             ManagedLaunch::Firecracker { memlock, .. } => *memlock,
             ManagedLaunch::Shards(_) => None,
         };
+        // The held child's gate stays finite on Linux (CLAUDE.md §12's "finite private pipe gate", Ada's to change): a
+        // launch that follows its guest gives it the slowest boot to ready on record, owed until a gate with no deadline
+        // is approved (the review's C-9; branch cp/t7-root-c9-gate).
+        let gate = match left {
+            Some(left) => left,
+            None => hex_runtime::guest::recorded_boot()?,
+        };
         self.supervisor.bind_managed(
             &native,
             program,
             stdio,
             process::HeldLaunch { report, memlock },
-            left,
+            gate,
             publish,
         )
     }
@@ -1098,7 +1117,7 @@ impl Node {
             |record: NativeRecord<'_>,
              plan: &ManagedLaunch<'_>,
              io: shards_api::LaunchIo,
-             patience: Duration,
+             patience: Option<Duration>,
              publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
                 self.launch_managed(record, plan, io, patience, publish)
             };

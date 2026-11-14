@@ -2496,11 +2496,15 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
-  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the managed
-  creates' budgets take records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
-  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation. The guest's own boot no
-  longer does (the review's C-9, 2026-11-14): within W*, the slowest boot its node has seen, past it told and followed
-  by its VM's life through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34).
+  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed until Shards'
+  GPU report takes no deadline: a GPU create's budget takes records.tsv's `boot_ready`
+  (`hex_client::guest::shards::recorded_boot`, through `hex_runtime::guest::managed::gpu_create`), as Shards binds a
+  VM process's GPU report to a finite create deadline (`PreparedBoot::with_gpu_report`). Every other managed create
+  and attach follows its guest (the review's C-9, 2026-11-14): its budget has no deadline (`managed::Budget::following`),
+  and its native launch, first relay dial and join each wait within their own W* and past it follow their party. So
+  does the guest's own boot: within W*, the slowest boot its node has seen, past it told and followed by its VM's life
+  through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34). The macOS managed helper's
+  control patience still reads the record, owed next (the review's C-9 (c3)).
   hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
   `conformance::PATIENCE` and `ENDS` from per-class end records until 2026-11-13; it now follows each program to its
   end (`conformance::end_of`, `ENDS` measuring), and each differential reading the runtime's party. `Patience::seeded`,

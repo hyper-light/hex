@@ -147,7 +147,7 @@ impl Transaction for Scope {
         &self,
         plan: &ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: Duration,
+        patience: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         let record = self.snapshot()?;
         let native = NativeRecord::Pool(&record);
@@ -318,7 +318,8 @@ impl Managed {
             None,
         )
         .map_err(|e| format!("preparing the guest's managed plan: {e}"))?;
-        let vm = hex_runtime::guest::boot_managed(scope.as_ref(), plan, self.patience()?.bound)
+        // Followed, as a node's managed boot is (the review's C-9): no deadline of the producer's.
+        let vm = hex_runtime::guest::boot_managed(scope.as_ref(), plan)
             .map_err(|e| format!("booting the guest managed: {e}"))?;
         Ok((Arc::new(vm), scope))
     }
@@ -499,11 +500,10 @@ impl Driver for Managed {
     }
 
     fn ready(&mut self, guest: &mut Guest) -> Result<(), String> {
-        // Followed to its answer: its link's dials past the class's W* tell the run-out once and follow the guest's VM by
-        // its life, and its hello waits on its connection (decision 9).
-        let bound = self.patience()?.bound;
+        // Followed to its answer: its link's dials past their own W* tell the run-out once and follow the guest's VM by
+        // its life, with no bound of the record's, and its hello waits on its connection (decision 9; the review's C-9).
         let vm: Arc<dyn shards_api::Guest> = Arc::clone(&guest.vm) as Arc<dyn shards_api::Guest>;
-        let client = own_link(ShardsLink::new(vm, Some(bound)))
+        let client = own_link(ShardsLink::new(vm, None))
             .and_then(Client::connect)
             .map_err(|why| format!("reaching the guest's agent: {why}"))?;
         guest.client = Some(client);

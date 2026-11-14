@@ -735,7 +735,9 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                 &args.state,
                 control,
                 &cost,
-                guest.first_dial_bound().map_err(failed)?,
+                // The helper's control patience: the slowest boot to ready on record, until its asks follow their
+                // helper (the review's C-9, (c3)).
+                hex_runtime::guest::recorded_boot().map_err(failed)?,
             )
             .map_err(failed)?;
             let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);

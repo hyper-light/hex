@@ -110,7 +110,7 @@ fn no_launch(
     _: NativeRecord<'_>,
     _: &hex_runtime::devices::ManagedLaunch<'_>,
     _: shards_api::LaunchIo,
-    _: Duration,
+    _: Option<Duration>,
     _: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     panic!("metadata/cancellation control cannot launch")
@@ -365,7 +365,7 @@ fn subset_native_launch_waits_for_full_source_release_then_passes_only_selected_
     let launch = |record: NativeRecord<'_>,
                   plan: &hex_runtime::devices::ManagedLaunch<'_>,
                   _: shards_api::LaunchIo,
-                  _: Duration,
+                  _: Option<Duration>,
                   _: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>|
      -> Result<ManagedReceipt, Refusal> {
         assert_eq!(record.devices(), [devices()[0]]);
@@ -407,7 +407,7 @@ fn subset_native_launch_waits_for_full_source_release_then_passes_only_selected_
             tx.launch_managed(
                 &hex_runtime::devices::ManagedLaunch::Shards(&plan),
                 io(),
-                Duration::from_secs(60)
+                Some(Duration::from_secs(60))
             ),
             Err(Refusal::Backing {
                 cause: hex_api::LifecycleCause::Pending,
@@ -426,7 +426,7 @@ fn subset_native_launch_waits_for_full_source_release_then_passes_only_selected_
             tx.launch_managed(
                 &hex_runtime::devices::ManagedLaunch::Shards(&plan),
                 io(),
-                Duration::from_secs(60)
+                Some(Duration::from_secs(60))
             ),
             Err(Refusal::Exhausted {
                 what: "counted subset native launch",

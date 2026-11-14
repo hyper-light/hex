@@ -284,7 +284,7 @@ pub(super) fn launch(
     record: NativeRecord<'_>,
     launch: &crate::devices::ManagedLaunch<'_>,
     io: shards_api::LaunchIo,
-    patience: Duration,
+    patience: Option<Duration>,
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     let crate::devices::ManagedLaunch::Shards(plan) = launch else {
@@ -299,10 +299,17 @@ pub(super) fn launch(
             .map_err(|why| {
                 record.uncertain(&format!("its Windows launch's runtime paths: {why}"))
             })?;
-    let deadline = Instant::now()
-        .checked_add(patience)
-        .filter(|_| patience != Duration::MAX && !patience.is_zero())
-        .ok_or_else(|| record.uncertain("its Windows launch's patience isn't a finite time"))?;
+    // None: a launch that follows its guest, with no deadline of its caller's (the review's C-9).
+    let deadline = patience
+        .map(|patience| {
+            Instant::now()
+                .checked_add(patience)
+                .filter(|_| patience != Duration::MAX && !patience.is_zero())
+                .ok_or_else(|| {
+                    record.uncertain("its Windows launch's patience isn't a finite time")
+                })
+        })
+        .transpose()?;
     let deadline = crate::devices::check_managed_report(
         Some(&runtime.catalog),
         record,
@@ -375,7 +382,7 @@ pub(super) fn launch(
         ));
     }
     let result = (|| {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             boxed.not_submitted()?;
             return Err(
                 record.uncertain("its Windows launch's deadline passed before it was submitted")
@@ -420,7 +427,7 @@ pub(super) fn launch(
             })?
             .identity;
         publish(identity)?;
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(record.uncertain(
                 "its Windows launch's deadline passed as its controller was published",
             ));

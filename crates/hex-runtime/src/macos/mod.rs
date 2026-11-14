@@ -254,7 +254,7 @@ impl MacRuntime {
         record: NativeRecord<'_>,
         plan: &crate::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         managed::launch(self, record, plan, io, patience, publish)

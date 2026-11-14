@@ -578,7 +578,13 @@ fn observe_receipt(
     }
     let id = BoxId::try_new(&name)?;
     let requested = id.try_clone()?;
-    let program = driver::program(configured, count, budget.remaining()?)?;
+    // A GPU create's observer spends its finite budget (`managed::gpu_create`), owed until Shards' GPU report takes no
+    // deadline (the review's C-9).
+    let program = driver::program(
+        configured,
+        count,
+        Some(crate::guest::managed::gpu_remaining(budget)?),
+    )?;
     let bounds = configured.bounds();
     let spec = BoxSpec {
         id: requested,
@@ -664,7 +670,7 @@ fn observe_receipt(
             },
             ..Stdio::null()
         },
-        budget.deadline(),
+        crate::guest::managed::gpu_deadline(budget)?,
     ) {
         Ok(process) => process,
         Err(why) => {
@@ -690,7 +696,7 @@ fn observe_receipt(
         attempt.phase = AttemptPhase::Waiting;
         receipt.write(path)?;
         let exit = process
-            .wait_for(budget.remaining()?)?
+            .wait_for(crate::guest::managed::gpu_remaining(budget)?)?
             .ok_or_else(|| uncertain("its GPU observer didn't end within its boot's budget"))?;
         facts_mut(receipt, uncertain)?.exited(exit)?;
         receipt.write(path)?;
@@ -755,7 +761,8 @@ fn cleanup(
 ) -> Result<(), Refusal> {
     facts_mut(receipt, uncertain)?.cleaning();
     receipt.write(path)?;
-    let outcome = booted.client.delete_before(id, budget.deadline());
+    let outcome = crate::guest::managed::gpu_deadline(budget)
+        .and_then(|at| booted.client.delete_before(id, at));
     let captured = match &outcome {
         Ok(()) => {
             facts_mut(receipt, uncertain)?.deleted(false);

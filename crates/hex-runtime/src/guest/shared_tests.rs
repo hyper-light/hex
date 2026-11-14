@@ -217,9 +217,9 @@ impl Transaction for Owner {
         &self,
         plan: &devices::ManagedLaunch<'_>,
         _: shards_api::LaunchIo,
-        patience: Duration,
+        patience: Option<Duration>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        self.patience.lock().unwrap().push(Some(patience));
+        self.patience.lock().unwrap().push(patience);
         let devices::ManagedLaunch::Shards(prepared) = plan else {
             panic!("a shared backing launches Shards")
         };
@@ -1198,7 +1198,7 @@ fn w14_c_a_pools_stop_follows_its_scope_and_never_waits_a_boots_record() {
         "its stop never followed its scope: {asked:?}"
     );
     assert!(
-        !asked.contains(&runtime.first_dial_bound().unwrap()),
+        !asked.contains(&crate::guest::recorded_boot().unwrap()),
         "its stop waited the first boot's bound: {asked:?}"
     );
 }

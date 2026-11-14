@@ -87,10 +87,12 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
         |_: NativeRecord<'_>,
          _: &hex_runtime::devices::ManagedLaunch<'_>,
          io: shards_api::LaunchIo,
-         remaining: Duration,
+         remaining: Option<Duration>,
          _: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
             assert!(io.gpu_report.is_some());
-            assert!(!remaining.is_zero() && remaining <= Duration::from_secs(60));
+            assert!(remaining.is_some_and(
+                |remaining| !remaining.is_zero() && remaining <= Duration::from_secs(60)
+            ));
             calls.set(calls.get() + 1);
             Err(Refusal::Exhausted {
                 what: "counted native launcher",
@@ -153,7 +155,7 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
             let result = tx.launch_managed(
                 &hex_runtime::devices::ManagedLaunch::Shards(&plan),
                 io(writer),
-                Duration::from_secs(3600),
+                Some(Duration::from_secs(3600)),
             );
             assert!(matches!(result, Err(Refusal::Backing { key:actual, .. }) if actual==key));
             assert_eq!(
@@ -170,7 +172,7 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
             tx.launch_managed(
                 &hex_runtime::devices::ManagedLaunch::Shards(&plan),
                 io(true),
-                Duration::from_secs(3600)
+                Some(Duration::from_secs(3600))
             ),
             Err(Refusal::Exhausted {
                 what: "counted native launcher",
@@ -200,7 +202,7 @@ fn cpu_none_reaches_the_same_callback_without_a_catalog_or_report() {
         |_: NativeRecord<'_>,
          _: &hex_runtime::devices::ManagedLaunch<'_>,
          io: shards_api::LaunchIo,
-         _: Duration,
+         _: Option<Duration>,
          _: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
             assert!(io.gpu_report.is_none());
             calls.set(calls.get() + 1);
@@ -236,7 +238,7 @@ fn cpu_none_reaches_the_same_callback_without_a_catalog_or_report() {
             tx.launch_managed(
                 &hex_runtime::devices::ManagedLaunch::Shards(&plan),
                 io(false),
-                Duration::from_secs(60)
+                Some(Duration::from_secs(60))
             ),
             Err(Refusal::Exhausted {
                 what: "counted native launcher",

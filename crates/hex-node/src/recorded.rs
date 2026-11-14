@@ -240,7 +240,7 @@ pub trait Recover: Runtime {
         record: NativeRecord<'_>,
         plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         let _ = (plan, io, patience, publish);
@@ -566,7 +566,7 @@ type NativeLaunch<'a> = dyn Fn(
         NativeRecord<'_>,
         &hex_runtime::devices::ManagedLaunch<'_>,
         shards_api::LaunchIo,
-        std::time::Duration,
+        Option<std::time::Duration>,
         &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<ManagedReceipt, Refusal>
     + 'a;
@@ -1173,14 +1173,19 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
         &self,
         plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
     ) -> Result<ManagedReceipt, Refusal> {
-        let deadline = std::time::Instant::now()
-            .checked_add(patience)
-            .filter(|_| patience != std::time::Duration::MAX && !patience.is_zero())
-            .ok_or_else(|| {
-                self.uncertain("its transaction's launch patience isn't a finite time")
-            })?;
+        // None: a create that follows its guest, with no deadline of its caller's (the review's C-9).
+        let deadline = patience
+            .map(|patience| {
+                std::time::Instant::now()
+                    .checked_add(patience)
+                    .filter(|_| patience != std::time::Duration::MAX && !patience.is_zero())
+                    .ok_or_else(|| {
+                        self.uncertain("its transaction's launch patience isn't a finite time")
+                    })
+            })
+            .transpose()?;
         self.with_native(|record| {
             if record.class()? != plan.class()
                 || record.allocation().is_none()
@@ -1221,10 +1226,15 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 introduced = true;
                 Ok(())
             };
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(self.uncertain("its transaction's launch deadline passed before its controller was handed over"));
-            }
+            let remaining = deadline
+                .map(|deadline| {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(self.uncertain("its transaction's launch deadline passed before its controller was handed over"));
+                    }
+                    Ok(remaining)
+                })
+                .transpose()?;
             let receipt = (self.native.launch)(record, plan, io, remaining, &mut publish)?;
             if !introduced {
                 return Err(self.uncertain("its launch's controller wasn't introduced to its record"));
@@ -1667,7 +1677,7 @@ impl<R: Recover> Recorded<R> {
             |record: NativeRecord<'_>,
              plan: &hex_runtime::devices::ManagedLaunch<'_>,
              io: shards_api::LaunchIo,
-             patience: std::time::Duration,
+             patience: Option<std::time::Duration>,
              publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
                 self.runtime
                     .launch_managed(record, plan, io, patience, publish)
@@ -3342,7 +3352,7 @@ impl Recover for hex_runtime::macos::MacRuntime {
         record: NativeRecord<'_>,
         plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         hex_runtime::macos::MacRuntime::launch_managed(self, record, plan, io, patience, publish)
@@ -3468,7 +3478,7 @@ impl Recover for hex_runtime::windows::WinRuntime {
         record: NativeRecord<'_>,
         plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         hex_runtime::windows::WinRuntime::launch_managed(self, record, plan, io, patience, publish)
@@ -3721,7 +3731,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         record: NativeRecord<'_>,
         plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
-        patience: std::time::Duration,
+        patience: Option<std::time::Duration>,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         self.host()

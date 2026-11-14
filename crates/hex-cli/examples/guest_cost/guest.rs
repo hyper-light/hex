@@ -74,12 +74,14 @@ pub fn envelope(config: &GuestConfig) -> Result<Envelope, String> {
     })
 }
 
-/// The first boot's patience: the guest's recorded first dial bound (decision 9's one remaining record read, owed).
+/// The bound of the producer's own waits (its guests' stop, place removal and end, a window's boot, the census): the
+/// slowest boot to ready on record. Owed: the producer's waits follow their parties (the review's C-9; ROOT's, after
+/// c9). Its guests' boots and link dials already follow, as a node's do.
 pub fn patience() -> Result<Patience, String> {
     Ok(Patience {
-        bound: hex_runtime::guest::recorded_dial_bound().map_err(|e| e.to_string())?,
+        bound: hex_runtime::guest::recorded_boot().map_err(|e| e.to_string())?,
         source: format!(
-            "the guest's recorded first dial bound, boot_ready of {} in bench/native/guest/records.tsv with no margin (hex_runtime::guest::recorded_dial_bound, decision 9)",
+            "the slowest boot to ready on record, boot_ready of {} in bench/native/guest/records.tsv with no margin (hex_runtime::guest::recorded_boot); owed: the producer's waits follow their parties",
             hex_runtime::guest::CLASS
         ),
     })

@@ -636,7 +636,7 @@ pub(in crate::guest) mod tests {
         let (config, input, allocation) = fixture(dir.path());
         let observer = GpuObserver::new(input, &config, allocation).unwrap();
         let remaining = std::time::Duration::from_nanos(123_456);
-        let program = driver::program(&observer, 1, remaining).unwrap();
+        let program = driver::program(&observer, 1, Some(remaining)).unwrap();
         let suffix = program.args.get(program.args.len() - 2..).unwrap();
         assert_eq!(suffix, ["--wait-ns", "123456"]);
         assert_eq!(program.env, observer.program(1).unwrap().env);
@@ -645,8 +645,12 @@ pub(in crate::guest) mod tests {
             std::time::Duration::MAX,
             std::time::Duration::from_nanos(u64::MAX),
         ] {
-            assert!(driver::program(&observer, 1, invalid).is_err());
+            assert!(driver::program(&observer, 1, Some(invalid)).is_err());
         }
+        assert_eq!(
+            driver::program(&observer, 1, None).unwrap().args,
+            observer.program(1).unwrap().args
+        );
     }
 
     /// AC-T7.4.1: unknown/mutable/aliased artifacts and an observer exceeding
