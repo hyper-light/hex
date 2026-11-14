@@ -611,6 +611,11 @@ impl Learner {
         self.last.keep_unrecorded(left);
     }
 
+    /// Carries the last-resort ends its node's start read back from node VM rows into its ends (joint plan step 39).
+    pub(super) fn carry_ended(&mut self, ends: Vec<LearnedEnd>) -> Result<(), Refusal> {
+        self.last.carry(ends)
+    }
+
     /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets within the
     /// units the boxes leave, and each process and OCI box and `.oci` by the `scale`.
     fn place(
