@@ -1505,6 +1505,97 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
     );
 }
 
+/// The review's D-3 (decision 9; AC-T7.4.1): an offered stream's CONNECT with no deadline is one dial, its OK taken
+/// however late. Past W*, the guest link's setup bound the offer carries, the run-out is told once, and the dial goes on
+/// with no clock of its own, ending at its OK, its connection's end or its VM's: it is never given up and made again,
+/// which would drop an answer coming late and redial a slow guest forever. Do open a stream for an offer whose W* every
+/// answer passes (a nanosecond), its muxer answering the first CONNECT only once the run-out has been told, and killing
+/// the stand-in VM at any second CONNECT. Expect the stream opened on its one CONNECT, none made after it, and its late
+/// OK the wait's sample.
+#[cfg(target_os = "linux")]
+#[test]
+fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
+    use hex_testkit::waits::follow::{self, Party};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::Mutex;
+
+    static TOLD: Patience = Patience::measuring("test.hex_client.guest.offered_run_out_told");
+    let dir = tempfile::tempdir().unwrap();
+    let (vm, started) = offered_vm();
+    let path = dir.path().join("m");
+    let offer = offered(&vm, started, path.clone(), Some(Duration::from_nanos(1)));
+    let identity = shards_api::Identity {
+        pid: offer.pid,
+        started: offer.started,
+        vsock: offer.vsock.clone(),
+    };
+    // Its learned W* stands until the run-out is told, which the muxer waits to see.
+    let wait = Arc::new(Patience::seeded(
+        "test.hex_client.guest.offered_connect",
+        Duration::from_nanos(1),
+    ));
+    let vm = Arc::new(Mutex::new(vm));
+    let listener = UnixListener::bind(&path).unwrap();
+    let (told, killed) = (Arc::clone(&wait), Arc::clone(&vm));
+    let muxer = std::thread::spawn(move || {
+        let (mut did, mut held) = (Vec::new(), Vec::new());
+        for n in 0.. {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            while line.last() != Some(&b'\n') && conn.read(&mut byte).unwrap_or(0) == 1 {
+                line.push(byte[0]);
+            }
+            if line == b"STOP\n" {
+                break;
+            }
+            if n > 0 {
+                // A second CONNECT: the first was given up. Its VM ends, which ends the dial's follow.
+                killed.lock().unwrap().kill().unwrap();
+                did.push(Muxed::GivenUp(line));
+                continue;
+            }
+            follow::until(
+                &TOLD,
+                "the offered CONNECT's run-out, told",
+                || Party::Live,
+                || told.deadline().is_none(),
+            )
+            .unwrap();
+            // Answered: the test names nothing after its OK.
+            if conn.write_all(b"OK 1\n").is_ok() {
+                did.push(Muxed::Named(line));
+                held.push(conn);
+            } else {
+                did.push(Muxed::GivenUp(line));
+            }
+        }
+        (did, held)
+    });
+    let opened = connect_following(&identity, offer.setup, &wait);
+    eprintln!(
+        "d3_offered_one_dial opened={:?}",
+        opened.as_ref().map(|_| ())
+    );
+    UnixStream::connect(&path)
+        .unwrap()
+        .write_all(b"STOP\n")
+        .unwrap();
+    let (did, held) = muxer.join().unwrap();
+    drop(vm.lock().unwrap().stdin.take());
+    let reaped = vm.lock().unwrap().wait();
+    eprintln!("d3_offered_one_dial did={did:?} reaped={reaped:?}");
+    assert!(opened.is_ok(), "{:?}", opened.map(|_| ()));
+    assert_eq!(
+        did,
+        [Muxed::Named(
+            format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes()
+        )]
+    );
+    assert!(wait.slowest().is_some(), "its late OK learned");
+    drop(held);
+}
+
 /// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
 /// the caller's files. Expect blocking ends that echo to EOF, while the control connection remains non-blocking.
 /// Shards waits around its non-blocking kernel sockets in its Stream wrapper; that wrapper is gone at handoff.

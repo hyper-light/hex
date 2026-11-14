@@ -688,7 +688,8 @@ pub(crate) fn open_offered(
                 conn
             }
             None => {
-                let mut conn = shards::ShardsStream(connect_following(&identity, offer.setup)?);
+                let mut conn =
+                    shards::ShardsStream(connect_following(&identity, offer.setup, &OFFERED)?);
                 conn.write_all(&stream::name(named))
                     .map_err(os("naming a stdio connection"))?;
                 conn
@@ -724,6 +725,7 @@ static OFFERED: Patience = Patience::measuring("client.guest.offered.connect");
 fn connect_following(
     identity: &shards_api::Identity,
     setup: Option<Duration>,
+    wait: &Patience,
 ) -> Result<Box<dyn shards_api::Stream>, Refusal> {
     const OP: &str = "opening an offered guest stream";
     let bound = setup
@@ -739,14 +741,14 @@ fn connect_following(
     loop {
         match shards_api::connect_borrowed(identity, stream::STDIO_PORT, bound) {
             Ok(conn) => {
-                OFFERED.answered(began.elapsed());
+                wait.answered(began.elapsed());
                 return Ok(conn);
             }
             Err(why) if !deadline_passed(&why) => return Err(shards::refusal(OP, &why)),
             Err(_) => {
                 if !told {
                     // No sample (Karn's point): the run-out is told, and the wait goes on.
-                    OFFERED.ran_out(
+                    wait.ran_out(
                         bound,
                         began.elapsed(),
                         &[
