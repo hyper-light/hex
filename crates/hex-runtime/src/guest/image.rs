@@ -10,11 +10,13 @@
 //! `Awaits(AttachAfterCrash)` until a reboot of the host proves it ended).
 //!
 //! D231's boot waits for its run's start or its host's end, given no bound of Hex's, and its stop for its run's end:
-//! each runs on a thread of its own and answers in a [`Slot`]. A caller waits at most its learned W* ([`ImageWaits`]),
-//! a bound only while answers come within it (decision 9, the person's ruling of 2026-11-13): past it the run-out is
-//! told to the census and the call is refused `Lifecycle { Pending }`, the boot or stop going on, and its answer,
-//! however long it took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards
-//! call, and a run is let go of only once its stop has returned, since D231 stops a run it drops.
+//! each runs on a thread of its own and answers in a [`Slot`], which a wait follows as its party
+//! ([`Slot::told_within`]): an answer given is seen though another call took it since, and the thread's end with none
+//! refuses the call, as the node's broken state. A caller waits at most its learned W* ([`ImageWaits`]), a bound only
+//! while answers come within it (decision 9, the person's ruling of 2026-11-13): past it the run-out is told to the
+//! census and the call is refused `Lifecycle { Pending }`, the boot or stop going on, and its answer, however long it
+//! took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards call, and a run
+//! is let go of only once its stop has returned, since D231 stops a run it drops.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -29,8 +31,12 @@ use hex_api::{
     LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
     Usage, VmSize,
 };
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
+use shards_api::control::{
+    Controller, Execs, Fault, Hangup, Identity, Member as MemberLane, MemberControl, Subscriptions,
+    Unsteered, exec_admissions,
+};
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
     MemberEnd, MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
@@ -94,6 +100,138 @@ pub(super) struct ImageBoot {
     /// This process's runs ([`Runs`]).
     runs: Runs,
     session: OnceLock<Option<BootSession>>,
+    /// Its runs' agent-control ([`Control`]): the key their endpoints take, and each box's controller.
+    control: Arc<Control>,
+}
+
+/// The agent-control of this class's runs (D238, D252; goal 2's item 2): its own key, made once from the OS's random
+/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); and each box's controller, dialed as the first
+/// signal to one of its run's members goes, and kept for the run it was dialed for while that run is held, so later
+/// signals ride its one connection.
+#[derive(Default)]
+struct Control {
+    identity: Mutex<Option<Arc<Identity>>>,
+    dialed: Mutex<BTreeMap<BoxId, Arc<Steering>>>,
+}
+
+/// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
+/// its members' lanes, and its hangup, which ends its connection, and its driver with it, as its last holder lets it go.
+struct Steering {
+    /// The run it steers: one dialed for another run of the box, or for one gone, is dialed anew.
+    guest: Weak<dyn ImageGuest>,
+    execs: Execs,
+    _hangup: Hangup,
+}
+
+impl Control {
+    /// This class's control key, made once.
+    fn identity(&self) -> Result<Arc<Identity>, Refusal> {
+        let mut kept = self.identity.lock().map_err(poisoned)?;
+        if let Some(identity) = kept.as_ref() {
+            return Ok(Arc::clone(identity));
+        }
+        let identity = Arc::new(Identity::generate().map_err(|why| Refusal::Os {
+            op: "making the key the node controls its image VMs' runs by",
+            why: why.to_string(),
+        })?);
+        *kept = Some(Arc::clone(&identity));
+        Ok(identity)
+    }
+
+    /// What every run asks of its agent-control endpoint: this class's key alone, and no lane to its command's sockets.
+    fn ask(&self) -> Result<ControlAsk, Refusal> {
+        Ok(ControlAsk {
+            controller: self.identity()?.fingerprint(),
+            sockets: None,
+        })
+    }
+
+    /// Box `id`'s controller for its run `guest`, dialed now where it has none for that run; a run gone lets its own go.
+    /// The dial waits on nothing: its lanes open once it has connected, each lane's ask following the connection.
+    fn steering(&self, id: &BoxId, guest: &Arc<dyn ImageGuest>) -> Result<Arc<Steering>, Refusal> {
+        let mut dialed = self.dialed.lock().map_err(poisoned)?;
+        if let Some(steering) = dialed.get(id)
+            && steering
+                .guest
+                .upgrade()
+                .is_some_and(|held| Arc::ptr_eq(&held, guest))
+        {
+            return Ok(Arc::clone(steering));
+        }
+        dialed.retain(|_, steering| steering.guest.strong_count() > 0);
+        let at = guest.control().ok_or_else(|| {
+            Refusal::Broken(format!(
+                "box {id}'s run told no agent-control endpoint, which its spec asked of it"
+            ))
+        })?;
+        let identity = self.identity()?;
+        let (controller, connected) = Controller::dial(
+            &identity,
+            at.vm,
+            at.address,
+            Subscriptions {
+                outputs: &[],
+                inputs: &[],
+                execs: Some(exec_admissions()),
+                sockets: None,
+            },
+        )
+        .map_err(|why| Refusal::Os {
+            op: "dialing a Shards image VM's agent-control endpoint",
+            why: why.to_string(),
+        })?;
+        std::thread::Builder::new()
+            .name("hex-image-control".to_owned())
+            .spawn(move || controller.run())
+            .map_err(|why| Refusal::os("starting a Shards image VM's controller", why))?;
+        let execs = connected.execs.ok_or_else(|| {
+            Refusal::Broken("a controller dialed for its members' lanes was given none".to_owned())
+        })?;
+        let steering = Arc::new(Steering {
+            guest: Arc::downgrade(guest),
+            execs,
+            _hangup: connected.hangup,
+        });
+        dialed.insert(id.try_clone()?, Arc::clone(&steering));
+        Ok(steering)
+    }
+}
+
+impl Steering {
+    /// `signal` to member `index` of box `id`'s run, on the member's own lane (D238): `true` where it took it, `false`
+    /// where the member had ended, which takes none; a lane refused or lost refused in its words.
+    ///
+    /// Its two waits, for the lane and for the signal's answer, follow the run's connection by its life alone:
+    /// decision 9's follow, but untold, with no W* to tell a run-out by, since Shards' `Execs::member` and
+    /// `MemberSteering::signal` take no patience (Hex's ask of Shards, through ROOT, 2026-11-14).
+    fn signal(&self, id: &BoxId, index: u32, signal: u32) -> Result<bool, Refusal> {
+        let refused = |fault: Fault| Refusal::Os {
+            op: "signalling a member of a Shards image VM",
+            why: format!("box {id}'s member {index}: {fault}"),
+        };
+        match self.execs.member(index).map_err(refused)? {
+            MemberLane::Ended(_) => Ok(false),
+            MemberLane::Running(MemberControl { mut steering, .. }) => {
+                match steering.signal(signal) {
+                    Ok(()) => Ok(true),
+                    Err(Fault::Unsteered(Unsteered::Ended)) => Ok(false),
+                    Err(fault) => Err(refused(fault)),
+                }
+            }
+        }
+    }
+}
+
+/// What a signal but KILL to an image VM whose run's members a signal reaches none of is refused with (ROOT,
+/// 2026-11-14): nothing in the run can take it, which says nothing of whether the VM runs.
+const NO_MEMBER: &str = "signal: its run has no member a signal reaches";
+
+/// A signal's Linux number as a member's lane carries it.
+fn signal_number(signal: Signal) -> Result<u32, Refusal> {
+    u32::try_from(signal.number()).map_err(|_| Refusal::Invalid {
+        what: "signal",
+        why: format!("{signal:?} has no number a member's lane carries"),
+    })
 }
 
 /// This process's runs: one for each box or node VM with a boot, run or stop of this process, at most
@@ -187,12 +325,14 @@ enum Run {
 }
 
 /// Why a run is stopping, so that a call that finds it so says which (goal 15's finding, 2026-11-13): its owner's stop
-/// (a signal or a delete, whose own call answers the run's end), or its run's own end, read as it came, its host reaped
-/// through the stop.
+/// (a signal or a delete, whose own call answers the run's end), its run's own end, read as it came, its host reaped
+/// through the stop, or its publishes breaking its box's grants, as the call that took its boot's answer found them
+/// (joint plan step 15, N6), the grants' refusal kept in its end.
 #[derive(Clone)]
 enum Stop {
     Asked,
     Ended(End),
+    Grants(Refusal),
 }
 
 /// One answer a thread of its own gives, a boot's or a stop's, with how long it took: from the slot's making, as its
@@ -276,24 +416,6 @@ impl<T> Slot<T> {
         })
     }
 
-    /// Whether the answer came within `wait` (`None`: a measuring patience, until it comes).
-    fn came_within(&self, wait: Option<Duration>) -> Result<bool, Refusal> {
-        let answer = self.answer.lock().map_err(poisoned)?;
-        let answer = match wait {
-            Some(wait) => {
-                self.came
-                    .wait_timeout_while(answer, wait, |a| a.is_none())
-                    .map_err(wait_refused)?
-                    .0
-            }
-            None => self
-                .came
-                .wait_while(answer, |a| a.is_none())
-                .map_err(wait_refused)?,
-        };
-        Ok(answer.is_some())
-    }
-
     /// The answer, once, with how long it took: the sample its wait records.
     fn take(&self) -> Result<Option<(T, Duration)>, Refusal> {
         Ok(self.answer.lock().map_err(poisoned)?.take())
@@ -322,7 +444,13 @@ fn timed_stats(waits: &ImageWaits, guest: &dyn ImageGuest) -> Result<Stats, Imag
     let answer = guest.stats(StatsScope::Run, Duration::MAX);
     let took = asked.elapsed();
     if let Some(bound) = bound.filter(|bound| took > *bound) {
-        waits.stats.ran_out(bound);
+        waits.stats.ran_out(
+            bound,
+            took,
+            &[Piece::Kind(
+                "a Shards image VM's run host, answering its stats",
+            )],
+        );
     }
     if answer.is_ok() {
         waits.stats.answered(took);
@@ -358,15 +486,22 @@ impl Follower {
 
     /// Its refusal where the boot's thread ended with no answer, in its own words.
     fn gone(self, id: &BoxId) -> Refusal {
-        let (boot, record) = match self {
-            Self::Delete => ("the boot it ends", ", and its record is kept, deleting"),
-            Self::Started => ("the boot it follows", ""),
-        };
-        Refusal::Broken(format!(
-            "box {id}: {boot} is still under way: its boot's thread ended with no answer, so neither its run's start \
-             nor its run host's end is known{record}"
-        ))
+        match self {
+            Self::Delete => {
+                unanswered_boot(id, "the boot it ends", ", and its record is kept, deleting")
+            }
+            Self::Started => unanswered_boot(id, "the boot it follows", ""),
+        }
     }
+}
+
+/// Box `id`'s `boot` (as its caller names it) is still under way, its thread ended with no answer: the node's broken
+/// state, `record` saying what its record keeps.
+fn unanswered_boot(id: &BoxId, boot: &str, record: &str) -> Refusal {
+    Refusal::Broken(format!(
+        "box {id}: {boot} is still under way: its boot's thread ended with no answer, so neither its run's start nor \
+         its run host's end is known{record}"
+    ))
 }
 
 /// A run as its runs' lock found it, the answer its boot's or stop's thread gave taken ([`Runs::settle`]).
@@ -413,6 +548,16 @@ impl End {
                 RunEnd::Exited(_) | RunEnd::Stopped => None,
             },
         }
+    }
+
+    /// A stopped run's end, `end` as its run host told it, with the grants' refusal as why where its run was stopped for
+    /// breaking them (N6): the why outlives the call that found it (ROOT, 2026-11-14).
+    fn stopped(end: &RunEnd, stop: &Stop) -> Self {
+        let mut stopped = Self::of(end);
+        if let Stop::Grants(why) = stop {
+            stopped.why = Some(why.to_string());
+        }
+        stopped
     }
 
     /// An end Hex can't read the exit of, with why where its runtime said it.
@@ -739,26 +884,6 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
     }
 }
 
-/// The agent-control endpoint (D238, D252) this node asks of an image VM's run: none yet, a member's program running
-/// through none here.
-const CONTROL: Option<ControlAsk> = None;
-
-/// Whether `image`'s members' MCP bridges (Shards' D254) can be asked of a run whose node asks it an agent-control
-/// endpoint or not (`control`): each bridge's connections reach the run's controller over that endpoint alone, so a
-/// member asking one of a run with none is refused by its field, as Shards' own spec check refuses it.
-fn bridges(image: &ShardsImage, control: bool) -> Result<(), Refusal> {
-    match image.members.iter().position(|m| m.mcp) {
-        Some(at) if !control => Err(Refusal::Invalid {
-            what: "shards image",
-            why: format!(
-                "members[{at}].mcp: a member's MCP bridge reaches its run's controller over the run's agent-control \
-                 endpoint alone (Shards' D254), which this node asks of no image VM's run"
-            ),
-        }),
-        _ => Ok(()),
-    }
-}
-
 /// A member as Shards' image boot names it.
 fn member_name(m: &Member) -> MemberName {
     match m.kind {
@@ -775,6 +900,10 @@ struct MemberProc {
     id: BoxId,
     guest: Arc<dyn ImageGuest>,
     name: MemberName,
+    /// Its declared index, by which its run's endpoint names its lane (D238); none for one its image declares not.
+    index: Option<u32>,
+    /// Its run's agent-control, its kill's.
+    control: Arc<Control>,
     given: Option<Given>,
     ended: Option<Exit>,
 }
@@ -799,8 +928,13 @@ impl Proc for MemberProc {
         }
         let exit = match self.guest.wait_member(&self.name, timeout) {
             Ok(None) => return Ok(None),
-            Ok(Some(MemberEnd::Exited(status))) => {
-                i32::try_from(status).map_or(Exit::Unknown, Exit::Code)
+            Ok(Some(MemberEnd::Exited(code))) => {
+                i32::try_from(code).map_or(Exit::Unknown, Exit::Code)
+            }
+            // Killed by a signal, its Linux number (image channel v27): its own end, never folded into the code
+            // `docker run` reports for it (128 plus it), which an exit can be too.
+            Ok(Some(MemberEnd::Signaled(signal))) => {
+                i32::try_from(signal).map_or(Exit::Unknown, Exit::Signal)
             }
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
@@ -814,10 +948,23 @@ impl Proc for MemberProc {
         Ok(Some(exit))
     }
 
+    /// KILL on its member's own lane, through its run's agent-control endpoint, dialed as the run's first signal goes
+    /// (D238; goal 2's item 2): its end then its member's, Signal(9). One that has ended, or ends as it is asked, has
+    /// nothing left to end: answered at once.
     fn kill(&mut self) -> Result<(), Refusal> {
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal,
-        })
+        if self.ended.is_some() {
+            return Ok(());
+        }
+        let index = self.index.ok_or_else(|| {
+            Refusal::Broken(format!(
+                "box {}'s run declares no member {:?}, whose stdin it gave",
+                self.id, self.name
+            ))
+        })?;
+        self.control
+            .steering(&self.id, &self.guest)?
+            .signal(&self.id, index, signal_number(Signal::KILL)?)
+            .map(drop)
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
@@ -959,7 +1106,7 @@ impl Runs {
                     if let Some(waits) = waits {
                         waits.stop.answered(took);
                     }
-                    let end = End::of(&end);
+                    let end = End::stopped(&end, stop);
                     *run = Run::Ended(end.clone());
                     Settled::Ends(end)
                 }
@@ -1010,8 +1157,9 @@ impl Runs {
         Ok(())
     }
 
-    /// `key`'s stop under way in `slot`, its run having ended on its own (`reached`), where it still runs: another
-    /// call may have moved it on first, and then its stop is that call's.
+    /// `key`'s stop under way in `slot` for `reached`, what the call that found it reached: its run's own end, or its
+    /// grants broken (N6). Where it still runs: another call may have moved it on first, and then its stop is that
+    /// call's.
     fn stop_reached<'k>(
         &self,
         key: impl Into<Key<'k>>,
@@ -1208,6 +1356,7 @@ impl ImageClass {
             diagnostics,
             runs: Runs::new(),
             session: OnceLock::new(),
+            control: Arc::new(Control::default()),
         });
     }
 
@@ -1325,8 +1474,9 @@ impl ImageClass {
             lessor: None,
             binary: Some(self.binary.clone()),
             env,
-            // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
-            control: CONTROL,
+            // The run's agent-control endpoint (D238, D252), of this class's key alone and no socket lane: its members'
+            // own lanes carry their signals (goal 2's item 2).
+            control: Some(self.image()?.control.ask()?),
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
             // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
@@ -1360,7 +1510,7 @@ impl ImageClass {
     fn record_end(&self, id: &BoxId, end: &End) -> Result<End, Refusal> {
         let bound = end.why.as_ref().map(|_| self.quote_bound());
         let mut recorded = None;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1411,7 +1561,7 @@ impl ImageClass {
         }
         let from = started_from(guest.started_from());
         let id = &record.spec.id;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut current = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1450,10 +1600,16 @@ impl ImageClass {
             Settled::Booting => Ok(State::Booting),
             Settled::Stopping(slot, stop) => Ok(State::Stopping(slot, stop)),
             // How its microVM started kept in its record (D253), whichever call took its boot's answer: this one, or
-            // its start, which settles it next.
+            // its start, which settles it next. Its run then read as any running VM's is (the review's B-3): one that
+            // ended as it started (D249: its command never started) is seen ended by whichever call took the answer, as
+            // by its start, never Running.
             Settled::Started(guest) => {
                 self.keep_started(record, guest.as_ref())?;
-                Ok(State::Running(guest))
+                match self.settle_running(image, id, guest)? {
+                    // Held to its grants by whichever call took its boot's answer, as by its start (N6).
+                    State::Running(guest) => self.hold_grants(image, &record.spec, guest),
+                    state => Ok(state),
+                }
             }
             Settled::Running(guest) => {
                 self.keep_started(record, guest.as_ref())?;
@@ -1464,11 +1620,70 @@ impl ImageClass {
                 image.runs.forget(id)?;
                 Ok(State::Ended(end))
             }
-            Settled::None if image.earlier_boot(record) => {
+            Settled::None => self.settle_unheld(image, id),
+        }
+    }
+
+    /// Box `id`, which no run of this process holds, as its record says now, read under its turn (the review's B-2): a
+    /// run is let go of only once its end is recorded, so a record read before another call recorded that end and let
+    /// go of the run would show this process's own run as an earlier one's, held. Ended where its record has its end,
+    /// or where an earlier boot of the host wrote it (T-T7.1.2); else held.
+    fn settle_unheld(&self, image: &ImageBoot, id: &BoxId) -> Result<State, Refusal> {
+        let now = devices::with_record_transaction(self.image_books()?, id, |t| t.read(id))?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        match now.exit {
+            Some(exit) => Ok(State::Ended(End {
+                exit,
+                why: now.ended,
+            })),
+            None if image.earlier_boot(&now) => {
                 Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
             }
-            Settled::None => Ok(State::Held),
+            None => Ok(State::Held),
         }
+    }
+
+    /// A run held to box `spec`'s grants as its boot's answer is taken, whichever call takes it (joint plan step 15, N6):
+    /// one whose publishes break them has its stop begun, the grants' refusal beside it and kept in its end, which the
+    /// start or `started` following it answers; any other runs on.
+    fn hold_grants(
+        &self,
+        image: &ImageBoot,
+        spec: &BoxSpec,
+        guest: Arc<dyn ImageGuest>,
+    ) -> Result<State, Refusal> {
+        let ClassSpec::ShardsImage(shards) = &spec.class else {
+            return Ok(State::Running(guest));
+        };
+        let Err(why) = crate::grants::bound(&shards.grants, guest.members(), guest.published())
+        else {
+            return Ok(State::Running(guest));
+        };
+        let broke = Stop::Grants(why);
+        let slot = image.stop(guest, None)?;
+        image.runs.stop_reached(&spec.id, &slot, broke.clone())?;
+        Ok(State::Stopping(slot, broke))
+    }
+
+    /// What a start or `started` answers of box `id`'s run stopped for breaking its grants (N6), `slot` its stop: the
+    /// grants' refusal `why` once the stop has ended (`past` saying how far it is followed), or, where it couldn't be
+    /// followed to its end, `why` with the stop's own refusal beside it.
+    fn grants_stopped(
+        &self,
+        id: &BoxId,
+        slot: Arc<Slot<RunEnd>>,
+        why: Refusal,
+        past: Past,
+    ) -> Result<Refusal, Refusal> {
+        let stopping = State::Stopping(slot, Stop::Grants(why.clone()));
+        Ok(match self.stop_image(id, stopping, past) {
+            Ok(_) => why,
+            Err(cleanup) => Refusal::Uncertain {
+                id: id.try_clone()?,
+                refusal: Box::new(why),
+                cleanup: Box::new(cleanup),
+            },
+        })
     }
 
     /// A running VM whose run may have ended on its own: its host is then reaped through its stop, so no
@@ -1504,13 +1719,11 @@ impl ImageClass {
             crate::grants::program(image)?;
             // As are credentials no one can lease here (joint plan step 33).
             self.can_lease(image)?;
-            // And a member's MCP bridge where its run has no agent-control endpoint (Shards' D254).
-            bridges(image, CONTROL.is_some())?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
         let made = info(&spec, BoxState::Created, None)?;
-        devices::with_transaction(books, &id, &[], |transaction| {
+        devices::with_record_transaction(books, &id, |transaction| {
             if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
@@ -1551,7 +1764,7 @@ impl ImageClass {
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
         // The boot's intent, durable before any effect: a crash from here on holds the box.
-        devices::with_transaction(self.image_books()?, &id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, &id, |transaction| {
             let mut current = transaction
                 .read(&id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1597,36 +1810,40 @@ impl ImageClass {
             image.runs.forget(&id)?;
             return Err(Refusal::os("starting a Shards image VM's boot", why));
         }
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.boot.ran_out(bound);
+        // The boot's thread followed as its party (B-1): its answer seen given though another call took it first, and
+        // its end with none the node's broken state.
+        match slot.told_within(bound)? {
+            Told::Came => {}
+            Told::NotYet => {
+                if let Some(bound) = bound {
+                    waits.boot.ran_out(
+                        bound,
+                        bound,
+                        &[
+                            Piece::Kind("the boot of box "),
+                            Piece::Name(id.as_str()),
+                            Piece::Kind(", by its boot's thread"),
+                        ],
+                    );
+                }
+                return Err(pending(&id)?);
             }
-            return Err(pending(&id)?);
+            Told::Gone => return Err(unanswered_boot(&id, "its boot", "")),
         }
         // The answer, taken here unless another call took it first, and its time the sample.
         match image.runs.booted(&id, &slot, waits)? {
             Ok(()) => {
-                match self.settle(&record_now(self, &id)?)? {
-                    // What the run published is held to the box's grants (joint plan step 15, N6): a run
-                    // that breaks them is stopped, and the start says why.
-                    State::Running(guest) => {
-                        match crate::grants::bound(
-                            &shards.grants,
-                            guest.members(),
-                            guest.published(),
-                        ) {
-                            Ok(_) => Ok(()),
-                            Err(why) => {
-                                match self.stop_image(&id, State::Running(guest), Past::Pending) {
-                                    Ok(_) => Err(why),
-                                    Err(cleanup) => Err(Refusal::Uncertain {
-                                        id,
-                                        refusal: Box::new(why),
-                                        cleanup: Box::new(cleanup),
-                                    }),
-                                }
-                            }
-                        }
+                // What the run published is held to the box's grants (joint plan step 15, N6), here or by the call
+                // that took its boot's answer first: a run that breaks them is stopped, and the start says why once
+                // its stop has ended, as the box's end keeps it.
+                let state = match self.settle(&record_now(self, &id)?)? {
+                    State::Running(guest) => self.hold_grants(image, &record.spec, guest)?,
+                    state => state,
+                };
+                match state {
+                    State::Running(_) => Ok(()),
+                    State::Stopping(slot, Stop::Grants(why)) => {
+                        Err(self.grants_stopped(&id, slot, why, Past::Pending)?)
                     }
                     // Its owner's own stop under way (a signal or a delete), whose call answers the run's end: this
                     // start succeeded.
@@ -1671,24 +1888,39 @@ impl ImageClass {
             State::Held => return Err(held()),
             State::Created => return Err(Refusal::NotRunning(id.try_clone()?, "stop")),
         };
+        // The stop's thread followed as its party (B-1): its answer seen given though another call took it first, and
+        // its end with none the node's broken state, nothing under way to be Pending on.
         let bound = waits.stop.deadline();
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
-            }
+        let mut told = slot.told_within(bound)?;
+        if let (Told::NotYet, Some(bound)) = (&told, bound) {
+            waits.stop.ran_out(
+                bound,
+                bound,
+                &[
+                    Piece::Kind("the stop of box "),
+                    Piece::Name(id.as_str()),
+                    Piece::Kind(", by its stop's thread"),
+                ],
+            );
             match past {
                 Past::Pending => return Err(pending(id)?),
                 // On to its answer: D231's stop is never refused, and its thread answers once the run host has gone,
                 // refused only where that thread ends with none.
-                Past::Follow => {
-                    if !matches!(slot.told_within(None)?, Told::Came) {
-                        return Err(Refusal::Broken(format!(
-                            "box {id}: the stop its delete asked is still under way: its stop's thread ended with no \
-                             answer, so its run's end is unknown, and its record is kept, deleting"
-                        )));
-                    }
-                }
+                Past::Follow => told = slot.told_within(None)?,
             }
+        }
+        if !matches!(told, Told::Came) {
+            let (stop, record) = match past {
+                Past::Pending => ("its stop", ""),
+                Past::Follow => (
+                    "the stop its delete asked",
+                    ", and its record is kept, deleting",
+                ),
+            };
+            return Err(Refusal::Broken(format!(
+                "box {id}: {stop} is still under way: its stop's thread ended with no answer, so its run's end is \
+                 unknown{record}"
+            )));
         }
         // Its answer, and its time the sample, is taken as the record is settled.
         match self.settle(&record_now(self, id)?)? {
@@ -1700,17 +1932,92 @@ impl ImageClass {
         }
     }
 
+    /// `signal`, but KILL, to every live member of box `id`'s run in `state`, each on its own lane of the run's
+    /// agent-control endpoint (D238; goal 2's item 2; ROOT, 2026-11-14: a signal reaches every process in the box, a
+    /// VM's its members'): the box runs on, a member that has ended skipped. Refused NotRunning ([`NO_MEMBER`]) where
+    /// no member of its run runs a program to take it, or none runs one now; Pending while it boots; NotRunning before
+    /// its start and once its stop has begun.
+    fn signal_members(&self, id: &BoxId, state: State, signal: Signal) -> Result<(), Refusal> {
+        let guest = match state {
+            State::Running(guest) => guest,
+            State::Booting => return Err(pending(id)?),
+            State::Held => return Err(held()),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id.try_clone()?, "signal"));
+            }
+        };
+        let number = signal_number(signal)?;
+        if !guest.members().iter().any(|member| member.runs) {
+            return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
+        }
+        let steering = self.image()?.control.steering(id, &guest)?;
+        let mut reached = false;
+        for member in guest.members().iter().filter(|member| member.runs) {
+            reached |= steering.signal(id, member.index, number)?;
+        }
+        if !reached {
+            return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
+        }
+        Ok(())
+    }
+
+    /// `signal` to member `member` of image box `record` alone, on its own lane of its run's agent-control endpoint
+    /// (goal 2's item 2; D238), KILL among them: the member's, never its VM's. Refused Invalid for a member its run
+    /// declares not; NotRunning where it runs no program or has ended, and as a box's own signal is where its run isn't
+    /// running; Pending while it boots.
+    pub(super) fn signal_member_image(
+        &self,
+        record: BoxRecord,
+        member: &Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id, "signal a member"));
+            }
+        };
+        let name = member_name(member);
+        let Some(declared) = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+        else {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s run declares no {member}"),
+            });
+        };
+        if !declared.runs {
+            return Err(Refusal::NotRunning(
+                id,
+                "signal a member: it runs no program",
+            ));
+        }
+        let index = declared.index;
+        let taken = self.image()?.control.steering(&id, &guest)?.signal(
+            &id,
+            index,
+            signal_number(signal)?,
+        )?;
+        if !taken {
+            return Err(Refusal::NotRunning(id, "signal a member: it has ended"));
+        }
+        Ok(())
+    }
+
     pub(super) fn signal_image(&self, record: BoxRecord, signal: Signal) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let state = self.settle(&record)?;
         match state {
             State::Held => Err(held()),
             State::Ended(_) => Err(Refusal::NotRunning(id, "signal")),
-            _ if signal != Signal::KILL => Err(Refusal::Awaits {
-                needs: Upstream::MemberSignal,
-            }),
+            _ if signal != Signal::KILL => self.signal_members(&id, state, signal),
             // Ended before it booted: no run, and its end its record's.
-            State::Created => devices::with_transaction(self.image_books()?, &id, &[], |t| {
+            State::Created => devices::with_record_transaction(self.image_books()?, &id, |t| {
                 let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                 if current.phase != Phase::Creating || current.exit.is_some() {
                     return Err(super::books::uncertain(
@@ -1840,8 +2147,11 @@ impl ImageClass {
     }
 
     /// Deletes image box `record` as [`ImageClass::delete_image`] does, answering its VM's final use of its host (goal
-    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none where its
-    /// run never started or that read failed (kiln charges nothing then), never a use made up.
+    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none only
+    /// where its run never started (docs/design/shards-image-class.md §3: kiln charges nothing then), never a use made
+    /// up. A run that started has its use or is refused, typed, the box left as it was (the review's B-5): the read's
+    /// own refusal where it is refused, and `NotRunning` where its run ended before its delete, Shards' stats answering
+    /// only a running run.
     pub(super) fn delete_image_used(&self, record: BoxRecord) -> Result<Option<HostUse>, Refusal> {
         self.delete_run(record, true)
     }
@@ -1892,10 +2202,17 @@ impl ImageClass {
             stdout: Some(stdout.into()),
             stderr: Some(stderr.into()),
         };
+        let index = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+            .map(|declared| declared.index);
         Ok(Box::new(MemberProc {
             id,
             guest,
             name,
+            index,
+            control: Arc::clone(&self.image()?.control),
             given: Some(given),
             ended: None,
         }))
@@ -1915,7 +2232,7 @@ impl ImageClass {
             }
             State::Created | State::Ended(_) => None,
         };
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if let Some(exit) = stopped {
                 current.exit = Some(exit);
@@ -1951,7 +2268,15 @@ impl ImageClass {
             let mut told = slot.told_within(bound)?;
             if let (Told::NotYet, Some(bound)) = (&told, bound) {
                 // The boot it follows is still under way.
-                wait.ran_out(bound);
+                wait.ran_out(
+                    bound,
+                    asked.elapsed(),
+                    &[
+                        Piece::Kind("the boot of box "),
+                        Piece::Name(id.as_str()),
+                        Piece::Kind(", by its boot's thread"),
+                    ],
+                );
                 told = slot.told_within(None)?;
             }
             match told {
@@ -1973,8 +2298,34 @@ impl ImageClass {
             state => state,
         };
         match state {
-            State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
+            // Its run stopped for breaking its grants as its boot's answer was taken (N6): the grants' refusal, as its
+            // start would answer it, once its stop has been followed to its end.
+            State::Stopping(slot, Stop::Grants(why)) => {
+                Err(self.grants_stopped(&id, slot, why, Past::Follow)?)
+            }
+            // Its run failed, as it started or since (D249), its end reached or recorded (the review's B-3); or was
+            // stopped for its grants, its end keeping why (N6).
+            State::Stopping(_, Stop::Ended(End { why: Some(why), .. }))
+            | State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
             _ => self.inspect_image(record_now(self, &id)?),
+        }
+    }
+
+    /// Box `id`'s VM's final use of its host, in its run's state `state` (the review's B-5): a running one's read as it
+    /// runs, its refusal the delete's; none where its run never started; and `NotRunning` where its run, which started,
+    /// had ended or was being stopped before the delete, Shards' stats answering only a running run, so no use is left
+    /// to read and none is made up.
+    fn final_use(&self, id: &BoxId, state: &State) -> Result<Option<HostUse>, Refusal> {
+        match state {
+            State::Running(_) => self.host_use_image(record_now(self, id)?).map(Some),
+            State::Stopping(..) | State::Ended(_) if ran(&record_now(self, id)?) => {
+                Err(ended_first(id.try_clone()?))
+            }
+            State::Created
+            | State::Booting
+            | State::Stopping(..)
+            | State::Ended(_)
+            | State::Held => Ok(None),
         }
     }
 
@@ -1985,27 +2336,48 @@ impl ImageClass {
     fn delete_run(&self, record: BoxRecord, used: bool) -> Result<Option<HostUse>, Refusal> {
         let id = record.spec.id.try_clone()?;
         let mut state = self.settle(&record)?;
+        // Its final use, where asked, read before any effect of the delete, so that a run that started answers its use
+        // or refuses with the box as it was (the review's B-5); a boot under way has no run to read yet.
         let mut last = None;
+        if used && !matches!(state, State::Booting) {
+            last = self.final_use(&id, &state)?;
+        }
         match state {
             State::Held => return Err(held()),
             State::Booting | State::Running(_) | State::Stopping(..) => {
-                // The delete's intent, durable before its waits.
-                devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                // The delete's intent, durable before its waits, and the phase it was in.
+                let before = devices::with_record_transaction(self.image_books()?, &id, |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+                    let before = current.phase;
                     current.phase = Phase::Deleting;
-                    t.put(&current)
+                    t.put(&current)?;
+                    Ok(before)
                 })?;
                 if matches!(state, State::Booting) {
                     // Its boot stopped mid-boot (D231's `BootStop`: its run host killed), then followed to its end,
                     // `Ended(Stopped)`; a boot that answered first is a run, stopped below.
                     self.image()?.runs.stop_boot(&id)?;
                     state = self.follow_boot(&id, Follower::Delete)?;
+                    // A boot whose answer came before its stop could end it is a run that started: its final use, where
+                    // asked, as one up at the delete has it; where it has none, the intent is taken back and the delete
+                    // refused, the box as it was, its run left as its boot left it.
+                    if used {
+                        match self.final_use(&id, &state) {
+                            Ok(read) => last = read,
+                            Err(why) => {
+                                devices::with_record_transaction(self.image_books()?, &id, |t| {
+                                    let mut current =
+                                        t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+                                    current.phase = before;
+                                    t.put(&current)
+                                })?;
+                                return Err(why);
+                            }
+                        }
+                    }
                 }
                 match state {
                     State::Running(_) => {
-                        if used {
-                            last = self.host_use_image(record_now(self, &id)?).ok();
-                        }
                         self.stop_image(&id, state, Past::Follow)?;
                     }
                     State::Stopping(..) => {
@@ -2027,7 +2399,7 @@ impl ImageClass {
         if let Some(file) = &record.diagnostics {
             remove_diagnostics(file)?;
         }
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if current.phase != Phase::Creating && current.exit.is_none() {
                 return Err(super::books::uncertain(
@@ -2189,6 +2561,10 @@ impl hex_api::Runtime for ImageClass {
         self.member_image(self.called(id)?, member)
     }
 
+    fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
+        self.signal_member_image(self.called(id)?, member, signal)
+    }
+
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         self.room_image(self.called(id)?, room)
     }
@@ -2220,6 +2596,21 @@ impl hex_api::Runtime for ImageClass {
 }
 
 /// `id`'s record as it is now.
+/// Whether box `record`'s run started: its record keeps how its microVM started (D253) once a call took its boot's answer,
+/// which no boot refused or stopped before its run gives.
+fn ran(record: &BoxRecord) -> bool {
+    record.started_from.is_some()
+}
+
+/// A delete with its host use of box `id`, whose run started and had ended, or was being stopped, before it: Shards'
+/// stats answer only a running run, so no use is left to read (the review's B-5), and none is made up.
+fn ended_first(id: BoxId) -> Refusal {
+    Refusal::NotRunning(
+        id,
+        "read its final use of its host: its run had ended, or was being stopped, before its delete",
+    )
+}
+
 fn record_now(class: &ImageClass, id: &BoxId) -> Result<BoxRecord, Refusal> {
     class
         .image_record(id)?

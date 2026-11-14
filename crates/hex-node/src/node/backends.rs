@@ -38,7 +38,7 @@ fn project_initialized_routes(
         let present = match pool.execution {
             Execution::Firecracker => firecracker.is_some(),
             Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
-            Execution::Native => false,
+            Execution::Native | Execution::NodeVm => false,
         };
         if !present {
             return Err(Refusal::Backing {
@@ -52,7 +52,7 @@ fn project_initialized_routes(
         let present = match execution {
             Execution::Firecracker => firecracker.is_some(),
             Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
-            Execution::Native => false,
+            Execution::Native | Execution::NodeVm => false,
         };
         if !present {
             return Err(projection_refused(
@@ -679,7 +679,7 @@ impl Node {
                         refused("its node configures no Shards backend to preflight it")
                     })?
                     .preflight_backing(record)?,
-                Execution::Native => {
+                Execution::Native | Execution::NodeVm => {
                     return Err(refused(
                         "its record's execution is native, which no backend preflights",
                     ));
@@ -767,7 +767,7 @@ impl Node {
                     .and_then(|backends| backends.shards.as_ref())
                     .ok_or_else(|| refused("its node configures no Shards backend to recover it"))?
                     .recover_backing()?,
-                Execution::Native => {
+                Execution::Native | Execution::NodeVm => {
                     return Err(refused(
                         "its record's execution is native, which no backend recovers",
                     ));
@@ -1072,7 +1072,17 @@ impl Node {
                 (Some(pool), boxed)
             }
         };
-        let _devices = self.hold_attachments(&keys)?;
+        self.held_transaction(owner, &keys, callback)
+    }
+
+    /// `owner`'s transaction once its turn is taken: its devices' attachments held, and this node its native owner.
+    fn held_transaction(
+        &self,
+        owner: BookOwner<'_>,
+        keys: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let _devices = self.hold_attachments(keys)?;
         let launch =
             |record: NativeRecord<'_>,
              plan: &ManagedLaunch<'_>,
@@ -1102,16 +1112,16 @@ impl Node {
         };
         match owner {
             BookOwner::Box(id) => {
-                crate::recorded::transaction(&self.store, id, &keys, &native, callback)
+                crate::recorded::transaction(&self.store, id, keys, &native, callback)
             }
             BookOwner::Pool(key) => {
-                crate::recorded::pool_transaction(&self.store, key, &keys, &native, callback)
+                crate::recorded::pool_transaction(&self.store, key, keys, &native, callback)
             }
             BookOwner::Handoff { id, source } => crate::recorded::handoff_transaction(
                 &self.store,
                 id,
                 source,
-                &keys,
+                keys,
                 &native,
                 callback,
             ),
@@ -1177,6 +1187,16 @@ impl Books for Node {
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         self.book_transaction(BookOwner::Box(id), devices, callback)
+    }
+    /// Waits for a turn of the box under way, following its holder (decision 9), as the recorded node's does: it makes
+    /// no native call (`hex_runtime::devices::with_record_transaction` refuses each), so no holder waits on it.
+    fn with_record_transaction(
+        &self,
+        id: &BoxId,
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let _turn = self.turns.take(id)?;
+        self.held_transaction(BookOwner::Box(id), &[], callback)
     }
     fn with_pool_transaction(
         &self,

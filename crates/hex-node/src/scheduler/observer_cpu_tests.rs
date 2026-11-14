@@ -140,6 +140,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     hex_runtime::devices::native_routes(&mut native, hex_api::Class::Process, image).unwrap();
     let cost = RuntimeCost {
@@ -194,6 +195,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     observer_report.check().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
@@ -386,6 +388,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     hex_runtime::devices::native_routes(&mut native, hex_api::Class::Process, image).unwrap();
     let cost = RuntimeCost {
@@ -440,6 +443,7 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     observer_report.check().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
@@ -662,6 +666,7 @@ fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures()
             LifecycleCause::Busy => "busy",
             LifecycleCause::Uncertain => "uncertain",
             LifecycleCause::Retired => "retired",
+            LifecycleCause::NodeVmEnded => "node-vm-ended",
         };
         assert!(text.ends_with(&format!("cause={name}")));
     }

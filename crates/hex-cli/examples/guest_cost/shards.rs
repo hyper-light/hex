@@ -141,12 +141,11 @@ impl Places {
     }
 }
 
-/// A killed VMM's cgroup to `populated 0`: a killed box's emptying, waited for as the tests wait for one, from the
-/// `node.emptying` census row's record (`hex_testkit::waits::EMPTYING`, test-only `Patience::seeded`; the node itself
-/// reads no record and follows the kill, decision 9), and learned from this run's own kills.
+/// A killed VMM's cgroup to `populated 0`: a killed box's emptying, measuring, learned from this run's own kills (decision
+/// 9: no record seeds it, the node's own wait no more than this one's).
 #[cfg(target_os = "linux")]
 static EMPTYING: hex_core::patience::Patience =
-    hex_core::patience::Patience::seeded("node.emptying", hex_testkit::waits::EMPTYING);
+    hex_core::patience::Patience::measuring("guest_cost.emptying");
 
 #[cfg(target_os = "linux")]
 impl Place {
@@ -161,11 +160,12 @@ impl Place {
         let left = deadline.saturating_duration_since(Instant::now());
         if !cgroup.wait_empty(left).map_err(failed)? {
             cgroup.kill().map_err(failed)?;
-            let emptied = hex_testkit::waits::within(&EMPTYING, |until| {
-                cgroup.wait_empty(until.map_or(Duration::MAX, |until| {
-                    until.saturating_duration_since(Instant::now())
-                }))
-            });
+            // On the cgroup's own events (`cgroup.events`), ended by its emptying, the killed processes' end.
+            let emptied = hex_testkit::waits::follow::whole(
+                &EMPTYING,
+                "the killed VMM's cgroup emptying",
+                || cgroup.wait_empty(Duration::MAX),
+            );
             if !emptied.map_err(failed)? {
                 return Err(failed(hex_api::Refusal::Os {
                     op: "removing a VMM's cgroup",
@@ -897,11 +897,10 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
-    /// A stand-in VMM's start into its place, a child of the test's own: `lifecycle.exec`, a program's run to its end
-    /// (hex_testkit::waits::PROGRAM), which bounds what it does on its way.
+    /// A stand-in VMM's start into its place, a child of the test's own, measuring (decision 9: no record seeds it).
     #[cfg(target_os = "linux")]
     static STARTED: hex_core::patience::Patience =
-        hex_core::patience::Patience::seeded("lifecycle.exec", hex_testkit::waits::PROGRAM);
+        hex_core::patience::Patience::measuring("test.guest_cost.started");
 
     /// A place for a stand-in VMM under a cgroup of the test's own, as a launch makes one (`Places::place`), and the
     /// stand-in in it: a shell that joins the place's cgroup as a launch's wrapper does, then holds on its stdin, so it
@@ -932,10 +931,16 @@ mod tests {
             .unwrap();
         let cgroup = hex_runtime::linux::cgroup::BoxCgroup::at(place.cgroup.clone());
         let mut ended = None;
-        hex_testkit::waits::until(&STARTED, "the stand-in VMM in its place or ended", || {
-            ended = vmm.try_wait().unwrap();
-            ended.is_some() || cgroup.populated().unwrap()
-        })
+        // A look: the cgroup tells no event as a process joins it. Its party, the stand-in, ends the wait in the fact.
+        hex_testkit::waits::follow::until(
+            &STARTED,
+            "the stand-in VMM in its place or ended",
+            || hex_testkit::waits::follow::Party::Live,
+            || {
+                ended = vmm.try_wait().unwrap();
+                ended.is_some() || cgroup.populated().unwrap()
+            },
+        )
         .unwrap();
         if let Some(status) = ended {
             let _ = std::fs::remove_dir(&place.cgroup);

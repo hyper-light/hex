@@ -102,6 +102,12 @@ impl ImageRuntime {
             .bind_boot_session(runtime.store.boot().cloned())?;
         Ok(runtime)
     }
+
+    /// The class its VMs boot through, a node VM's among them (joint plan step 39): what a node's guest runtime calls
+    /// to boot, read and stop its node VM, its records this runtime's own Store.
+    pub fn class(&self) -> &ImageClass {
+        &self.class
+    }
 }
 
 /// What the class never asks of this runtime's records: a pool, a device, a native launch. Refused as broken, since only
@@ -274,6 +280,9 @@ impl Runtime for ImageRuntime {
     fn member(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
         self.class.member(id, member)
     }
+    fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
+        self.class.signal_member(id, member, signal)
+    }
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         self.class.room(id, room)
     }
@@ -297,4 +306,4 @@ impl Runtime for ImageRuntime {
 
 #[cfg(test)]
 #[path = "images/tests.rs"]
-mod tests;
+pub(crate) mod tests;

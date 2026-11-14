@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
@@ -612,8 +612,9 @@ struct Out {
     /// At most one per reserved program; no stream handle has been exported to another process.
     offered: BTreeMap<u64, PendingOffer>,
     /// Answers waiting for room in the socket, oldest first, each with the descriptors riding with it and, for a given
-    /// answer, its exec's id, whose client is to say it took them.
-    backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>, Option<u64>)>,
+    /// answer, its exec's id, whose client is to say it took them. One that carries a lease's value or a sign-in's
+    /// tokens is wiped as it goes, sent or let go (docs/design/credential-grants.md C7, C8; the review's E-6).
+    backlog: VecDeque<(hex_api::lease::Wiped, Vec<hex_api::End>, Option<u64>)>,
     /// Its given answers whose client hasn't yet said it took their ends ([`Request::Taken`]), by their exec's id, each
     /// with the node's own copies of the ends once the answer has gone: kept from its send until the word, or until
     /// the connection closes, so none is ever in flight alone, as XNU's collector of descriptors in flight flushes a
@@ -777,6 +778,13 @@ enum Job<O: Os> {
     /// A program here whose watch reported its end before its runtime could tell it: a run's, whose box its node
     /// is removing (decision 7). Its end is waited for on a worker, so the I/O thread waits on no removal.
     Collect(Box<Watched<O>>),
+    /// A remote member's own kill (goal 2's item 2; [`MemberEnd`]): KILL to member `member` of box `id` alone, its
+    /// host's `signal_member`, whose lane's answer it waits for on a worker, as every call does; `done` hears it.
+    MemberKill {
+        id: BoxId,
+        member: hex_api::Member,
+        done: Killed,
+    },
 }
 
 /// What a call that starts a program starts: a program in a box there is (an exec), or a `process` box made for
@@ -801,6 +809,9 @@ impl Launch {
 struct MemberEnd<O: Os> {
     shared: std::sync::Weak<Shared<O>>,
     token: u64,
+    /// Its box and itself, which its own kill names (goal 2's item 2).
+    id: BoxId,
+    member: hex_api::Member,
     /// Its caller let it go: its end goes to no one. Taken for its end's telling and for its release alike, so a
     /// release either comes first, and nothing is told, or after, and clears what was told before its start was
     /// registered ([`Table::early`]).
@@ -822,13 +833,38 @@ impl<O: Os> MemberEnd<O> {
     }
 }
 
+/// Tells a kill's `done` whether it went, where no one has yet.
+fn killed(done: &Mutex<Option<Killed>>, sent: Result<(), Refusal>) {
+    if let Some(done) = done.lock().ok().and_then(|mut done| done.take()) {
+        done(sent);
+    }
+}
+
 impl<O: Os> Remote for MemberEnd<O> {
-    /// A member's own kill awaits Shards' agent-control endpoint (joint plan step 11), as the `Proc`
-    /// `Runtime::member` gives refuses it in process: refused by type, its box's KILL or delete ending it with its VM.
+    /// KILL to the member alone, on its own lane of its run's agent-control endpoint (goal 2's item 2), as the `Proc`
+    /// `Runtime::member` gives kills it in process: its host's `signal_member`, run on a worker as every call is
+    /// ([`Job::MemberKill`]), which tells `done` the lane's answer; or here, refused, where the queue takes no job.
     fn kill(&self, done: Killed) {
-        done(Err(Refusal::Awaits {
-            needs: hex_api::Upstream::MemberSignal,
-        }));
+        let Some(shared) = self.shared.upgrade() else {
+            return done(Err(Refusal::Broken(
+                "the node serving the member has ended".to_owned(),
+            )));
+        };
+        let id = match self.id.try_clone() {
+            Ok(id) => id,
+            Err(why) => return done(Err(why)),
+        };
+        // A queue that refuses the job (its lock poisoned) drops it, and the worker's telling with it.
+        let done = Arc::new(Mutex::new(Some(done)));
+        let telling = Arc::clone(&done);
+        let queued = shared.enqueue(Job::MemberKill {
+            id,
+            member: self.member.clone(),
+            done: Box::new(move |sent| killed(&telling, sent)),
+        });
+        if let Err(why) = queued {
+            killed(&done, Err(why));
+        }
     }
 
     /// No one waits for its end any longer: it runs on, its end told no one, and an end told before its start was
@@ -1547,6 +1583,10 @@ impl<O: Os> Shared<O> {
         given: Option<u64>,
         after_read: bool,
     ) -> Result<(), Refusal> {
+        // A sign-in's tokens or a lease's value cross in their message alone: its bytes here are wiped as they go,
+        // sent, queued and sent, or let go (docs/design/credential-grants.md C7, C8; the review's E-6).
+        let secret = wire::carries_secret(&bytes);
+        let bytes = hex_api::lease::Wiped::new(bytes, secret);
         let mut out = conn.out.lock().map_err(poisoned)?;
         if after_read {
             out = self.drained(conn, out)?;
@@ -1558,15 +1598,9 @@ impl<O: Os> Shared<O> {
             out.given.insert(exec, Vec::new());
         }
         if out.backlog.is_empty() {
-            match self.os.send(&conn.sock, &bytes, &fds) {
+            match self.os.send(&conn.sock, bytes.bytes(), &fds) {
                 Sent::Sent => {
                     out.sent(fds, given);
-                    // A sign-in's tokens cross in their message alone: its bytes here are wiped once it has gone
-                    // (docs/design/credential-grants.md C8).
-                    if wire::carries_secret(&bytes) {
-                        let mut bytes = bytes;
-                        hex_api::lease::wipe(&mut bytes);
-                    }
                     return Ok(());
                 }
                 // Its client is gone, and the I/O thread sees the hang-up and closes it.
@@ -1611,7 +1645,15 @@ impl<O: Os> Shared<O> {
                 && now >= within
             {
                 // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on.
-                self.reads.ran_out(within);
+                self.reads.ran_out(
+                    within,
+                    now,
+                    &[
+                        Piece::Kind("the client of connection "),
+                        Piece::Number(conn.token),
+                        Piece::Kind(", reading its waiting answers"),
+                    ],
+                );
                 bound = None;
             }
             out = match bound {
@@ -1635,13 +1677,10 @@ impl<O: Os> Shared<O> {
     fn flush(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         while let Some((front, fds, _)) = out.backlog.front() {
-            match self.os.send(&conn.sock, front, fds) {
+            match self.os.send(&conn.sock, front.bytes(), fds) {
                 Sent::Sent => {
-                    if let Some((mut bytes, fds, given)) = out.backlog.pop_front() {
+                    if let Some((_, fds, given)) = out.backlog.pop_front() {
                         out.sent(fds, given);
-                        if wire::carries_secret(&bytes) {
-                            hex_api::lease::wipe(&mut bytes);
-                        }
                     }
                 }
                 Sent::WouldBlock => return Ok(()),
@@ -1678,12 +1717,8 @@ impl<O: Os> Shared<O> {
             if out.places() == 0 {
                 self.idle_programs.fetch_sub(1, Ordering::AcqRel);
             }
-            // What waited to go goes nowhere now: any that carried a sign-in's tokens wiped.
-            for (mut bytes, ..) in std::mem::take(&mut out.backlog) {
-                if wire::carries_secret(&bytes) {
-                    hex_api::lease::wipe(&mut bytes);
-                }
-            }
+            // What waited to go goes nowhere now: any that carried a sign-in's tokens wiped as it drops.
+            out.backlog.clear();
             // Its lease asks hear its end, and its boxes' runs lease from no one here from now.
             for slot in std::mem::take(&mut out.asks).into_values() {
                 slot.fill(leases::Reply::Ended);
@@ -2071,6 +2106,10 @@ impl<O: Os> Shared<O> {
                         }) => self.list(&conn, header, &infos),
                         // No worker to wait in: its end isn't known, and is sent so, or counted in its box as
                         // `finish` counts one.
+                        Some(Job::MemberKill { done, .. }) => {
+                            done(Err(Refusal::os("starting a worker for a member's kill", e)));
+                            Ok(())
+                        }
                         Some(Job::Collect(w)) => {
                             let open = w.conn.out.lock().is_ok_and(|out| out.open);
                             if open && !w.killed {
@@ -2134,6 +2173,18 @@ impl<O: Os> Shared<O> {
                     infos,
                 } => {
                     let _ = self.list(&conn, header, &infos);
+                }
+                // A member that no longer runs has nothing to end, as in process (the image class's `MemberProc`):
+                // its end is told as it comes. The worker follows the member's lane as long as its answer takes, as
+                // the image class's `Steering::signal` waits: decision 9's follow, untold until Shards' lane asks take
+                // a patience (Hex's ask of Shards, through ROOT, 2026-11-14).
+                Job::MemberKill { id, member, done } => {
+                    done(
+                        match self.host.signal_member(&id, &member, hex_api::Signal::KILL) {
+                            Err(Refusal::NotRunning(..)) => Ok(()),
+                            sent => sent,
+                        },
+                    );
                 }
                 Job::Collect(mut w) => {
                     let exit = match &mut w.run {
@@ -2341,6 +2392,9 @@ impl<O: Os> Shared<O> {
             Call::Create(spec) => self.create(conn, *spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),
+            Call::MemberSignal { id, member, signal } => host
+                .signal_member(&id, &member, signal)
+                .map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => {
@@ -2686,6 +2740,8 @@ impl<O: Os> Shared<O> {
         let end = Arc::new(MemberEnd {
             shared: Arc::downgrade(self),
             token,
+            id: id.try_clone()?,
+            member: member.clone(),
             released: Mutex::new(false),
         });
         let telling = Arc::clone(&end);
@@ -2817,7 +2873,13 @@ impl<O: Os> Shared<O> {
             if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
                 // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
                 // lives alone.
-                crate::emptying::EMPTYING.ran_out(window);
+                crate::emptying::EMPTYING.ran_out(
+                    window,
+                    killed.elapsed(),
+                    &[Piece::Kind(
+                        "the programs a stopping server's closes ended, by their own events",
+                    )],
+                );
                 past = true;
                 left = None;
             }

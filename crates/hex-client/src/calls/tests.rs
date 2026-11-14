@@ -1230,6 +1230,18 @@ fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
             }),
             BoxKind::Member,
         ),
+        // Goal 2's item 2: a member's own signal is timed as its box's signal is, by the box's class.
+        (
+            Request::Call(Call::MemberSignal {
+                id: b.clone(),
+                member: hex_api::Member {
+                    kind: hex_api::MemberKind::Harness,
+                    name: "claude".to_owned(),
+                },
+                signal: hex_api::Signal::TERM,
+            }),
+            BoxKind::Signal,
+        ),
     ] {
         assert!(kind_of(waits, &request).is_none(), "{request:?}");
         assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));
@@ -1604,4 +1616,48 @@ mod queued_deadline_probe {
     fn cp_t7_4_absent_native_reply_does_not_extend_expired_wait() {
         assert!(expired_native_submit(Queued::Absent).is_none());
     }
+}
+
+/// The review's B-6 (kiln's HexVms adapter; goal 54's change 3): a remote node's client has no wire call for `started`
+/// nor for a delete answering its VM's host use, so it refuses each, typed, naming the call and what its wire lacks,
+/// before anything is sent: never the trait's defaults, which answered `started` as an inspect, at once, and a delete
+/// with host use as a plain delete answering none, read as a run that never started, so kiln charged nothing. Do: ask
+/// both of a client whose node answers every request at once. Expect: each `Invalid`, naming its call; nothing sent.
+#[test]
+fn b6_a_client_refuses_started_and_delete_with_host_use_typed_before_anything_is_sent() {
+    let client = client();
+    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Done);
+    let id = BoxId::new("b6-remote").unwrap();
+    let started = client.started(&id);
+    assert!(
+        matches!(
+            &started,
+            Err(Refusal::Invalid {
+                what: "started",
+                ..
+            })
+        ),
+        "{started:?}"
+    );
+    let deleted = client.delete_with_host_use(&id);
+    assert!(
+        matches!(
+            &deleted,
+            Err(Refusal::Invalid {
+                what: "delete_with_host_use",
+                ..
+            })
+        ),
+        "{deleted:?}"
+    );
+    assert!(
+        client
+            .conn
+            .shared
+            .transport
+            .outbound
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
 }

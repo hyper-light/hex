@@ -288,7 +288,10 @@ holds it. While the VM runs, `inspect` also reports what its boot bound, `BoxInf
 the grant's host address, on its host port or on the one the OS picked. A run doesn't outlive its owner in
 D231's first version (`Awaits(AttachAfterCrash)`), so this report is the live run's, not the durable record's.
 
-At start, Hex holds the run's own report to the grants (`hex_runtime::grants::bound`):
+As its boot's answer is taken, Hex holds the run's own report to the grants (`hex_runtime::grants::bound`), by
+whichever call takes it: the start, or, where the boot outlasts its W* and the start answers `Lifecycle { Pending }`
+(decision 9, the person's ruling of 2026-11-13), the later call that finds the answer (`started`, an inspect, a
+signal, a delete):
 
 - each publish grant's member must be one the image runs (`ImageGuest::members()`);
 - the host must have bound each publish once, where the grant names it, and nothing else
@@ -297,8 +300,11 @@ At start, Hex holds the run's own report to the grants (`hex_runtime::grants::bo
   member the image gives the port coming in, by declared index, at the member's own port; several where several
   claim it, the one listening taking each connection; none where it reaches the run's own command).
 
-A run that breaks any is stopped, and its start is refused. A member the image doesn't run, or a port the image
-gives anyone else, is the spec's fault, `Invalid` naming the grant and whom the port reaches. A socket bound past
+A run that breaks any is stopped, and its start is refused, or, past the boot's W*, the `started` that follows it, once
+its stop has ended; the box's end keeps the refusal's words (`BoxInfo.ended`), so the why outlives whichever call
+found it (ROOT, 2026-11-14), and a `started` asked after the stop answers `Failed` in them. A member the image
+doesn't run, or a port the image gives anyone else, is the spec's fault, `Invalid` naming the grant and whom the port
+reaches. A socket bound past
 or short of the grants, or a receiver that is no member of the image, is Shards', `Broken`. So no port stays
 published for anyone its grant doesn't name. Each `Published` records its receiver as `Receiver::Named { port }`:
 the grant's member, at its own port there (the published port, or the one an `EXPOSE` maps it to). A publish is
@@ -321,10 +327,16 @@ raises it with the person beside N4's change.
 | DNS name characters, label octets | 253, 63 | RFC 1035 §2.3.4, in text form |
 | lowest port | 1 | RFC 6335 §6 reserves port 0 |
 | the host's name | `host.docker.internal` | Shards D236, Docker Desktop's name for the host, under `.internal`, the top-level domain ICANN reserved for private use |
+| a boot's request | `shards_abi::run::MAX_PAYLOAD` (6 MiB) | Shards' run protocol: Linux's bound on a command line and environment (3/4 of `_STK_LIM`), the most D231's channel carries in one request, the destinations kept and each member's reach among it |
 
 There is no count constant. A box's grants cross the node's wire in one message (`hex_core::wire::MAX_MESSAGE`)
 and live in its record (`hex_core::record::MAX_RECORD_BYTES`), so the count is bounded by bytes. Each grant
-encodes in a fixed minimum. The check's one working copy is reserved fallibly and refused `Exhausted` past what
+encodes in a fixed minimum. Their destinations are not bounded so: D236 names one port a destination, so a grant of a
+range is a destination for each of its ports, kept, and again in its member's reach, and a few KiB of grants could
+name hundreds of millions (the review's D-9). What bounds them is the one request D231's channel carries them in, at
+most `shards_abi::run::MAX_PAYLOAD` bytes: `program` counts the bytes they take there from the grants' ranges, never a
+port expanded (each host's ranges merged, each member's counted once), and refuses `Invalid` a list naming more, by
+those bytes and the bound, before anything is expanded. A list that fits expands within that bound. The check's one working copy is reserved fallibly and refused `Exhausted` past what
 memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11).
 
 ## Tests

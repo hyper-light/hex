@@ -255,7 +255,7 @@ on hardware (ROOT's fairness run).
 - **Last**, when what the fleet's VMs hold plus the fastest growth on record in one window passes the fleet's
   budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
   so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
-  growth is learned from the node's own windows, only rising as a rate: kept with the window it was seen over and
+  growth is learned from the node's own windows, only rising as a rate, and only from a VM's readings after its first: what a VM holds as its learner first meets it is its baseline, never a window's growth, so a restarted node's learner meeting its whole fleet records no growth, and before its first reading a VM counts at its booking (ROOT, 2026-11-13, A-1; `charge::Node::baseline`): kept with the window it was seen over and
   projected over the window in force, rounded up, so a window that changes with the caps a learner holds (C1) neither
   shrinks nor swells it. Moving it instead of ending it waits on Shards' D176
   (`Awaits(LiveMove)`): its saved and live moves are the `shards` command's, which shards-api's image run (D231)
@@ -502,26 +502,31 @@ computes, per seed:
   while short, only it held or ended.
 
 ROOT measures on hardware: density and fairness under this rule with real harness VMs (Linux on 00aad, the Mac
-Studio), the CPU violation rate per OS on recorded agent traces, and f85's memory measurements before memory pools.
-The driver is hex-cli's `charge_fleet` (ignored, ROOT's run): a real `hex node` and a fleet of VMs of one class
-(`shards-image`, Agentfile images, Linux, macOS and Windows awaiting `RunHostStdioOnly`; `shards`, Shards guests whose
-box plays the trace; `firecracker`, Linux), each replaying one recorded trace (`millis threads mib` steps, played by
-the guest's shell) and deleted once it has played, the first admitted the riser (its trace until its charge has
-warmed, SEEDABLE windows, then every vCPU and the most any trace holds, to the run's end), beside a process box asking
-its whole cap. It admits as the scheduler's ledger books (each VM at its class's prior on the node's capacity answer,
-else its receipt; C2, C6), a start retried only once the room has changed, and reads each window, the node's learner's
-as the node says it on stderr (`the charge learner's window is N ns`, or why it doesn't run, which refuses the run),
-each read at least a window after the last, each VM's CPU given (its usage over its own span), asked (its trace's over
-the same span) and booked (its holding). `hex_sim::charge::trial` reckons the windows as `sim` reckons its own: ratios
-of given over min(asked, booked) and misses in the contended windows (C4's falsifier's), Jain's index, the riser's
-windows over its booking, its neighbours' and the box's misses while it rises, and each VM's windows past its charge
-(C1's falsifier); with the most VMs at once against envelope density, the starts refused while the riser rises, the
-riser's inspect (its exit and the last resort's why), and the learner's own CPU (Linux: its `hex-charges` thread;
-macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
-not a verdict. Every number it runs with is derived, none picked (ROOT, 2026-11-12): each VM's workload from the
-traces (the most busy threads and MiB any step asks), the process box's caps from kiln's CI (the median CPU and the
-median peak memory of the build legs in bench/sched/kiln-ci-20261022-20261105.trace, which it books; on macOS, which
-holds a process box at no CPU cap, its memory alone, its spinners asking a CPU each), and the deadline guarding the
-node's start and each create from the node's own boot bound for the class (twice it). Its traces are real harness
-sessions, recorded by bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS
-period, the Linux learner's own window.
+Studio, a Windows host), the CPU violation rate per OS on recorded agent traces, and f85's memory measurements before
+memory pools. The driver is hex-cli's `charge_fleet` (ignored, ROOT's run): a real `hex node` and a fleet of VMs of one
+class (`shards-image`, Agentfile images on Linux, macOS and Windows, built into the node's Shards home from
+`HEX_IMAGE_CONTEXT` or pulled by digest; `shards`, Shards guests whose box plays the trace; `firecracker`, Linux), each
+replaying one recorded trace (`millis threads mib` steps, played by the guest's shell from its own start, its memory
+beside its CPU) and deleted once it has played, the riser playing the longest (its trace until its charge has warmed,
+SEEDABLE windows, then every vCPU and the most any trace holds, to the run's end), beside a process box asking its
+whole cap. It admits as the scheduler's ledger books (each VM at its class's prior on the node's capacity answer, else
+its receipt; C2, C6), a start retried only once the room has changed and a start answering Pending followed to its
+run, and reads each window, the node's learner's as the node says it (on stderr at its start, or on the class's
+capacity answers as the caps it holds move; a learner that doesn't run refuses the run), each read at least a window
+after the last, each VM's CPU given (its usage over its own span), asked (what its trace asked for certain over the
+span its reading can't have missed: the trace's zero anywhere within its VM's start, each step's edge anywhere within
+the ticks of `/proc/uptime` its player keeps time by) and booked (its holding). `hex_sim::charge::trial` reckons the
+windows as `sim` reckons its own: ratios of given over min(asked, booked) and misses in the contended windows (C4's
+falsifier's), the same of given over asked where nothing contended (the run's floor: how far a reading falls short of
+its ask with nothing taking its share), Jain's index, the riser's windows over its booking, its neighbours' and the
+box's misses while it rises, and each VM's windows past its charge (C1's falsifier); with the most VMs at once against
+envelope density, the starts refused while the riser rises, the riser's inspect (its exit and the last resort's why),
+each VM that ended before its trace had played, by name, with its inspect's exit and why, and the learner's own CPU
+(Linux: its `hex-charges` thread; macOS and Windows: the node's whole CPU, an upper bound). Its windows go to
+`windows.tsv`; its figures are a record, not a verdict. Every number it runs with is derived, none picked (ROOT,
+2026-11-12): each VM's workload from the traces (the most busy threads, at most the host's CPUs, and MiB any step
+asks), the process box's caps from kiln's CI (the median CPU and the median peak memory of the build legs in
+bench/sched/kiln-ci-20261022-20261105.trace, which it books; on macOS, which holds a process box at no CPU cap, its
+memory alone, its spinners asking a CPU each); and none of its waits is timed, each call following its answer
+(decision 9). Its traces are real harness sessions, recorded by bench/charge/record_trace.py in a cgroup of their
+own, at most two steps a window of the cgroup's CFS period, the Linux learner's own window.
