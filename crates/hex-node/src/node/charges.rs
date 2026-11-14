@@ -517,10 +517,12 @@ impl Learner {
             };
             if let Some(vm) = self.vms.get_mut(&scope) {
                 let (before, at) = vm.last;
+                // Split where both readings hold its vCPUs' guest time (D260), its VMM's own the cgroup's less theirs, as
+                // every OS's learner reads it; whole where either doesn't.
                 let cpu = ran(
                     usage.cpu_usec.saturating_sub(before).saturating_mul(1_000),
-                    None,
-                    None,
+                    guest_ns.as_deref(),
+                    vm.guest_ns.as_deref(),
                 )
                 .map_err(refused)?;
                 self.node
