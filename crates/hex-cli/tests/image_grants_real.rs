@@ -608,7 +608,8 @@ fn granted_destinations_are_reached_alone(client: &Client, probe: &Probe, alloca
 
 /// Joint plan step 15 (N6): do create, then start, a VM with a command of its own granted a publish of a port its
 /// image gives no member, which Shards gives that command (D122). Expect: the start refused Invalid naming the run's
-/// own command, the box ended by KILL with nothing published, and no run host left under the node.
+/// own command (beside its run's stop still pending, Uncertain, where that stop outlasts its W*), the box followed to
+/// its end by KILL with nothing published, and no run host left under the node.
 fn a_publish_reaching_the_runs_own_command_stops_it(
     client: &Client,
     node: u32,
@@ -629,11 +630,43 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
     client.create(spec).unwrap();
     let refused = start(client, &id);
     eprintln!("GRANTS-CHECK-5 {id} start: {refused:?}");
+    // The grants' refusal, its run's stop begun: where that stop outlasts its W* the start says so beside it (Uncertain,
+    // its cleanup Lifecycle Pending) and the stop goes on (decision 9; B-4's stop answers once its run is released).
+    let grants = match &refused {
+        Err(Refusal::Uncertain {
+            refusal, cleanup, ..
+        }) if matches!(
+            cleanup.as_ref(),
+            Refusal::Lifecycle {
+                cause: LifecycleCause::Pending,
+                ..
+            }
+        ) =>
+        {
+            refusal.as_ref()
+        }
+        Err(why) => why,
+        Ok(()) => panic!("{id} started past its grants"),
+    };
     assert!(
-        matches!(&refused, Err(Refusal::Invalid { what: "grants", why }) if why.contains("the run's own command")),
+        matches!(grants, Refusal::Invalid { what: "grants", why } if why.contains("the run's own command")),
         "{refused:?}"
     );
-    let ended = client.inspect(&id).unwrap();
+    // Its end followed: the box looked at, each look the node's own answer, until it shows it.
+    let mut ended = None;
+    hex_testkit::waits::follow::until(
+        &KILLED,
+        &format!("{id} ended by its grants' stop"),
+        || hex_testkit::waits::follow::Party::Live,
+        || {
+            let shown = client.inspect(&id).unwrap();
+            let reached = shown.state == BoxState::Empty;
+            ended = Some(shown);
+            reached
+        },
+    )
+    .unwrap();
+    let ended = ended.unwrap();
     assert_eq!(
         (ended.state, ended.exit),
         (BoxState::Empty, Some(Exit::Signal(9)))
