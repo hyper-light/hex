@@ -3426,8 +3426,8 @@ fn w39_a_node_vm_whose_boot_is_refused_ends_its_record_in_shards_words() {
 
 /// A run's real agent-control endpoint (D252) on loopback, its microVM's key the model's own, taking `ask`'s controller
 /// alone and admitting the lanes it grants; its host connects each lane to the socket it names in `dir`, as
-/// shards-init's relay host does (D251). A model run's endpoint and host live while the test does.
-#[cfg(unix)]
+/// shards-init's relay host does (D251), and answers with its run host's end of it ([`lane_to`]). A model run's
+/// endpoint and host live while the test does.
 fn serve_lanes(
     ask: &shards_api::image::ControlAsk,
     dir: std::path::PathBuf,
@@ -3457,7 +3457,7 @@ fn serve_lanes(
         // Held for the endpoint's life: let go, it would end every lane.
         let _revoke = revoke;
         for ask in asks {
-            let reply = match std::os::unix::net::UnixStream::connect(dir.join(ask.name())) {
+            let reply = match lane_to(&dir.join(ask.name())) {
                 Ok(socket) => shards_remote::control::unix::Reply::Connected(socket),
                 // Linux's ECONNREFUSED: the run host is the guest's.
                 Err(_) => shards_remote::control::unix::Reply::Unreached(
@@ -3473,26 +3473,89 @@ fn serve_lanes(
     }
 }
 
-#[cfg(not(unix))]
-fn serve_lanes(
-    _: &shards_api::image::ControlAsk,
-    _: std::path::PathBuf,
-) -> shards_api::image::ControlAt {
-    model_control()
+/// A connection to the relay's socket, as the relay listens in `/run/hex/channel` (its `--unix` form): on Unix an
+/// AF_UNIX stream socket, std's.
+#[cfg(unix)]
+type Relayed = std::os::unix::net::UnixStream;
+
+/// The run host's end of a lane to the relay's socket at `path` (D251): on Unix the socket itself, as shards-init's
+/// relay host connects it.
+#[cfg(unix)]
+fn lane_to(path: &Path) -> std::io::Result<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(path)
+}
+
+/// The relay's socket at `path`, listening once this returns, its first connection served by `serve` on a thread of
+/// its own.
+#[cfg(unix)]
+fn relay<T: Send + 'static>(
+    path: &Path,
+    serve: impl FnOnce(Relayed) -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    std::thread::spawn(move || serve(listener.accept().unwrap().0))
+}
+
+/// A lane's end on Windows as Shards' run host makes it there (`crates/shards/src/api_run.rs`'s `open_lane` and
+/// `handed_pair`, at 097ec0047): a plain pipe pair, whose ends each say the end of their writes as a socket's
+/// half-close does, the run host's end answering the lane and the other its VM's, which carries the lane to the relay's
+/// socket in the guest. The relay here reads and writes the VM's end itself: the guest's AF_UNIX socket is a Linux
+/// one, which no Windows host carries, and afunix.sys, which would stand in for it, now and then misses waking a read
+/// with its peer's end (HEX-SOCK-3, beaf22ee), the end this relay waits for.
+#[cfg(windows)]
+type Relayed = shards_ipc::Stream;
+
+/// The relays listening in the model runs' socket directories, each by its socket's path: the guest's directory, as
+/// one map of this process's on Windows.
+#[cfg(windows)]
+static RELAYS: Mutex<BTreeMap<PathBuf, std::sync::mpsc::Sender<Relayed>>> =
+    Mutex::new(BTreeMap::new());
+
+/// The run host's end of a lane to the relay's socket at `path` (D251), the VM's end handed to that relay: a path no
+/// relay listens at is not found, as its connect would be.
+#[cfg(windows)]
+fn lane_to(path: &Path) -> std::io::Result<shards_ipc::Stream> {
+    let relays = RELAYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let relay = relays.get(path).ok_or(std::io::ErrorKind::NotFound)?;
+    let (ours, theirs) = shards_ipc::Stream::plain_pair()?;
+    relay
+        .send(theirs)
+        .map_err(|_| std::io::ErrorKind::ConnectionRefused)?;
+    Ok(ours)
+}
+
+/// The relay's socket at `path`, listening once this returns, its first connection served by `serve` on a thread of
+/// its own; gone as `serve` returns, as a listener is.
+#[cfg(windows)]
+fn relay<T: Send + 'static>(
+    path: &Path,
+    serve: impl FnOnce(Relayed) -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    let (listening, connections) = std::sync::mpsc::channel();
+    RELAYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_owned(), listening);
+    let path = path.to_owned();
+    std::thread::spawn(move || {
+        let served = serve(connections.recv().unwrap());
+        RELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&path);
+        served
+    })
 }
 
 /// The node's relay in the guest under shards-init, as far as its first connection needs it: its control socket in
 /// `dir`, one connection's token, then its node's hello answered, and each capacity ask after it with `pool`, its
 /// guest's own, where one is given; held until the client goes. Says whether it greeted.
-#[cfg(unix)]
 fn greeting_relay(dir: &std::path::Path, pool: Option<Capacity>) -> std::thread::JoinHandle<bool> {
     use std::io::{Read, Write};
-    let listener = std::os::unix::net::UnixListener::bind(
-        dir.join(hex_core::stream::socket_name(hex_core::stream::CONTROL_PORT).unwrap()),
-    )
-    .unwrap();
-    std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
+    let path = dir.join(hex_core::stream::socket_name(hex_core::stream::CONTROL_PORT).unwrap());
+    relay(&path, move |mut conn| {
         conn.write_all(&7u64.to_le_bytes()).unwrap();
         let mut d = hex_core::stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
         let mut byte = [0u8; 1];
@@ -3541,7 +3604,6 @@ fn greeting_relay(dir: &std::path::Path, pool: Option<Capacity>) -> std::thread:
 
 /// A fixed VM's cost profile for `config`'s guest: its vCPUs and memory, floor and ceiling alike, as a node's guest is
 /// charged (`GuestConfig::checked_runtime_allocation`).
-#[cfg(unix)]
 fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
     let vm = crate::guest::selected::resources(config).unwrap();
     hex_api::RuntimeCost {
@@ -3560,7 +3622,6 @@ fn fixed_cost(config: &crate::guest::GuestConfig) -> hex_api::RuntimeCost {
 
 /// A node's guest runtime of the image form, its node VM booted through `images`, its records `owner`'s, its node
 /// having fitted it six lanes: with the configuration it was made from.
-#[cfg(unix)]
 fn image_form(
     images: &Arc<ModelImages>,
     owner: &Arc<Owner>,
@@ -3593,7 +3654,6 @@ fn image_form(
 /// taking this runtime's key and admitting the lanes its node fitted; its record a node VM's, Ready, charged at the
 /// configured VM; its relay dialed through a lane of that endpoint and its node's hello the answer; and the runtime's
 /// next ask the same guest, its run still running, no second boot.
-#[cfg(unix)]
 #[test]
 fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_node_over_its_runs_lanes()
  {
@@ -3629,10 +3689,8 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
 }
 
 /// A node's loop with no room for one more connection: it refuses every guest connection's join.
-#[cfg(unix)]
 struct FullLoop;
 
-#[cfg(unix)]
 impl crate::guest::Joins for FullLoop {
     fn reserve(&self) -> Result<(u64, crate::guest::Room), Refusal> {
         Err(Refusal::Exhausted {
@@ -3651,7 +3709,6 @@ impl crate::guest::Joins for FullLoop {
 /// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13): do boot a node's guest under shards-init whose connection its
 /// node's loop can't join, though its node greeted it. Expect: the boot refused as the loop refused it, and its node
 /// VM's run stopped first: its record Ended with its exit, so no run is left beside the next boot's.
-#[cfg(unix)]
 #[test]
 fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stopped() {
     let images = ModelImages::new();
@@ -3685,7 +3742,6 @@ fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stoppe
 }
 
 /// The guest node's own pool as its relay answers it: two CPUs and 4 GiB, all of them free.
-#[cfg(unix)]
 fn guest_pool() -> Capacity {
     let room = CapacityResources {
         cpu_milli: 2_000,
@@ -3712,7 +3768,6 @@ fn guest_pool() -> Capacity {
 /// answer, its record the one source): do ask the `oci` class's capacity of a node whose guest is a node VM under
 /// shards-init. Expect its guest's pool, fenced by its node VM's run, carrying that node VM's receipt as its record
 /// keeps it: its run, what its allocation books, Ready.
-#[cfg(unix)]
 #[test]
 fn w39_the_image_forms_oci_answer_carries_its_node_vms_receipt_from_its_record() {
     let images = ModelImages::new();
