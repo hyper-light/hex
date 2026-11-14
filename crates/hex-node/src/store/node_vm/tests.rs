@@ -395,8 +395,15 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
     .unwrap();
 }
 
-/// The owner `role` names, started in `dir` and followed until it says it is ready: its stdin the test's to write.
-fn owner_ready(role_named: &str, dir: &Path) -> std::process::Child {
+/// The owner `role` names, started in `dir` and followed until it says it is ready: its stdin the test's to write, and
+/// its stdout, which the test keeps open until the owner has ended, so the owner's last words find a reader.
+fn owner_ready(
+    role_named: &str,
+    dir: &Path,
+) -> (
+    std::process::Child,
+    std::io::BufReader<std::process::ChildStdout>,
+) {
     use std::io::BufRead;
     let mut owner = role(role_named, dir)
         .stdin(std::process::Stdio::piped())
@@ -412,7 +419,7 @@ fn owner_ready(role_named: &str, dir: &Path) -> std::process::Child {
             "the owner ended unready"
         );
         if line.ends_with("HEX_NODE_VM_OWNER_READY\n") {
-            return owner;
+            return (owner, said);
         }
     }
 }
@@ -426,13 +433,14 @@ fn owner_ready(role_named: &str, dir: &Path) -> std::process::Child {
 fn c11_a_row_its_owner_ended_after_the_starts_read_is_let_go_as_ended_its_end_carried() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
-    let mut owner = owner_ready("ending owner", dir.path());
+    let (mut owner, said) = owner_ready("ending owner", dir.path());
     let mut ends = owner.stdin.take().unwrap();
     SETTLE_READ.with(|then| {
         *then.borrow_mut() = Some(Box::new(move || {
             ends.write_all(b"end\n").unwrap();
             drop(ends);
             assert!(owner.wait().unwrap().success());
+            drop(said);
         }));
     });
     let store = store_in(dir.path());
