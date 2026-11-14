@@ -3700,6 +3700,45 @@ mod tests {
         record
     }
 
+    /// AC-T7.4.1, joint plan step 14 (ROOT, 2026-11-13, ruling B; A-4): do take a VM's host bounds from its record,
+    /// as its launch and its adoption prepare its job. Expect its CPU at its allocation's and no commit limit, so
+    /// its VMM's own memory beside its guest's RAM is never refused at a bound of its guest's size.
+    #[test]
+    fn w14_a4_a_vms_job_holds_its_cpu_and_no_commit_limit() {
+        let record = vm_record("ruling-b");
+        let native = hex_core::record::NativeRecord::Box(&record);
+        let cpu = record.spec.allocation.unwrap().resources.cpu_milli;
+        let bounds = super::managed::host_bounds(native).unwrap();
+        assert_eq!(bounds.cpu_max_milli, Some(u32::try_from(cpu).unwrap()));
+        assert_eq!(bounds.memory_max, None);
+    }
+
+    /// AC-T7.4.1, joint plan step 14 (ROOT, 2026-11-13, ruling B; A-4): do adopt a VM's job that a create before
+    /// ruling B made, with a commit limit at its guest's RAM. Expect the adoption to lift it, as Linux lifts a VM's
+    /// `memory.max` at its first window.
+    #[test]
+    fn w14_a4_an_adopted_vms_job_has_its_old_commit_limit_lifted() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let record = vm_record("adopted");
+        let native = hex_core::record::NativeRecord::Box(&record);
+        let guest = record.spec.allocation.unwrap().resources.mem_bytes;
+        let name = format!("Local\\hex-test-{}-a4", std::process::id());
+        let old = super::sys::Job::create_named(&name).unwrap();
+        let before = super::sys::Limits {
+            memory: Some(guest),
+            processes: None,
+            cpu: None,
+        };
+        old.configure(&before).unwrap();
+        assert_eq!(old.memory_limit().unwrap(), Some(guest));
+        let bounds = super::managed::host_bounds(native).unwrap();
+        let boxed =
+            JobBox::prepare_vm(native, bounds, rt.processors, Some(&name), &rt.holding).unwrap();
+        boxed.adopt_vm(super::sys::Job::open(&name).unwrap().unwrap()).unwrap();
+        assert_eq!(old.memory_limit().unwrap(), None);
+    }
+
     /// AC-T7.4.1: a creator marks only the slot holding its own job receipt. A stale creator whose
     /// slot was released and relaunched never marks the newer creator's slot; its own goes to
     /// cleanup, and one already in cleanup needs no mark.
@@ -3709,13 +3748,8 @@ mod tests {
         let rt = device_runtime(scratch.path());
         let record = vm_record("relaunched");
         let native = hex_core::record::NativeRecord::Box(&record);
-        // A VM's job is prepared with its allocation's CPU and memory, as managed::host_bounds gives them.
-        let allocation = record.spec.allocation.unwrap();
-        let bounds = hex_api::Bounds {
-            cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).unwrap()),
-            memory_max: Some(allocation.resources.mem_bytes),
-            ..hex_api::Bounds::default()
-        };
+        // A VM's job is prepared with the bounds managed::host_bounds gives it.
+        let bounds = super::managed::host_bounds(native).unwrap();
         let stale =
             JobBox::prepare_vm(native, bounds.clone(), rt.processors, None, &rt.holding).unwrap();
         let newer = JobBox::prepare_vm(native, bounds, rt.processors, None, &rt.holding).unwrap();
