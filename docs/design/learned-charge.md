@@ -362,9 +362,16 @@ measured, never the census's (ROOT, 2026-11-13; a census-free cost carries no `g
 from its guest agent's capacity answer, each dimension the most seen, only rising, kept per backing generation
 (`guest::shared::guest_seen`): its memory in use (its total less its free) past what its boxes hold; its disk in use,
 its boxes' disk no usage reads; and its CPU, its machine's CPU time past its boxes' over the uptime between two
-answers, read from `/proc/stat` and `/proc/uptime` (`hex_api::Capacity::own`, `hex_sim::facts::machine_time`). The
-first answer's CPU is read since the guest's boot, its boot's work among it, so it stands only until the first
-interval replaces it; then the most of the intervals, an interval over which its boxes changed giving none. A
+answers, read from `/proc/stat` and `/proc/uptime` (`hex_api::Capacity::own`, `hex_sim::facts::machine_time`), its
+boxes' CPU time the guest node's own count of everything under its box root (its cgroup's `usage_usec`, which keeps an
+ended box's time: cgroup v2 flushes a removed cgroup's counts into its parent's, seen on adacachy2's 7.3.3), so an
+interval spans its boxes' coming and going. An interval counts only once its counters resolve its share to the unit
+it is kept in, a milli-CPU (the review's A-8): `/proc/stat` is in USER_HZ ticks (100 a second on x86_64 and arm64, the
+kernel's user ABI), its five fields each floored, a CPU's time charged a scheduler tick at a time, and `/proc/uptime`
+in hundredths, so an interval's error is at most 5 ticks and 3 more for each CPU, and it resolves at a thousand times
+that (110 s for a 2-CPU guest); the reading it starts from is kept meanwhile, so answers close together no longer feed
+their noise into the most. The first answer's CPU is read since the guest's boot, its boot's work among it, so it
+stands only until the first resolved interval replaces it; then the most of the resolved intervals. A
 backing is cold only before it is Live: its runtime takes the first measurement before its record says Live and
 leaves it Granted without one (`GuestRuntime::initialize_pool`), so a placement never meets a cold guest. Its offer
 carries what was seen (`BackingOffer::guest`); a new box fits its envelope with it, a dimension not yet measured
