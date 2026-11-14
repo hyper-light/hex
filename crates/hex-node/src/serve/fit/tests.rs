@@ -62,13 +62,13 @@ fn a_fitted_nodes_terms_are_within_its_descriptors_at_the_most_places_that_fit()
 
 /// D251's admission comes from the node's own budgets: a hosted VM's lanes are its two control connections and, for
 /// each program place, its three streams and its box's staging connection, with its controller's two descriptors. Each
-/// lane holds what `hex_client::guest::lanes` counts and its tests hold to the real descriptors (the review's D-6): a
-/// control connection five, every other lane three. Do: read the lanes and the hosted term at 10 places. Expect: 42
-/// lanes, 132 descriptors.
+/// lane holds what `hex_client::guest::lanes` counts and its tests hold to the real descriptors (the review's D-6): its
+/// socket pair's two ends, a control connection's as every other's (the review's D-5). Do: read the lanes and the
+/// hosted term at 10 places. Expect: 42 lanes, 86 descriptors.
 #[test]
 fn a_hosted_vms_lanes_are_its_control_connections_and_four_for_each_place() {
     assert_eq!(lanes(10), 2 + 10 * 4);
-    assert_eq!(hosted_descriptors(1, 10), 2 * 5 + 40 * 3 + 2);
+    assert_eq!(hosted_descriptors(1, 10), 42 * 2 + 2);
     assert_eq!(hosted_descriptors(0, 10), 0);
     let at = Bounds {
         descriptors: 1_000,
@@ -77,7 +77,7 @@ fn a_hosted_vms_lanes_are_its_control_connections_and_four_for_each_place() {
         hosted: 1,
     };
     let named: Vec<_> = terms(at, MACOS, Some(0)).into_iter().collect();
-    assert!(named.contains(&("the hosted VMs' lanes", 132)), "{named:?}");
+    assert!(named.contains(&("the hosted VMs' lanes", 86)), "{named:?}");
 }
 
 /// A second hosted VM, should the form hold one, takes its lanes from the same descriptors: the places that fit
