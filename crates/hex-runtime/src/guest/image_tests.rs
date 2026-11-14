@@ -3883,6 +3883,50 @@ fn w39_a_node_vm_boots_under_shards_init_through_the_image_class_and_is_never_a_
     assert!(runtime.list().unwrap().is_empty());
 }
 
+/// Joint plan step 39, item 4 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's starts told cold or restored, and its READY an
+/// event line): do boot a node VM whose run host says it restored its image's template, then form its `node_vm_ready`
+/// line, and one for a run that saved its template and said READY late. Expect the boot to answer its run restored and
+/// its READY on time, and each line one line: its run's name, how it started and how its READY came, each a JSON
+/// string, and its READY's time in whole nanoseconds.
+#[test]
+fn w39_a_node_vms_boot_says_how_its_run_started_and_its_ready_line_says_it() {
+    let images = ModelImages::new();
+    *images.started_from.lock().unwrap() = StartedFrom::Restored;
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    let booted = runtime.images.boot_node(&vm).unwrap();
+    assert_eq!(
+        (booted.started_from, booted.ready),
+        (
+            hex_api::StartedFrom::Restored,
+            shards_api::image::Ready::OnTime
+        )
+    );
+    let run = "01".repeat(16);
+    assert_eq!(
+        node::ready_line(
+            &vm.run,
+            booted.started_from,
+            booted.ready,
+            Duration::from_nanos(1_234)
+        ),
+        format!(
+            "hex.guest event=node_vm_ready run=\"{run}\" started_from=\"restored\" ready=\"on_time\" took_ns=1234"
+        )
+    );
+    assert_eq!(
+        node::ready_line(
+            &vm.run,
+            hex_api::StartedFrom::Saved,
+            shards_api::image::Ready::Late(5),
+            Duration::from_secs(2)
+        ),
+        format!(
+            "hex.guest event=node_vm_ready run=\"{run}\" started_from=\"saved\" ready=\"late\" took_ns=2000000000"
+        )
+    );
+}
+
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is held through its run's rate, D247): do boot a
 /// node VM whose run says its governor holds a rate over 70 ms, hold it to 4 CPUs, read its period, then stop it and
 /// hold it again. Expect its run held at 4,000 milli-CPU as an image box's is, its period its run's 70 ms, and once its
