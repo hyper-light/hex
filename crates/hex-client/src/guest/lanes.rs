@@ -368,7 +368,10 @@ fn bridge(socket: Socket) -> std::io::Result<Bridged> {
 
 /// What the owner writes, to the lane; the owner's end of writing, or its close, is the lane's FIN: the relay's socket
 /// shut for writing, its reads going on. A write the lane refuses (its reset, its connection's end) ends this way, and
-/// the owner's writes then fail as the pair's other end stops reading; an error reading the pair aborts the lane.
+/// the owner's writes then fail ([`writes_refused`]): on Unix as the pair's other end stops reading; on Windows at
+/// [`Bridged`]'s write once the cut is recorded, what the owner sends meanwhile read here and let go, as Winsock resets
+/// a TCP pair whose receiving is shut while bytes wait or come, which drops what the owner hasn't read (the review's
+/// D-4). An error reading the pair aborts the lane.
 fn upward(mut writer: SocketWriter, mut from: Local) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
@@ -384,7 +387,7 @@ fn upward(mut writer: SocketWriter, mut from: Local) {
             }
             Ok(n) => {
                 if writer.write_all(buf.get(..n).unwrap_or_default()).is_err() {
-                    let _ = from.shutdown(Shutdown::Read);
+                    writes_refused(&mut from, &mut buf);
                     return;
                 }
             }
@@ -393,6 +396,27 @@ fn upward(mut writer: SocketWriter, mut from: Local) {
                 let _ = writer.abort();
                 return;
             }
+        }
+    }
+}
+
+/// The owner's writes once the lane refuses them: on Unix the pair's other end stops reading, so they fail.
+#[cfg(unix)]
+fn writes_refused(from: &mut Local, _: &mut [u8]) {
+    let _ = from.shutdown(Shutdown::Read);
+}
+
+/// The owner's writes once the lane refuses them, on Windows: read and let go to the owner's end of writing, its
+/// close or its reset, so the pair's other end never closes with bytes unread, which would reset the owner's socket
+/// and drop what it hasn't read. The owner learns of the cut at its next read, or its next write ([`Bridged`]).
+#[cfg(windows)]
+fn writes_refused(from: &mut Local, buf: &mut [u8]) {
+    loop {
+        match from.read(buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
         }
     }
 }
