@@ -508,27 +508,24 @@ fn retained_backing_refuses_a_replaced_initialized_cost_without_inner_boxes() {
     assert!(owner.boxes.lock().unwrap().is_empty());
 }
 
-/// AC-T7.4.1 (original): a managed Shards boot tells its guest the boot's deadline as a CPU boot does, so its relay's
-/// hello to its node takes it as its caller's. Do: initialize a shared backing, whose launch the owner reads, then
-/// refuses. Expect the launch's kernel command line to name the boot's deadline once (`hex.ready-ms=`): what is left
-/// of the create's budget, the first dial's bound, in milliseconds rounded up.
+/// The review's C-9 (1) (decision 9): a managed Shards boot tells its guest no boot deadline, as the node's own guest is
+/// told none, so its relay keeps its own learned bounds. Do: initialize a shared backing, whose launch the owner reads,
+/// then refuses. Expect the launch's kernel command line to name no boot deadline (`hex.ready-ms`).
 #[test]
-fn original_a_managed_shards_boot_tells_its_guest_the_boots_deadline() {
+fn c9_a_managed_shards_boot_tells_its_guest_no_boot_deadline() {
     let dir = socket_fixture();
     let (runtime, owner) = configured(dir.path());
-    let bound = runtime.first_dial_bound().unwrap();
     let offer = runtime.prepare_backing().unwrap();
     let initialized = runtime.initialize_backing(grant(&offer)).map(drop);
     let cmdlines = owner.cmdlines.lock().unwrap().clone();
     eprintln!(
-        "hex_guest_ready_word boot=managed bound={bound:?} initialized={initialized:?} cmdlines={cmdlines:?}"
+        "hex_guest_ready_word boot=managed initialized={initialized:?} cmdlines={cmdlines:?}"
     );
     assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
     assert_eq!(cmdlines.len(), 1);
-    let given = super::super::tests::ready_ms(&cmdlines[0]);
     assert!(
-        !given.is_zero() && given <= bound + Duration::from_millis(1),
-        "{given:?} isn't what is left of the boot's bound {bound:?}"
+        !cmdlines[0].contains(super::super::tests::READY_MS),
+        "{cmdlines:?}"
     );
 }
 

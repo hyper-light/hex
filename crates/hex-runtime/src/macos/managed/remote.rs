@@ -823,10 +823,10 @@ impl Helper {
         }
         Ok((answer, descriptors))
     }
-    /// Joint plan step 14 (2c-4b): the stop response the live helper's managed CPU control learned from its own holds,
-    /// as it answers it (2c-4a's request): none where no helper runs or the one that ran has ended, nothing being learned
-    /// there, and none before its first hold. It starts no helper to ask.
-    fn response(&self) -> Result<Option<Duration>, CallFailure> {
+    /// Joint plan step 14 (2c-4b; the review's A-14): the stop response the live helper's managed CPU control estimates
+    /// from its own holds, as it answers it (2c-4a's request): none where no helper runs or the one that ran has ended,
+    /// nothing being learned there, and none before its first hold. It starts no helper to ask.
+    fn response(&self) -> Result<Option<protocol::response::Estimate>, CallFailure> {
         let Some(snapshot) = receipt::read(self)? else {
             return Ok(None);
         };
@@ -1618,9 +1618,11 @@ pub(super) fn set_rate(
     helper.set_rate(key, rate).map_err(CallFailure::refusal)
 }
 
-/// Joint plan step 14 (2c-4b): the stop response this node's managed helper learned from its holds, as it answers it:
-/// none where the node runs no managed helper, none runs now, or it has measured no hold yet.
-pub(super) fn response(runtime: &MacRuntime) -> Result<Option<Duration>, Refusal> {
+/// Joint plan step 14 (2c-4b; the review's A-14): the stop response this node's managed helper estimates from its holds,
+/// as it answers it: none where the node runs no managed helper, none runs now, or it has measured no hold yet.
+pub(super) fn response(
+    runtime: &MacRuntime,
+) -> Result<Option<protocol::response::Estimate>, Refusal> {
     match runtime.managed_helper.as_ref() {
         Some(helper) => helper.response().map_err(CallFailure::refusal),
         None => Ok(None),

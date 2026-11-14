@@ -116,7 +116,7 @@ The alternatives, and why not:
 | Shares | `hex.shares=` on the kernel's command line; init mounts each as virtiofs at `/run/hex/shares/<i>` | the run's shares (`ImageShare`), mounted by shards-init at `/run/hex/shares/<i>` before the command starts (D109, D231). The paths are the same, so the host's rewrite (`shards-guest.md` §4a) is unchanged |
 | Controllers and box root | `+cpu +io +memory +pids` at the root's `cgroup.subtree_control`; the box root `/sys/fs/cgroup/hex` | the same, in the delegated subtree. The namespace root is `run/workload`, and its processes are in the leaf `init`, so the write meets no internal process (cgroup-v2.rst; D234 f8, f9) |
 | Descriptors | raises `fs.nr_open` to the node's need, then sets the node's soft and hard RLIMIT_NOFILE to it | none. `fs.nr_open` and the limit are the run's: 1048576 soft and hard by default (the kernel's default `nr_open`, D234 f14), or the run's own, with `fs.nr_open` raised by shards-init (f15). The node raises its soft limit to the hard one and fits every descriptor bound to it (9c75ca76) |
-| The boot's deadline | `hex.ready-ms` or `hex.firecracker-ready-ms` on the kernel's command line, counted from the kernel's start | `SHARDS_READY_BY`: the same clock, unit and form (CLOCK_BOOTTIME nanoseconds, D234 f24), counted from the run's arrival, so neither a template's restore nor a pool's wait counts against it; 0 where it passed before the run arrived. Either way init hands it to the node and the relay as `HEX_BOOT_READY_BY` and holds each child's ready line to it |
+| The boot's deadline | `hex.firecracker-ready-ms` on the kernel's command line, counted from the kernel's start (a Shards host tells none) | `SHARDS_READY_BY`: the same clock, unit and form (CLOCK_BOOTTIME nanoseconds, D234 f24), counted from the run's arrival, so neither a template's restore nor a pool's wait counts against it; 0 where it passed before the run arrived. Either way init hands it to the node and the relay as `HEX_BOOT_READY_BY` and holds each child's ready line to it |
 | GPU authority | `hex.gpu.box=` and `hex.gpu=` on the kernel's command line | none. Under shards-init the kernel's command line is Shards' own. D234's `gpus=` (`/run/shards/gpus`) is not built, so a node VM under shards-init is CPU-only (§5) |
 | Start the node, then the relay | each within the deadline; the relay on vsock (`--vsock`) | the same, but the relay listens on AF_UNIX sockets in `/run/hex/channel` (`--unix`, a form the relay has today): Docker's default filter, which shards-init gives the workload, refuses `socket(AF_VSOCK)` (D234 f27) |
 | Readiness | `hex guest ready` on the console, and Firecracker's ready word over vsock where Firecracker asks | `hex guest ready`, then READY=1 to `NOTIFY_SOCKET` (sd_notify(3)) once the node and the relay are ready. shards-init owns the readiness state and tells the host (D234's table; `ImageGuest::wait_ready`) |
@@ -306,7 +306,9 @@ by each child's life, with no deadline, as its run carries none (§4).
   the stop's W*, the run-out told, the stop is followed by its thread's life.
 - **A row whose owner still runs** (`store.node_vm_owner`): its owner's lock, on a thread of its own, to that owner's
   end. Past its W*, the run-out told, it follows the owner by its life. A follow that fails is said as
-  `hex.guest event=node_vm_unfollowed`, its why a JSON string.
+  `hex.guest event=node_vm_unfollowed`, its why a JSON string. A node's store holds its directory while it runs
+  (runtime-architecture.md decision 1, the store's records in memory), so a start meets no live owner: it follows
+  only a run lock its ended owner's OS has yet to let go (Windows lets each go as its handle's close is done).
 
 No record seeds any of them. The waits census keeps their answers as evidence.
 

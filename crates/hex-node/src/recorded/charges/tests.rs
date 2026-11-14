@@ -113,7 +113,8 @@ struct Record {
     governed: RefCell<BTreeMap<String, Duration>>,
     /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
     cycle: std::cell::Cell<Option<Duration>>,
-    /// Why that cycle is cold, where the test says it is (2c-4b): its helper has measured no stop.
+    /// Why that cycle is cold, where the test says it is: with no cycle, its helper has measured no stop (2c-4b); with
+    /// one, it is at a cold estimate, used (the review's A-14).
     cold: RefCell<Option<String>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
@@ -223,10 +224,15 @@ impl Managed for Record {
     }
 
     fn cap_cycle(&self, _: u64) -> Result<CapCycle, Refusal> {
-        if let Some(cold) = self.cold.borrow().as_ref() {
-            return Ok(CapCycle::Cold(cold.clone()));
-        }
-        Ok(self.cycle.get().map_or(CapCycle::Never, CapCycle::Of))
+        Ok(match (self.cycle.get(), self.cold.borrow().as_ref()) {
+            (Some(cycle), Some(why)) => CapCycle::ColdOf {
+                cycle,
+                why: why.clone(),
+            },
+            (None, Some(why)) => CapCycle::Cold(why.clone()),
+            (Some(cycle), None) => CapCycle::Of(cycle),
+            (None, None) => CapCycle::Never,
+        })
     }
 
     fn least(&self, holder: Holder<'_>) -> u64 {
@@ -2779,6 +2785,60 @@ fn w14_2c4b_a_cold_cap_cycle_is_told_on_its_vms_rate() {
     );
 }
 
+/// The review's A-14 (ROOT, 2026-11-14; AC-T7.4.1): a VM its platform's cap holds, whose cap's cycle is at a cold
+/// estimate (its helper's slowest stop, too few holds to have seen their p99.9), has that cycle taken into the learner's
+/// window, and what holds its rate says it is cold. Do run a window of a managed VM whose process takes no rate, so its
+/// platform's cap holds it, on a learner whose platform's cap's cycle is 2 s at a cold estimate; then answer the class's
+/// capacity. Expect the next window 2 s, told naming the VM, and its rate told held by its platform's cap, naming why
+/// its cycle is cold.
+#[test]
+fn a14_a_cold_estimates_cycle_sets_the_window_and_is_told_on_its_vms_rate() {
+    let io = Record::default();
+    let held = vm("vm-2", 2);
+    io.set("vm-2", 0, GIB);
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    io.cycle.set(Some(Duration::from_secs(2)));
+    *io.cold.borrow_mut() = Some("its helper's slowest stop, not their p99.9".to_owned());
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&held)),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(learner.next_window(), Some(Duration::from_secs(2)));
+    let learned = learner
+        .learned(
+            Class::Shards,
+            &[cost()],
+            &holders(std::slice::from_ref(&held)),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.window,
+        Some(hex_api::LearnedWindow {
+            window_ns: 2_000_000_000,
+            slowed_by: Some(LearnedHolder::Box(BoxId::new("vm-2").unwrap())),
+        })
+    );
+    assert_eq!(
+        learned.rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            held: hex_api::RateHeld::Platform(
+                "its VM process takes no rate; its helper's slowest stop, not their p99.9"
+                    .to_owned()
+            ),
+        }]
+    );
+}
+
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): a platform cap's cycle sets the learner's window only for a VM that cap
 /// holds, at that VM's own share, and where it does, the class's capacity answer names that VM and the window: every
 /// VM's read waits on it, a slowdown told, never silent. Do run a window of a managed VM its governor holds over a
@@ -3005,7 +3065,11 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let learned = capacity.learned.unwrap();
     assert!(
@@ -3233,11 +3297,19 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
     );
     images.0.box_rates.lock().unwrap().clear();
     store.remove(&BoxId::new("img-1").unwrap()).unwrap();
-    std::fs::write(store.runtime_place(&capped.spec.id), b"{\"version\":").unwrap();
+    // A record damaged behind its store's back is out of the store's contract: the next node's open reads it (ROOT,
+    // 2026-11-14), so the node restarts over it.
+    let place = store.runtime_place(&capped.spec.id);
+    drop(node);
+    std::fs::write(place, b"{\"version\":").unwrap();
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
     let Some(Err(why)) = store.get(&capped.spec.id).unwrap() else {
         panic!("the process box's record still reads");
     };
     store.put(&booked("img-2", 2)).unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     let mut capacity = hex_api::Capacity {
         own: Default::default(),
@@ -3255,7 +3327,11 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let told: Vec<(String, String)> = capacity
         .learned
@@ -3332,7 +3408,7 @@ fn told_reservations(
         .attach_learned(
             hex_api::Class::Shards,
             &mut capacity,
-            &node.books.store.all().unwrap(),
+            &node.books.store.snapshot().unwrap(),
         )
         .unwrap();
     capacity.learned.and_then(|learned| learned.reservations)
@@ -4006,5 +4082,59 @@ fn measure_a_windows_record_reads() {
         let all = time(&|| store.all().unwrap().len());
         let rows = time(&|| store.all_node_vms().unwrap().len());
         eprintln!("WINDOW-READS records={n} all: {all}; all_node_vms: {rows}");
+    }
+}
+
+/// The review's per-window reads, step 2 (batch 1114d's reads2; AC-T7.4.1): a charge window's reads of its node's records
+/// read no file, its node's store being their only writer. Do, at 10, 100 and 1000 of each: leave image VMs' records and
+/// Ended node VM rows as a node leaves them; open the store as the next node does; then read as a window does (every
+/// record and every row), as a VM's guest time does (each record by its id) and as a capacity answer's receipts do (each
+/// row by its run). Expect no record or row file read once the store is open.
+#[test]
+fn reads2_a_windows_reads_read_no_record_file_at_10_100_and_1000() {
+    for n in [10_usize, 100, 1000] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, run) = (dir.path().join("state"), dir.path().join("run"));
+        let ids: Vec<BoxId> = (0..n)
+            .map(|i| BoxId::new(&format!("img-{i}")).unwrap())
+            .collect();
+        {
+            let store = Store::open(&state, &run).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                store
+                    .put(&image_vm(id.as_str(), u64::try_from(i).unwrap()))
+                    .unwrap();
+            }
+        }
+        let rows = state.join(".node-vms");
+        std::fs::create_dir_all(&rows).unwrap();
+        let runs: Vec<hex_api::NodeRun> = (0..n)
+            .map(|i| {
+                let mut run = [0u8; 16];
+                run[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+                let row = hex_core::record::NodeVmRecord {
+                    run: hex_api::NodeRun::from_bytes(run),
+                    ..node_row(0, hex_api::NodeVmPhase::Ended)
+                };
+                let name: String = run.iter().map(|byte| format!("{byte:02x}")).collect();
+                std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
+                row.run
+            })
+            .collect();
+        let store = Store::open(&state, &run).unwrap();
+        let opened = store.reads();
+        assert_eq!(store.all().unwrap().len(), n);
+        assert_eq!(store.all_node_vms().unwrap().len(), n);
+        for id in &ids {
+            assert!(matches!(store.get(id).unwrap(), Some(Ok(_))));
+        }
+        for run in &runs {
+            assert!(store.node_vm(run).unwrap().is_some());
+        }
+        let read = store.reads() - opened;
+        assert_eq!(
+            read, 0,
+            "at {n} records and rows, a window's reads read {read} files"
+        );
     }
 }

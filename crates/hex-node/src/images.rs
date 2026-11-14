@@ -5,7 +5,7 @@
 //! directory given, changed one at a time; and each run host's diagnostics a file beside them.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hex_api::lease::Lessors;
@@ -18,13 +18,15 @@ use hex_runtime::devices::{Books, PoolPreparationCheck, PoolRecords, Records, Tr
 use hex_runtime::guest::{ImageClass, ImageWaits, host_images};
 use shards_api::image::Images;
 
-use crate::store::Store;
+use crate::store::{Store, TURNS};
+use crate::turns::Turns;
 
 /// The Shards class on Agentfile images as a runtime of its own: its record authority this runtime's own Store.
 pub struct ImageRuntime {
     store: Store,
-    /// A box's record is read and changed by one transaction at a time.
-    turn: Mutex<()>,
+    /// A box's record is read and changed by one transaction of it at a time; transactions of different boxes never
+    /// wait on each other (the review's B-14), each box's turn its own, at most [`TURNS`] taken at once.
+    turns: Turns,
     class: ImageClass,
 }
 
@@ -91,7 +93,15 @@ impl ImageRuntime {
         };
         let runtime = Arc::new(Self {
             store,
-            turn: Mutex::new(()),
+            // A transaction waits for one of the same box under way, made by this process's own thread, bounded by the
+            // slowest hold its transactions taught it and following the holder past it (decision 9), as the store's own
+            // turns do; no record is read for it.
+            turns: Turns::new(
+                "changing an image box's record",
+                "image box record changes under way",
+                TURNS,
+                hex_core::patience::Patience::measuring("images.turns"),
+            ),
             class,
         });
         let books: Arc<dyn Books> = runtime.clone();
@@ -108,6 +118,12 @@ impl ImageRuntime {
     /// to boot, read and stop its node VM, its records this runtime's own Store.
     pub fn class(&self) -> &ImageClass {
         &self.class
+    }
+
+    /// Whether box `id`'s turn is free now, held by no transaction: what the tests of the runtime's turns read.
+    #[cfg(test)]
+    fn turn_free(&self, id: &BoxId) -> bool {
+        self.turns.try_take(id).is_ok()
     }
 }
 
@@ -144,6 +160,9 @@ impl Books for ImageRuntime {
     fn records(&self) -> Result<Records, Refusal> {
         self.store.all()
     }
+    fn record(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
+        self.store.get(id)
+    }
     fn pool_records(&self) -> Result<PoolRecords, Refusal> {
         Ok(Vec::new())
     }
@@ -164,19 +183,18 @@ impl Books for ImageRuntime {
     fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         Ok(Vec::new())
     }
-    /// One box's record read and changed by `callback` alone, each change through the Store's lifecycle writes.
+    /// One box's record read and changed by `callback` alone, each change through the Store's lifecycle writes, under the
+    /// box's own turn.
     fn with_transaction(
         &self,
-        _: &BoxId,
+        id: &BoxId,
         devices: &[hex_api::DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         if !devices.is_empty() {
             return Err(unasked("device"));
         }
-        let _turn = self.turn.lock().map_err(|_| {
-            Refusal::Broken("an image runtime's record turn is poisoned".to_owned())
-        })?;
+        let _turn = self.turns.take(id)?;
         callback(&Kept(&self.store))
     }
     fn with_pool_transaction(

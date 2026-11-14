@@ -37,7 +37,8 @@ pub use observer::config::{
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,6 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime, Signal,
     Stdio, Usage,
 };
-#[cfg(test)]
 use hex_client::guest::Link;
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
@@ -454,82 +454,27 @@ pub use hex_client::guest::shards::{CLASS, recorded, recorded_boot, seed_in, slo
 /// node's start, and the bound the macOS CPU response's producer measures up to (hex-cli's example
 /// `macos_cpu_response`, AC-T7.4.1).
 pub fn recorded_dial_bound() -> Result<Duration, Refusal> {
-    dial_bound(Duration::ZERO)
+    dial_bound(None)
 }
 
 /// The slowest of the record's boot and `seen`, the slowest boot this node has seen. The record is the build's one
-/// remaining read of `bench/native/guest/records.tsv` (decision 9): a first boot that follows the guest's liveness
-/// needs a dial sliced against Shards' finite deadlines (HEX-GUEST-33), owed.
-fn dial_bound(seen: Duration) -> Result<Duration, Refusal> {
-    Ok(recorded_boot()?.max(seen))
+/// remaining read of `bench/native/guest/records.tsv` (decision 9), for the managed budgets alone: the kernel-form boot
+/// follows its guest ([`GuestRuntime::boot_bound`]).
+fn dial_bound(seen: Option<Duration>) -> Result<Duration, Refusal> {
+    Ok(recorded_boot()?.max(seen.unwrap_or_default()))
 }
 
-/// The word that tells a Shards guest its boot's deadline on its kernel command line (AC-T7.4.1), as a Firecracker
-/// guest is told its own (`hex.firecracker-ready-ms`): `hex.ready-ms=` and what is left of the boot's bound as it
-/// boots, in whole milliseconds rounded up, so the guest, counting from its kernel's start, ends no sooner than its
-/// host. Guest init hands it to the relay, whose calls to its node before the guest is ready take it as their
-/// caller's (hex-cli's `guest`); a guest told none keeps their learned bounds.
-pub const READY_MS: &str = "hex.ready-ms";
-
-/// Tells the guest booted with `cmdline` that `left` is what remains of its boot's deadline ([`READY_MS`]), within the
-/// kernel's command-line bound; refused where nothing is left, the word is there already, or init's arguments (`--`)
-/// begin, past which no word is the kernel's. Public for the guest-cost producer, which boots its guests as the node
-/// does (AC-T7.4.1).
-pub fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
-    let invalid = |why: &str| Refusal::Invalid {
-        what: "the guest's boot deadline",
-        why: why.to_owned(),
-    };
-    let millis = left.as_nanos().div_ceil(1_000_000);
-    if millis == 0 {
-        return Err(invalid("nothing of it is left to boot in"));
-    }
-    if cmdline
-        .split_whitespace()
-        .any(|word| word == "--" || word.starts_with(READY_MS))
-    {
-        return Err(invalid(
-            "the command line names it already, or passes init its arguments",
-        ));
-    }
-    let word = format!(" {READY_MS}={millis}");
-    let exhausted = Refusal::Exhausted {
-        what: "guest kernel command line",
-        bound: gpu::CMDLINE_BYTES,
-    };
-    if cmdline
-        .len()
-        .checked_add(word.len())
-        .is_none_or(|len| len >= gpu::CMDLINE_BYTES)
-    {
-        return Err(exhausted);
-    }
-    cmdline
-        .try_reserve_exact(word.len())
-        .map_err(|_| exhausted)?;
-    cmdline.push_str(&word);
-    Ok(())
-}
-
-/// The managed plan of guest `spec` booted with `binary` on `socket`, its guest told `left`, what remains of its boot's
-/// deadline ([`tell_ready`]), where it has one, and told none where it has none, so it keeps its learned bounds: the
-/// native plan where `images` declare its images (its cost evidence's), else Shards' own plan with the runtime folders
-/// `paths`. A node's guests prepare theirs here, each told its boot's deadline, and so does the guest-cost producer
-/// (crates/hex-cli/examples/guest_cost), whose guests are told none and followed to their answer (decision 9), so it
-/// measures what a node runs (AC-T7.4.1).
+/// The managed plan of guest `spec` booted with `binary` on `socket`: the native plan where `images` declare its images
+/// (its cost evidence's), else Shards' own plan with the runtime folders `paths`. Its guest is told no boot deadline, so
+/// its relay keeps its own learned bounds (decision 9; the review's C-9). A node's guests prepare theirs here, and so
+/// does the guest-cost producer (crates/hex-cli/examples/guest_cost), so it measures what a node runs (AC-T7.4.1).
 pub fn managed_plan(
     spec: &shards_api::GuestSpec,
     binary: &std::path::Path,
     socket: &std::path::Path,
     paths: &shards_api::RuntimePaths,
     images: Option<shards_api::NativeImages>,
-    left: Option<Duration>,
 ) -> Result<shards_api::PreparedBoot, Refusal> {
-    let mut spec = spec.clone();
-    if let Some(left) = left {
-        tell_ready(&mut spec.cmdline, left)?;
-    }
-    let spec = &spec;
     let plan = if let Some(images) = images {
         shards_api::prepare_native_boot(
             spec,
@@ -564,10 +509,6 @@ pub fn boot_managed(
     managed::boot(transaction, plan, managed::Budget::new(patience)?)
 }
 
-/// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
-/// boot has another guest to try before its caller is refused.
-const BOOTS: usize = 2;
-
 /// What tells a node's loop that bytes wait to be written on a connection it watches.
 pub type Room = Arc<dyn Fn() + Send + Sync>;
 
@@ -588,10 +529,8 @@ pub struct GuestRuntime {
     /// The shared backing's guest overhead as its capacity answers measured it, by its generation (joint plan step 14,
     /// C7): none before the first.
     guest_overhead: Mutex<Option<(hex_api::BackingKey, shared::Seen)>>,
-    /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
-    slowest: Mutex<Duration>,
-    /// Guests stopped for hanging alive past the bound, never ready.
-    retired: AtomicU64,
+    /// The slowest boot to ready this node has seen, its guest's boots' W* (decision 9): none before its first.
+    slowest: Mutex<Option<Duration>>,
     /// The digests learned for layer tarballs not named by theirs, as they crossed (§4a).
     digests: Mutex<Digests>,
     /// The Shards binary's identity when the running guest booted it.
@@ -631,6 +570,65 @@ struct Warm {
     /// The binary warmed, or being warmed.
     identity: Option<stage::Identity>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Its throwaway guest, as its thread boots and follows it ([`GuestRuntime::finish_warm`]).
+    guest: Arc<Mutex<Throwaway>>,
+}
+
+/// A warm-up's throwaway guest, as the runtime's end finds it. Its readiness is followed by its VM's life past W*
+/// (decision 9), so the runtime's end stops it rather than wait on a boot nobody needs: a stop ends the wait that follows
+/// it (Shards' `Ended(Stopped)`).
+#[derive(Default)]
+enum Throwaway {
+    /// Not booted yet.
+    #[default]
+    Booting,
+    /// Booted, its readiness followed.
+    Booted(Arc<dyn shards_api::Guest>),
+    /// Stopped, by its warm-up once ready or by the runtime's end: one booted after that end is stopped at once.
+    Stopped,
+}
+
+impl Throwaway {
+    /// Stops the throwaway in `slot` once, whoever asks first: its warm-up once it is ready, or the runtime's end.
+    fn stop(slot: &Mutex<Self>) {
+        let Ok(mut held) = slot.lock() else {
+            return;
+        };
+        if let Self::Booted(guest) = std::mem::replace(&mut *held, Self::Stopped) {
+            let _ = guest.stop();
+        }
+    }
+}
+
+/// Boots a throwaway guest of `spec` on `guests` and follows it to ready as the node's own boot does (decision 9: within
+/// `bound`, the slowest boot this node has seen, counted from the boot's start; past it the run-out told and the dial
+/// following its VM by its life), then stops it, or at once where the runtime ended first (`slot`). Ready, so its VM
+/// process ran too. A warm-up that fails leaves the next boot to pay the first run, as it would have.
+fn warm_up(
+    guests: &dyn shards_api::Guests,
+    spec: &shards_api::GuestSpec,
+    bound: Option<Duration>,
+    slot: &Mutex<Throwaway>,
+) {
+    let began = Instant::now();
+    let Ok(guest) = guests.boot(spec) else {
+        return;
+    };
+    let guest: Arc<dyn shards_api::Guest> = guest.into();
+    let booted = match slot.lock() {
+        Ok(mut held) if matches!(*held, Throwaway::Booting) => {
+            *held = Throwaway::Booted(Arc::clone(&guest));
+            true
+        }
+        _ => false,
+    };
+    if !booted {
+        let _ = guest.stop();
+        return;
+    }
+    let link = ShardsLink::new(Arc::clone(&guest), bound).booted_at(began);
+    let _ = link.dial(stream::CONTROL_PORT);
+    Throwaway::stop(slot);
 }
 
 /// The Shards binary's identity, if it can be read (a binary that can't is the next boot's to refuse).
@@ -706,8 +704,8 @@ impl GuestRuntime {
         spec.gpu = false;
         Ok(spec)
     }
-    /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
-    /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
+    /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits within
+    /// [`Self::boot_bound`], and past it follows the guest ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
         let images = image::ImageClass::new(config.binary.clone());
         Self {
@@ -715,8 +713,7 @@ impl GuestRuntime {
             config,
             booted: Mutex::new(None),
             guest_overhead: Mutex::new(None),
-            slowest: Mutex::new(Duration::ZERO),
-            retired: AtomicU64::new(0),
+            slowest: Mutex::new(None),
             digests: Mutex::new(Digests::default()),
             booted_binary: Mutex::new(None),
             warm: Mutex::new(Warm::default()),
@@ -802,10 +799,7 @@ impl GuestRuntime {
                 }
                 Err(why) => return Err(refusal("taking back the node's guest", &why)),
             };
-        let link: LinkOwner = own_link(ShardsLink::new(
-            Arc::clone(&guest),
-            self.first_dial_bound()?,
-        ))?;
+        let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), self.boot_bound()?))?;
         match Client::connect(triomphe::Arc::clone(&link)) {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
@@ -960,57 +954,68 @@ impl GuestRuntime {
         least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
         least.shares.clear();
         least.gpu = false;
-        let mut spec = least.spec()?;
+        // Told no boot deadline, as the node's own guest is (the review's C-9).
+        let spec = least.spec()?;
         let guests = Arc::clone(&self.guests);
-        let bound = self.first_dial_bound()?;
-        tell_ready(&mut spec.cmdline, bound)?;
+        let bound = self.boot_bound()?;
+        let slot = Arc::new(Mutex::new(Throwaway::Booting));
+        let held = Arc::clone(&slot);
         let thread = std::thread::Builder::new()
             .name("hex-guest-warm".to_owned())
-            .spawn(move || {
-                // Ready, so its VM process ran too; then gone. A warm-up that fails leaves the next boot to
-                // pay the first run, as it would have.
-                if let Ok(guest) = guests.boot(&spec) {
-                    let _ = guest.connect(stream::CONTROL_PORT, bound);
-                    let _ = guest.stop();
-                }
-            })
+            .spawn(move || warm_up(guests.as_ref(), &spec, bound, &held))
             .map_err(|e| Refusal::os("starting a guest warm-up", e))?;
         warm.identity = Some(now);
         warm.thread = Some(thread);
+        warm.guest = slot;
         Ok(())
     }
 
-    /// Waits for a warm-up in flight to end: its boot and dial are bounded by the first dial's bound.
+    /// Ends a warm-up in flight: its throwaway guest stopped, which ends its boot's wait, and its thread joined.
     fn finish_warm(&self) {
-        let thread = self.warm.lock().ok().and_then(|mut w| w.thread.take());
+        let Ok((slot, thread)) = self
+            .warm
+            .lock()
+            .map(|mut w| (Arc::clone(&w.guest), w.thread.take()))
+        else {
+            return;
+        };
+        Throwaway::stop(&slot);
         if let Some(t) = thread {
             let _ = t.join();
         }
     }
 
-    /// How long a boot may take to be ready (decision 9, learned waits): the slowest of the record's and this node's
-    /// own, so it only rises; before any boot here, the record's ([`dial_bound`]).
+    /// The managed budgets' bound (decision 9, learned waits): the slowest of the record's boot to ready and this node's
+    /// own, so it only rises; before any boot here, the record's ([`dial_bound`]). The guest's own boot follows it
+    /// instead ([`Self::boot_bound`]).
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
-        dial_bound(*self.slowest.lock().map_err(poisoned)?)
+        dial_bound(self.boot_bound()?)
+    }
+
+    /// The W* of the guest's boots (decision 9; the review's C-9): the slowest boot to ready this node has seen; none
+    /// before its first, whose dial then follows its guest from its start.
+    pub fn boot_bound(&self) -> Result<Option<Duration>, Refusal> {
+        Ok(*self.slowest.lock().map_err(poisoned)?)
     }
 
     /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.
     pub fn learn(&self, took: Duration) {
         if let Ok(mut slowest) = self.slowest.lock() {
-            *slowest = (*slowest).max(took);
+            *slowest = Some(slowest.map_or(took, |slowest| slowest.max(took)));
         }
-    }
-
-    /// Guests stopped because they stayed alive past the bound without being ready.
-    pub fn retired(&self) -> u64 {
-        self.retired.load(Ordering::Relaxed)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Option<triomphe::Arc<Booted>>>, Refusal> {
         self.booted.lock().map_err(poisoned)
     }
 
-    /// The guest, booted now if it isn't, or booted again if it ended (every box in it ended with it).
+    /// The guest, booted now if it isn't, or booted again if it ended (every box in it ended with it). One boot, its
+    /// first dial the boot's wait (decision 9; the review's C-9): within W*, the slowest boot to ready this node has
+    /// seen, counted from the boot's start (HEX-GUEST-34); past it the run-out told once and the dial following the
+    /// guest's VM by its life ([`ShardsLink`]); before any boot is seen, following from its start, told once as it
+    /// starts. It is refused at the guest's end, at its VM's stall as Shards judges it, or by a refusal of its own,
+    /// never at a bound, and never stopped and booted again. The guest is told no boot deadline: its relay keeps its
+    /// own learned bounds.
     fn guest(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
         if self.managed_shared() {
             return self.shared_running();
@@ -1032,71 +1037,51 @@ impl GuestRuntime {
             .backend()
             .map_err(|why| refusal("finding Shards' backend", &why))?;
         let binary = binary_identity(&self.config.binary);
-        let mut hung = Vec::with_capacity(BOOTS);
-        for _ in 0..BOOTS {
-            let bound = self.first_dial_bound()?;
-            let began = Instant::now();
-            // HEX-GUEST-34: the boot and its first dial spend one deadline: a boot that spends it is refused
-            // by type before a dial, never left a zero patience, whose answer Shards awaits without a bound.
-            let ready_by = began.checked_add(bound).ok_or_else(|| Refusal::Invalid {
+        let bound = self.boot_bound()?;
+        let began = Instant::now();
+        // HEX-GUEST-34: a W* past any monotonic deadline is refused by type before anything boots.
+        if let Some(bound) = bound
+            && began.checked_add(bound).is_none()
+        {
+            return Err(Refusal::Invalid {
                 what: "the guest's boot bound",
                 why: format!("{bound:?} from now is past a monotonic deadline"),
-            })?;
-            // AC-T7.4.1: the guest is told what is left of it, which its relay's hello to its node takes.
-            let mut spec = self.cpu_spec()?;
-            tell_ready(
-                &mut spec.cmdline,
-                ready_by.saturating_duration_since(Instant::now()),
-            )?;
-            let guest: Arc<dyn shards_api::Guest> = self
-                .guests
-                .boot(&spec)
-                .map_err(|why| refusal("booting the node's guest", &why))?
-                .into();
-            let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), bound))?;
-            match Client::connect_before(triomphe::Arc::clone(&link), ready_by) {
-                Ok(client) => {
-                    self.learn(began.elapsed());
-                    if let Err(why) = self.record(guest.as_ref()) {
-                        // Unrecorded, a crash would leave it an orphan: ended, and the boot refused.
-                        let _ = guest.stop();
-                        return Err(why);
-                    }
-                    *self.booted_binary.lock().map_err(poisoned)? = binary;
-                    let b = booted_owner(Booted {
-                        guest: GuestHandle::Shared(guest),
-                        link,
-                        client,
-                        evented: Mutex::new(None),
-                        owner: None,
-                        backing: None,
-                    })?;
-                    // The new guest's control connection joins the loop as the one before's did.
-                    self.join(&b)?;
-                    *booted = Some(triomphe::Arc::clone(&b));
-                    return Ok(b);
-                }
-                Err(why) => {
-                    // Alive and not ready within the bound: a hang, retired for another boot. Ended,
-                    // or refused otherwise, the boot's failure is its caller's.
-                    let alive = matches!(guest.wait_for(Duration::ZERO), Ok(None));
-                    let _ = guest.stop();
-                    if !alive {
-                        return Err(why);
-                    }
-                    self.retired.fetch_add(1, Ordering::Relaxed);
-                    hung.push(format!("not ready within {bound:?}: {why}"));
-                }
-            }
+            });
         }
-        Err(Refusal::Os {
-            op: "booting the node's guest",
-            why: format!(
-                "{BOOTS} guests booted, each alive and not ready within its bound, the slowest boot to \
-                 ready recorded or seen (bench/native/guest/boot-ready/RECORD.md): {}",
-                hung.join("; ")
-            ),
-        })
+        let guest: Arc<dyn shards_api::Guest> = self
+            .guests
+            .boot(&self.cpu_spec()?)
+            .map_err(|why| refusal("booting the node's guest", &why))?
+            .into();
+        let link: LinkOwner =
+            own_link(ShardsLink::new(Arc::clone(&guest), bound).booted_at(began))?;
+        let client = match Client::connect(triomphe::Arc::clone(&link)) {
+            Ok(client) => client,
+            Err(why) => {
+                // Refused at its end, its VM's stall, or by a refusal of its own: none is left beside the next boot.
+                let _ = guest.stop();
+                return Err(why);
+            }
+        };
+        self.learn(began.elapsed());
+        if let Err(why) = self.record(guest.as_ref()) {
+            // Unrecorded, a crash would leave it an orphan: ended, and the boot refused.
+            let _ = guest.stop();
+            return Err(why);
+        }
+        *self.booted_binary.lock().map_err(poisoned)? = binary;
+        let b = booted_owner(Booted {
+            guest: GuestHandle::Shared(guest),
+            link,
+            client,
+            evented: Mutex::new(None),
+            owner: None,
+            backing: None,
+        })?;
+        // The new guest's control connection joins the loop as the one before's did.
+        self.join(&b)?;
+        *booted = Some(triomphe::Arc::clone(&b));
+        Ok(b)
     }
 
     /// Whether `guest` still runs: a Shards guest by its own word, the node VM under shards-init by its run's, which

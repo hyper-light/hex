@@ -204,6 +204,31 @@ once: a part a create makes at a path its id doesn't fix, which a crash before t
 crash test kills the agent at each point of a create and finds nothing left); and a record write beside the
 containers' state costing more than 0.015 ms of filesystem work in the create breakdown, the step's bar.
 
+**The store's records in memory (the review's per-window reads, step 2; ROOT, 2026-11-14).** A store is its state
+directory's one writer: its open takes an exclusive lock on `@lock` there, without waiting, and a second store over the
+directory, in that process or another, is refused at its open, naming it. On Unix the lock is fcntl(2)'s record lock,
+which no child inherits and which the kernel lets go as its process ends; the process opens the file once, as closing
+any descriptor of it lets the lock go, and keeps the directories its stores hold by device and inode. On Windows it is
+LockFileEx on a handle no child inherits. Holding its directory, the store keeps every box record and node VM row in
+memory, read once by its open and changed by each write in the write's turn once the file holds it: the directory's
+state, not a cache of it. A window's read of every record is a shared map of pointers, a box's one keyed lookup, and a
+write made while a reader holds the map copies its pointers, never a record.
+
+- **Sources.** fcntl(2), "Advisory record locking": "Record locks are not inherited by a child created via fork(2)",
+  and a process's locks on a file are released "when any file descriptor referring to that file is closed".
+  [LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex): locks are released
+  as the handle closes or its process ends.
+- **Evidence.** Before it, each charge window read every record and row from disk. `measure_a_windows_record_reads`
+  (hex-node, an ignored test run alone; batch 1114c's runs at b24e59ee4) read them, at 10, 100 and 1000 of each, in
+  77 us, 0.34 ms and 3.0 ms (records) and 90 us, 0.92 ms and 8.7 ms (rows) p50 in a release build on adacachy2, and
+  the rows at 1000 in 1.92 s in a debug build on Windows, longer than the 70-100 ms window. After it, a window, a VM's
+  guest time, a capacity answer's node VM receipts and an image VM's calls read no record file, as the store's own
+  count of files read says (`reads2_a_windows_reads_read_no_record_file_at_10_100_and_1000`,
+  `reads2_b8_an_image_vms_calls_read_no_record_file`); the same measurement after it is owed.
+- **What would falsify it.** A second writer of the directory the lock lets through (a filesystem that doesn't keep
+  fcntl locks, such as some network filesystems, where the state directory is then out of contract); or a record
+  file changed while the store runs that its index must follow, which only the next open reads.
+
 ### 2. No shim per container: one supervisor per node
 
 **The choice.** `create` leaves no Hex process beside the container.
@@ -2496,10 +2521,12 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
-  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the guest's
-  first boot takes records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
-  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation, by a dial sliced against
-  the guest's liveness (HEX-GUEST-33). hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
+  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the managed
+  creates' budgets take records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
+  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation. The guest's own boot no
+  longer does (the review's C-9, 2026-11-14): within W*, the slowest boot its node has seen, past it told and followed
+  by its VM's life through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34).
+  hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
   `conformance::PATIENCE` and `ENDS` from per-class end records until 2026-11-13; it now follows each program to its
   end (`conformance::end_of`, `ENDS` measuring), and each differential reading the runtime's party. `Patience::seeded`,
   now `hex_api::patience`'s, exists for tests alone (`cfg(test)`, or hex-api's `test-seeds` feature, which only

@@ -748,6 +748,14 @@ impl shards_api::Guest for Counted {
         self.inner.connect_once_before(port, at)
     }
 
+    fn connect_while_runs(
+        &self,
+        port: u32,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.told(port);
+        self.inner.connect_while_runs(port)
+    }
+
     fn stop(&self) -> Result<(), shards_api::Refusal> {
         self.inner.stop()
     }
@@ -838,9 +846,10 @@ fn nth_dial(
     )
 }
 
-/// Decision 9 (the person's ruling of 2026-11-13; AC-T7.4.1), on every OS: dial, with no caller deadline, a Shards
-/// simulator guest that listens on the port only once the dial has been made again, its link's bound past. Expect the
-/// dial connected: past the bound, the run-out told, the dial made again while the guest lives, never refused there.
+/// Decision 9 (the person's ruling of 2026-11-13; the review's C-9; AC-T7.4.1), on every OS: dial, with no caller
+/// deadline, a Shards simulator guest that listens on the port only once the dial follows it, its link's bound past.
+/// Expect the dial connected: past the bound, the run-out told and one dial that follows the guest
+/// (`connect_while_runs`), never refused there.
 #[test]
 fn a_dial_with_no_deadline_follows_its_guest_past_the_links_bound() {
     static AGAIN: hex_core::patience::Patience =
@@ -854,7 +863,7 @@ fn a_dial_with_no_deadline_follows_its_guest_past_the_links_bound() {
         }
         shards_api::End::PowerOff
     });
-    let link = shards::ShardsLink::new(guest, CONNECT_CAP);
+    let link = shards::ShardsLink::new(guest, Some(CONNECT_CAP));
     let dialing = std::thread::spawn(move || {
         let dialed = link.dial(stream::CONTROL_PORT).map(drop);
         let _ = ended.send(DIALING_ENDED);
@@ -869,8 +878,8 @@ fn a_dial_with_no_deadline_follows_its_guest_past_the_links_bound() {
 }
 
 /// Decision 9 (AC-T7.4.1), on every OS: dial, with no caller deadline, a Shards simulator guest that never listens on
-/// the port, and stop the guest once the dial has been made again past its link's bound. Expect the dial refused at
-/// the guest's end, by its end as Shards' own kind (the review's B-15), never at a bound.
+/// the port, and stop the guest once the dial follows it past its link's bound. Expect the dial refused at the guest's
+/// end, by its end as Shards' own kind (the review's B-15), never at a bound.
 #[test]
 fn a_dial_with_no_deadline_is_refused_at_its_guests_end() {
     static AGAIN: hex_core::patience::Patience = hex_core::patience::Patience::measuring(
@@ -881,7 +890,7 @@ fn a_dial_with_no_deadline_is_refused_at_its_guests_end() {
         let _ = host.accept();
         shards_api::End::PowerOff
     });
-    let link = shards::ShardsLink::new(guest.clone(), CONNECT_CAP);
+    let link = shards::ShardsLink::new(guest.clone(), Some(CONNECT_CAP));
     let dialing = std::thread::spawn(move || {
         let dialed = link.dial(stream::STDIO_PORT).map(drop);
         let _ = ended.send(DIALING_ENDED);
@@ -915,7 +924,7 @@ fn a_later_dial_to_a_gone_relay_is_one_attempt_refused_at_once() {
         before: std::sync::Mutex::new(Vec::new()),
         once: std::sync::Mutex::new(Vec::new()),
     });
-    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(60));
+    let link = shards::ShardsLink::new(guest.clone(), Some(Duration::from_secs(60)));
     link.dial(stream::CONTROL_PORT).unwrap();
     for port in [stream::STDIO_PORT, stream::CONTROL_PORT] {
         let refused = link.dial(port).err().unwrap();
@@ -949,7 +958,7 @@ fn every_dial_carries_a_finite_deadline_after_the_first_listen() {
         absolute: std::sync::Mutex::new(Vec::new()),
     });
     let bound = Duration::from_millis(354);
-    let link = shards::ShardsLink::new(guest.clone(), bound);
+    let link = shards::ShardsLink::new(guest.clone(), Some(bound));
     let mut windows = Vec::new();
     for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
         let began = Instant::now();
@@ -1025,7 +1034,7 @@ fn a_relay_token_held_past_the_links_bound_is_waited_for() {
             let _ = conn.read(&mut [0u8; 1]);
             true
         });
-        let link = own_link(shards::ShardsLink::new(guest.clone(), bound)).unwrap();
+        let link = own_link(shards::ShardsLink::new(guest.clone(), Some(bound))).unwrap();
         let connected = if evented {
             Client::connect_evented(link, Arc::new(|| {})).map(drop)
         } else {
@@ -1054,7 +1063,7 @@ fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
             given: std::sync::Mutex::new(Vec::new()),
             absolute: std::sync::Mutex::new(Vec::new()),
         });
-        let link = shards::ShardsLink::new(guest.clone(), bound);
+        let link = shards::ShardsLink::new(guest.clone(), Some(bound));
         let dialed = link.dial(stream::CONTROL_PORT).map(drop);
         let given = guest.given.lock().unwrap().clone();
         let absolute = guest.absolute.lock().unwrap().clone();
@@ -1153,7 +1162,7 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
     // The caller's own deadline for its dial, the case's input: whatever it is, a dial the guest takes and never
     // answers is refused at it, and not before. Short, so the case is.
     let bound = Duration::from_millis(200);
-    let link = shards::ShardsLink::new(Arc::from(guest), bound);
+    let link = shards::ShardsLink::new(Arc::from(guest), Some(bound));
     let control = link.dial(stream::CONTROL_PORT).unwrap();
     let (sent, answer) = std::sync::mpsc::channel();
     let began = Instant::now();
@@ -1661,7 +1670,8 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
     // (`first_dial_bound`), the guest's recorded boot to ready, the boot and listen it waits on (decision 9).
     let bound = shards::recorded_boot().unwrap();
     let transport =
-        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), bound)).unwrap()).unwrap();
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), Some(bound))).unwrap())
+            .unwrap();
     let given = transport
         .asks(
             1,
@@ -2609,7 +2619,7 @@ fn shards_link_carries_the_original_absolute_deadline_and_bytes() {
         given: std::sync::Mutex::new(Vec::new()),
         absolute: std::sync::Mutex::new(Vec::new()),
     });
-    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(1));
+    let link = shards::ShardsLink::new(guest.clone(), Some(Duration::from_secs(1)));
     assert!(
         link.dial_before(stream::CONTROL_PORT, Some(Instant::now()))
             .is_err()

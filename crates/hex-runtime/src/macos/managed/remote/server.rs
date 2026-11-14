@@ -348,8 +348,9 @@ fn serve(
         )
         .map_err(frame::Failure::refusal);
     }
-    // Joint plan step 14 (2c; ROOT, 2026-11-13): the node asks the slowest stop response this helper's managed CPU
-    // control has seen in its own holds, which it derives its charge window from: none before the first.
+    // Joint plan step 14 (2c; ROOT, 2026-11-13): the node asks the stop response this helper's managed CPU control
+    // estimates from its own holds, cold or not (the review's A-14), which it derives its charge window from: none before
+    // the first.
     if let Ok((version, id)) = protocol::response::read(&bytes, descriptors.len()) {
         if matches!(entry, Entry::FirstPrepare(_)) {
             return Err(super::super::configuration(

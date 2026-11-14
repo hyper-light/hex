@@ -102,9 +102,8 @@ fn native_evidence_joins_same_cost_and_real_preparation_without_rewriting() {
         .last()
         .unwrap()
         .join("native-model.v");
-    let budget = crate::guest::managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
     let plan = runtime
-        .managed_plan(&config.spec().unwrap(), &socket, budget)
+        .managed_plan(&config.spec().unwrap(), &socket)
         .unwrap();
     let view = plan.native_startup().unwrap();
     assert_eq!(view.images(), images);
@@ -230,10 +229,8 @@ fn w14_d260_every_managed_vm_a_node_boots_is_host_managed() {
         if native {
             runtime = runtime.with_native_images(images).unwrap();
         }
-        let budget =
-            crate::guest::managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
         let plan = runtime
-            .managed_plan(&config.spec().unwrap(), &socket, budget)
+            .managed_plan(&config.spec().unwrap(), &socket)
             .unwrap();
         assert!(
             plan.arguments().iter().any(|arg| arg == "--host-managed"),
