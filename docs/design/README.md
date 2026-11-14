@@ -73,7 +73,9 @@ live from its next push. Built means on a branch and not merged.
 | Storage: a CSI-like interface; images from Reliquary, lazily | CP-T7.8 | open |
 | The Kubernetes API subset | CP-T7.13 | open |
 
-`vendor/shards` pins Shards main `d7ff8a094` on Hex's main (`2246a8829` before it, at `d91ebb32`; `2737fc4ec` before that, at `20015fb5`;
+`vendor/shards` pins Shards main `0290f1e9f` on Hex's main (`9d8a05f6a` before it; `d7ff8a094` before that, at `641856cf`; `2246a8829`
+before that, at `d91ebb32`;
+`2737fc4ec` before that, at `20015fb5`;
 `ce80cbb37` before that, at `9ff60efb`; `16451e19f` before that, at `cf844022`; `37ddeb080` before that, at `2f55dccf`; `097ec0047` before that, at
 `1314e5f2`; `3114e082f` before that, at `8dfe6df8`; `db4168345` before that, at `1d60abad`; `740fa372` before that, at `8aa7c028`; `e0cc059c` before that, at
 `c8b4ce6b`). GitHub's main, the live one, pins Shards `1389dc0b` (`2c728252`) until the next push. `097ec0047` holds, each recorded in Shards'

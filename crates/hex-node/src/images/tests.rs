@@ -71,8 +71,8 @@ impl ImageGuest for Held {
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
         None
     }
-    fn rate_period(&self) -> Duration {
-        Duration::from_millis(100)
+    fn rate_period(&self) -> Option<Duration> {
+        Some(Duration::from_millis(100))
     }
     fn started_from(&self) -> StartedFrom {
         StartedFrom::Booted
@@ -133,7 +133,7 @@ impl ImageGuest for Held {
             .clone()
             .map(|end| RunEnded::unused(end, Unused::Killed)))
     }
-    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, _: std::fs::File, _: u64) -> Result<(), ImageRefusal> {
         Ok(())
     }
     fn wait_channel(
@@ -540,5 +540,52 @@ fn b13_an_image_runtime_recovers_its_records_as_a_node_does_and_lists_one_it_can
     assert_eq!(
         listed(&images),
         [("kiln-kept".to_owned(), BoxState::Created)]
+    );
+}
+
+/// The review's B-8 (batch 1114d's reads2; AC-T7.4.1): an image VM's call reads its box's record by its id, never every
+/// record its runtime keeps. Do make 100 image VMs and one more, start that one, then inspect it, ask it started and
+/// delete it. Expect no record file read by those three calls.
+#[test]
+fn reads2_b8_an_image_vms_calls_read_no_record_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    for n in 0..100 {
+        images.create(image_box(&format!("kiln-b8-{n}"))).unwrap();
+    }
+    let id = images.create(image_box("kiln-b8-one")).unwrap().id;
+    images.start(&id).unwrap();
+    let before = images.store.reads();
+    assert_eq!(images.inspect(&id).unwrap().state, BoxState::Running);
+    assert_eq!(images.started(&id).unwrap().state, BoxState::Running);
+    images.delete(&id).unwrap();
+    let read = images.store.reads() - before;
+    assert_eq!(
+        read, 0,
+        "an inspect, a started and a delete read {read} record files"
+    );
+}
+
+/// The review's B-14 (batch 1114d's reads2; AC-T7.4.1): one image box's transaction holds its own box's turn alone, so
+/// the lifecycles of different boxes never wait on each other. Do take box a's transaction and, while it holds, look at
+/// box b's turn. Expect b's turn free.
+#[test]
+fn reads2_b14_one_boxs_transaction_leaves_anothers_turn_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    let (a, b) = (
+        BoxId::new("kiln-b14-a").unwrap(),
+        BoxId::new("kiln-b14-b").unwrap(),
+    );
+    let mut b_free = None;
+    Books::with_transaction(images.as_ref(), &a, &[], &mut |_| {
+        b_free = Some(images.turn_free(&b));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        b_free,
+        Some(true),
+        "box b's turn taken while box a's transaction held"
     );
 }

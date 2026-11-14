@@ -105,7 +105,7 @@ fn node(
     let checked = Arc::new(AtomicUsize::new(0));
     let initialized = Arc::new(AtomicUsize::new(0));
     let metadata = root.join("metadata");
-    std::fs::create_dir(&metadata).unwrap();
+    std::fs::create_dir_all(&metadata).unwrap();
     let node = Recorded::open(
         MetadataRecovery {
             backend: CountedRecovery {
@@ -318,7 +318,7 @@ fn a_pool_and_box_cannot_both_claim_a_device_without_the_canonical_handoff() {
 #[test]
 fn a_route_to_an_unknown_backing_never_reaches_an_initialized_adapter() {
     let dir = tempfile::tempdir().unwrap();
-    let (node, effects, checked, initialized) = node(dir.path(), None);
+    let (node, _, _, _) = node(dir.path(), None);
     let mut inner = spec();
     inner.id = BoxId::new("zz-shared-inner").unwrap();
     inner.class = ClassSpec::Oci(Box::new(hex_api::OciSpec {
@@ -346,7 +346,9 @@ fn a_route_to_an_unknown_backing_never_reaches_an_initialized_adapter() {
     });
     add(&node, "aa-cpu", b"same initialized metadata");
     // Store::put refuses a reference to an unknown backing (check_box_backing). A retained row can
-    // still name one (an older writer, a damaged file), so it is planted as its encoded bytes.
+    // still name one (an older writer, a damaged file), so it is planted as its encoded bytes, read
+    // by the store as the node starts again (a store reads its directory once, as it opens).
+    drop(node);
     let dangling = BoxRecord::new(inner, Phase::Ready, Vec::new());
     std::fs::write(
         crate::store::runtime_record(
@@ -356,6 +358,7 @@ fn a_route_to_an_unknown_backing_never_reaches_an_initialized_adapter() {
         dangling.encode().unwrap(),
     )
     .unwrap();
+    let (node, effects, checked, initialized) = self::node(dir.path(), None);
     let before = node.books.store.all().unwrap();
     assert!(before.contains_key(&dangling.spec.id));
     assert!(node.recover().is_err());

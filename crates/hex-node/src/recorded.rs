@@ -292,10 +292,13 @@ pub trait Recover: Runtime {
     }
 
     /// Joint plan step 14 (C1): the period Shards image VM `record`'s rate holds over (Shards' D247, its hold D191's
-    /// governor), its run's own as its run host said it as the run started: the window the charge learner caps it
-    /// through its rate over, read each window, never a number of Hex's. Refused, typed, by a native owner that runs
-    /// no image VM.
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+    /// governor), its run's own as its VM said it with its last rate's answer, none before its first (Shards' image
+    /// channel v31): the window the charge learner caps it through its rate over, read each window, never a number of
+    /// Hex's. Refused, typed, by a native owner that runs no image VM.
+    fn image_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         Err(Refusal::Invalid {
             what: "rate_period",
             why: format!(
@@ -313,8 +316,12 @@ pub trait Recover: Runtime {
     }
 
     /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D191, D247), its run's own
-    /// as its run host said it as the run started. Refused, typed, by a native owner that runs no node VM.
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+    /// as its VM said it with its last rate's answer, none before its first (Shards' image channel v31). Refused, typed,
+    /// by a native owner that runs no node VM.
+    fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         Err(no_node_vm(run, "rate_period"))
     }
 
@@ -1717,6 +1724,9 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     fn records(&self) -> Result<hex_runtime::devices::Records, Refusal> {
         self.books.store.all()
     }
+    fn record(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
+        self.books.store.get(id)
+    }
     fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         let prober = self
             .books
@@ -1745,12 +1755,16 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         // performs its renderer/native join later, exactly once; it must not be called recursively
         // from the authority it queries. The same Prober provides all native metadata here.
         capacity.devices = hex_runtime::devices::Books::physical_devices(self)?;
-        recorded_holders(
-            &mut capacity,
-            &self.books.store.all()?,
-            &self.books.store.all_pools()?,
-            self.runtime.device_catalog()?.as_deref(),
-        )?;
+        if capacity.devices.is_empty() {
+            capacity.check()?;
+        } else {
+            recorded_holders(
+                &mut capacity,
+                &self.books.store.all()?,
+                &self.books.store.all_pools()?,
+                self.runtime.device_catalog()?.as_deref(),
+            )?;
+        }
         Ok(capacity)
     }
     fn with_transaction(
@@ -2443,11 +2457,11 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         let record = match holder {
             charges::Holder::Box(record) => record,
             charges::Holder::Node { row, .. } => {
-                return self.runtime.node_vm_rate_period(row.run).map(Some);
+                return self.runtime.node_vm_rate_period(row.run);
             }
         };
         if charges::running_image(record) {
-            return self.runtime.image_rate_period(record).map(Some);
+            return self.runtime.image_rate_period(record);
         }
         self.runtime.managed_rate_period(record)
     }
@@ -2637,11 +2651,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 hex_api::LearnedReservations::Unserved => hex_api::CapacityResources::default(),
             }
         };
-        let read = self.books.store.all().and_then(|records| {
+        // The node's records and node VM rows as its store holds them: pointers, no file read (the review's per-window
+        // reads).
+        let read = self.books.store.snapshot().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
             // learner's lock as every write into a box's record is.
-            charges::retire_with_node_vms(&self.books.store, &records, &rows)?;
+            charges::retire_with_node_vms(&self.books.store, charges::entries(&records), &rows)?;
             Ok((records, rows, self.machine()?))
         });
         let (records, rows, machine) = match read {
@@ -2649,9 +2665,9 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             Err(why) => return fail(why),
         };
         // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
-        let band = charges::node_band(records.iter());
+        let band = charges::node_band(charges::entries(&records));
         // Each record it can't read is counted at its machine and told, never dropped (the review's dropped records).
-        let (records, unreadable) = match charges::readable(records) {
+        let (records, unreadable) = match charges::readable(&records) {
             Ok(split) => split,
             Err(why) => return fail(why),
         };
@@ -2796,7 +2812,7 @@ impl Books {
         &self,
         class: Class,
         capacity: &mut hex_api::Capacity,
-        records: &std::collections::BTreeMap<BoxId, Result<BoxRecord, String>>,
+        records: &crate::store::Snapshot,
     ) -> Result<(), Refusal> {
         let class = match class {
             Class::Shards => hex_sim::model::Class::Shards,
@@ -2808,7 +2824,7 @@ impl Books {
         };
         // Its node VMs' holdings too, each by its run (joint plan step 39, place 3).
         let rows = self.store.all_node_vms()?;
-        let band = charges::node_band(records.iter());
+        let band = charges::node_band(charges::entries(records));
         let nodes = charges::nodes(&rows, &band)?;
         // Its holders are the records it reads: a box whose record it can't read is told from its last window, counted
         // at its machine (the review's dropped records).
@@ -2820,7 +2836,7 @@ impl Books {
                 capacity,
                 records
                     .values()
-                    .flatten()
+                    .filter_map(|record| record.as_ref().as_ref().ok())
                     .map(charges::Holder::Box)
                     .chain(nodes),
             )
@@ -2977,14 +2993,20 @@ impl<R: Recover> Runtime for Recorded<R> {
                 hex_runtime::devices::Books::physical_devices(self)?,
             )?;
         }
-        let records = self.books.store.all()?;
-        recorded_holders(
-            &mut report,
-            &records,
-            &self.books.store.all_pools()?,
-            self.runtime.device_catalog()?.as_deref(),
-        )?;
-        self.books.attach_learned(class, &mut report, &records)?;
+        // Its devices' holders from a copy of every record, where it offers a device; its learned holders from the
+        // records as the store holds them, no copy.
+        if report.devices.is_empty() {
+            report.check()?;
+        } else {
+            recorded_holders(
+                &mut report,
+                &self.books.store.all()?,
+                &self.books.store.all_pools()?,
+                self.runtime.device_catalog()?.as_deref(),
+            )?;
+        }
+        self.books
+            .attach_learned(class, &mut report, &self.books.store.snapshot()?)?;
         Ok(Some(report))
     }
 
@@ -3692,8 +3714,12 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().cap_cycle(rate)
     }
 
-    /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247).
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247): its last
+    /// rate's answer's, none before its first (Shards' image channel v31).
+    fn image_rate_period(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         self.guest().rate_period(&record.spec.id)
     }
 
@@ -3702,8 +3728,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.guest().node_vm_host_use(run)
     }
 
-    /// Joint plan step 39 (place 3): its node VM's run's rate period (D247).
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 39 (place 3): its node VM's run's rate period (D247), none before its first rate's answer.
+    fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         self.guest().node_vm_rate_period(run)
     }
 

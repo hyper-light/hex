@@ -1838,10 +1838,10 @@ impl crate::recorded::Recover for Images {
             footprint_bytes: GIB,
             resident_bytes: GIB,
             guest_ns: Vec::new(),
-            window: self.node_vm_rate_period(run)?,
+            window: self.node_vm_rate_period(run)?.unwrap_or_default(),
         })
     }
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Duration, Refusal> {
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Option<Duration>, Refusal> {
         self.ask("node_vm_rate_period");
         self.0
             .node_periods
@@ -1849,6 +1849,7 @@ impl crate::recorded::Recover for Images {
             .unwrap()
             .get(&run)
             .copied()
+            .map(Some)
             .ok_or_else(|| Refusal::Broken("a node VM this runtime doesn't run".into()))
     }
     fn node_vm_rate(
@@ -1869,13 +1870,13 @@ impl crate::recorded::Recover for Images {
         self.0.node_rooms.lock().unwrap().push((run, room));
         Ok(())
     }
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+    fn image_rate_period(&self, record: &BoxRecord) -> Result<Option<Duration>, Refusal> {
         self.ask("image_rate_period");
         self.0
             .reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.0.periods.lock().unwrap().get(record.spec.id.as_str()) {
-            Some(period) => Ok(*period),
+            Some(period) => Ok(Some(*period)),
             None => Err(Refusal::NotRunning(
                 record.spec.id.try_clone()?,
                 "rate_period",
@@ -3064,7 +3065,11 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let learned = capacity.learned.unwrap();
     assert!(
@@ -3292,11 +3297,19 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
     );
     images.0.box_rates.lock().unwrap().clear();
     store.remove(&BoxId::new("img-1").unwrap()).unwrap();
-    std::fs::write(store.runtime_place(&capped.spec.id), b"{\"version\":").unwrap();
+    // A record damaged behind its store's back is out of the store's contract: the next node's open reads it (ROOT,
+    // 2026-11-14), so the node restarts over it.
+    let place = store.runtime_place(&capped.spec.id);
+    drop(node);
+    std::fs::write(place, b"{\"version\":").unwrap();
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
     let Some(Err(why)) = store.get(&capped.spec.id).unwrap() else {
         panic!("the process box's record still reads");
     };
     store.put(&booked("img-2", 2)).unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     let mut capacity = hex_api::Capacity {
         own: Default::default(),
@@ -3314,7 +3327,11 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         unlearned: None,
     };
     node.books
-        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .attach_learned(
+            hex_api::Class::Shards,
+            &mut capacity,
+            &store.snapshot().unwrap(),
+        )
         .unwrap();
     let told: Vec<(String, String)> = capacity
         .learned
@@ -3391,7 +3408,7 @@ fn told_reservations(
         .attach_learned(
             hex_api::Class::Shards,
             &mut capacity,
-            &node.books.store.all().unwrap(),
+            &node.books.store.snapshot().unwrap(),
         )
         .unwrap();
     capacity.learned.and_then(|learned| learned.reservations)
@@ -4065,5 +4082,59 @@ fn measure_a_windows_record_reads() {
         let all = time(&|| store.all().unwrap().len());
         let rows = time(&|| store.all_node_vms().unwrap().len());
         eprintln!("WINDOW-READS records={n} all: {all}; all_node_vms: {rows}");
+    }
+}
+
+/// The review's per-window reads, step 2 (batch 1114d's reads2; AC-T7.4.1): a charge window's reads of its node's records
+/// read no file, its node's store being their only writer. Do, at 10, 100 and 1000 of each: leave image VMs' records and
+/// Ended node VM rows as a node leaves them; open the store as the next node does; then read as a window does (every
+/// record and every row), as a VM's guest time does (each record by its id) and as a capacity answer's receipts do (each
+/// row by its run). Expect no record or row file read once the store is open.
+#[test]
+fn reads2_a_windows_reads_read_no_record_file_at_10_100_and_1000() {
+    for n in [10_usize, 100, 1000] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, run) = (dir.path().join("state"), dir.path().join("run"));
+        let ids: Vec<BoxId> = (0..n)
+            .map(|i| BoxId::new(&format!("img-{i}")).unwrap())
+            .collect();
+        {
+            let store = Store::open(&state, &run).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                store
+                    .put(&image_vm(id.as_str(), u64::try_from(i).unwrap()))
+                    .unwrap();
+            }
+        }
+        let rows = state.join(".node-vms");
+        std::fs::create_dir_all(&rows).unwrap();
+        let runs: Vec<hex_api::NodeRun> = (0..n)
+            .map(|i| {
+                let mut run = [0u8; 16];
+                run[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+                let row = hex_core::record::NodeVmRecord {
+                    run: hex_api::NodeRun::from_bytes(run),
+                    ..node_row(0, hex_api::NodeVmPhase::Ended)
+                };
+                let name: String = run.iter().map(|byte| format!("{byte:02x}")).collect();
+                std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
+                row.run
+            })
+            .collect();
+        let store = Store::open(&state, &run).unwrap();
+        let opened = store.reads();
+        assert_eq!(store.all().unwrap().len(), n);
+        assert_eq!(store.all_node_vms().unwrap().len(), n);
+        for id in &ids {
+            assert!(matches!(store.get(id).unwrap(), Some(Ok(_))));
+        }
+        for run in &runs {
+            assert!(store.node_vm(run).unwrap().is_some());
+        }
+        let read = store.reads() - opened;
+        assert_eq!(
+            read, 0,
+            "at {n} records and rows, a window's reads read {read} files"
+        );
     }
 }

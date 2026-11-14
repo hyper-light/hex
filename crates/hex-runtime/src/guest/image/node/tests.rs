@@ -73,8 +73,8 @@ impl ImageGuest for Run {
         None
     }
 
-    fn rate_period(&self) -> Duration {
-        Duration::ZERO
+    fn rate_period(&self) -> Option<Duration> {
+        None
     }
 
     fn started_from(&self) -> shards_api::image::StartedFrom {
@@ -183,7 +183,7 @@ impl ImageGuest for Run {
         Err(unasked())
     }
 
-    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, _: std::fs::File, _: u64) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
 

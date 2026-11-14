@@ -306,7 +306,9 @@ by each child's life, with no deadline, as its run carries none (§4).
   the stop's W*, the run-out told, the stop is followed by its thread's life.
 - **A row whose owner still runs** (`store.node_vm_owner`): its owner's lock, on a thread of its own, to that owner's
   end. Past its W*, the run-out told, it follows the owner by its life. A follow that fails is said as
-  `hex.guest event=node_vm_unfollowed`, its why a JSON string.
+  `hex.guest event=node_vm_unfollowed`, its why a JSON string. A node's store holds its directory while it runs
+  (runtime-architecture.md decision 1, the store's records in memory), so a start meets no live owner: it follows
+  only a run lock its ended owner's OS has yet to let go (Windows lets each go as its handle's close is done).
 
 No record seeds any of them. The waits census keeps their answers as evidence.
 

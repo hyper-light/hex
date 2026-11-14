@@ -169,23 +169,22 @@ impl GuestRuntime {
             .ok_or_else(|| Refusal::Broken("guest has no live native record authority".into()))
     }
 
-    /// Read the canonical persisted route before touching a native backend. This
+    /// Read the canonical persisted route before touching a native backend, by its id alone (the review's B-8). This
     /// snapshot grants no method ownership; each operation rereads under its turn.
     pub fn recorded_box(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
         if !self.uses_books() {
             return Ok(None);
         }
         self.authority()?
-            .records()?
-            .remove(id)
+            .record(id)?
             .map(|record| {
                 record.map_err(|_| Refusal::Broken("guest box record is unreadable".into()))
             })
             .transpose()
     }
 
-    /// Box `id`'s record, read once for the call that asks ([`GuestRuntime::recorded_box`], one scan of the node's
-    /// records), and routed by its class, so no call scans them twice: each operation still rereads it under its turn.
+    /// Box `id`'s record, read once for the call that asks ([`GuestRuntime::recorded_box`], one read by its id), and
+    /// routed by its class: each operation still rereads it under its turn.
     pub(super) fn routed(&self, id: &BoxId) -> Result<Routed, Refusal> {
         Ok(match self.recorded_box(id)? {
             Some(record) if record.retired => Routed::Retired(record),

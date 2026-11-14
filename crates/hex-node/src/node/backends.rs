@@ -1158,6 +1158,9 @@ impl Books for Node {
     fn records(&self) -> Result<Records, Refusal> {
         self.store.all()
     }
+    fn record(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
+        self.store.get(id)
+    }
     fn pool_records(&self) -> Result<PoolRecords, Refusal> {
         self.store.all_pools()
     }

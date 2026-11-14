@@ -538,14 +538,6 @@ pub(super) fn stop(runtime: &WinRuntime, record: NativeRecord<'_>) -> Result<(),
         .map_err(super::proc::ObserveError::refusal)
 }
 
-pub(super) fn members(runtime: &WinRuntime, record: NativeRecord<'_>) -> Result<Vec<u32>, Refusal> {
-    existing(runtime, record)?
-        .ok_or_else(|| {
-            record.uncertain("its Windows job box isn't this runtime's as its members are listed")
-        })?
-        .member_ids()
-}
-
 pub(super) fn usage(
     runtime: &WinRuntime,
     record: NativeRecord<'_>,

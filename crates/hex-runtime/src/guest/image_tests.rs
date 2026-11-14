@@ -336,6 +336,8 @@ struct ModelRun {
     /// Each file its run host's diagnostics were told to go to (`ImageGuest::keep_diagnostics`), in order: the test
     /// writes the host's diagnostics into the last, as the run host's do.
     diagnostics: Mutex<Vec<std::fs::File>>,
+    /// The bound each of those files was told to be held within, in order (the review's B-9).
+    diagnostics_bounds: Mutex<Vec<u64>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -411,7 +413,8 @@ struct ModelGuest {
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
     outside: Mutex<std::collections::BTreeMap<String, Outside>>,
-    /// The period its run host said its VM's governor holds a rate over as it started (D247's `rate_period`).
+    /// The period its VM's governor holds a rate over, said with each rate's answer (D247's `rate_period`; Shards' image
+    /// channel v31): none before its first.
     rate_period: Duration,
     /// How its microVM started (D253), as the model's run host said it at its boot.
     started_from: StartedFrom,
@@ -445,8 +448,12 @@ impl ImageGuest for ModelGuest {
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
         self.control.as_ref()
     }
-    fn rate_period(&self) -> Duration {
-        self.rate_period
+    fn rate_period(&self) -> Option<Duration> {
+        if self.run.rates.lock().unwrap().is_empty() {
+            None
+        } else {
+            Some(self.rate_period)
+        }
     }
     fn started_from(&self) -> StartedFrom {
         self.started_from
@@ -578,8 +585,9 @@ impl ImageGuest for ModelGuest {
         self.run.release();
         Ok(())
     }
-    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, to: std::fs::File, bound: u64) -> Result<(), ImageRefusal> {
         self.run.diagnostics.lock().unwrap().push(to);
+        self.run.diagnostics_bounds.lock().unwrap().push(bound);
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
@@ -1499,6 +1507,25 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// The review's B-9 (ROOT's ruling of 2026-11-14, shards-image-class.md §1): an image VM's diagnostics are its own output
+/// on the node's disk, charged to it, so their file is held within the disk its box's allocation was admitted with
+/// (Shards' bounded `keep_diagnostics`), no number picked. Do start an image VM whose box was admitted with the sim's VM
+/// allocation. Expect Shards told once to keep its diagnostics, within exactly that allocation's disk.
+#[test]
+fn b9_an_image_vms_diagnostics_are_held_within_the_disk_its_box_was_admitted_with() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-diagnostics-bound", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        *images.run.diagnostics_bounds.lock().unwrap(),
+        [allocation().resources.disk_bytes]
+    );
+}
+
 /// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one
 /// file under the node's state, named in its record as its start's intent is written, and a failed run's `ended` quotes
 /// their last bytes after its own words; the file goes with the box's delete. Do start an image VM, write its run host's
@@ -2085,7 +2112,6 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
             waker: std::net::SocketAddr::from(([127, 0, 0, 1], 10)),
             wake: std::net::SocketAddr::from(([127, 0, 0, 1], 11)),
         }),
-        rate_period: Duration::from_millis(100),
         from: StartedFrom::Booted,
     }
     .encode()
@@ -2140,7 +2166,23 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
     );
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
-    let id = runtime.create(spec("b4-release", None)).unwrap().id;
+    // A disk that holds its run host's diagnostics' quoted tail, as a real image VM's does (the review's B-9): the sim's
+    // VM allocation admits none. The fixture's own VM, with as much disk as memory, under its cost profile so widened.
+    let mut admitted = spec("b4-release", None);
+    let fixture = allocation();
+    let vm = CapacityResources {
+        disk_bytes: fixture.resources.mem_bytes,
+        ..fixture.resources
+    };
+    admitted.allocation = Some(
+        hex_api::RuntimeCost {
+            ceiling: vm,
+            ..fixture.cost
+        }
+        .allocate(vm)
+        .unwrap(),
+    );
+    let id = runtime.create(admitted).unwrap().id;
     runtime.start(&id).unwrap();
     // Each open waits for its other end: the run host's, its VM's, then the VM's gate, each held from here.
     let mut host_end = std::io::BufReader::new(std::fs::File::open(&host_seen).unwrap());
@@ -2525,12 +2567,13 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
     ));
 }
 
-/// Joint plan step 14 (C1; ROOT, 2026-11-13): a running image VM's rate period is its own run's, as its run host said
-/// it as the run started (D247's `ImageGuest::rate_period`), the window the node's charge learner caps it over, never a
-/// number of Hex's. Do start two image VMs whose run hosts say 70 ms and 130 ms, each on a runtime of its own (so
-/// neither boot waits at a bound the other's answer taught, decision 9), and ask each its period; then ask one made and
-/// not started, and a box the runtime doesn't hold. Expect each its own run's period; the one not started refused
-/// NotRunning, naming the call; the one not held NoSuchBox.
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): a running image VM's rate period is its own run's, as its VM said it with
+/// its last rate's answer (D247's `ImageGuest::rate_period`; Shards' image channel v31), the window the node's charge
+/// learner caps it over, never a number of Hex's. Do start two image VMs whose VMs say 70 ms and 130 ms, each on a
+/// runtime of its own (so neither boot waits at a bound the other's answer taught, decision 9), and ask each its period
+/// before and after a rate is held; then ask one made and not started, and a box the runtime doesn't hold. Expect none
+/// before a rate's answer, then each its own run's period; the one not started refused NotRunning, naming the call; the
+/// one not held NoSuchBox.
 #[test]
 fn w14_a_running_vms_rate_period_is_its_own_runs() {
     let started = |name: &str, ms: u64| {
@@ -2543,8 +2586,18 @@ fn w14_a_running_vms_rate_period_is_its_own_runs() {
     };
     let (first, _first_owner, a) = started("image-period-a", 70);
     let (second, _second_owner, b) = started("image-period-b", 130);
-    assert_eq!(first.rate_period(&a).unwrap(), Duration::from_millis(70));
-    assert_eq!(second.rate_period(&b).unwrap(), Duration::from_millis(130));
+    assert_eq!(first.rate_period(&a).unwrap(), None, "no rate answered yet");
+    let rate = std::num::NonZeroU64::new(1_000);
+    assert_eq!(first.rate(&a, rate).unwrap(), rate);
+    assert_eq!(second.rate(&b, rate).unwrap(), rate);
+    assert_eq!(
+        first.rate_period(&a).unwrap(),
+        Some(Duration::from_millis(70))
+    );
+    assert_eq!(
+        second.rate_period(&b).unwrap(),
+        Some(Duration::from_millis(130))
+    );
     let made = first.create(spec("image-period-c", None)).unwrap().id;
     assert!(matches!(
         first.rate_period(&made),
@@ -4253,7 +4306,7 @@ fn w39_a_node_vm_is_held_to_its_rate_over_its_runs_period() {
     assert_eq!(*images.run.rates.lock().unwrap(), [rate]);
     assert_eq!(
         runtime.images.rate_period_node(vm.run).unwrap(),
-        Duration::from_millis(70)
+        Some(Duration::from_millis(70))
     );
     runtime.images.stop_node(vm.run).unwrap();
     let refused = runtime.images.rate_node(vm.run, rate).unwrap_err();

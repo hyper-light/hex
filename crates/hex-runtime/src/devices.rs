@@ -548,6 +548,12 @@ fn check_report_selection(
 /// It performs no implicit commit: every physical/record transition remains explicit to its caller.
 pub trait Books: Send + Sync {
     fn records(&self) -> Result<Records, Refusal>;
+    /// Box `id`'s record alone, as [`Books::records`] holds it: a call about one box reads its record by its id, never
+    /// every record (the review's B-8). By default, from every record; an owner that keeps its records by id reads the
+    /// one.
+    fn record(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
+        Ok(self.records()?.remove(id))
+    }
     fn pool_records(&self) -> Result<PoolRecords, Refusal>;
     /// Metadata-only preparation under the SAME family configuration and full conflict turns.
     /// The family tuple is (immutable full-configuration identity, complete alias keys, expected

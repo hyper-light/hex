@@ -1765,11 +1765,12 @@ impl GuestRuntime {
         self.images.host_use_node(run)
     }
 
-    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D247), its run's own.
+    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D247), its run's own, as
+    /// its last rate's answer said it: none before its first (Shards' image channel v31).
     pub fn node_vm_rate_period(
         &self,
         run: hex_api::NodeRun,
-    ) -> Result<std::time::Duration, Refusal> {
+    ) -> Result<Option<std::time::Duration>, Refusal> {
         self.images.rate_period_node(run)
     }
 
@@ -1796,9 +1797,10 @@ impl GuestRuntime {
     }
 
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
-    /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
-    /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.
-    pub fn rate_period(&self, id: &BoxId) -> Result<std::time::Duration, Refusal> {
+    /// its VM said it with its last rate's answer (D191, D247's `ImageGuest::rate_period`; Shards' image channel v31),
+    /// none before its first: the window the node's charge learner caps it over. Any other box's refused as
+    /// `Runtime::rate` refuses it.
+    pub fn rate_period(&self, id: &BoxId) -> Result<Option<std::time::Duration>, Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.images.rate_period_image(record),
