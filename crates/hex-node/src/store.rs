@@ -2000,6 +2000,60 @@ mod tests {
         assert!(all[&BoxId::new("d").unwrap()].is_err());
     }
 
+    /// The review's per-window reads (AC-T7.4.1): do read a box record's file, then a file twice the record bound, through
+    /// the store's record reader, which every node VM row, pool record and retained box record is read by. Expect: each
+    /// read's one allocation, its buffer, the file's own length, no more: never the bound's MiB for a record of a few
+    /// hundred bytes; the oversized file read to the bound and one byte, all its decoder needs to refuse it.
+    #[test]
+    fn a_records_read_allocates_its_files_length_never_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let small = dir.path().join("small.json");
+        let encoded = record("small").encode().unwrap();
+        fs::write(&small, &encoded).unwrap();
+        let read = read_record_bytes(File::open(&small).unwrap()).unwrap();
+        assert_eq!(read, encoded);
+        assert!(
+            read.capacity() <= encoded.len(),
+            "a {}-byte record's read allocated {} bytes",
+            encoded.len(),
+            read.capacity()
+        );
+        let large = dir.path().join("large.json");
+        fs::write(&large, vec![b' '; bound * 2]).unwrap();
+        let read = read_record_bytes(File::open(&large).unwrap()).unwrap();
+        assert_eq!(read.len(), bound + 1);
+        assert!(
+            read.capacity() <= bound + 1,
+            "a {}-byte file's read allocated {} bytes",
+            bound * 2,
+            read.capacity()
+        );
+    }
+
+    /// The review's per-window reads (AC-T7.4.1): do write a file twice the record bound where a box's record goes, then
+    /// get it, list every record, and list them as recovery does. Expect: each refuses it as damaged having read the
+    /// bound and one byte, never the rest of the file.
+    #[test]
+    fn an_oversized_box_record_is_read_no_further_than_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let bound = hex_core::record::MAX_RECORD_BYTES;
+        let id = BoxId::new("oversized").unwrap();
+        fs::write(
+            record_file(&dir.path().join("state"), &id),
+            vec![b' '; bound * 2],
+        )
+        .unwrap();
+        let refused = format!("{} bytes, over {bound}", bound + 1);
+        assert_eq!(store.get(&id).unwrap(), Some(Err(refused.clone())));
+        assert_eq!(store.all().unwrap().get(&id), Some(&Err(refused.clone())));
+        assert_eq!(
+            store.retained_records().unwrap().get(&id),
+            Some(&Err(refused))
+        );
+    }
+
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
     /// where [`runtime_record`] says, none in the directory itself, so the boxes made and deleted at once rarely
     /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards,
