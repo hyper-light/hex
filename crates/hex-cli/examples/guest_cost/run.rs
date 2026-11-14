@@ -1067,14 +1067,15 @@ mod tests {
     use super::*;
     use crate::seam::{Envelope, Launched, Lines, Patience};
 
-    /// One scripted guest: its readings in turn (the last repeated), what its agent reports, and what it
-    /// leaves on disk after its end.
+    /// One scripted guest: its readings in turn (the last repeated), what its agent reports, what it
+    /// leaves on disk after its end, and how long after its launch it is ready.
     #[derive(Clone)]
     struct Script {
         uses: Vec<Use>,
         holdings: Vec<Holding>,
         free: CapacityResources,
         left: Files,
+        boots_in: Duration,
     }
 
     /// Readings in turn, the last repeated.
@@ -1100,6 +1101,8 @@ mod tests {
         runtime: PathBuf,
         boots: Vec<Option<Script>>,
         launched: usize,
+        /// When the last guest was launched.
+        launched_at: Option<Instant>,
         torn_down: usize,
         bounds: Vec<Duration>,
         disk: Files,
@@ -1113,11 +1116,19 @@ mod tests {
                 runtime: runtime.to_owned(),
                 boots,
                 launched: 0,
+                launched_at: None,
                 torn_down: 0,
                 bounds: Vec::new(),
                 disk: Vec::new(),
                 governed: Vec::new(),
             }
+        }
+    }
+
+    /// Parks this thread until `at`.
+    fn park_until(at: Instant) {
+        while let Some(left) = at.checked_duration_since(Instant::now()) {
+            std::thread::park_timeout(left);
         }
     }
 
@@ -1160,6 +1171,7 @@ mod tests {
                 .cloned()
                 .ok_or("no launch left")?;
             self.launched += 1;
+            self.launched_at = Some(Instant::now());
             let (uses, holdings) = next
                 .as_ref()
                 .map(|s| (s.uses.clone(), s.holdings.clone()))
@@ -1169,7 +1181,13 @@ mod tests {
         fn ready(&mut self, guest: &mut Option<Script>, deadline: Instant) -> Result<bool, String> {
             self.bounds
                 .push(deadline.saturating_duration_since(Instant::now()));
-            Ok(guest.is_some())
+            let Some(script) = guest else {
+                return Ok(false);
+            };
+            // Ready `boots_in` after its launch, or run out at the deadline before then.
+            let at = self.launched_at.ok_or("ready before a launch")? + script.boots_in;
+            park_until(at.min(deadline));
+            Ok(at <= deadline)
         }
         fn idle(&mut self, _: &Option<Script>, until: Instant) -> Result<(), String> {
             while let Some(left) = until.checked_duration_since(Instant::now()) {
@@ -1246,6 +1264,7 @@ mod tests {
             holdings,
             free: free(free_mem),
             left: Vec::new(),
+            boots_in: Duration::ZERO,
         }
     }
 
@@ -1560,6 +1579,35 @@ mod tests {
         );
         assert_eq!(driver.torn_down, 5);
         assert!(derive(envelope(), &census, 4).is_err());
+    }
+
+    /// AC-T7.4.1 (decision 9; ROOT, 2026-11-14: a boot bound that doubles at each run-out is a chosen multiple and a timer
+    /// verdict): guests that boot slower than the class's patience: expect each followed to its answer, its
+    /// boot-to-ready time its sample, and no guest launched that wasn't one.
+    #[test]
+    fn a_boot_slower_than_its_patience_is_followed_to_its_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let patience = Duration::from_millis(40);
+        let mut slow = script(vec![reading(1, 0, 1, 1, Vec::new())], 400 << 20);
+        slow.boots_in = patience * 2;
+        let mut driver = Driven::new(dir.path(), vec![Some(slow); 4]);
+        let census = census(
+            &mut driver,
+            2,
+            patience,
+            &window(5),
+            2,
+            true,
+            &mut record(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(census.samples.len(), 2);
+        assert_eq!(driver.launched, 2, "a boot was ended and booted again");
+        assert!(
+            census.samples.iter().all(|s| s.ready >= patience * 2),
+            "{:?}",
+            census.samples.iter().map(|s| s.ready).collect::<Vec<_>>()
+        );
     }
 
     /// AC-T7.4.1: a class whose guests run out as often as the census needs answers is refused, not
