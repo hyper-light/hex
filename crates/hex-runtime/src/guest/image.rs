@@ -1599,10 +1599,26 @@ impl ImageClass {
                 image.runs.forget(id)?;
                 Ok(State::Ended(end))
             }
-            Settled::None if image.earlier_boot(record) => {
+            Settled::None => self.settle_unheld(image, id),
+        }
+    }
+
+    /// Box `id`, which no run of this process holds, as its record says now, read under its turn (the review's B-2): a
+    /// run is let go of only once its end is recorded, so a record read before another call recorded that end and let
+    /// go of the run would show this process's own run as an earlier one's, held. Ended where its record has its end,
+    /// or where an earlier boot of the host wrote it (T-T7.1.2); else held.
+    fn settle_unheld(&self, image: &ImageBoot, id: &BoxId) -> Result<State, Refusal> {
+        let now = devices::with_transaction(self.image_books()?, id, &[], |t| t.read(id))?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        match now.exit {
+            Some(exit) => Ok(State::Ended(End {
+                exit,
+                why: now.ended,
+            })),
+            None if image.earlier_boot(&now) => {
                 Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
             }
-            Settled::None => Ok(State::Held),
+            None => Ok(State::Held),
         }
     }
 
