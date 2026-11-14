@@ -16,7 +16,7 @@ pub mod hosted;
 mod image;
 mod leases;
 mod managed;
-pub use managed::ManagedRate;
+pub use managed::{ManagedGuestTime, ManagedRate};
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
 mod observer;
@@ -1596,6 +1596,36 @@ impl GuestRuntime {
                     why: "its guest is held through no managed guest of its own".to_owned(),
                 }))
             }
+        }
+    }
+
+    /// Joint plan step 14 (D260; ROOT, 2026-11-13): managed box `record`'s VM's vCPUs' guest time, as its VM process
+    /// answers its use through its booted managed guest ([`managed::guest_time`]), each held to the VM's size: none apart
+    /// for a box whose guest is held through no managed guest of its own, told why.
+    pub fn managed_guest_time(
+        &self,
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<ManagedGuestTime, Refusal> {
+        let id = &record.spec.id;
+        let Some(booted) = self.booted_for_record(Some(record), id)? else {
+            return Err(Refusal::NoSuchBox(id.try_clone()?));
+        };
+        match &booted.guest {
+            GuestHandle::Managed(guest) => {
+                let vcpus = record
+                    .spec
+                    .allocation
+                    .ok_or_else(|| Refusal::Invalid {
+                        what: "a managed VM's guest time",
+                        why: format!("box {id} holds no allocation to size its vCPUs by"),
+                    })?
+                    .vm_size()?
+                    .vcpus;
+                managed::guest_time(guest, id, vcpus)
+            }
+            GuestHandle::Shared(_) | GuestHandle::Node(_) => Ok(ManagedGuestTime::Unheld(
+                "its guest is held through no managed guest of its own".to_owned(),
+            )),
         }
     }
 

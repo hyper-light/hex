@@ -258,7 +258,7 @@ pub(super) fn rate(
     let asked = std::num::NonZeroU64::new(rate);
     let began = Instant::now();
     let answer = match RATE.deadline() {
-        Some(bound) => told_past(bound, || guest.rate(asked, Duration::MAX))?,
+        Some(bound) => told_past(&RATE, bound, || guest.rate(asked, Duration::MAX))?,
         None => guest.rate(asked, Duration::MAX),
     };
     let took = began.elapsed();
@@ -289,26 +289,58 @@ pub(super) fn rate(
     }
 }
 
-/// Answers `ask`, a watcher telling [`RATE`]'s run-out once `bound` passes with no answer while the ask goes on.
-fn told_past<T>(bound: Duration, ask: impl FnOnce() -> T) -> Result<T, Refusal> {
+/// What a managed VM's VM process answered of its vCPUs' guest time (joint plan step 14, D260).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedGuestTime {
+    /// Each of its vCPUs' guest time since its boot, in nanoseconds, by index.
+    PerVcpu(Vec<u64>),
+    /// None apart, why in its words: its microVM not started yet, or a VM process that answers no use (one not booted
+    /// `--host-managed`, or a shards before D260).
+    Unheld(String),
+}
+
+/// A managed VM's use's ask (decision 9; D260), from its ask until its VM process answers: a wait of its own,
+/// measuring, as a rate's is ([`RATE`]): Shards follows the VM with no bound of Hex's, and past the slowest answer seen
+/// a watcher tells the run-out while the ask goes on, which is refused only at the VM's end.
+static USE: Patience = Patience::measuring("managed.use");
+
+/// Joint plan step 14 (D260; ROOT, 2026-11-13): managed guest `guest`'s VM's vCPUs' guest time, box `id`'s, `vcpus` of
+/// them, as its VM process answers its use on its socket ([`USE`]): each vCPU's, held to the VM's size as an image run's
+/// are ([`super::image::vcpus_ns`]); none apart where its microVM hasn't started or its process answers no use, why
+/// told; or the VM's end.
+pub(super) fn guest_time(
+    guest: &shards_api::ManagedGuest,
+    id: &BoxId,
+    vcpus: u32,
+) -> Result<ManagedGuestTime, Refusal> {
+    let _ = (guest, id, vcpus);
+    Ok(ManagedGuestTime::Unheld("its use isn't asked".to_owned()))
+}
+
+/// Answers `ask`, a watcher telling `patience`'s run-out once `bound` passes with no answer while the ask goes on.
+fn told_past<T>(
+    patience: &'static Patience,
+    bound: Duration,
+    ask: impl FnOnce() -> T,
+) -> Result<T, Refusal> {
     let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
         hex_wait::Failed::Poisoned => {
-            Refusal::Broken("a managed VM rate's watch is poisoned".to_owned())
+            Refusal::Broken("a managed VM ask's watch is poisoned".to_owned())
         }
-        hex_wait::Failed::Os(why) => Refusal::os("making a managed VM rate's watch", why),
+        hex_wait::Failed::Os(why) => Refusal::os("making a managed VM ask's watch", why),
     })?;
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .name("hex-managed-rate".to_owned())
+            .name("hex-managed-ask".to_owned())
             .spawn_scoped(scope, move || {
                 if matches!(
                     waiting.recv_timeout(bound),
                     Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    RATE.ran_out(bound);
+                    patience.ran_out(bound);
                 }
             })
-            .map_err(|why| Refusal::os("starting a managed VM rate's watcher", why))?;
+            .map_err(|why| Refusal::os("starting a managed VM ask's watcher", why))?;
         let answer = ask();
         drop(answered);
         Ok(answer)
@@ -500,6 +532,58 @@ mod tests {
         assert_eq!(
             rate(&guest, &id, 4_000),
             Err(Refusal::NotRunning(id.try_clone().unwrap(), "rate"))
+        );
+    }
+
+    /// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): a managed VM's vCPUs' guest time is asked of its VM process
+    /// through Shards, on its socket, and held to the VM's size. Do ask a managed guest of 2 vCPUs, booted through Shards
+    /// with a stand-in VM process at its socket, for its use five times: the process answering both vCPUs' times; its
+    /// microVM not started; times of 3 vCPUs; closing the ask unanswered, as a VM process that takes no use does; then,
+    /// its process ended, asked again. Expect each ask `USE`; the two vCPUs' times; none apart, in the process's words,
+    /// before its microVM starts and from a process that answers no use; the count other than the VM's refused, naming
+    /// both; and the VM's end.
+    #[cfg(unix)]
+    #[test]
+    fn w14_d260_a_managed_vms_guest_time_is_asked_of_its_vm_process_and_held_to_its_size() {
+        let dir = super::super::tests::socket_fixture();
+        let socket = dir.path().join("v");
+        let vm = vm_process(
+            &socket,
+            vec![
+                Some(b"USED\ndeparted 0\nvcpu 0 1000\nvcpu 1 2000\nhost 5000 4096 8192\n"),
+                Some(b"USED\nguest-unread the microVM has not started\nhost 300 4096 8192\n"),
+                Some(b"USED\ndeparted 0\nvcpu 0 1\nvcpu 1 2\nvcpu 2 3\nhost 9 4096 8192\n"),
+                None,
+            ],
+        );
+        let (guest, running) = managed_at(&socket);
+        let id = BoxId::new("vm-1").unwrap();
+        assert_eq!(
+            guest_time(&guest, &id, 2),
+            Ok(ManagedGuestTime::PerVcpu(vec![1_000, 2_000]))
+        );
+        assert_eq!(
+            guest_time(&guest, &id, 2),
+            Ok(ManagedGuestTime::Unheld(
+                "the microVM has not started".to_owned()
+            ))
+        );
+        let three = guest_time(&guest, &id, 2);
+        assert!(
+            matches!(&three, Err(Refusal::Os { why, .. }) if why.contains("3 vCPUs") && why.contains("2 vCPUs")),
+            "{three:?}"
+        );
+        let unanswered = guest_time(&guest, &id, 2);
+        assert!(
+            matches!(&unanswered, Ok(ManagedGuestTime::Unheld(why)) if !why.is_empty()),
+            "{unanswered:?}"
+        );
+        assert_eq!(vm.join().unwrap(), vec![b"USE\n".to_vec(); 4]);
+        shards_api::ManagedProcess::stop(running.as_ref()).unwrap();
+        shards_api::Guest::wait_for(&guest, Duration::MAX).unwrap();
+        assert_eq!(
+            guest_time(&guest, &id, 2),
+            Err(Refusal::NotRunning(id.try_clone().unwrap(), "host_use"))
         );
     }
 
