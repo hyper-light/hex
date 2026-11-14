@@ -54,6 +54,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.links"),
     // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
     Patience::measuring("client.answer.lessors"),
+    // MEASURING until a waits census records a keeper's word to its node (the review's A-10).
+    Patience::measuring("client.answer.reserved"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`,
