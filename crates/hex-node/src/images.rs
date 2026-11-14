@@ -102,6 +102,12 @@ impl ImageRuntime {
             .bind_boot_session(runtime.store.boot().cloned())?;
         Ok(runtime)
     }
+
+    /// The class its VMs boot through, a node VM's among them (joint plan step 39): what a node's guest runtime calls
+    /// to boot, read and stop its node VM, its records this runtime's own Store.
+    pub fn class(&self) -> &ImageClass {
+        &self.class
+    }
 }
 
 /// What the class never asks of this runtime's records: a pool, a device, a native launch. Refused as broken, since only

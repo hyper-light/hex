@@ -8,6 +8,7 @@ use hex_api::sim::SimRuntime;
 use hex_api::{ClassSpec, Exit};
 use hex_core::patience::Patience;
 use hex_runtime::guest::{GuestConfig, GuestRuntime, Side, WithGuest};
+use hex_testkit::waits::follow::{self, Party};
 
 fn route(_: &SimRuntime, class: &ClassSpec) -> Result<Side, Refusal> {
     Ok(if class.class() == Class::Process {
@@ -77,9 +78,16 @@ fn img4_an_image_vms_kill_whose_end_meets_another_calls_turn_waits_for_it_never_
     let waited = node.books.lifecycle.waited();
     let killed = std::thread::scope(|scope| {
         let killing = scope.spawn(|| node.signal(&id, Signal::KILL));
-        hex_testkit::waits::until(
+        follow::until(
             &IMG4_KILL_WAITS,
             "the KILL waiting for the box's turn",
+            || {
+                if killing.is_finished() {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
             || killing.is_finished() || node.books.lifecycle.waited() > waited,
         )
         .unwrap();
