@@ -164,6 +164,28 @@ fn asked_over(steps: &[Step], from: Duration, to: Duration, vcpus: u64) -> u64 {
     u64::try_from(busy * 1000 / span).unwrap()
 }
 
+/// What a VM's trace asked for certain over `len` ns of its time from any instant of `from_lo..=from_hi`, in thread-ns:
+/// as the driver reckons it here, from its start's answer (`from_lo`), each step's edge at its time.
+struct Asked {
+    steps: Vec<Step>,
+    vcpus: u64,
+}
+
+impl Asked {
+    fn of(steps: &[Step], vcpus: u64) -> Self {
+        Self {
+            steps: steps.to_vec(),
+            vcpus,
+        }
+    }
+
+    fn least(&self, from_lo: i128, _from_hi: i128, len: i128) -> u128 {
+        let at = |t: i128| Duration::from_nanos(u64::try_from(t).unwrap());
+        let milli = asked_over(&self.steps, at(from_lo), at(from_lo + len), self.vcpus);
+        u128::from(milli) * u128::try_from(len).unwrap() / 1000
+    }
+}
+
 /// `usec` of CPU over `span`, in milli-CPU.
 fn milli(usec: u64, span: Duration) -> u64 {
     u64::try_from(u128::from(usec) * 1000 / span.as_micros().max(1)).unwrap()
@@ -1110,5 +1132,54 @@ fn w14_the_box_beside_the_fleet_is_a_median_ci_build_leg() {
             mem_bytes: 2_228_883_456,
             disk_bytes: 0,
         }
+    );
+}
+
+/// A millisecond of a trace's time, in its ns.
+const MS: i128 = 1_000_000;
+
+/// Steps of `(millis, threads)`, holding no memory.
+fn steps_of(pairs: &[(u64, u64)]) -> Vec<Step> {
+    pairs
+        .iter()
+        .map(|&(millis, threads)| Step {
+            millis,
+            threads,
+            mib: 0,
+        })
+        .collect()
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a reading's ask is what its VM's trace asked for certain, the trace's zero placed
+/// anywhere its VM's start allows (module docs). Do reckon a 100 ms reading of a trace that falls from 2 busy threads to
+/// none at 1 s, the reading's start in the trace's time anywhere from 950 ms to 1 s; expect nothing asked for certain:
+/// from 1 s, the trace may have fallen already.
+#[test]
+fn w14_a_reading_whose_start_spans_a_falling_edge_asks_nothing_for_certain() {
+    let asked = Asked::of(&steps_of(&[(1_000, 2), (1_000, 0)]), 2);
+    assert_eq!(asked.least(950 * MS, 1_000 * MS, 100 * MS), 0);
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a step's end may come up to two ticks of `/proc/uptime` before its time, its deadline
+/// and the trace's zero each read rounded down to a tick (module docs). Do reckon a 100 ms reading from 900 ms of a
+/// trace falling from 2 busy threads to none at 1 s, its start certain; expect its 2 threads for the 80 ms before 980 ms.
+#[test]
+fn w14_a_falling_edge_is_certain_only_two_ticks_before_its_time() {
+    let asked = Asked::of(&steps_of(&[(1_000, 2), (1_000, 0)]), 2);
+    assert_eq!(
+        asked.least(900 * MS, 900 * MS, 100 * MS),
+        u128::try_from(2 * 80 * MS).unwrap()
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a step's start may come up to a tick of `/proc/uptime` past its time, the player's
+/// sleep reckoned from a clock read rounded down (module docs). Do reckon a 100 ms reading from 1 s of a trace rising
+/// from none to 2 busy threads at 1 s, its start certain; expect its 2 threads for the 90 ms from 1,010 ms.
+#[test]
+fn w14_a_rising_edge_is_certain_only_a_tick_after_its_time() {
+    let asked = Asked::of(&steps_of(&[(1_000, 0), (1_000, 2)]), 2);
+    assert_eq!(
+        asked.least(1_000 * MS, 1_000 * MS, 100 * MS),
+        u128::try_from(2 * 90 * MS).unwrap()
     );
 }
