@@ -1506,7 +1506,7 @@ impl ImageClass {
     fn record_end(&self, id: &BoxId, end: &End) -> Result<End, Refusal> {
         let bound = end.why.as_ref().map(|_| self.quote_bound());
         let mut recorded = None;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1557,7 +1557,7 @@ impl ImageClass {
         }
         let from = started_from(guest.started_from());
         let id = &record.spec.id;
-        devices::with_transaction(self.image_books()?, id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, id, |transaction| {
             let mut current = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1625,7 +1625,7 @@ impl ImageClass {
     /// go of the run would show this process's own run as an earlier one's, held. Ended where its record has its end,
     /// or where an earlier boot of the host wrote it (T-T7.1.2); else held.
     fn settle_unheld(&self, image: &ImageBoot, id: &BoxId) -> Result<State, Refusal> {
-        let now = devices::with_transaction(self.image_books()?, id, &[], |t| t.read(id))?
+        let now = devices::with_record_transaction(self.image_books()?, id, |t| t.read(id))?
             .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
         match now.exit {
             Some(exit) => Ok(State::Ended(End {
@@ -1719,7 +1719,7 @@ impl ImageClass {
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
         let made = info(&spec, BoxState::Created, None)?;
-        devices::with_transaction(books, &id, &[], |transaction| {
+        devices::with_record_transaction(books, &id, |transaction| {
             if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
@@ -1760,7 +1760,7 @@ impl ImageClass {
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
         // The boot's intent, durable before any effect: a crash from here on holds the box.
-        devices::with_transaction(self.image_books()?, &id, &[], |transaction| {
+        devices::with_record_transaction(self.image_books()?, &id, |transaction| {
             let mut current = transaction
                 .read(&id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1965,7 +1965,7 @@ impl ImageClass {
             State::Ended(_) => Err(Refusal::NotRunning(id, "signal")),
             _ if signal != Signal::KILL => self.signal_members(&id, state, signal),
             // Ended before it booted: no run, and its end its record's.
-            State::Created => devices::with_transaction(self.image_books()?, &id, &[], |t| {
+            State::Created => devices::with_record_transaction(self.image_books()?, &id, |t| {
                 let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                 if current.phase != Phase::Creating || current.exit.is_some() {
                     return Err(super::books::uncertain(
@@ -2180,7 +2180,7 @@ impl ImageClass {
             }
             State::Created | State::Ended(_) => None,
         };
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if let Some(exit) = stopped {
                 current.exit = Some(exit);
@@ -2294,7 +2294,7 @@ impl ImageClass {
             State::Held => return Err(held()),
             State::Booting | State::Running(_) | State::Stopping(..) => {
                 // The delete's intent, durable before its waits, and the phase it was in.
-                let before = devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                let before = devices::with_record_transaction(self.image_books()?, &id, |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                     let before = current.phase;
                     current.phase = Phase::Deleting;
@@ -2313,7 +2313,7 @@ impl ImageClass {
                         match self.final_use(&id, &state) {
                             Ok(read) => last = read,
                             Err(why) => {
-                                devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                                devices::with_record_transaction(self.image_books()?, &id, |t| {
                                     let mut current =
                                         t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
                                     current.phase = before;
@@ -2347,7 +2347,7 @@ impl ImageClass {
         if let Some(file) = &record.diagnostics {
             remove_diagnostics(file)?;
         }
-        devices::with_transaction(self.image_books()?, &id, &[], |t| {
+        devices::with_record_transaction(self.image_books()?, &id, |t| {
             let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
             if current.phase != Phase::Creating && current.exit.is_none() {
                 return Err(super::books::uncertain(
