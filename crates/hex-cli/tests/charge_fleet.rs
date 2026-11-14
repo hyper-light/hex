@@ -815,17 +815,30 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                 if window.is_none() {
                     // No window told yet: the learner gives one once it holds this VM's cap, which the class's capacity
                     // answer then tells; the riser waits for it.
-                    hex_testkit::waits::until(
+                    // A look: the class tells no event as its window moves, its capacity asked. Its party, the node,
+                    // ends where an ask is refused, the node gone (the review's C-5).
+                    let refused = std::cell::Cell::new(false);
+                    hex_testkit::waits::follow::until(
                         &TOLD_WINDOW,
                         "the learner's window, told on the class's capacity answer",
                         || {
-                            window = client
-                                .capacity(class)
-                                .ok()
-                                .flatten()
-                                .and_then(|c| c.learned)
-                                .and_then(|l| l.window)
-                                .map(|told| Duration::from_nanos(told.window_ns));
+                            if refused.get() {
+                                hex_testkit::waits::follow::Party::Ended
+                            } else {
+                                hex_testkit::waits::follow::Party::Live
+                            }
+                        },
+                        || {
+                            window = match client.capacity(class) {
+                                Ok(capacity) => capacity
+                                    .and_then(|c| c.learned)
+                                    .and_then(|l| l.window)
+                                    .map(|told| Duration::from_nanos(told.window_ns)),
+                                Err(_) => {
+                                    refused.set(true);
+                                    None
+                                }
+                            };
                             window.is_some()
                         },
                     )
@@ -1056,9 +1069,12 @@ fn w14_the_box_beside_the_fleet_runs_its_spinners_under_its_bounds() {
     // The shell and one member a CPU of its cap.
     let members = caps.cpu_milli.div_ceil(1000) + 1;
     let mut ended = None;
-    hex_testkit::waits::until(
+    // A look: the box tells no event as its members start, its usage read. Its party, the program, ends the wait in
+    // the fact itself.
+    hex_testkit::waits::follow::until(
         &RUNNING,
         "the box's spinners running, or its program's end",
+        || hex_testkit::waits::follow::Party::Live,
         || {
             if let Ok(Some(exit)) = program.try_wait() {
                 ended = Some(exit);
