@@ -663,8 +663,18 @@ fn connect_following(
             Err(why) if !deadline_passed(&why) => return Err(shards::refusal(OP, &why)),
             Err(_) => {
                 if !told {
-                    // No sample (Karn's point): the census is told, and the wait goes on.
-                    OFFERED.ran_out(bound);
+                    // No sample (Karn's point): the run-out is told, and the wait goes on.
+                    OFFERED.ran_out(
+                        bound,
+                        began.elapsed(),
+                        &[
+                            hex_core::patience::Piece::Kind(
+                                "the borrowed guest's VM process, pid ",
+                            ),
+                            hex_core::patience::Piece::Pid(i64::from(identity.pid)),
+                            hex_core::patience::Piece::Kind(", its stdio CONNECT's OK"),
+                        ],
+                    );
                     told = true;
                 }
             }

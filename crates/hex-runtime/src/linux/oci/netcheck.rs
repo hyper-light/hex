@@ -44,7 +44,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use hex_core::netns_reuse::Refused;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
@@ -266,7 +266,13 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         {
             // No sample (Karn's point): the namespace is refused, and the checker reads another. The census is told the
             // settle took longer than its bound.
-            SETTLES.ran_out(bound);
+            SETTLES.ran_out(
+                bound,
+                began.elapsed(),
+                &[Piece::Kind(
+                    "a fresh network namespace's loopback IPv6 address, by its rtnetlink notices",
+                )],
+            );
             return Err(OciError::Broken(format!(
                 "a fresh network namespace's loopback IPv6 address was still tentative after {bound:?}, \
                  the slowest settle this process has seen"
@@ -753,8 +759,12 @@ fn ask(
             Ok((got, _)) => got,
             // The read's bound passed with no answer: no sample (Karn's point), but the census is told.
             Err(rustix::io::Errno::AGAIN) => {
-                if let Some(after) = answers.deadline() {
-                    answers.ran_out(after);
+                if let Some(bound) = answers.deadline() {
+                    answers.ran_out(
+                        bound,
+                        asked.elapsed(),
+                        &[Piece::Kind("the kernel's rtnetlink dump, on its socket")],
+                    );
                 }
                 return Err(Refused::Unreadable);
             }

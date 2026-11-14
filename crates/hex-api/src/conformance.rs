@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::time::Duration;
 
-use crate::patience::{Party, Patience};
+use crate::patience::{Party, Patience, Piece};
 use crate::{
     Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, CredentialGrant, Destination,
     DeviceId, DeviceKind, Exit, Grant, GuestTime, Member, MemberKind, Mount, Network, OciSpec,
@@ -98,6 +98,19 @@ pub struct Failure {
 /// record seeds it: the per-class end records it was seeded from until 2026-11-13 are evidence alone.
 pub static ENDS: Patience = Patience::measuring("conformance.ends");
 
+/// Program `p` as a following wait names its party ([`Piece`]): by its pid, a guest's own where it runs in a VM's guest.
+fn program<P: crate::Proc + ?Sized>(p: &P) -> [Piece<'static>; 3] {
+    [
+        Piece::Kind("program pid "),
+        Piece::Pid(i64::from(p.pid())),
+        Piece::Kind(if p.on_this_host() {
+            ", by its own events"
+        } else {
+            " in its guest, by its host's events"
+        }),
+    ]
+}
+
 /// Program `p`'s end, waited for as [`ENDS`] waits: within W*, and past it, its run-out told, by the program's life
 /// alone, on its own events (`Proc::wait_for` until its end), however long that takes. The end, however long it took,
 /// is the sample W* rises to. Refused only as the runtime refuses the wait.
@@ -108,8 +121,8 @@ pub fn end_of<P: crate::Proc + ?Sized>(p: &mut P) -> Result<Exit, Refusal> {
             ENDS.answered(asked.elapsed());
             return Ok(exit);
         }
-        // Past W*: no sample (Karn's point), but the census is told, once, and the wait goes on.
-        ENDS.ran_out(within);
+        // Past W*: no sample (Karn's point), but the run-out is told, once, and the wait goes on.
+        ENDS.ran_out(within, asked.elapsed(), &program(p));
     }
     loop {
         // `Duration::MAX`: until its end, each runtime's wait taking it as "no deadline".
@@ -738,7 +751,14 @@ fn read_until<T, R: std::fmt::Debug>(
             && asked.elapsed() >= within
         {
             // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on while the runtime lives.
-            ENDS.ran_out(within);
+            ENDS.ran_out(
+                within,
+                asked.elapsed(),
+                &[
+                    Piece::Kind("the runtime under test, for "),
+                    Piece::Name(what),
+                ],
+            );
             fx.told(&format!(
                 "{what}: past {within:?}, the runtime showing {stood:?}; following it"
             ));

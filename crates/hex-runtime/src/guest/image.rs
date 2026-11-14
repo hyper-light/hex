@@ -29,7 +29,7 @@ use hex_api::{
     LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
     Usage, VmSize,
 };
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::control::{
     Controller, Execs, Fault, Hangup, Identity, Member as MemberLane, MemberControl, Subscriptions,
@@ -454,7 +454,13 @@ fn timed_stats(waits: &ImageWaits, guest: &dyn ImageGuest) -> Result<Stats, Imag
     let answer = guest.stats(StatsScope::Run, Duration::MAX);
     let took = asked.elapsed();
     if let Some(bound) = bound.filter(|bound| took > *bound) {
-        waits.stats.ran_out(bound);
+        waits.stats.ran_out(
+            bound,
+            took,
+            &[Piece::Kind(
+                "a Shards image VM's run host, answering its stats",
+            )],
+        );
     }
     if answer.is_ok() {
         waits.stats.answered(took);
@@ -1735,7 +1741,15 @@ impl ImageClass {
         }
         if !slot.came_within(bound)? {
             if let Some(bound) = bound {
-                waits.boot.ran_out(bound);
+                waits.boot.ran_out(
+                    bound,
+                    bound,
+                    &[
+                        Piece::Kind("the boot of box "),
+                        Piece::Name(id.as_str()),
+                        Piece::Kind(", by its boot's thread"),
+                    ],
+                );
             }
             return Err(pending(&id)?);
         }
@@ -1810,7 +1824,15 @@ impl ImageClass {
         let bound = waits.stop.deadline();
         if !slot.came_within(bound)? {
             if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
+                waits.stop.ran_out(
+                    bound,
+                    bound,
+                    &[
+                        Piece::Kind("the stop of box "),
+                        Piece::Name(id.as_str()),
+                        Piece::Kind(", by its stop's thread"),
+                    ],
+                );
             }
             match past {
                 Past::Pending => return Err(pending(id)?),
@@ -2124,7 +2146,15 @@ impl ImageClass {
             let mut told = slot.told_within(bound)?;
             if let (Told::NotYet, Some(bound)) = (&told, bound) {
                 // The boot it follows is still under way.
-                wait.ran_out(bound);
+                wait.ran_out(
+                    bound,
+                    asked.elapsed(),
+                    &[
+                        Piece::Kind("the boot of box "),
+                        Piece::Name(id.as_str()),
+                        Piece::Kind(", by its boot's thread"),
+                    ],
+                );
                 told = slot.told_within(None)?;
             }
             match told {

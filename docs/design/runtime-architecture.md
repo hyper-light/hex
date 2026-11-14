@@ -2194,8 +2194,14 @@ wrapper each box keeps (f13).
   it and returns its `Proc`. The node agent removes the box once the program ends, ending whatever it left
   there, as `hex box run` ends its strays. The `Proc` reports the end only once the box is gone (HEX-RT-15).
   `create` then `exec` still make a box that outlives its programs. An `oci` spec's run is refused: its box has
-  an init to create and start. macOS's and Windows' nodes have nothing that removes a box when its program ends,
-  so they refuse a run naming their platform (`Fixture::runs`).
+  an init to create and start. On macOS and Windows a thread of the run's own waits for the program's end and
+  removes the box (`hex_runtime::run`), with Linux's guarantee below (the review's E-11, 2026-11-14): the box
+  carries its removal's claim from its making, which the run's setup holds until the box is whole and its program
+  watched, as Linux's create turn does, so a delete meanwhile waits for the setup. Then whichever of the run's end
+  and a delete takes the claim removes the box, touching only the box that carries that claim, which stays in view
+  until the removal ends, so no box takes its id meanwhile; one that meets the removal under way waits for the
+  claimer's word and answers as the removal went, removing the box itself only where the claimer stopped without a
+  word. The run's KILL holds the claim through it, so it never reaches a box made again under the id.
 - **The spawn is the vfork class.** `clone3(CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD)` runs from
   the calling agent thread on goal 5's trampoline (`oci/sys.rs`, `clone_vfork`, decision 3's exec), on a
   per-thread child stack. glibc's `posix_spawn` and Go's `os/exec` start programs the same way
@@ -2476,8 +2482,13 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   bound), so a VM's boot alone, whose progress is continuous work at a scale its window sees, is judged so, by
   Shards' Part B. No time is picked and none is recorded.
 - **After a run-out**: a wait that ran out is no sample (Karn's point), and the tail it ran into is unknown, the cold
-  start's case: the next wait follows its party again (`Patience::ran_out`, which tells the census), its answer comes
-  in uncensored, and the bound rises to it.
+  start's case: the next wait follows its party again (`Patience::ran_out`), its answer comes in uncensored, and the
+  bound rises to it.
+- **Told** (the review's C-1, 2026-11-14): a run-out is told once, as W* passes, where a person sees it, in every
+  configuration: one structured line on the process's stderr, the node's log (`hex.wait event=ran_out wait=<name>
+  w_star_ns=<W*> waited_ns=<how long> party=<what it follows>`), and to the census where one runs. A party that stays
+  alive and never answers holds its wait, and that line says which wait, on what, and how long it had gone. Until then
+  a run-out reached the census alone, which a node installs only under `HEX_WAITS_CENSUS`.
   No factor: RFC 6298's back-off doubles by a cited number, and the following wait measures how long to wait instead.
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
@@ -2500,8 +2511,10 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
   the node busy initializing the guest's GPU with most of the boot's 60 s left, and the guest panicked; the relay's
   hello now carries the boot's deadline, `hex guest`.)
-- **Measuring**: every production wait is made `Patience::measuring` and follows its party until its first answer;
-  where the census runs, every wait follows (`patience::measure_all`), so the distribution it records keeps its tail.
+- **Measuring**: every production wait is made `Patience::measuring` and follows its party until its first answer.
+  The census disarms no wait (C-1: until 2026-11-14 installing it disarmed every one, `patience::measure_all`, so
+  under the census no wait ran out): a wait past its W* follows its party to its answer, which comes in uncensored,
+  so the distribution it records keeps its tail with every wait armed.
 
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded). Its back-off's factor
@@ -2537,6 +2550,7 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take; past it, the holder followed to its let-go | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty; past it the run-out told as W* passes and the box followed by its life; on the supervising thread, which every box shares, within W* alone, a run's box past it followed and taken apart on a thread of its own (the review's E-3, 2026-11-14) | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 904.705 ms<!-- /record --> |
 | a delete's wait for the word of the claimer removing a run's box (`Run::said`) | none: the claimer followed silently | learned; past it the run-out told and the claimer followed to its word, which comes on every path (the review's E-3, 2026-11-14) | MEASURING: no census run has the `node.run_said` rows yet |
+| on macOS and Windows, a delete's or the run's end's wait for a run's setup to make its box (`run::Claim`'s making) and for the word of the claimer removing it | none: a delete removed the box beside the setup or the removal, and a late removal took a later box of its id | learned each; past it the run-out told and the setup or the claimer followed to its move, which comes on every path (the review's E-11, 2026-11-14) | MEASURING: no census run has the `runtime.run_made` or `runtime.run_said` rows yet |
 | the oci runtime's start, waiting for its init's byte (`START_PATIENCE`), `delete --force`'s wait for a killed init and for its cgroup to empty, and a create's for its shim's exit (`DELETE_PATIENCE`), and `hex box run`'s cleanup (`CLEANUP_PATIENCE`) | 10 s each, picked or copied | learned; past it the run-out told and the party followed by its life (the init's or shim's pidfd, the cgroup's events), never refused at a time, a shim never killed at one (the review's (c), 2026-11-14) | MEASURING: no census run has the `oci.start`, `oci.delete.exit`, `oci.delete.emptying`, `oci.shim.exit` or `boxrun.emptying` rows yet |
 | a Firecracker VM's and observer's stop (`stop_ms`) | the configured `stop_ms` | `managed.stop`'s, the managed scopes' stop (A-13, 2026-11-14); `stop_ms` gone from the configuration, which refuses it as an unknown field | MEASURING: no census run has the `managed.stop` rows yet |
 | a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 7,043 ns an entry, debug 137,124 ns<!-- /record --> |

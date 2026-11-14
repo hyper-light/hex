@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::Proc;
 use hex_api::{Bounds, BoxId, IoRates, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_runtime::linux::cgroup::{self, BoxCgroup, BoxRoot};
 use hex_runtime::linux::{disks, proc, process, sys};
 
@@ -129,7 +129,15 @@ fn emptied(cg: &BoxCgroup, killed: Instant) -> Result<bool, Refusal> {
             CLEANUP.answered(killed.elapsed());
             return Ok(true);
         }
-        CLEANUP.ran_out(window);
+        CLEANUP.ran_out(
+            window,
+            killed.elapsed(),
+            &[
+                Piece::Kind("box cgroup "),
+                Piece::Path(cg.dir()),
+                Piece::Kind(", by its cgroup.events"),
+            ],
+        );
     }
     let came = cg.wait_empty(Duration::MAX)?;
     if came {
