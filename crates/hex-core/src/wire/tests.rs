@@ -2309,9 +2309,10 @@ fn hostile_values_are_refused_by_name() {
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
-    // empty grant and published lists' counts, the last resort's and the run's words' none tags and the empty
-    // credential list's count end the info.
-    let adopted = info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - 2 - 8 - 6 - 1;
+    // empty grant and published lists' counts, the last resort's and the run's words' none tags, the empty
+    // credential list's count and the agent-control endpoint's none tag end the info.
+    let adopted =
+        info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -3691,8 +3692,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         valid_info
     );
     // The info's route comes before its empty grant and published lists' counts, its last resort's and its run's
-    // words' none tags, and its empty credential list's count.
-    let route_at = bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - route_bytes;
+    // words' none tags, its empty credential list's count and its agent-control endpoint's none tag.
+    let route_at =
+        bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -5233,6 +5235,9 @@ const NO_WORDS: usize = 1;
 /// What ends an info granting no credential (joint plan step 33): its empty credential list's u32 count, after its
 /// words' tag.
 const NO_CREDENTIALS: usize = size_of::<u32>();
+/// What ends an info whose run told no agent-control endpoint (joint plan step 15, N6): its none tag, after its
+/// credentials.
+const NO_CONTROL: usize = 1;
 
 /// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire after its info's grants. Do:
 /// encode an info with an end and one with none, cut the second before its end's none tag, and read and write both as
@@ -5252,11 +5257,11 @@ fn w14_an_infos_last_resort_crosses_the_wire_after_its_grants() {
     let plain = info();
     let mut cut = answer(3, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END],
+        cut[cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END],
         0,
         "no end's tag"
     );
-    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END);
+    cut.truncate(cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5287,9 +5292,9 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         Answer::Info(failed.clone())
     );
-    assert!(bytes[..bytes.len() - NO_CREDENTIALS].ends_with(words.as_bytes()));
+    assert!(bytes[..bytes.len() - NO_CREDENTIALS - NO_CONTROL].ends_with(words.as_bytes()));
     let mut garbled = bytes.clone();
-    let last = garbled.len() - NO_CREDENTIALS - 1;
+    let last = garbled.len() - NO_CREDENTIALS - NO_CONTROL - 1;
     garbled[last] = 0xff;
     assert!(matches!(
         read_answer(&received(&garbled, 0), MAX_MESSAGE),
@@ -5298,11 +5303,11 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     let plain = info();
     let mut cut = answer(5, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CREDENTIALS - 1],
+        cut[cut.len() - NO_CREDENTIALS - NO_CONTROL - 1],
         0,
-        "no words' tag ends it, but for its credentials"
+        "no words' tag ends it, but for its credentials and its agent-control endpoint"
     );
-    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS);
+    cut.truncate(cut.len() - NO_CREDENTIALS - NO_CONTROL - NO_WORDS);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5788,7 +5793,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend(49152u16.to_le_bytes());
     tail.push(1);
     tail.extend(1455u16.to_le_bytes());
-    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS]);
+    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL]);
     assert!(bytes.ends_with(&tail));
     let declared = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -5804,7 +5809,15 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         read_answer(&received(&older, 0), MAX_MESSAGE).unwrap().1,
         declared
     );
-    assert!(older.ends_with(&[&[0][..], &[0; NO_END + NO_WORDS + NO_CREDENTIALS][..]].concat()));
+    assert!(
+        older.ends_with(
+            &[
+                &[0][..],
+                &[0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL][..]
+            ]
+            .concat()
+        )
+    );
     let wrong = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: each_way(),
@@ -5822,7 +5835,8 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS;
+    let receiver =
+        hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL;
     hostile[receiver] = 2;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
@@ -5999,8 +6013,8 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
 }
 
 /// Joint plan step 33 (C4): do answer an inspect of a Shards image VM with its grants and its credential grants. Expect
-/// it read back whole, its credentials its last bytes. Do answer one whose credential its grants don't reach. Expect it
-/// refused as "credentials" written.
+/// it read back whole, its credentials its last bytes but for its agent-control endpoint's none tag (joint plan step 15).
+/// Do answer one whose credential its grants don't reach. Expect it refused as "credentials" written.
 #[test]
 fn w33_an_inspect_carries_its_credential_grants_last() {
     let credentials = openai_credential("api.openai.com");
@@ -6017,7 +6031,7 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
     );
     let mut listed = Writer::new(MAX_MESSAGE);
     put_credentials(&mut listed, &credentials, &each_way()).unwrap();
-    assert!(bytes.ends_with(&listed.done().unwrap()));
+    assert!(bytes[..bytes.len() - NO_CONTROL].ends_with(&listed.done().unwrap()));
     let unreached = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: Vec::new(),
@@ -6033,14 +6047,11 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
     ));
 }
 
-/// What ends an info whose run told no agent-control endpoint (joint plan step 15, N6): its none tag, after its
-/// credentials.
-const NO_CONTROL: usize = 1;
-
 /// Joint plan step 15 (N6; AC-T7.7.2): do answer an inspect of a running Shards image VM with its run's agent-control
 /// endpoint, at an IPv4 loopback address and at IPv6's, and one with none; read each back, and write each as JSON. Expect
 /// each back exactly, the endpoint its info's last bytes (tag 1, its address as a grant's is written, its port), none a
-/// 0 last and refused once cut, as every truncation is, and JSON without the field reading as none.
+/// 0 last and refused once cut, as every truncation is, and JSON without the field reading as none. Do read one whose
+/// endpoint's address family is none, and one whose tag is neither 0 nor 1; expect each refused by name.
 #[test]
 fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
     for (at, address) in [
@@ -6065,6 +6076,18 @@ fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
         assert!(bytes.ends_with(&tail), "{at}");
         let json = serde_json::to_value(&shown).unwrap();
         assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), shown);
+        let (tag, family) = (bytes.len() - tail.len(), bytes.len() - tail.len() + 1);
+        for (at_byte, byte, what) in [(family, 5, "grant address"), (tag, 2, "option")] {
+            let mut hostile = bytes.clone();
+            hostile[at_byte] = byte;
+            assert!(
+                matches!(
+                    read_answer(&received(&hostile, 0), MAX_MESSAGE),
+                    Err(Fault::Value { what: said, .. }) if said == what
+                ),
+                "{at}: byte {byte} at {at_byte}"
+            );
+        }
     }
     let plain = info();
     let mut cut = answer(99, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();

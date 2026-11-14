@@ -2044,6 +2044,9 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
+                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
+                // from a socket no grant made.
+                shown.control = guest.control().map(|at| at.address);
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),

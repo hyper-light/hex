@@ -12,15 +12,17 @@
 //!   (no DNS answer, T-T7.7.1) and none of its targets connected, the host's service and the image's port egress
 //!   among them; inspect shows no grant and nothing published, and the host's service took nothing. Its image links
 //!   its harness past the microVM, so its run keeps its network, whose network process (Shards' `shards-net`, D36),
-//!   told nothing kept, lets nothing past (D250): one network process, no process of its run holding a listening
-//!   TCP or UDP socket or a flow past the host's loopback.
+//!   told nothing kept, lets nothing past (D250): one network process, no process of its run holding a socket that
+//!   takes what comes in (a listening TCP socket, a UDP socket with no peer) but its run's agent-control endpoint
+//!   (Hex's own, on the host's loopback, where inspect says: `BoxInfo.control`), and no flow past the host's loopback.
 //! - **One publish, published alone, to its member.** A VM of its members alone is granted one publish: the probe's
 //!   port at the host's loopback, on a host port the OS picks. Inspect shows that one grant, and its one published
-//!   port at 127.0.0.1 reaching the probe at that port, as Shards names it. Its run listens there alone: at no
-//!   wildcard address, and not on the image's other port coming in. A connection there reaches the probe, which says
-//!   it came in on that port and that none of its own egress connected: its provider and an ungranted name, the
-//!   host's service, and the image's port egress, every one its image grants dropped by Hex's narrowing. No process of
-//!   the run holds a flow past the host's loopback, and the host's service, a listener of this test's, took nothing.
+//!   port at 127.0.0.1 reaching the probe at that port, as Shards names it. Its run listens there alone, past its
+//!   agent-control endpoint: at no wildcard address, and not on the image's other port coming in. A connection there
+//!   reaches the probe, which says it came in on that port and that none of its own egress connected: its provider and
+//!   an ungranted name, the host's service, and the image's port egress, every one its image grants dropped by Hex's
+//!   narrowing. No process of the run holds a flow past the host's loopback, and the host's service, a listener of
+//!   this test's, took nothing.
 //! - **Its granted destinations alone, reached.** A VM of its members alone is granted that publish and, by TCP, the
 //!   probe's provider by name and the host's service (kiln's endpoint, `host.docker.internal`): the probe says it
 //!   reached both, its ungranted name and the image's port egress nowhere, and the host's service, this test's
@@ -164,6 +166,16 @@ fn start(client: &Client, id: &BoxId) -> Result<(), Refusal> {
         }) => client.started(id).map(drop),
         started => started,
     }
+}
+
+/// Where running box `id`'s run's agent-control endpoint is bound, as its inspect `shown` says (`BoxInfo.control`),
+/// told on stderr. Hex asks every image run for one, so a running VM that says none fails.
+fn agent_control(id: &BoxId, shown: &hex_api::BoxInfo) -> SocketAddr {
+    let control = shown
+        .control
+        .unwrap_or_else(|| panic!("{id} runs and says no agent-control endpoint: {shown:?}"));
+    eprintln!("GRANTS {id}'s agent-control endpoint at {control}");
+    control
 }
 
 /// Stops box `id` with KILL, Hex's stop of an image VM, and deletes it; expects it ended by that signal. A KILL whose
@@ -311,12 +323,13 @@ fn asked_on_stdin(client: &Client, id: &BoxId, probe: &Probe) -> Report {
 
 /// Joint plan step 15, T-T7.7.1 (N4, D250): do run a VM of its members alone granted nothing, its probe driven by this
 /// test, while this test listens on the host's loopback at the service port the image grants as
-/// `host.docker.internal`, and ask the probe on its stdin. Expect: inspect shows no grant and nothing published; on
-/// Linux its run holds its VM process and one network process (D250: its image links its harness past the microVM,
-/// so the run keeps its network, whose network process, told nothing kept, lets nothing past), no listening socket and
-/// no flow past the host's loopback; the probe says it was asked on its stdin, its provider's name and its ungranted
-/// name unresolved (no DNS answer), and none of its targets connected (no packet past the microVM: the host's service
-/// by the name its image grants it, and the image's port egress, among them); and the host's service took nothing.
+/// `host.docker.internal`, and ask the probe on its stdin. Expect: inspect shows no grant and nothing published, and
+/// where its run's agent-control endpoint is bound; its run holds its VM process and one network process (D250: its
+/// image links its harness past the microVM, so the run keeps its network, whose network process, told nothing kept,
+/// lets nothing past), no socket taking what comes in but that endpoint, and no flow past the host's loopback; the
+/// probe says it was asked on its stdin, its provider's name and its ungranted name unresolved (no DNS answer), and
+/// none of its targets connected (no packet past the microVM: the host's service by the name its image grants it, and
+/// the image's port egress, among them); and the host's service took nothing.
 fn no_grant_lets_nothing_past(client: &Client, node: u32, probe: &Probe, allocation: Allocation) {
     let service = TcpListener::bind((Ipv4Addr::LOCALHOST, probe.host_port)).unwrap();
     service.set_nonblocking(true).unwrap();
@@ -332,7 +345,8 @@ fn no_grant_lets_nothing_past(client: &Client, node: u32, probe: &Probe, allocat
         shown.grants.is_empty() && shown.published.is_empty(),
         "{shown:?}"
     );
-    host::granted_nothing(node);
+    let control = agent_control(&id, &shown);
+    host::granted_nothing(node, control);
     let report = asked_on_stdin(client, &id, probe);
     eprintln!("GRANTS-CHECK-2 {id}: the probe said {report:?}");
     assert_eq!(report.ingress, Ingress::Stdin);
@@ -433,10 +447,11 @@ fn answered_at(client: &Client, id: &BoxId, at: SocketAddr) -> (String, u64) {
 /// Joint plan step 15, AC-T7.7.2: do run a VM of its members alone granted one publish, the probe's port at the host's
 /// loopback, the OS picking the host's port, while this test listens on the host's loopback at the service port the
 /// image grants as `host.docker.internal`. Expect: inspect shows that one grant and its one published port at
-/// 127.0.0.1, reaching the probe at that port; the run listens there alone, at no wildcard address and not on the
-/// image's other port coming in; a connection there reaches the probe, which says it came in on that port and that
-/// none of its egress connected (its provider, an ungranted name, the host's service, the image's port egress), each
-/// outcome typed; the run holds no flow past the host's loopback; and the host's service took nothing.
+/// 127.0.0.1, reaching the probe at that port; the run listens there alone past its agent-control endpoint, at no
+/// wildcard address and not on the image's other port coming in; a connection there reaches the probe, which says it
+/// came in on that port and that none of its egress connected (its provider, an ungranted name, the host's service,
+/// the image's port egress), each outcome typed; the run holds no flow past the host's loopback; and the host's service
+/// took nothing.
 fn one_publish_published_alone(client: &Client, node: u32, probe: &Probe, allocation: Allocation) {
     let service = TcpListener::bind((Ipv4Addr::LOCALHOST, probe.host_port)).unwrap();
     service.set_nonblocking(true).unwrap();
@@ -470,7 +485,7 @@ fn one_publish_published_alone(client: &Client, node: u32, probe: &Probe, alloca
         )
     );
     let at = published.at;
-    host::listens_alone(node, at, probe.ungranted_port);
+    host::listens_alone(node, at, probe.ungranted_port, agent_control(&id, &shown));
     let (answer, looks) = answered_at(client, &id, at);
     eprintln!("GRANTS-CHECK-3 the probe said {answer:?} after {looks} looks");
     let report = Report::parse(&answer).unwrap();

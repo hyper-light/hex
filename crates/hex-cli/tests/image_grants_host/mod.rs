@@ -154,10 +154,38 @@ fn sockets_of(run: &[Process]) -> Vec<Socket> {
     sockets
 }
 
+/// Whether `socket` is the run's agent-control endpoint at `control` (`BoxInfo.control`): Hex's own control endpoint,
+/// which its run host binds on the host's loopback (Shards' D238, D252), a QUIC endpoint on a UDP socket (D180).
+fn is_control(socket: &Socket, control: SocketAddr) -> bool {
+    !socket.tcp && socket.local == control
+}
+
 /// The sockets of `sockets` that take what comes in past the run's agent-control endpoint at `control`.
 fn listening_past(sockets: &[Socket], control: SocketAddr) -> Vec<&Socket> {
-    let _ = control;
-    sockets.iter().filter(|s| s.listens()).collect()
+    sockets
+        .iter()
+        .filter(|s| s.listens() && !is_control(s, control))
+        .collect()
+}
+
+/// The run's sockets, read once, and those that take what comes in past its agent-control endpoint at `control`, which
+/// must be on the host's loopback. The run holds that endpoint while it runs (Hex asks every run for one, which its run
+/// host binds before the run starts), so a reading without it missed a socket it was told of, and fails.
+fn read_past_control(run: &[Process], control: SocketAddr) -> (Vec<Socket>, Vec<Socket>) {
+    assert!(
+        control.ip().to_canonical().is_loopback(),
+        "the run's agent-control endpoint at {control} is past the host's loopback"
+    );
+    let sockets = sockets_of(run);
+    assert!(
+        sockets.iter().any(|s| is_control(s, control)),
+        "the run's agent-control endpoint at {control} is none of its sockets ({HOW}): {sockets:#?}"
+    );
+    let past = listening_past(&sockets, control)
+        .into_iter()
+        .cloned()
+        .collect();
+    (sockets, past)
 }
 
 /// How many of the run's processes are named `name`.
@@ -167,8 +195,9 @@ fn named(run: &[Process], name: &str) -> usize {
 
 /// A VM granted nothing whose image links its harness past the microVM: its run's VM process beside its run host,
 /// and one network process (D250: the run keeps its network, the network process told nothing kept, so it lets
-/// nothing past), and no socket that listens or leaves the host.
-pub fn granted_nothing(node: u32) {
+/// nothing past); no socket that takes what comes in but its run's agent-control endpoint at `control`, which it holds;
+/// and no flow past the host's loopback.
+pub fn granted_nothing(node: u32, control: SocketAddr) {
     let run = run_of(node);
     assert_eq!(
         named(&run, "shards-vm"),
@@ -180,11 +209,11 @@ pub fn granted_nothing(node: u32) {
         1,
         "the run's network process (D250): {run:#?}"
     );
-    let sockets = sockets_of(&run);
-    let listening: Vec<&Socket> = sockets.iter().filter(|s| s.listens()).collect();
+    let (sockets, listening) = read_past_control(&run, control);
     assert!(
         listening.is_empty(),
-        "the run of a VM granted nothing listens: {listening:#?}"
+        "the run of a VM granted nothing takes what comes in past its agent-control endpoint at {control}: \
+         {listening:#?}"
     );
     let leaving: Vec<&Socket> = sockets.iter().filter(|s| s.leaves()).collect();
     assert!(
@@ -194,17 +223,16 @@ pub fn granted_nothing(node: u32) {
 }
 
 /// A VM granted one publish, bound at `at`: its network process there (D36: so a VM granted nothing, which had
-/// none, had a real one to lack), and its run listening at `at` alone, at no wildcard address and not on the
-/// image's port `ungranted`.
-pub fn listens_alone(node: u32, at: SocketAddr, ungranted: u16) {
+/// none, had a real one to lack), and its run listening at `at` alone past its agent-control endpoint at `control`,
+/// which it holds: at no wildcard address and not on the image's port `ungranted`.
+pub fn listens_alone(node: u32, at: SocketAddr, ungranted: u16, control: SocketAddr) {
     let run = run_of(node);
     assert_eq!(
         named(&run, "shards-net"),
         1,
         "the run's network process: {run:#?}"
     );
-    let sockets = sockets_of(&run);
-    let listening: Vec<&Socket> = sockets.iter().filter(|s| s.listens()).collect();
+    let (_, listening) = read_past_control(&run, control);
     assert!(
         listening.iter().all(|s| !s.local.ip().is_unspecified()),
         "the run listens at a wildcard address: {listening:#?}"
