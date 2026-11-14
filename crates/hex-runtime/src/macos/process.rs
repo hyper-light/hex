@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
+use hex_core::helper::managed::response::Estimate;
 use hex_core::patience::Piece;
 use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
@@ -137,9 +138,9 @@ pub struct Shared {
     /// later act a watcher sees (watch::Lateness). What each box's hold reckons a member running across a
     /// wait can run on for.
     lateness: Arc<Mutex<watch::Lateness>>,
-    /// The slowest stop response the managed CPU control has seen in its own holds (joint plan step 14, 2c; ROOT,
-    /// 2026-11-13): none before its first, only rising, every scope's control starting from it.
-    response: Arc<Mutex<Option<Duration>>>,
+    /// The stop responses of the managed CPU control's last holds (joint plan step 14, 2c; the review's A-14, ROOT,
+    /// 2026-11-14), whose estimate every scope's control holds to: none before its first.
+    response: Arc<Mutex<super::cpu::Responses>>,
 }
 
 impl Shared {
@@ -161,8 +162,11 @@ impl Shared {
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
             lateness: Arc::try_new(Mutex::new(watch::Lateness::new(lateness)))
                 .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
-            response: Arc::try_new(Mutex::new(None))
-                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            response: Arc::try_new(Mutex::new(
+                super::cpu::Responses::new()
+                    .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            ))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
         })
     }
 
@@ -175,26 +179,29 @@ impl Shared {
             .worst())
     }
 
-    /// The slowest stop response the helper's managed CPU control has seen in its own holds (joint plan step 14, 2c):
-    /// none before its first.
-    pub fn cpu_response(&self) -> Result<Option<Duration>, Refusal> {
-        Ok(*self
+    /// The stop response the helper's managed CPU control estimates from its own holds (joint plan step 14, 2c; the
+    /// review's A-14): none before its first.
+    pub fn cpu_response(&self) -> Result<Option<Estimate>, Refusal> {
+        Ok(self
             .response
             .lock()
-            .map_err(|_| poisoned("the managed CPU control's response"))?)
+            .map_err(|_| poisoned("the managed CPU control's response"))?
+            .estimate())
     }
 
-    /// A hold's measured response (2c): the slowest seen rises to it.
-    pub(super) fn observe_cpu_response(&self, response: Duration) -> Result<(), Refusal> {
-        let mut slowest = self
-            .response
+    /// A hold's measured response (2c; A-14): the estimate after it, which the hold's scope learns.
+    pub(super) fn observe_cpu_response(&self, response: Duration) -> Result<Estimate, Refusal> {
+        self.response
             .lock()
-            .map_err(|_| poisoned("the managed CPU control's response"))?;
-        *slowest = Some(slowest.map_or(response, |seen| seen.max(response)));
-        Ok(())
+            .map_err(|_| poisoned("the managed CPU control's response"))?
+            .observe(response)
+            .map_err(|_| Refusal::Invalid {
+                what: "a hold's stop response",
+                why: "its control's estimate refused it".to_owned(),
+            })
     }
 
-    /// The response a new scope's control starts from (2c): the slowest seen; before any, a cold helper's probe first
+    /// The response a new scope's control starts from (2c; A-14): the estimate; before any, a cold helper's probe first
     /// ([`probe_response`]), and the cold one where it gave none.
     pub(super) fn cpu_start(&self) -> Result<Duration, Refusal> {
         if self.cpu_response()?.is_none()
@@ -204,7 +211,9 @@ impl Shared {
         }
         Ok(self
             .cpu_response()?
-            .unwrap_or(hex_core::helper::managed::COLD_RESPONSE))
+            .map_or(hex_core::helper::managed::COLD_RESPONSE, |estimate| {
+                estimate.response
+            }))
     }
 
     /// The rates as learned so far.
@@ -2618,7 +2627,8 @@ impl Watcher {
                 // every member it holds reads stopped, each read once after its stop ([`stopped_after`]). A member that
                 // didn't take its stop (one this read had to stop again among them), ended, left or couldn't be read, a
                 // response of no time, or one its control or the helper refuses, is no sample (Karn's point): counted,
-                // never the scope's refusal.
+                // never the scope's refusal. The helper's estimate takes it first, then the scope's control learns it
+                // against the estimate after it (the review's A-14).
                 let escaped = restopped.saturating_add(applied.restopped);
                 let learned = ran_out
                     .filter(|_| escaped == 0)
@@ -2626,8 +2636,12 @@ impl Watcher {
                     .and_then(|(from, stopped)| stopped.checked_duration_since(from))
                     .filter(|response| !response.is_zero())
                     .is_some_and(|response| {
-                        scope.cpu_learn(owner, response).is_ok()
-                            && self.shared.observe_cpu_response(response).is_ok()
+                        self.shared
+                            .observe_cpu_response(response)
+                            .and_then(|estimate| {
+                                scope.cpu_learn(owner, response, estimate.response)
+                            })
+                            .is_ok()
                     });
                 if !learned {
                     let mut status = self.state.status()?;

@@ -20,9 +20,9 @@ use super::{ARG_MAX, BoxId, FIRST, HEADER_BYTES, MAGIC, PATH_MAX, VERSION};
 pub struct CpuControl {
     pub cost_id: [u8; 32],
     /// Kept for helpers older than goal 14's learning helper (main a8dc671c and before), which take it as their
-    /// control's response; a learning helper reads its own, the slowest stop it has seen ([`response`]). The node sends
-    /// [`COLD_RESPONSE`] (joint plan step 14, 2c; ROOT, 2026-11-13): wire compatibility for a persistent helper holding
-    /// live VMs across a node upgrade, never a census number.
+    /// control's response; a learning helper reads its own estimate from its holds ([`response::Estimate`]). The node
+    /// sends [`COLD_RESPONSE`] (joint plan step 14, 2c; ROOT, 2026-11-13): wire compatibility for a persistent helper
+    /// holding live VMs across a node upgrade, never a census number.
     pub response: Duration,
 }
 

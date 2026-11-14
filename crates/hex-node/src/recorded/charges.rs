@@ -395,9 +395,10 @@ pub(crate) trait Managed {
     /// ([`GOVERNOR_LEAST`]), a managed VM's its platform's cap's, which holds its share whatever its governor does.
     fn least(&self, holder: Holder<'_>) -> u64;
     /// The cycle its platform's cap holds a managed VM at `rate` over (C1; ROOT, 2026-11-13; 2c-4b): macOS's CPU
-    /// control's, its run and its hold at the stop response its helper learned, so the VM keeps its rate on average over
-    /// one; never at a rate it never holds a VM below; cold, told, until its helper has measured a stop. Refused where its
-    /// platform derives none (Windows' job: its interval undocumented).
+    /// control's, its run and its hold at the stop response its helper estimates, so the VM keeps its rate on average over
+    /// one; never at a rate it never holds a VM below; cold, told, until its helper has measured a stop, and used but
+    /// told cold while its estimate is (the review's A-14). Refused where its platform derives none (Windows' job: its
+    /// interval undocumented).
     fn cap_cycle(&self, rate: u64) -> Result<CapCycle, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal>;
@@ -2687,13 +2688,18 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
             )
             .and_then(|held| {
                 // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1); a cycle not yet
-                // known is told on what holds its rate (2c-4b), never guessed.
+                // known is told on what holds its rate (2c-4b), never guessed, and one at a cold estimate is taken and
+                // told cold there (the review's A-14).
                 Ok(match held {
                     hex_api::RateHeld::Platform(why) => match io.cap_cycle(cap.share)? {
                         CapCycle::Of(cycle) => (hex_api::RateHeld::Platform(why), Some(cycle)),
                         CapCycle::Never => (hex_api::RateHeld::Platform(why), None),
                         CapCycle::Cold(cold) => {
                             (hex_api::RateHeld::Platform(format!("{why}; {cold}")), None)
+                        }
+                        // Red (the review's A-14): taken as a settled cycle, as every one was.
+                        CapCycle::ColdOf { cycle, .. } => {
+                            (hex_api::RateHeld::Platform(why), Some(cycle))
                         }
                     },
                     held => (held, None),
