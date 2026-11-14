@@ -207,6 +207,16 @@ impl JobBox {
         self.state.id.as_ref()
     }
 
+    /// Whether this box's emptying is held by a test ([`crate::emptying::hold`], keyed by the box's id): while it is,
+    /// its job reads as not yet empty. Never in production.
+    fn emptying_held(&self) -> bool {
+        #[cfg(test)]
+        if let OwnerRef::Box(id) = self.owner() {
+            return !crate::emptying::hold::lets_empty(id.as_str(), std::time::Duration::ZERO);
+        }
+        false
+    }
+
     pub fn bounds(&self) -> Bounds {
         self.state.bounds.clone()
     }
@@ -634,7 +644,7 @@ impl JobBox {
                 c.deletion = Deletion::Requested;
             }
         }
-        if self.live_processes()? != 0 {
+        if self.live_processes()? != 0 || self.emptying_held() {
             return Err(self.uncertain("its job still holds live processes as it is deleted"));
         }
         self.state.counts()?.deletion = Deletion::Released;
