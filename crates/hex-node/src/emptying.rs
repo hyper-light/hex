@@ -26,6 +26,10 @@ pub(crate) trait Emptying {
 #[cfg(target_os = "linux")]
 impl Emptying for hex_runtime::linux::cgroup::BoxCgroup {
     fn empties_within(&self, timeout: Duration) -> Result<bool, hex_api::Refusal> {
+        #[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+        if !HOLD.lets_empty(self.dir(), timeout)? {
+            return Ok(false);
+        }
         self.wait_empty(timeout)
     }
 }
@@ -70,6 +74,113 @@ pub(crate) fn follow_kill(
         came: fact(Duration::MAX)?,
         past: Some(window),
     })
+}
+
+/// A debug build's hold on one box's emptying, armed by a test alone ([`crate::Node::hold_emptying`]): while it stands,
+/// the box's cgroup reads as not yet empty, a slice's wait ending empty-handed and a following wait waiting until the
+/// hold goes, as a box whose last process sleeps uninterruptibly in the kernel past W* empties (the review's E-3). Absent
+/// from release builds, and from any build without the test controls.
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+pub(crate) static HOLD: Hold = Hold {
+    state: std::sync::Mutex::new(Holding {
+        held: None,
+        following: Vec::new(),
+    }),
+    changed: std::sync::Condvar::new(),
+};
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+pub(crate) struct Hold {
+    state: std::sync::Mutex<Holding>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+struct Holding {
+    /// The cgroup directory's last name whose emptying is held: its box's id.
+    held: Option<String>,
+    /// The threads whose following waits are stopped at the hold now, by name.
+    following: Vec<String>,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+fn held_poisoned<T>(_: std::sync::PoisonError<T>) -> hex_api::Refusal {
+    hex_api::Refusal::Broken("the emptying hold's lock was poisoned".to_owned())
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+impl Hold {
+    /// Whether the cgroup at `dir` may be waited for as it is: not while its box's emptying is held, a slice's wait then
+    /// spent and a following wait (`timeout` `Duration::MAX`) stopped until the hold goes.
+    fn lets_empty(
+        &self,
+        dir: &std::path::Path,
+        timeout: Duration,
+    ) -> Result<bool, hex_api::Refusal> {
+        let name = dir.file_name().and_then(|n| n.to_str());
+        let state = self.state.lock().map_err(held_poisoned)?;
+        if state.held.is_none() || state.held.as_deref() != name {
+            return Ok(true);
+        }
+        if timeout != Duration::MAX {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| state.held.as_deref() == name)
+                .map_err(held_poisoned)?;
+            return Ok(state.held.as_deref() != name);
+        }
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("an unnamed thread")
+            .to_owned();
+        let mut state = state;
+        state.following.push(thread.clone());
+        self.changed.notify_all();
+        let mut state = self
+            .changed
+            .wait_while(state, |state| state.held.as_deref() == name)
+            .map_err(held_poisoned)?;
+        if let Some(at) = state.following.iter().position(|t| *t == thread) {
+            state.following.swap_remove(at);
+        }
+        Ok(true)
+    }
+
+    /// Holds box `id`'s emptying until the guard goes.
+    pub(crate) fn hold(&'static self, id: &str) -> Result<EmptyingHold, hex_api::Refusal> {
+        self.state.lock().map_err(held_poisoned)?.held = Some(id.to_owned());
+        Ok(EmptyingHold { hold: self })
+    }
+}
+
+/// The hold on one box's emptying ([`HOLD`]): it stands until this goes.
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+pub struct EmptyingHold {
+    hold: &'static Hold,
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+impl EmptyingHold {
+    /// The threads whose following waits are stopped at the hold now, by name: whose thread follows the box.
+    pub fn following(&self) -> Result<Vec<String>, hex_api::Refusal> {
+        Ok(self
+            .hold
+            .state
+            .lock()
+            .map_err(held_poisoned)?
+            .following
+            .clone())
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
+impl Drop for EmptyingHold {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.hold.state.lock() {
+            state.held = None;
+        }
+        self.hold.changed.notify_all();
+    }
 }
 
 /// Program `proc`'s end, killed (or its box gone) at `killed`, waited for as a killed box's emptying is ([`EMPTYING`];

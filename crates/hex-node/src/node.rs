@@ -552,6 +552,16 @@ impl Node {
         self.supervisor.hold_removals()
     }
 
+    /// Holds box `id`'s emptying until the returned guard goes (the review's E-3): its cgroup reads as not yet empty,
+    /// as a box whose last process sleeps uninterruptibly in the kernel past W* reads, so a test meets a removal past W*
+    /// beside the node's other work; the guard names the threads whose following waits are stopped at it. A test
+    /// control of debug builds alone, armed by the node's caller alone.
+    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-controls")]
+    pub fn hold_emptying(&self, id: &BoxId) -> Result<crate::EmptyingHold, Refusal> {
+        crate::emptying::HOLD.hold(id.as_str())
+    }
+
     /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
     /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
     /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the
@@ -2901,6 +2911,44 @@ mod tests {
         assert!(emptied, "refused at W*");
         assert_eq!(killed.looks.get(), 2);
         assert!(wait.slowest().is_some_and(|slowest| slowest > learned));
+    }
+
+    /// A killed box slower to empty than W*, as [`Killed`] is, that looks at its follow (`Duration::MAX`) whether its
+    /// wait's run-out was told by then: its wait following, with no deadline.
+    struct Told<'a> {
+        wait: &'a Patience,
+        at_follow: std::cell::Cell<Option<bool>>,
+    }
+
+    impl crate::emptying::Emptying for Told<'_> {
+        fn empties_within(&self, timeout: Duration) -> Result<bool, Refusal> {
+            if timeout == Duration::MAX {
+                self.at_follow.set(Some(self.wait.deadline().is_none()));
+                return Ok(true);
+            }
+            Ok(false)
+        }
+    }
+
+    /// The review's E-3 (decision 9: past W* the run-out is told once): a killed box's emptying past W* has its run-out
+    /// told as W* passes, before the box is followed, so a box that never empties, its follow never ending, is told
+    /// all the same. Do: a wait whose W* is 1 ns; a killed box slower to empty than that, which looks at its follow
+    /// whether the run-out was told. Expect: told by the follow; the box emptied.
+    #[test]
+    fn e3_an_emptying_past_w_star_tells_its_run_out_before_it_is_followed() {
+        let wait = Patience::measuring("test.node.emptying.told");
+        wait.answered(Duration::from_nanos(1));
+        let killed = Told {
+            wait: &wait,
+            at_follow: std::cell::Cell::new(None),
+        };
+        let (emptied, _) = wait_empty_with(&killed, Instant::now(), &wait).unwrap();
+        assert!(emptied, "refused at W*");
+        assert_eq!(
+            killed.at_follow.get(),
+            Some(true),
+            "the run-out told only once the follow ended, or never"
+        );
     }
 
     /// AC-T7.1.3, decision 8: deleting an OCI box after its init was reaped still waits for that init's cgroup to
