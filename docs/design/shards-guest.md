@@ -602,8 +602,10 @@ Hex's tests of the channel, each citing its ID:
   patience, as Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
   (`hex_client::guest::shards::ShardsLink`). A dial with no caller deadline waits as decision 9 waits, the bound its
   W*: past it, the run-out told, the dial is made again while the guest lives, refused at its end, never at a bound
-  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as long as the
-  link's transport takes, the connection's end refusing it.
+  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as decision 9
+  waits (the review's D-2): within its W*, the slowest token its transport has carried (`client.guest.relay.token`,
+  `client.quic.relay.token`), the token is the answer; past it, the run-out told, the read follows the connection,
+  the bytes read before kept, refused at its end, never at a bound (`guest::token_following`).
 - HEX-GUEST-34: a boot's first dial is bounded, never unbounded: the slowest boot to ready on record before any
   boot is seen (bench/native/guest/boot-ready/RECORD.md), then the slowest of the record's and the node's own, only
   rising, with no margin (decision 9 of runtime-architecture.md, 2026-11-13); a guest alive and not ready within it is
