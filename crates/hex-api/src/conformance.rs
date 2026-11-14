@@ -1107,7 +1107,7 @@ fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         ensure(again == Err(Refusal::Exists(id.clone())), || {
             format!("second create: {again:?}")
         })?;
-        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        booted(rt, &id)?;
         let info = rt.inspect(&id).map_err(|e| e.to_string())?;
         ensure((info.state, info.exit) == (BoxState::Running, None), || {
             format!("a started VM: {info:?}")
@@ -1133,6 +1133,23 @@ fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     Ok(())
 }
 
+/// Starts Shards image VM `id`: its start taken at once, or answered `Lifecycle { Pending }`, its boot under way past its
+/// runtime's W* (the 11-13 ruling), and then followed through [`Runtime::started`] to its boot's answer, a wait on the
+/// fact (decision 9), never on looks (ROOT, 2026-11-14).
+fn booted(rt: &dyn Runtime, id: &BoxId) -> Result<(), String> {
+    match rt.start(id) {
+        Ok(()) => Ok(()),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        }) => rt
+            .started(id)
+            .map(|_| ())
+            .map_err(|e| format!("started: {e}")),
+        Err(e) => Err(format!("start: {e}")),
+    }
+}
+
 /// KILL to Shards image VM `id`, its stop taken, its end for [`exit_of`] to follow. A stop past its runtime's W* is
 /// answered `Lifecycle { Pending }` (the 11-13 ruling: the stop goes on), a stop taken too. No call of the node's wire
 /// follows a stop's end yet, so a remote caller reads it as `exit_of` does (ROOT, 2026-11-14: the next appended call,
@@ -1151,7 +1168,7 @@ fn stopped(rt: &dyn Runtime, id: &BoxId) -> Result<(), String> {
 fn image_stop(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = image_made(rt, fx, "image-stop")?;
     deleting(rt, &id, || {
-        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        booted(rt, &id)?;
         stopped(rt, &id)?;
         let info = exit_of(rt, fx, &id)?;
         ensure(
@@ -1175,7 +1192,7 @@ fn image_command_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> 
     rt.create(fx.init(id.clone(), &Act::Fail(3)))
         .map_err(|e| format!("create: {e}"))?;
     deleting(rt, &id, || {
-        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        booted(rt, &id)?;
         let info = exit_of(rt, fx, &id)?;
         ensure(
             (info.state, info.exit) == (BoxState::Empty, Some(Exit::Code(3))),
@@ -1215,7 +1232,7 @@ fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             format!("usage before its start: {early:?}")
         })?;
         let before = std::time::Instant::now();
-        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        booted(rt, &id)?;
         let first = per_vcpu(rt.usage(&id).map_err(|e| format!("usage: {e}"))?)?;
         let second = per_vcpu(rt.usage(&id).map_err(|e| format!("usage: {e}"))?)?;
         let wall = u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -1245,7 +1262,7 @@ fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
 fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = image_made(rt, fx, "image-members")?;
     deleting(rt, &id, || {
-        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        booted(rt, &id)?;
         let exec = rt.exec(&id, fx.program(&Act::Say("never")), Stdio::null());
         ensure(
             matches!(
