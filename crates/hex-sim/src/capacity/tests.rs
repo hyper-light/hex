@@ -11,6 +11,7 @@ fn total(all: Report, r: Report) -> Report {
         runs_granted: all.runs_granted + r.runs_granted,
         runs_refused: all.runs_refused + r.runs_refused,
         runs_unanswered: all.runs_unanswered + r.runs_unanswered,
+        runs_let_go: all.runs_let_go + r.runs_let_go,
         link_drops: all.link_drops + r.link_drops,
         keeper_crashes: all.keeper_crashes + r.keeper_crashes,
         crashes_at_write: all.crashes_at_write + r.crashes_at_write,
@@ -90,6 +91,7 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.runs_granted > 0
             && all.runs_refused > 0
             && all.runs_unanswered > 0
+            && all.runs_let_go > 0
             && all.link_drops > 0
             && all.keeper_crashes > 0
             && all.crashes_at_write > 0
@@ -253,8 +255,8 @@ fn quiet(runners: usize) -> World {
 }
 
 /// AC-T7.4.1, joint plan step 13 (CLAUDE.md §2: a loop's bound derived, never picked): do have one runner, synced, ask
-/// for one run more than its reservation bound and let each one's wait run out before its answer, so two words each
-/// wait on its link to the keeper, more than twice the bound, then settle; expect it to settle with the books agreeing:
+/// for one run more than its reservation bound and let go of each before its answer (CV5), so two words each wait on
+/// its link to the keeper, more than twice the bound, then settle; expect it to settle with the books agreeing:
 /// settling is bounded by the protocol's own count of what its links carry, not by a multiple of a runner's
 /// reservations.
 #[test]
@@ -263,7 +265,7 @@ fn a_backlog_on_a_link_settles_within_the_protocols_own_bound() {
     let asks = world.budget.reservations + 1;
     for _ in 0..asks {
         world.ask(Some(0)).unwrap();
-        world.ran_out(Some(0)).unwrap();
+        world.let_go(Some(0)).unwrap();
     }
     assert_eq!(world.runners[0].link.to_keeper.len(), 2 * asks);
     let settled = world.settle();
@@ -625,6 +627,31 @@ fn hex_boxes_are_the_recorded_fleets_oci_legs() {
     let high = boxes.iter().map(|l| l.need).reduce(Amounts::max).unwrap();
     assert_eq!((low.cpu_milli, low.mem_bytes), (300, 128 << 20));
     assert_eq!((high.cpu_milli, high.mem_bytes), (3_400, 4 << 30));
+}
+
+/// AC-T7.4.1, joint plan step 13 (ROOT's ruling 7, 2026-11-14): the capacity view's tests on real machines ask the
+/// recorded legs one after another. Do read them as those tests do; expect each list in the order its trace has it, every
+/// leg of it once, kiln's first leg (recorded below a milli-core) drawn as one unit of its resolution.
+#[test]
+fn the_recorded_legs_are_asked_in_recorded_order() {
+    let kiln: Vec<Amounts> = kiln_needs().collect();
+    assert_eq!(kiln.len(), 4_655);
+    let first = |cpu_milli, mem_bytes| Amounts {
+        cpu_milli,
+        mem_bytes,
+        ..Amounts::ZERO
+    };
+    assert_eq!(
+        kiln[..3],
+        [
+            first(1, 2_609_152),
+            first(5_422, 35_218_735_104),
+            first(371, 13_536_509_952)
+        ]
+    );
+    let oci: Vec<Amounts> = oci_needs().collect();
+    assert_eq!(oci.len(), 8_432);
+    assert_eq!(oci[..2], [first(600, 512 << 20), first(300, 128 << 20)]);
 }
 
 /// AC-T7.4.1, joint plan step 13 (ROOT, 2026-11-14: workload rates from the traces): kiln's runs arrive at the machine as

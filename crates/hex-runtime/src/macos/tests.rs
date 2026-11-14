@@ -92,6 +92,11 @@ impl Privileged for Sim {
         Ok(self.inner.lock().expect("sim lock").members.clone())
     }
 
+    /// The stand-in's user is empty once its KILL has cleared its members.
+    fn empties_within(&self, _uid: u32, _slice: Duration) -> Result<bool, Refusal> {
+        Ok(self.inner.lock().expect("sim lock").members.is_empty())
+    }
+
     fn kill(&self, _uid: u32, signal: i32) -> io::Result<usize> {
         let mut s = self.inner.lock().expect("sim lock");
         let n = s.members.len();
@@ -355,6 +360,11 @@ impl Privileged for Shells {
 
     fn kill(&self, _uid: u32, _signal: i32) -> io::Result<usize> {
         Ok(0)
+    }
+
+    /// The stand-in's programs aren't its user's (they run as this test's), so its user holds none: as its listing.
+    fn empties_within(&self, _uid: u32, _slice: Duration) -> Result<bool, Refusal> {
+        Ok(true)
     }
 }
 
@@ -1332,8 +1342,9 @@ fn e11_a_rootless_delete_of_a_run_being_made_waits_for_its_making() {
     );
 }
 
-/// E-11 in the box-user mode (step 2), through a daemon on a real socket: its helper keeps no end of a program whose
-/// box it has dropped, so the run's end, read after the delete, is Unknown (`proc::UserProc`).
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket: the helper keeps a dropped box's programs
+/// until their own ends come, never an end made up at a time (the review's E-12), so the run's end, read after the
+/// delete, is its KILL's, Signal(9), as in the rootless mode.
 #[test]
 fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1341,6 +1352,79 @@ fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
         &helped(dir.path()),
         "e11-making-helped",
         kill_by_pid,
-        Exit::Unknown,
+        Exit::Signal(9),
     );
+}
+
+/// A delete's or a recovery's end's wait on a killed box's group past W*, stopped at the hold on its emptying, or its
+/// answer: a fact no recorded operation makes, waited for measuring, following the ending thread.
+static EMPTYING_FOLLOWED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_runtime.emptying_followed");
+
+/// How a test ends a box's killed group: the box's delete, or a recovery's end of its group `(pgid, leader's start)`.
+type EndGroup = fn(&MacRuntime, &BoxId, (i32, u64)) -> Result<(), Refusal>;
+
+/// The review's E-12 (decision 9), AC-T7.4.1: a killed box's group that empties late is followed to its emptying, never
+/// refused at a bound. Do: make rootless box `name` and start a program in it until it is ended; hold its group's
+/// emptying, as a group whose last member's teardown runs long reads; end the group from another thread (`end`); once
+/// that end follows the group past W* (stopped at the hold) or answers, let the hold go. Expect: the end hadn't answered
+/// while the group read as not yet empty, then answers Ok; the program ends Signal(9).
+fn a_late_emptying_is_followed_to_its_end(name: &str, end: EndGroup) {
+    let rt = rootless();
+    let id = BoxId::new(name).unwrap();
+    rt.create(run_spec(&id)).expect("make the box");
+    let mut program = rt
+        .exec(&id, until_ended(), fed())
+        .expect("start a program until it is ended");
+    let _feeding = program.streams().unwrap().stdin;
+    let group = rt
+        .group(&id)
+        .unwrap()
+        .expect("the box's group, its program started");
+    let held = crate::emptying::hold::hold(&group.0.to_string());
+    thread::scope(|s| {
+        let ending = s.spawn(|| end(&rt, &id, group));
+        hex_testkit::waits::follow::until(
+            &EMPTYING_FOLLOWED,
+            "the end's wait following the group past W*, or its answer",
+            || party(&ending),
+            || held.following() || ending.is_finished(),
+        )
+        .unwrap();
+        if ending.is_finished() {
+            panic!(
+                "the end answered while the group read as not yet empty: {:?}",
+                ending.join()
+            );
+        }
+        drop(held);
+        assert_eq!(
+            ending.join().unwrap(),
+            Ok(()),
+            "the end once the group emptied"
+        );
+    });
+    assert_eq!(
+        hex_api::conformance::end_of(&mut *program),
+        Ok(Exit::Signal(9))
+    );
+    let cleanup = rt.delete(&id);
+    assert!(
+        matches!(cleanup, Ok(()) | Err(Refusal::NoSuchBox(_))),
+        "{cleanup:?}"
+    );
+}
+
+/// E-12 at a box's delete (`ProcessBox::delete`).
+#[test]
+fn e12_a_delete_follows_a_late_emptying_to_its_end() {
+    a_late_emptying_is_followed_to_its_end("e12-delete", |rt, id, _| rt.delete(id));
+}
+
+/// E-12 at a recovery's end of a box's group (`MacRuntime::end`, `process::end_group`).
+#[test]
+fn e12_a_recoverys_end_follows_a_late_emptying_to_its_end() {
+    a_late_emptying_is_followed_to_its_end("e12-recovery", |_, _, group| {
+        MacRuntime::end(Some(group))
+    });
 }

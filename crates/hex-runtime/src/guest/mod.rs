@@ -58,6 +58,8 @@ use shares::Share;
 /// The existing evented connection owner, shared without an unchecked new Arc.
 pub type EventedClient = triomphe::Arc<Client>;
 
+pub use dedicated::ExecClient;
+
 fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
     triomphe::Arc::try_new(client).map_err(|_| Refusal::Exhausted {
         what: "guest evented client owner",
@@ -191,10 +193,14 @@ impl GuestConfig {
                         needs: hex_api::Upstream::NestedRuntime,
                     });
                 }
-                Boot::Image(image.into_string().map_err(|given| Refusal::Invalid {
+                let image = image.into_string().map_err(|given| Refusal::Invalid {
                     what: ENV_IMAGE,
                     why: format!("{given:?} is not UTF-8, as an image's reference is"),
-                })?)
+                })?;
+                // Pinned by its digest (§4; the review's C-17), so a tag that moved never boots another image as the
+                // node boots its guest again.
+                hex_api::check_pinned(ENV_IMAGE, &image)?;
+                Boot::Image(image)
             }
             None => Boot::Kernel {
                 kernel: path(ENV_KERNEL),
@@ -507,19 +513,23 @@ pub fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
 }
 
 /// The managed plan of guest `spec` booted with `binary` on `socket`, its guest told `left`, what remains of its boot's
-/// deadline ([`tell_ready`]): the native plan where `images` declare its images (its cost evidence's), else Shards' own
-/// plan with the runtime folders `paths`. A node's guests prepare theirs here, and so does the guest-cost producer
-/// (crates/hex-cli/examples/guest_cost), so it measures what a node runs (AC-T7.4.1).
+/// deadline ([`tell_ready`]), where it has one, and told none where it has none, so it keeps its learned bounds: the
+/// native plan where `images` declare its images (its cost evidence's), else Shards' own plan with the runtime folders
+/// `paths`. A node's guests prepare theirs here, each told its boot's deadline, and so does the guest-cost producer
+/// (crates/hex-cli/examples/guest_cost), whose guests are told none and followed to their answer (decision 9), so it
+/// measures what a node runs (AC-T7.4.1).
 pub fn managed_plan(
     spec: &shards_api::GuestSpec,
     binary: &std::path::Path,
     socket: &std::path::Path,
     paths: &shards_api::RuntimePaths,
     images: Option<shards_api::NativeImages>,
-    left: Duration,
+    left: Option<Duration>,
 ) -> Result<shards_api::PreparedBoot, Refusal> {
     let mut spec = spec.clone();
-    tell_ready(&mut spec.cmdline, left)?;
+    if let Some(left) = left {
+        tell_ready(&mut spec.cmdline, left)?;
+    }
     let spec = &spec;
     let plan = if let Some(images) = images {
         shards_api::prepare_native_boot(
@@ -1008,7 +1018,7 @@ impl GuestRuntime {
         }
         let mut booted = self.lock()?;
         if let Some(b) = booted.as_ref() {
-            if self.still_runs(&b.guest) {
+            if self.still_runs(&b.guest)? {
                 return Ok(triomphe::Arc::clone(b));
             }
             *booted = None;
@@ -1091,13 +1101,15 @@ impl GuestRuntime {
     }
 
     /// Whether `guest` still runs: a Shards guest by its own word, the node VM under shards-init by its run's, which
-    /// is reaped through its stop where it ended on its own.
-    fn still_runs(&self, guest: &GuestHandle) -> bool {
+    /// is reaped through its stop where it ended on its own, its end kept in its row. A node VM whose end can't be read
+    /// or kept is refused, typed (the review's C-4): a guest booted beside it would leave its row Ready, locked and
+    /// booked, so the next ask tries its end again first.
+    fn still_runs(&self, guest: &GuestHandle) -> Result<bool, Refusal> {
         match guest {
-            GuestHandle::Node(run) => self.images.node_runs(*run).unwrap_or(false),
-            other => other
+            GuestHandle::Node(run) => self.images.node_runs(*run),
+            other => Ok(other
                 .shards()
-                .is_some_and(|guest| matches!(guest.wait_for(Duration::ZERO), Ok(None))),
+                .is_some_and(|guest| matches!(guest.wait_for(Duration::ZERO), Ok(None)))),
         }
     }
 
@@ -1513,6 +1525,21 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Goal 2's item 3: an image VM's member's next MCP connection (D254); any other box's refused as the trait refuses
+    /// it.
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.mcp_image(record, member),
+            books::Routed::Other(_) => Err(Refusal::Invalid {
+                what: "mcp",
+                why: format!(
+                    "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+                ),
+            }),
+        }
+    }
+
     /// Goal 2's item 2: a signal to an image VM's member alone, on its own lane; any other box's refused as the trait
     /// refuses it.
     fn signal_member(
@@ -1665,7 +1692,7 @@ impl Runtime for GuestRuntime {
                 }
             }
         }
-        let images = self.images.image_infos()?;
+        let images = self.images.image_infos(image::Unread::Unlisted)?;
         // Each oci box its node retired with its node VM (A-6), from its record, as its inspect answers it.
         let retired = self.retired_infos()?;
         boxes
@@ -2305,6 +2332,10 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.member(id, member)
+    }
+
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.holder(id)?.mcp(id, member)
     }
 
     fn signal_member(

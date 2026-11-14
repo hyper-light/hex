@@ -142,7 +142,7 @@ impl ImageClass {
         }
         if let Err(why) = image.runs.booted(vm.run, &slot, waits)? {
             image.runs.forget(vm.run)?;
-            end_record(books.as_ref(), &mut record, Exit::Unknown)?;
+            end_record(books.as_ref(), &mut record, End::of_refused(&why).exit)?;
             return Err(refused(BOOTING, why));
         }
         // Its run is up: from here a failure stops it (C-2), so no node VM runs held by no one, its record unwritten,
@@ -404,6 +404,8 @@ impl ImageClass {
             sign_ins: Vec::new(),
             // No upstream root (Shards' D242, image channel v26): it grants no credential to fill in.
             upstream_roots: Vec::new(),
+            // No GPU report (Shards' D233, image channel v29): a node VM renders on no GPU.
+            gpu_report: None,
         })
     }
 }
@@ -481,7 +483,8 @@ fn not_running(run: &NodeRun) -> Refusal {
 ///   window at a time while the run progresses, and is refused, stalled, only where a whole window shows none. Its
 ///   progress is its VM process's CPU time as its host counts it (D241). A window with no reading of it judges no
 ///   stall: the run is then followed by its life alone, as at a cold start.
-/// - **At the cold start**, or after a run-out (no W*), the wait follows the run's life.
+/// - **At the cold start**, or after a run-out (no W*), the wait follows the run's life, told once as it starts
+///   ([`Patience::following`]; the review's C-10), so an init that hangs alive there is never silent.
 /// - **The run's end**, its host's end or a refusal of Shards' ends the wait at any time, typed.
 /// - **A ready-by passed**, of a run that carries one (Hex gives none), is waited past to its late READY: D234's table
 ///   moves from it to ready alone.
@@ -493,6 +496,9 @@ pub(in crate::guest) fn follow_ready(
 ) -> Result<Ready, Refusal> {
     let mut seen = None;
     let Some(window) = bound else {
+        // No W* to bound it (its process's first READY, or after a run-out): its init could hang alive with nothing to
+        // judge it by, so its following is told, once, as it starts (the review's C-10).
+        ready.following(&[Piece::Kind("the node VM's run, by its READY and its end")]);
         return wait_to(guest, &mut seen, Duration::MAX)?.ok_or_else(|| {
             Refusal::Broken("Shards answered no readiness to a wait with no timeout".to_owned())
         });
@@ -583,9 +589,12 @@ pub(in crate::guest) fn refused(op: &'static str, why: ImageRefusal) -> Refusal 
             platform: std::env::consts::OS,
             why,
         },
-        ImageRefusal::Ended(end) => Refusal::Os {
+        ImageRefusal::Ended(ended) => Refusal::Os {
             op,
-            why: format!("its run ended before its init said it was ready: {end:?}"),
+            why: format!(
+                "its run ended before its init said it was ready: {:?}",
+                ended.end
+            ),
         },
         other => Refusal::Os {
             op,
