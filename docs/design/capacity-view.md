@@ -486,7 +486,7 @@ window, which would under-count Hex here.
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them in one case, ending with them in the
   other: kiln states neither), drops links with
-  what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
+  what was on them, partitions and heals them, has a runner let go of a reserve before its answer, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
@@ -498,7 +498,8 @@ window, which would under-count Hex here.
   records of its runners' links (topo's drops, time up and outage, read 2026-11-14). A step is one event of that
   continuous-time chain, each kind as likely as its rate in the machine's state (Gillespie's direct method), delivery
   at the least rate that drains the links (each kind's rate times the deliveries the protocol has it say). The faults no
-  record times (the keeper's crash between messages and at its next write, the write lost or landed; a wait run out; the
+  record times (the keeper's crash between messages and at its next write, the write lost or landed; a reserve let go
+  of before its answer, no wait of a holder's ending at a time (CV6); the
   person's wrong release; a retirement) each strike once a run, at a step drawn for them or the first after where they
   can. What the code does on its own trigger, the nemesis does there: a runner dials again as soon as its link can open
   (kiln's `links`), the keeper's hints go out after each message it hears and each command of its host, and Hex's node
