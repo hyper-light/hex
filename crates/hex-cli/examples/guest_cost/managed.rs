@@ -43,8 +43,6 @@ pub struct Managed {
     paths: shards_api::RuntimePaths,
     cache: PathBuf,
     home: PathBuf,
-    /// Shards' records of its VM processes' AppContainer profiles, in its cache ([`Driver::swept_at_next_start`]).
-    containers: PathBuf,
     /// The run's own folder of runtime folders, its guests' sockets among them.
     folder: PathBuf,
     /// The cost each guest is booted under while its own is measured: its envelope's, floor and ceiling, in this
@@ -259,7 +257,6 @@ impl Managed {
             config,
             runtime: Arc::new(WinRuntime::new()),
             paths,
-            containers: cache.join("containers"),
             cache,
             home,
             folder,
@@ -477,17 +474,6 @@ impl Driver for Managed {
 
     fn held(&self) -> Result<Files, String> {
         walk(&[self.cache.clone(), self.home.clone()])
-    }
-
-    /// Shards' records of its VM processes' AppContainer profiles (Shards' helpers::containers, D141): each VM process
-    /// makes its profile and a record of it as it starts, and deletes both as it ends; Hex ends a managed VM by its
-    /// job's end (its native owner's stop: shards_api has no other for a managed VM), so the profile and its record
-    /// stay until the next VM's start sweeps them.
-    fn swept_at_next_start(&self) -> Option<(PathBuf, String)> {
-        Some((
-            self.containers.clone(),
-            "Shards' AppContainer profile record left by a killed VM, swept at the next start (D141; its profile, in LOCALAPPDATA's Packages and the registry, lives as long)".to_owned(),
-        ))
     }
 
     fn launch(&mut self) -> Result<Launched<Self>, String> {
@@ -804,7 +790,9 @@ mod tests {
     /// configured Shards guest with SEEDABLE two, through the same census, evidence and output the measurement uses:
     /// the governed window's guest booted, held and ended, then two guests each launched, read from their launch,
     /// held idle at the census's rate and torn down. Expect the pair written and loaded as a node loads it, its
-    /// envelope the configured guest's, its window the governor's period, and two guests in its evidence. Needs
+    /// envelope the configured guest's, its window the governor's period, two guests in its evidence, and no guest
+    /// leaving anything on disk: its native owner releases the AppContainer profiles and records its VM process made
+    /// as it ends its scope (Shards' D141, shards_api::release_app_containers), which the census would refuse. Needs
     /// SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS, HEX_GUEST_MEMORY_MIB and GUEST_COST_SMOKE_OUT (a
     /// folder of the run's own under the user's profile).
     #[test]
@@ -837,6 +825,13 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        // Its native owner released each guest's AppContainer profiles with its scope, the window's guest's too: no
+        // record of one is left in its cache.
+        let records = out.join("runtime").join("cache").join("containers");
+        let left: Vec<_> = std::fs::read_dir(&records)
+            .map(|dir| dir.flatten().map(|entry| entry.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "{left:?} left in {records:?}");
         println!("{}\n{text}", made.summary);
     }
 }

@@ -658,16 +658,6 @@ pub struct Census {
     pub told_past: Duration,
     pub samples: Vec<Sample>,
     pub caches: Files,
-    /// What its guests left that their class's next VM start sweeps ([`Driver::swept_at_next_start`]).
-    pub left: Vec<Left>,
-}
-
-/// A record guest `guest` left that its class's next VM start sweeps: counted and named, never a one-time host cache,
-/// and `swept` once the next guest's end found it gone.
-pub struct Left {
-    pub guest: usize,
-    pub held: Held,
-    pub swept: bool,
 }
 
 /// The paths of `after` that `before` didn't hold.
@@ -684,8 +674,7 @@ fn new_paths(before: &Files, after: &Files) -> Files {
 /// boot never ended at it; ROOT, 2026-11-14), read per window from its launch through its readiness and an idle hold,
 /// and reported on and torn down within `bound`. A guest that ends before it is ready, or any other failure, refuses
 /// the run. Only the run's first guest (`caches`: this census's first) may leave anything new on disk; any other that
-/// does is refused: a VM's leftovers are no one-time cache. What a guest leaves where its class's next VM start sweeps
-/// ([`Driver::swept_at_next_start`]) is counted apart ([`Left`]), and refused once the next guest's end still finds it.
+/// does is refused: a VM's leftovers are no one-time cache.
 pub fn census<D: Driver>(
     driver: &mut D,
     seedable: usize,
@@ -699,9 +688,7 @@ pub fn census<D: Driver>(
         told_past: bound,
         samples: Vec::with_capacity(seedable),
         caches: Vec::new(),
-        left: Vec::new(),
     };
-    let swept_at = driver.swept_at_next_start().map(|(dir, _)| dir);
     let mut known = driver.held()?;
     let mut launched = 0usize;
     while census.samples.len() < seedable {
@@ -709,23 +696,7 @@ pub fn census<D: Driver>(
         let after = driver.held()?;
         let n = launched;
         launched = launched.saturating_add(1);
-        // What the guests before left for this one's start to sweep: gone by its end.
-        for left in census.left.iter_mut().filter(|left| !left.swept) {
-            if listed(&after, &left.held.path) {
-                return Err(format!(
-                    "guest {} left {} for its class's next VM start to sweep, and guest {n}'s start didn't",
-                    left.guest,
-                    left.held.path.display()
-                ));
-            }
-            left.swept = true;
-        }
-        let (swept, left): (Files, Files) =
-            new_paths(&known, &after).into_iter().partition(|held| {
-                swept_at
-                    .as_ref()
-                    .is_some_and(|dir| held.path.starts_with(dir))
-            });
+        let left = new_paths(&known, &after);
         if caches && n == 0 {
             census.caches = left;
         } else if !left.is_empty() {
@@ -738,11 +709,6 @@ pub fn census<D: Driver>(
                 named.join(", ")
             ));
         }
-        census.left.extend(swept.into_iter().map(|held| Left {
-            guest: n,
-            held,
-            swept: false,
-        }));
         let Booted {
             ready,
             readings,
@@ -994,21 +960,6 @@ pub fn produce<D: Driver>(
             held.bytes
         ));
     }
-    if let Some((_, what)) = driver.swept_at_next_start() {
-        for left in &census.left {
-            line(format!(
-                "disk_left guest={} {} {} ({what}; {})",
-                left.guest,
-                left.held.path.display(),
-                left.held.bytes,
-                if left.swept {
-                    "gone by the next guest's end, swept at its start"
-                } else {
-                    "the last guest's: its sweep, at the next VM's start, not seen here"
-                }
-            ));
-        }
-    }
     line(format!(
         "guest_overhead {} (the census maximum of the envelope less what the guest's agent reported free) (evidence alone, not in the cost: a node learns a guest's own from its backing's windows, decision 9)",
         resources(inside)
@@ -1122,9 +1073,6 @@ mod tests {
         disk: Files,
         /// The rates its governed window was asked at.
         governed: Vec<u64>,
-        /// A folder its VMs leave records in, and whether each launch sweeps the records there no VM holds, as Shards'
-        /// next VM start sweeps its AppContainer profile records (D141).
-        sweeps: Option<(PathBuf, bool)>,
     }
 
     impl Driven {
@@ -1137,7 +1085,6 @@ mod tests {
                 torn_down: 0,
                 disk: Vec::new(),
                 governed: Vec::new(),
-                sweeps: None,
             }
         }
     }
@@ -1181,11 +1128,6 @@ mod tests {
         fn held(&self) -> Result<Files, String> {
             Ok(self.disk.clone())
         }
-        fn swept_at_next_start(&self) -> Option<(PathBuf, String)> {
-            self.sweeps
-                .as_ref()
-                .map(|(dir, _)| (dir.clone(), "a scripted record".to_owned()))
-        }
         fn launch(&mut self) -> Result<Launched<Self>, String> {
             let next = self
                 .boots
@@ -1194,9 +1136,6 @@ mod tests {
                 .ok_or("no launch left")?;
             self.launched += 1;
             self.launched_at = Some(Instant::now());
-            if let Some((dir, true)) = &self.sweeps {
-                self.disk.retain(|held| !held.path.starts_with(dir));
-            }
             let (uses, holdings) = next
                 .as_ref()
                 .map(|s| (s.uses.clone(), s.holdings.clone()))
@@ -1617,87 +1556,6 @@ mod tests {
             "{:?}",
             census.samples.iter().map(|s| s.ready).collect::<Vec<_>>()
         );
-    }
-
-    /// Guests that each leave a record of their own in `dir`, read steady and reporting 400 MiB free.
-    fn recording(dir: &Path, guests: u64) -> Vec<Option<Script>> {
-        let steady: Vec<(Use, Holding)> = (0..64)
-            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
-            .collect();
-        (0..guests)
-            .map(|n| {
-                let mut guest = script(steady.clone(), 400 << 20);
-                guest.left = vec![Held {
-                    path: dir.join(format!("shards.vm.{n}.0")),
-                    file: (9, n),
-                    bytes: 0,
-                }];
-                Some(guest)
-            })
-            .collect()
-    }
-
-    /// AC-T7.4.1 (ROOT, 2026-11-14: a leftover is counted and named, never hidden): a class each of whose VMs leaves a
-    /// record its next VM's start sweeps (Windows: Shards' AppContainer profile records, D141, which a VM ended by its
-    /// job's end leaves): expect the run made, each guest's record named in the evidence with whether the next guest's
-    /// start swept it, and none taken for a one-time host cache.
-    #[test]
-    fn a_record_the_next_start_sweeps_is_named_never_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let records = dir.path().join("containers");
-        let mut driver = Driven::new(dir.path(), recording(&records, 3));
-        driver.sweeps = Some((records.clone(), true));
-        let made = produce(
-            &mut driver,
-            &Plan { seedable: 3 },
-            &dir.path().join("out"),
-            &Windows::Fixed(window(5)),
-            &[],
-        )
-        .unwrap();
-        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
-        for n in 0..3 {
-            let seen = if n < 2 {
-                "gone by the next guest's end"
-            } else {
-                "the last guest's"
-            };
-            let named = format!(
-                "disk_left guest={n} {} 0 (a scripted record; {seen}",
-                records.join(format!("shards.vm.{n}.0")).display()
-            );
-            assert!(text.contains(&named), "{named} in {text}");
-        }
-        assert!(text.contains("\ndisk_host none"), "{text}");
-    }
-
-    /// AC-T7.4.1: a record its class's next VM start is to sweep, still there at the next guest's end: expect the run
-    /// refused, naming the record and both guests.
-    #[test]
-    fn a_record_the_next_start_leaves_refuses_the_census() {
-        let dir = tempfile::tempdir().unwrap();
-        let records = dir.path().join("containers");
-        let mut driver = Driven::new(dir.path(), recording(&records, 3));
-        driver.sweeps = Some((records.clone(), false));
-        let refused = census(
-            &mut driver,
-            3,
-            Duration::from_secs(1),
-            &window(5),
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .err()
-        .unwrap();
-        assert!(
-            refused.contains(&format!(
-                "guest 0 left {} for its class's next VM start to sweep, and guest 1's start didn't",
-                records.join("shards.vm.0.0").display()
-            )),
-            "{refused}"
-        );
-        assert_eq!(driver.torn_down, 2);
     }
 
     /// AC-T7.4.1 (ROOT, 2026-11-14: a Windows node holds a managed VM's rate with its own governor, Shards' D255): a
