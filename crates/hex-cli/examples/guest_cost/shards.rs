@@ -18,7 +18,7 @@ use shards_api::Guests as _;
 
 use super::guest::guest_range;
 use super::run::walk;
-use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Patience, Probe, Use};
+use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Probe, Use};
 
 pub struct Shards {
     config: GuestConfig,
@@ -142,63 +142,41 @@ impl Places {
     }
 }
 
-/// A killed VMM's cgroup to `populated 0`: a killed box's emptying, measuring, learned from this run's own kills (decision
-/// 9: no record seeds it, the node's own wait no more than this one's).
+/// A VMM's cgroup to `populated 0` once its guest has ended: its host's own exit, measuring (decision 9: within W*, the
+/// slowest this run has seen, its answer; past it the run-out told once and the wait following the cgroup's processes,
+/// never killed at a bound; no record seeds it).
 #[cfg(target_os = "linux")]
-static EMPTYING: hex_core::patience::Patience =
-    hex_core::patience::Patience::measuring("guest_cost.emptying");
+static EMPTIED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("guest_cost.emptied");
 
 #[cfg(target_os = "linux")]
 impl Place {
     /// Its VMM ended, its cgroup and wrapper go, once its cgroup holds no process. A guest's stop answers at its run's
-    /// end, and its VMM's host exits on its own after it (Shards at 66113379), so the cgroup empties within what is
-    /// left of the teardown's `deadline`, the census's learned bound for a guest, its host's exit being the teardown's
-    /// last part; past it, the cgroup is killed and given a killed box's emptying ([`EMPTYING`]), and refused, typed,
-    /// naming what still runs in it where it never empties. Never an rmdir of a cgroup that holds a process.
-    fn remove(&self, deadline: Instant) -> Result<(), String> {
+    /// end, and its VMM's host exits on its own after it (Shards at 66113379), so the cgroup empties by itself: followed
+    /// on its own events (`cgroup.events`) to its emptying ([`EMPTIED`]). Never an rmdir of a cgroup that holds a
+    /// process.
+    fn remove(&self) -> Result<(), String> {
         let cgroup = hex_runtime::linux::cgroup::BoxCgroup::at(self.cgroup.clone());
         let failed = |e: hex_api::Refusal| format!("removing {}: {e}", self.cgroup.display());
-        let left = deadline.saturating_duration_since(Instant::now());
-        if !cgroup.wait_empty(left).map_err(failed)? {
-            cgroup.kill().map_err(failed)?;
-            // On the cgroup's own events (`cgroup.events`), ended by its emptying, the killed processes' end.
-            let emptied = hex_testkit::waits::follow::whole(
-                &EMPTYING,
-                "the killed VMM's cgroup emptying",
-                || cgroup.wait_empty(Duration::MAX),
-            );
-            if !emptied.map_err(failed)? {
-                return Err(failed(hex_api::Refusal::Os {
-                    op: "removing a VMM's cgroup",
-                    why: format!(
-                        "it still holds {} past its teardown, its cgroup's kill and a killed box's emptying ({:?})",
-                        survivors(&cgroup),
-                        EMPTYING.deadline()
-                    ),
-                }));
-            }
-        }
+        hex_testkit::waits::follow::within(
+            &EMPTIED,
+            "the VMM's cgroup emptying after its guest's end",
+            || hex_testkit::waits::follow::Party::Live,
+            |by| {
+                let left = by.map_or(Duration::MAX, |at| {
+                    at.saturating_duration_since(Instant::now())
+                });
+                match cgroup.wait_empty(left) {
+                    Ok(true) => Some(Ok(())),
+                    Ok(false) => None,
+                    Err(e) => Some(Err(failed(e))),
+                }
+            },
+        )
+        .map_err(|unmet| format!("removing {}: {unmet}", self.cgroup.display()))??;
         cgroup.remove().map_err(failed)?;
         std::fs::remove_file(&self.wrapper)
             .map_err(|e| format!("removing {}: {e}", self.wrapper.display()))
-    }
-}
-
-/// What still runs in `cgroup`, each process by its pid and its command's name, as its OS names them.
-#[cfg(target_os = "linux")]
-fn survivors(cgroup: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
-    match cgroup.procs() {
-        Ok(pids) => pids
-            .iter()
-            .map(|pid| {
-                let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                    .map(|name| name.trim().to_owned())
-                    .unwrap_or_else(|e| format!("its name unread: {e}"));
-                format!("{pid} ({name})")
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        Err(e) => format!("processes it can't list: {e}"),
     }
 }
 
@@ -216,7 +194,7 @@ impl Places {
 
 #[cfg(target_os = "macos")]
 impl Place {
-    fn remove(&self, _: Instant) -> Result<(), String> {
+    fn remove(&self) -> Result<(), String> {
         Ok(())
     }
 }
@@ -254,14 +232,10 @@ impl Shards {
         super::guest::ram(&self.config)
     }
 
-    fn stop(vm: &dyn shards_api::Guest, deadline: Instant) -> Result<(), String> {
+    /// Stops `vm` and follows it to its end ([`super::guest::follow_end`]).
+    fn stop(vm: &dyn shards_api::Guest) -> Result<(), String> {
         vm.stop().map_err(|e| format!("stopping the guest: {e}"))?;
-        let left = deadline.saturating_duration_since(Instant::now());
-        match vm.wait_for(left) {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(format!("the guest didn't end within {left:?} of its stop")),
-            Err(e) => Err(format!("waiting for the guest's end: {e}")),
-        }
+        super::guest::follow_end(vm)
     }
 
     /// The probes of a launched guest's VMM: its pid, its guest's RAM, where it runs, and its folders (the
@@ -324,10 +298,6 @@ impl Driver for Shards {
         super::guest::envelope(&self.config)
     }
 
-    fn patience(&self) -> Result<Patience, String> {
-        super::guest::patience()
-    }
-
     fn runtime(&self) -> &Path {
         &self.home
     }
@@ -360,12 +330,7 @@ impl Driver for Shards {
             Ok(vm) => Arc::from(vm),
             Err(e) => {
                 let why = format!("launching the guest: {e}");
-                let removed = self.patience().and_then(|patience| {
-                    let at = Instant::now()
-                        .checked_add(patience.bound)
-                        .ok_or_else(|| "the removal's wait overflows".to_owned())?;
-                    place.remove(at)
-                });
+                let removed = place.remove();
                 return Err(match removed {
                     Ok(()) => why,
                     Err(remove) => format!("{why}; then {remove}"),
@@ -384,13 +349,7 @@ impl Driver for Shards {
             )),
             // Whatever kept it from being read, the guest is stopped first: none is left running.
             Err(why) => {
-                let stopped = self.patience().and_then(|patience| {
-                    let at = Instant::now()
-                        .checked_add(patience.bound)
-                        .ok_or_else(|| "the stop's wait overflows".to_owned())?;
-                    Self::stop(vm.as_ref(), at)?;
-                    place.remove(at)
-                });
+                let stopped = Self::stop(vm.as_ref()).and_then(|()| place.remove());
                 Err(match stopped {
                     Ok(()) => why,
                     Err(stop) => format!("{why}; then {stop}"),
@@ -421,22 +380,22 @@ impl Driver for Shards {
         }
     }
 
-    fn report(&mut self, guest: &Guest, deadline: Instant) -> Result<CapacityResources, String> {
-        guest
+    fn report(&mut self, guest: &Guest) -> Result<CapacityResources, String> {
+        let client = guest
             .client
             .as_ref()
-            .ok_or("the guest's agent never answered")?
-            .capacity_before(Class::Oci, deadline)
+            .ok_or("the guest's agent never answered")?;
+        hex_api::Runtime::capacity(client, Class::Oci)
             .map_err(|e| format!("reading the guest agent's capacity: {e}"))?
             .map(|capacity| capacity.free)
             .ok_or_else(|| "the guest's agent reports no oci capacity".to_owned())
     }
 
-    fn tear_down(&mut self, guest: Guest, deadline: Instant) -> Result<(), String> {
+    fn tear_down(&mut self, guest: Guest) -> Result<(), String> {
         let Guest { vm, place, client } = guest;
         drop(client);
-        Self::stop(vm.as_ref(), deadline)?;
-        place.remove(deadline)
+        Self::stop(vm.as_ref())?;
+        place.remove()
     }
 }
 
@@ -953,37 +912,6 @@ mod tests {
         Some((parent, place, vmm))
     }
 
-    /// AC-T7.4.1 (ROOT, 2026-11-12, at Shards 66113379): a VMM that outlives its guest's stop and its teardown is ended
-    /// before its place goes. At 66113379 a guest's stop answers at its run's end and its VMM's host exits on its own
-    /// after, so a census that removed the VMM's cgroup at once met it still populated: `Device or resource busy`. Do
-    /// give a stand-in VMM a place as a launch does, its process in the place's cgroup, its guest's stop come and gone
-    /// while it holds on, and remove the place with its teardown's time spent. Expect the place gone, its cgroup and its
-    /// wrapper, and the stand-in ended by its cgroup's kill.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_vmm_that_outlives_its_teardown_is_ended_before_its_place_goes() {
-        let dir = tempfile::tempdir().unwrap();
-        let test = "a_vmm_that_outlives_its_teardown_is_ended_before_its_place_goes";
-        let Some((parent, place, mut vmm)) = a_place_held(test, dir.path()) else {
-            return;
-        };
-        let got = place.remove(Instant::now());
-        let (cgroup_left, wrapper_left) = (place.cgroup.exists(), place.wrapper.exists());
-        let killed = vmm.try_wait().unwrap();
-        let _ = vmm.kill();
-        let _ = vmm.wait();
-        let _ = std::fs::remove_dir(&place.cgroup);
-        let _ = std::fs::remove_dir(&parent);
-        assert_eq!(got, Ok(()));
-        assert!(!cgroup_left && !wrapper_left, "the place is left");
-        use std::os::unix::process::ExitStatusExt as _;
-        assert_eq!(
-            killed.and_then(|status| status.signal()),
-            Some(9),
-            "{killed:?}"
-        );
-    }
-
     fn config(dir: &Path) -> GuestConfig {
         for (name, bytes) in [
             ("shards", b"vmm".as_slice()),
@@ -1006,10 +934,11 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.1: a VMM whose host ends on its own after its guest's stop is waited for, not killed. Do give a stand-in
-    /// VMM a place as a launch does, its process in the place's cgroup, let it end on its own as its guest's stop is
-    /// done (its stdin closed), and remove the place within a teardown's time, the stand-in's end's own record. Expect
-    /// the place gone and the stand-in's own end, no signal's.
+    /// AC-T7.4.1 (decision 9; the review's C-9): a VMM whose host ends on its own after its guest's stop is followed to
+    /// its end, never killed at a bound: at Shards 66113379 a guest's stop answers at its run's end and its VMM's host
+    /// exits on its own after. Do give a stand-in VMM a place as a launch does, its process in the place's cgroup, let it
+    /// end on its own as its guest's stop is done (its stdin closed), and remove the place. Expect the place gone and the
+    /// stand-in's own end, no signal's.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_vmm_that_ends_after_its_stop_is_waited_for_before_its_place_goes() {
@@ -1019,8 +948,7 @@ mod tests {
             return;
         };
         drop(vmm.stdin.take());
-        let teardown = Instant::now() + STARTED.deadline().unwrap();
-        let got = place.remove(teardown);
+        let got = place.remove();
         let (cgroup_left, wrapper_left) = (place.cgroup.exists(), place.wrapper.exists());
         let ended = vmm.try_wait().unwrap();
         let _ = vmm.kill();
