@@ -1007,6 +1007,8 @@ pub struct ProcessBox {
     pub(super) controller: Mutex<super::managed::Controller>,
     pub(super) identity: OnceLock<shards_api::Identity>,
     pub(super) scope_pids: Mutex<Vec<i32>>,
+    /// A run's box's claim on its removal, carried from its making ([`crate::run::Claim`]); none for any other box.
+    run: OnceLock<std::sync::Arc<crate::run::Claim>>,
 }
 
 impl ProcessBox {
@@ -1083,7 +1085,20 @@ impl ProcessBox {
             controller: Mutex::new(super::managed::Controller::Unsubmitted),
             identity: OnceLock::new(),
             scope_pids: Mutex::new(scope_pids),
+            run: OnceLock::new(),
         })
+    }
+
+    /// Makes this box a run's, carrying `claim` from before anything else holds it.
+    pub(super) fn carry(&self, claim: &std::sync::Arc<crate::run::Claim>) -> Result<(), Refusal> {
+        self.run
+            .set(std::sync::Arc::clone(claim))
+            .map_err(|_| self.state.uncertain("it carries a run's claim already"))
+    }
+
+    /// The claim it carries as a run's box; none for any other box.
+    pub(super) fn claim(&self) -> Option<&std::sync::Arc<crate::run::Claim>> {
+        self.run.get()
     }
 
     fn start_watcher(&self, shared: &Shared) -> Result<(), Refusal> {

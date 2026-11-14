@@ -29,7 +29,7 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::schedule::waits::WaitKind;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 use hex_wait::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
@@ -521,17 +521,26 @@ impl ReplyDeadline {
         Refusal::Os { op, why }
     }
 
-    fn ran_out(self, waits: Option<&Patience>) {
+    /// Its learned wait passed with no answer to call `call`: a run-out to `waits`, naming the call's connection.
+    fn ran_out(self, waits: Option<&Patience>, call: u64) {
         if let (ReplyBound::Learned(wait), Some(waits)) = (self.source, waits) {
-            waits.ran_out(wait);
+            waits.ran_out(
+                wait,
+                wait,
+                &[
+                    Piece::Kind("the node agent's answer to call "),
+                    Piece::Number(call),
+                    Piece::Kind(", by its connection"),
+                ],
+            );
         }
     }
 
     /// A call's `budget` passed with no answer, and with it every learned wait before it: the call's own where its
     /// caller gave no deadline, else `learned`, the one under the caller's not yet told, each a run-out to `waits`.
-    fn ended(budget: Option<Self>, learned: Option<Self>, waits: Option<&Patience>) {
+    fn ended(budget: Option<Self>, learned: Option<Self>, waits: Option<&Patience>, call: u64) {
         for bound in [budget, learned].into_iter().flatten() {
-            bound.ran_out(waits);
+            bound.ran_out(waits, call);
         }
     }
 }
@@ -1792,7 +1801,7 @@ impl<'a, T: Transport> Caller<'a, T> {
                 return Some(answer);
             }
             *learned = None;
-            bound.ran_out(waits);
+            bound.ran_out(waits, self.id);
         }
         self.wait(deadline)
     }
@@ -1885,7 +1894,7 @@ impl<T: Transport> Conn<T> {
             Err(Sent::Full(r)) => {
                 pending = caller.wait(Some(Instant::now()));
                 if pending.is_none() {
-                    ReplyDeadline::ended(budget, learned.take(), waits);
+                    ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                     return Err(budget.map_or(r, |d| d.refusal("sending to the node agent")));
                 }
             }
@@ -1946,7 +1955,7 @@ impl<T: Transport> Conn<T> {
                         shared.send_owed_now();
                         return Err(match why {
                             Sent::Full(why) => {
-                                ReplyDeadline::ended(budget, learned.take(), waits);
+                                ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                                 budget.map_or(why, |d| d.refusal("accepting offered streams"))
                             }
                             Sent::Refused(why) => why,
@@ -1976,7 +1985,7 @@ impl<T: Transport> Conn<T> {
                         shared.owe(caller.id, &Request::Release)?;
                         shared.send_owed_now();
                     }
-                    ReplyDeadline::ended(budget, learned.take(), waits);
+                    ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                     return Err(budget.map_or_else(
                         || {
                             Refusal::Broken(
@@ -3218,6 +3227,31 @@ impl<T: Transport> Runtime for Core<T> {
             why: format!(
                 "box {id}: the node's wire carries no host-use call yet; a box's host use is read in the node's own \
                  process"
+            ),
+        })
+    }
+
+    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no host use, so a delete here
+    /// can't answer its VM's final use, and the trait's plain delete answering none would read as a run that never
+    /// started, which kiln charges nothing for.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "delete_with_host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet, so a delete can't answer its VM's final use; \
+                 delete it with delete, or in the node's own process"
+            ),
+        })
+    }
+
+    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no call that follows a box's
+    /// start to its end, and the trait's inspect at once would answer a box still booting as made only.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        Err(Refusal::Invalid {
+            what: "started",
+            why: format!(
+                "box {id}: the node's wire carries no call that follows a start to its end yet; a box's start is \
+                 followed in the node's own process"
             ),
         })
     }
