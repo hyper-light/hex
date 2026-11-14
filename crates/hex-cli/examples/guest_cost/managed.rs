@@ -679,13 +679,17 @@ fn entries(process: &Handle) -> Result<Vec<(u64, u64, bool)>, String> {
 impl VmmHolds {
     /// Its guest's RAM: the one region of exactly its size in its VM process's map, Shards' confined VM process
     /// (its `reserve_ram`), as `ManagedGuest::vm_process` names it by pid and start (Shards 9d8a05f6a); none while that
-    /// process has no such region yet. The process is named again once its handle is open, so the handle is the one
+    /// process isn't recorded yet (its `shards` records it as it starts it, before it runs) or has no such region yet,
+    /// looked at again at the next reading. The process is named again once its handle is open, so the handle is the one
     /// named, never another that took its pid.
     fn find(&self) -> Result<Option<Mapped>, String> {
-        let named = self
-            .vm
-            .vm_process()
-            .map_err(|e| format!("naming the guest's VM process: {e}"))?;
+        let named = match self.vm.vm_process() {
+            Ok(named) => named,
+            Err(shards_api::Refusal::VmProcess(shards_api::VmProcessRefusal::Unrecorded)) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("naming the guest's VM process: {e}")),
+        };
         let process = sys::open_for_reading(named.pid)
             .map_err(|e| format!("opening the guest's VM process {}: {e}", named.pid))?
             .ok_or_else(|| format!("the guest's VM process {} is gone", named.pid))?;
