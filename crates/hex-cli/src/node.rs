@@ -730,16 +730,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                     "a configured guest lost its managed CPU control".to_owned(),
                 ))
             })?;
-            let process = managed_host(
-                process,
-                &args.state,
-                control,
-                &cost,
-                // The helper's control patience: the slowest boot to ready on record, until its asks follow their
-                // helper (the review's C-9, (c3)).
-                hex_runtime::guest::recorded_boot().map_err(failed)?,
-            )
-            .map_err(failed)?;
+            let process = managed_host(process, &args.state, control, &cost).map_err(failed)?;
             let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
@@ -1092,7 +1083,6 @@ fn managed_host(
     state: &Path,
     control: hex_runtime::macos::CpuControl,
     cost: &hex_api::RuntimeCost,
-    patience: std::time::Duration,
 ) -> Result<hex_runtime::macos::MacRuntime, Refusal> {
     use std::os::unix::fs::DirBuilderExt;
     let directory = backend_path(state, "managed-helper")?;
@@ -1107,7 +1097,6 @@ fn managed_host(
         binary,
         directory.join("helper.sock"),
         directory.join("helper.receipt"),
-        patience,
     )?;
     let runtime = process
         .with_cpu_control(control)?

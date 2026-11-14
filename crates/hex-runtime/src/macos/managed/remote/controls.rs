@@ -6,10 +6,6 @@ use hex_core::record::{PoolRecord, RECORD_VERSION};
 use std::num::NonZeroU64;
 
 pub(super) fn helper(directory: &Path) -> Arc<Helper> {
-    helper_with(directory, Duration::from_secs(1))
-}
-/// The same helper, each request bounded by `rpc`.
-fn helper_with(directory: &Path, rpc: Duration) -> Arc<Helper> {
     // The helper's endpoint and receipt parents are private to its UID (0700).
     std::fs::set_permissions(
         directory,
@@ -21,7 +17,6 @@ fn helper_with(directory: &Path, rpc: Duration) -> Arc<Helper> {
             directory.join("hex"),
             directory.join("s"),
             directory.join("r"),
-            rpc,
         )
         .unwrap(),
         protocol::CpuControl {
@@ -279,7 +274,7 @@ pub(super) fn around_peer_read(fd: BorrowedFd<'_>, now: Read) {
 fn a_whole_reply_holds_wherever_the_helpers_close_lands_against_the_nodes_peer_reads() {
     for at in [Read::Before, Read::After] {
         let dir = tempfile::tempdir().unwrap();
-        let helper = helper_with(dir.path(), Duration::from_secs(60));
+        let helper = helper(dir.path());
         let pid = rustix::process::getpid().as_raw_nonzero().get();
         let own = ProcId {
             pid: u32::try_from(pid).unwrap(),
@@ -353,6 +348,61 @@ fn a_whole_reply_holds_wherever_the_helpers_close_lands_against_the_nodes_peer_r
     }
 }
 
+/// The review's C-9 (1), (c3) (decision 9; ROOT, 2026-11-14): an ask with no caller's deadline carries no expiry, its
+/// helper's waits following its connection, and its answer, however late, is the ask's: no control patience of the
+/// helper's config bounds it. Do: a helper (this test's process, the live incarnation its key names) asked to inspect a
+/// scope on a private connection, with no deadline. Expect the request read with no expiry, and its answer taken.
+#[test]
+fn c9_an_ask_with_no_deadline_carries_no_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = helper(dir.path());
+    let pid = rustix::process::getpid().as_raw_nonzero().get();
+    let own = ProcId {
+        pid: u32::try_from(pid).unwrap(),
+        start_ticks: sys::rusage(pid).unwrap().unwrap().started,
+    };
+    let key = protocol::Key::from_record(NativeRecord::Pool(&pool()), own).unwrap();
+    let (node, end) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .unwrap();
+    for fd in [&node, &end] {
+        crate::macos::private_descriptor(fd, true).unwrap();
+    }
+    let answering = std::thread::spawn(move || {
+        let (bytes, fds) = frame::receive(end.as_fd(), protocol::timed::MAX_MESSAGE, None).unwrap();
+        let (_, id, expires, request) = protocol::timed::read(&bytes, fds.len()).unwrap();
+        let answer = protocol::Answer::Done {
+            key: request.key().try_clone().unwrap(),
+        };
+        let bytes = protocol::encode_answer(VERSION, id, &answer).unwrap();
+        frame::send(end.as_fd(), &bytes, &[], protocol::MAX_MESSAGE, None).unwrap();
+        expires
+    });
+    let result = helper.rpc_on(
+        &protocol::Request::Control {
+            key,
+            action: protocol::Action::Inspect,
+            controller: None,
+        },
+        &[],
+        None,
+        Some(node.as_fd()),
+    );
+    let expires = answering.join().unwrap();
+    assert_eq!(expires, None, "an ask with no deadline carried an expiry");
+    assert!(
+        matches!(
+            result.map_err(CallFailure::refusal),
+            Ok((protocol::Answer::Done { .. }, _))
+        ),
+        "its answer wasn't taken"
+    );
+}
+
 /// How the played helper answers a response ask: with its estimate, as this helper's server does, or as an older helper
 /// does, its slowest seen with no field after it (the review's A-14).
 enum Says {
@@ -391,7 +441,6 @@ fn playing_helper(
             directory.path().join("hex"),
             directory.path().join("s"),
             directory.path().join("r"),
-            Duration::from_secs(60),
         )
         .unwrap(),
     )

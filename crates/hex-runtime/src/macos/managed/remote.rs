@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{Exit, LifecycleCause, Refusal, Usage};
 use hex_core::helper::{VERSION, managed as protocol};
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{NativeRecord, ProcId};
 use rustix::event::PollFlags;
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
@@ -172,30 +173,17 @@ pub(super) fn diagnostic(error: impl std::fmt::Display) -> Result<String, Refusa
     Ok(text.bytes)
 }
 
-/// Explicit same-binary/private-state startup configuration. Construction performs no I/O.
-/// rpc_budget is the node's configured control patience, never an inferred polling period.
+/// Explicit same-binary/private-state startup configuration. Construction performs no I/O. It
+/// carries no control patience: an ask with no caller's deadline waits as decision 9 waits
+/// ([`ANSWERS`]; the review's C-9).
 #[derive(Debug)]
 pub struct ManagedHelper {
     binary: PathBuf,
     endpoint: PathBuf,
     receipt: PathBuf,
-    rpc_budget: Duration,
 }
 impl ManagedHelper {
-    pub fn new(
-        binary: PathBuf,
-        endpoint: PathBuf,
-        receipt: PathBuf,
-        rpc_budget: Duration,
-    ) -> Result<Self, Refusal> {
-        if rpc_budget.is_zero()
-            || rpc_budget == Duration::MAX
-            || u64::try_from(rpc_budget.as_nanos()).is_err()
-        {
-            return Err(super::configuration(
-                "helper control patience must be positive, finite and representable",
-            ));
-        }
+    pub fn new(binary: PathBuf, endpoint: PathBuf, receipt: PathBuf) -> Result<Self, Refusal> {
         for path in [&binary, &endpoint, &receipt] {
             if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
                 return Err(super::configuration(
@@ -214,7 +202,6 @@ impl ManagedHelper {
             binary,
             endpoint,
             receipt,
-            rpc_budget,
         })
     }
     pub fn binary(&self) -> &Path {
@@ -226,9 +213,53 @@ impl ManagedHelper {
     pub fn receipt(&self) -> &Path {
         &self.receipt
     }
-    pub fn rpc_budget(&self) -> Duration {
-        self.rpc_budget
+}
+
+/// A managed helper's answer to an ask with no caller's deadline, its startup's readiness among them (decision 9; the
+/// review's C-9 (c3)): within W*, the slowest answer this process has seen; past it the run-out told once and the read
+/// following the helper's connection, ended by its answer or the connection's end, the helper's process ending; before
+/// any answer, following from its start, told as it starts.
+static ANSWERS: Patience = Patience::measuring("managed.helper.rpc");
+
+/// `fd`'s next frame, its helper's answer, `party` naming the helper: within `deadline` where its caller gave one; with
+/// none, as [`ANSWERS`] waits.
+fn answer(
+    fd: BorrowedFd<'_>,
+    bound: usize,
+    deadline: Option<Instant>,
+    party: &[Piece<'_>],
+) -> Result<(Vec<u8>, Vec<OwnedFd>), frame::Failure> {
+    if deadline.is_some() {
+        return frame::receive(fd, bound, deadline);
     }
+    let began = Instant::now();
+    match ANSWERS.deadline() {
+        Some(w_star) => {
+            // Within W* its first byte; past it, its run-out told and the read following the connection.
+            match frame::wait(fd, PollFlags::IN, began.checked_add(w_star)) {
+                Ok(()) => {}
+                Err(frame::Failure::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    ANSWERS.ran_out(w_star, began.elapsed(), party);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        None => {
+            ANSWERS.following(party);
+        }
+    }
+    let answered = frame::receive(fd, bound, None)?;
+    ANSWERS.answered(began.elapsed());
+    Ok(answered)
+}
+
+/// The party an ask of helper `process` follows past W*.
+fn helper_party(process: &ProcId) -> [Piece<'static>; 3] {
+    [
+        Piece::Kind("the managed helper, pid "),
+        Piece::Pid(i64::from(process.pid)),
+        Piece::Kind(", its answer on its connection"),
+    ]
 }
 
 enum HelperProcess {
@@ -293,7 +324,7 @@ impl Helper {
         let pools = books.pool_records()?;
         check_restart(completed, &records, &pools)
     }
-    fn start(&self, until: Instant) -> Result<(ProcId, OwnedFd), Refusal> {
+    fn start(&self, deadline: Option<Instant>) -> Result<(ProcId, OwnedFd), Refusal> {
         if self
             .books
             .get()
@@ -320,9 +351,9 @@ impl Helper {
         rustix::net::sockopt::set_socket_nosigpipe(&parent, true)
             .map_err(|error| Refusal::os("preparing helper startup disconnect", error))?;
         let mut argv = Vec::new();
-        // argv0 and the branch, then three path options, the cost option and five numbers, each
+        // argv0 and the branch, then three path options, the cost option and four numbers, each
         // with its value.
-        const START_WORDS: usize = 2 + 3 * 2 + 2 + 5 * 2;
+        const START_WORDS: usize = 2 + 3 * 2 + 2 + 4 * 2;
         argv.try_reserve_exact(START_WORDS)
             .map_err(|_| native_allocation(START_WORDS))?;
         let cstring = |raw: &[u8]| -> Result<std::ffi::CString, Refusal> {
@@ -366,11 +397,6 @@ impl Helper {
         push(b"--cpu-cost")?;
         push(cost.as_bytes())?;
         for (name, value) in [
-            (
-                b"--rpc-nanos".as_slice(),
-                u64::try_from(self.config.rpc_budget.as_nanos())
-                    .map_err(|_| super::configuration("helper budget width"))?,
-            ),
             (
                 b"--cpu-response-nanos".as_slice(),
                 u64::try_from(self.cpu.response.as_nanos())
@@ -430,7 +456,7 @@ impl Helper {
             // cap sized by the VM whose launch started it would end them all at a bound of no basis.
             jetsam_mib: None,
         };
-        if Instant::now() >= until {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(super::configuration(
                 "helper startup expired before native submission",
             ));
@@ -449,8 +475,17 @@ impl Helper {
         drop(spawn);
         // Startup reply is an event on this exact inherited socket, not a socket-path/process probe.
         // No VMM has been requested yet. Failure retains the canonical Creating record and receipt.
-        let (bytes, fds) = frame::receive(parent.as_fd(), protocol::MAX_MESSAGE, Some(until))
-            .map_err(frame::Failure::refusal)?;
+        let (bytes, fds) = answer(
+            parent.as_fd(),
+            protocol::MAX_MESSAGE,
+            deadline,
+            &[
+                Piece::Kind("the managed helper starting, pid "),
+                Piece::Pid(i64::from(pid)),
+                Piece::Kind(", its readiness on its startup channel"),
+            ],
+        )
+        .map_err(frame::Failure::refusal)?;
         if let Ok((version, id, rejected)) = protocol::rejected::read(&bytes, fds.len()) {
             if version == VERSION && id == 0 {
                 return Err(CallFailure::Rejected(rejected).refusal());
@@ -491,24 +526,22 @@ impl Helper {
         })
         .map_err(|_| native_allocation(size_of::<Self>()))
     }
-    fn until(&self, deadline: Option<Instant>) -> Result<Instant, Refusal> {
-        let own = Instant::now()
-            .checked_add(self.config.rpc_budget)
-            .ok_or_else(|| super::configuration("helper deadline is not representable"))?;
-        let until = deadline.map_or(own, |deadline| own.min(deadline));
-        if until <= Instant::now() {
+    /// `deadline`, an ask's caller's, refused where it has passed; none where its caller gave none, the ask then
+    /// waiting as [`ANSWERS`] waits (the review's C-9: no control patience of the helper's config bounds it).
+    fn until(deadline: Option<Instant>) -> Result<Option<Instant>, Refusal> {
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(super::configuration(
                 "the native helper request budget has expired",
             ));
         }
-        Ok(until)
+        Ok(deadline)
     }
     fn next(&self) -> Result<u64, Refusal> {
         self.next
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| super::configuration("helper request identity is exhausted"))
     }
-    fn finish_helper(&self, process: ProcId, until: Instant) -> Result<(), Refusal> {
+    fn finish_helper(&self, process: ProcId, deadline: Option<Instant>) -> Result<(), Refusal> {
         let mut observer = {
             let mut state = self
                 .process
@@ -593,14 +626,18 @@ impl Helper {
                         }
                     }
                 }
-                let remaining = until
-                    .checked_duration_since(Instant::now())
-                    .filter(|left| !left.is_zero())
-                    .ok_or_else(|| {
-                        super::configuration(
-                            "helper termination exceeded original finalization patience",
-                        )
-                    })?;
+                // With no deadline, its end followed by its process's own (wait_scope's no clock).
+                let remaining = match deadline {
+                    Some(deadline) => deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|left| !left.is_zero())
+                        .ok_or_else(|| {
+                            super::configuration(
+                                "helper termination exceeded original finalization patience",
+                            )
+                        })?,
+                    None => Duration::MAX,
+                };
                 if !native
                     .wait_scope(&[], remaining)
                     .map_err(|error| native_failure("waiting for exact helper", error))?
@@ -667,7 +704,7 @@ impl Helper {
     fn identity(
         &self,
         allow_start: bool,
-        until: Instant,
+        deadline: Option<Instant>,
     ) -> Result<(ProcId, Option<OwnedFd>), Refusal> {
         // Disk/Store observations precede any short helper-state turn. The native Starting state
         // refuses concurrent starts; no helper-global mutex spans I/O or another Books turn.
@@ -677,7 +714,7 @@ impl Helper {
                     return Err(super::configuration("native helper is completed"));
                 }
                 self.restart_fence(completed)?;
-                self.finish_helper(snapshot.process, until)?;
+                self.finish_helper(snapshot.process, deadline)?;
                 snapshot.retire(self)?;
                 self.reset_completed()?;
             } else {
@@ -711,7 +748,7 @@ impl Helper {
                     ));
                 }
             }
-            let (process, connection) = self.start(until)?;
+            let (process, connection) = self.start(deadline)?;
             self.remember(process)?;
             if receipt::read(self)?
                 .is_none_or(|snapshot| snapshot.process != process || snapshot.completed.is_some())
@@ -733,7 +770,7 @@ impl Helper {
         }
         result
     }
-    fn connect(&self, process: ProcId, until: Instant) -> Result<OwnedFd, CallFailure> {
+    fn connect(&self, process: ProcId, deadline: Option<Instant>) -> Result<OwnedFd, CallFailure> {
         check_process(process)?;
         let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
             .map_err(|error| CallFailure::io(protocol::Operation::Connect, error))?;
@@ -746,7 +783,7 @@ impl Helper {
         match rustix::net::connect(&fd, &address) {
             Ok(()) => {}
             Err(rustix::io::Errno::INPROGRESS | rustix::io::Errno::AGAIN) => {
-                frame::wait(fd.as_fd(), PollFlags::OUT, Some(until))
+                frame::wait(fd.as_fd(), PollFlags::OUT, deadline)
                     .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
                 rustix::net::sockopt::socket_error(&fd)
                     .map_err(|error| CallFailure::io(protocol::Operation::Connect, error))?
@@ -774,9 +811,10 @@ impl Helper {
         deadline: Option<Instant>,
         connection: Option<BorrowedFd<'_>>,
     ) -> Result<(protocol::Answer, Vec<OwnedFd>), CallFailure> {
-        let until = self.until(deadline)?;
+        let until = Self::until(deadline)?;
         let id = self.next()?;
-        let expires = expiry(until)?;
+        // No expiry where its caller gave no deadline: the helper's waits then follow its connection.
+        let expires = until.map(expiry).transpose()?;
         let bytes = protocol::timed::encode(VERSION, id, expires, request).map_err(|_| {
             super::configuration("the native helper request is invalid or cannot be reserved")
         })?;
@@ -793,12 +831,16 @@ impl Helper {
             &bytes,
             descriptors,
             protocol::timed::MAX_MESSAGE,
-            Some(until),
+            until,
         )
         .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
-        let (bytes, descriptors) =
-            frame::receive(fd.as_fd(), protocol::MAX_MESSAGE, Some(until))
-                .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        let (bytes, descriptors) = answer(
+            fd.as_fd(),
+            protocol::MAX_MESSAGE,
+            until,
+            &helper_party(&request.key().helper),
+        )
+        .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
         peer_after_reply(fd, request.key().helper)?;
         if let Ok((version, answer_id, rejected)) =
             protocol::rejected::read(&bytes, descriptors.len())
@@ -835,23 +877,26 @@ impl Helper {
         }
         snapshot.check_live()?;
         let process = snapshot.process;
-        let until = self.until(None)?;
         let id = self.next()?;
         let bytes = protocol::response::encode(VERSION, id)
             .map_err(|_| super::configuration("the native response request is invalid"))?;
-        let fd = self.connect(process, until)?;
+        let fd = self.connect(process, None)?;
         peer(&fd, process)?;
         frame::send(
             fd.as_fd(),
             &bytes,
             &[],
             protocol::response::MAX_MESSAGE,
-            Some(until),
+            None,
         )
         .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
-        let (bytes, descriptors) =
-            frame::receive(fd.as_fd(), protocol::response::MAX_ANSWER, Some(until))
-                .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        let (bytes, descriptors) = answer(
+            fd.as_fd(),
+            protocol::response::MAX_ANSWER,
+            None,
+            &helper_party(&process),
+        )
+        .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
         peer_after_reply(&fd, process)?;
         let (version, answer_id, response) =
             protocol::response::read_answer(&bytes, descriptors.len()).map_err(|_| {
@@ -867,23 +912,20 @@ impl Helper {
     }
     /// Joint plan step 14 (C4 on macOS): sets `key`'s scope to `rate` milli-CPU, its water-filled share.
     fn set_rate(&self, key: protocol::Key, rate: u64) -> Result<(), CallFailure> {
-        let until = self.until(None)?;
         let id = self.next()?;
         let bytes = protocol::rate::encode(VERSION, id, &key, rate)
             .map_err(|_| super::configuration("the native rate request is invalid"))?;
-        let fd = self.connect(key.helper, until)?;
+        let fd = self.connect(key.helper, None)?;
         peer(&fd, key.helper)?;
-        frame::send(
+        frame::send(fd.as_fd(), &bytes, &[], protocol::rate::MAX_MESSAGE, None)
+            .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        let (bytes, descriptors) = answer(
             fd.as_fd(),
-            &bytes,
-            &[],
-            protocol::rate::MAX_MESSAGE,
-            Some(until),
+            protocol::MAX_MESSAGE,
+            None,
+            &helper_party(&key.helper),
         )
         .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
-        let (bytes, descriptors) =
-            frame::receive(fd.as_fd(), protocol::MAX_MESSAGE, Some(until))
-                .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
         peer_after_reply(&fd, key.helper)?;
         if let Ok((version, answer_id, rejected)) =
             protocol::rejected::read(&bytes, descriptors.len())
@@ -912,24 +954,17 @@ impl Helper {
         }
     }
     pub(in crate::macos) fn census(&self) -> Result<protocol::census::Census, Refusal> {
-        let until = self.until(None)?;
-        let (process, _) = self.identity(false, until)?;
+        let (process, _) = self.identity(false, None)?;
         let id = self.next()?;
         let request = protocol::census::encode_request(VERSION, id, process)
             .map_err(|_| super::configuration("invalid native census request"))?;
-        let fd = self.connect(process, until).map_err(CallFailure::refusal)?;
-        frame::send(
-            fd.as_fd(),
-            &request,
-            &[],
-            protocol::MAX_MESSAGE,
-            Some(until),
-        )
-        .map_err(frame::Failure::refusal)?;
+        let fd = self.connect(process, None).map_err(CallFailure::refusal)?;
+        frame::send(fd.as_fd(), &request, &[], protocol::MAX_MESSAGE, None)
+            .map_err(frame::Failure::refusal)?;
         let bound = protocol::census::message_bound(crate::MAX_BOXES)
             .map_err(|_| native_allocation(crate::MAX_BOXES))?;
-        let (bytes, descriptors) =
-            frame::receive(fd.as_fd(), bound, Some(until)).map_err(frame::Failure::refusal)?;
+        let (bytes, descriptors) = answer(fd.as_fd(), bound, None, &helper_party(&process))
+            .map_err(frame::Failure::refusal)?;
         peer_after_reply(&fd, process)?;
         let (version, got, census) =
             protocol::census::read_answer(&bytes, descriptors.len(), crate::MAX_BOXES)
@@ -1202,14 +1237,16 @@ fn expiry(until: Instant) -> Result<Duration, Refusal> {
         .checked_add(remaining)
         .ok_or_else(|| super::configuration("native raw uptime expiry overflow"))
 }
-fn deadline(expires: Duration, budget: Duration) -> Result<Instant, Refusal> {
+/// The transferred expiry `expires` as this process's own instant, refused once passed: the helper's work for an ask
+/// ends no later than its caller's deadline, and with none follows the ask's connection (the review's C-9).
+fn deadline(expires: Duration) -> Result<Instant, Refusal> {
     let began = Instant::now();
     let remaining = expires
         .checked_sub(uptime()?)
         .filter(|left| !left.is_zero())
         .ok_or_else(|| super::configuration("the transferred native request has expired"))?;
     began
-        .checked_add(remaining.min(budget))
+        .checked_add(remaining)
         .ok_or_else(|| super::configuration("native helper deadline overflow"))
 }
 
@@ -1483,7 +1520,7 @@ pub(super) fn launch(
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to launch it"))?;
     let launch = make_launch(record, plan, helper.cpu)?;
-    let (process, startup) = helper.identity(true, helper.until(deadline)?)?;
+    let (process, startup) = helper.identity(true, Helper::until(deadline)?)?;
     let proxy = Proxy::prepared(
         Arc::clone(helper),
         protocol::Key::from_record(record, process)?,
@@ -1598,7 +1635,7 @@ pub(super) fn attach(
             .map_err(|_| record.uncertain("its completed end was published before"))?;
         return Ok(proxy);
     }
-    let (process, _) = helper.identity(false, helper.until(None)?)?;
+    let (process, _) = helper.identity(false, None)?;
     let proxy = Proxy::prepared(
         Arc::clone(helper),
         protocol::Key::from_record(record, process)?,
@@ -1623,7 +1660,7 @@ pub(super) fn set_rate(
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to set its rate"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?)?;
+    let (process, _) = helper.identity(false, None)?;
     let key = protocol::Key::from_record(record, process)?;
     helper.set_rate(key, rate).map_err(CallFailure::refusal)
 }
@@ -1646,7 +1683,7 @@ pub(super) fn stop(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<(),
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to stop it"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?)?;
+    let (process, _) = helper.identity(false, None)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
         .rpc(
@@ -1670,7 +1707,7 @@ pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Us
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to read its usage"))?;
-    let (process, _) = helper.identity(false, helper.until(None)?)?;
+    let (process, _) = helper.identity(false, None)?;
     let key = protocol::Key::from_record(record, process)?;
     let (answer, _) = helper
         .rpc(
@@ -1697,7 +1734,6 @@ pub(super) fn finalize(
         .managed_helper
         .as_ref()
         .ok_or_else(|| record.uncertain("its node runs no managed helper to finalize it"))?;
-    let until = helper.until(None)?;
     let controller = identity
         .map(|identity| ProcId {
             pid: identity.pid,
@@ -1720,10 +1756,10 @@ pub(super) fn finalize(
         {
             return Err(record.uncertain("its helper's completed receipt doesn't name it, though it is past its creation, as it is finalized"));
         }
-        helper.finish_helper(snapshot.process, until)?;
+        helper.finish_helper(snapshot.process, None)?;
         return Ok(()); // Receipt retained until canonical Released/remove; new launch fences it.
     }
-    let (process, _) = helper.identity(false, until)?;
+    let (process, _) = helper.identity(false, None)?;
     let key = protocol::Key::from_record(record, process)?;
     let result = helper.rpc(
         &protocol::Request::Control {
@@ -1732,7 +1768,7 @@ pub(super) fn finalize(
             controller,
         },
         &[],
-        Some(until),
+        None,
     );
     if let Some(snapshot) = receipt::read(helper)?
         && snapshot.completed.is_some()
@@ -1741,7 +1777,7 @@ pub(super) fn finalize(
         snapshot.completion(&key, controller)?.ok_or_else(|| {
             record.uncertain("its helper's completed receipt doesn't name it after its finalize")
         })?;
-        helper.finish_helper(process, until)?;
+        helper.finish_helper(process, None)?;
         return Ok(());
     }
     match result.map_err(CallFailure::refusal)?.0 {
@@ -2040,8 +2076,6 @@ impl Helper {
             self.rates.processes.get(),
             u64::try_from(self.lateness.as_nanos())
                 .map_err(|_| super::configuration("helper lateness width"))?,
-            u64::try_from(self.config.rpc_budget.as_nanos())
-                .map_err(|_| super::configuration("helper budget width"))?,
             u64::try_from(self.cpu.response.as_nanos())
                 .map_err(|_| super::configuration("helper CPU response width"))?,
         ] {

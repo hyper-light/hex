@@ -767,7 +767,7 @@ fn prepare_native(
     record: NativeRecord<'_>,
     launch: &hex_core::helper::managed::Launch,
     descriptors: Vec<OwnedFd>,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Arc<ProcessBox>, Refusal> {
     let bounds = host_bounds(record)?;
     let (lifeline_reader, lifeline_writer) = std::io::pipe()
@@ -819,7 +819,7 @@ fn prepare_native(
         .map_err(|_| record.uncertain("its native scope's lifeline is poisoned"))? =
         Some(lifeline_writer);
     retain(runtime, record, &boxed)?;
-    if Instant::now() >= deadline {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         *boxed
             .scope()
             .ok_or_else(|| {

@@ -95,6 +95,7 @@ follows, and what is wired:
 | `client.guest.offered.connect` (hex-client `guest::connect_following`, Windows) | a borrowed guest's stdio CONNECT, waiting for its OK, with no caller's deadline | the VM's process, held by its pid and start before the one dial and waited on beside its socket (Shards' `connect_borrowed_before` with no deadline): its OK, the connection's end or the VM's | none | liveness alone past W*, the run-out told by a watcher as the link's setup bound the offer carries passes; one dial, never given up and made again (the review's D-3) |
 | `client.guest.relay.token`, `client.quic.relay.token` (hex-client `guest::token_following`) | the guest's or node's relay, its token on a control connection with no caller's deadline | the connection's end or reset | none | liveness alone past W*, the run-out told, the bytes read before kept (the review's D-2) |
 | `store.node_vm_owner` (hex-node `store::node_vm::follow_owner`) | a node VM row's owner, a node process | its lock, which a thread of its own takes as the owner ends | none: a local site | liveness alone past W*, the run-out told |
+| `managed.helper.rpc` (hex-runtime `macos::managed::remote::answer`) | the macOS managed helper, its answer to an ask with no caller's deadline, its startup's readiness among them | its connection: the answer, or the connection's end (the helper's process ending); the ask carries no expiry, so the helper's own waits follow it too | none | liveness alone past W*, the run-out told; its config carries no control patience (the review's C-9 (c3), 2026-11-14: it was the record's boot_ready) |
 | `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
@@ -131,7 +132,7 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    `Option<Instant>`), its native launch taking none (`Transaction::launch_managed`'s `Option<Duration>`; on Linux the
    held child's gate then waits with no clock, ended by its peer's byte or EOF, Ada's approval of 2026-11-14). Owed: a
    GPU create's budget keeps the record (`managed::gpu_create`) until Shards' GPU report takes no deadline, ROOT's ask;
-   the macOS managed helper's control patience, next; and hex-cli's measurement tools' own waits (guest_cost's stop,
+   and hex-cli's measurement tools' own waits (guest_cost's stop,
    place removal, end, window boot and census; macos_cpu_response's top arm): the producer's waits follow their
    parties.
 2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
