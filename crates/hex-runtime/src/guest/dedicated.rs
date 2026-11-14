@@ -1710,7 +1710,7 @@ impl GuestRuntime {
             socket,
             paths,
             self.native_images,
-            budget.remaining()?,
+            Some(budget.remaining()?),
         )
     }
 
