@@ -336,6 +336,8 @@ struct ModelRun {
     /// Each file its run host's diagnostics were told to go to (`ImageGuest::keep_diagnostics`), in order: the test
     /// writes the host's diagnostics into the last, as the run host's do.
     diagnostics: Mutex<Vec<std::fs::File>>,
+    /// The bound each of those files was told to be held within, in order (the review's B-9).
+    diagnostics_bounds: Mutex<Vec<u64>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -578,8 +580,9 @@ impl ImageGuest for ModelGuest {
         self.run.release();
         Ok(())
     }
-    fn keep_diagnostics(&self, to: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, to: std::fs::File, bound: u64) -> Result<(), ImageRefusal> {
         self.run.diagnostics.lock().unwrap().push(to);
+        self.run.diagnostics_bounds.lock().unwrap().push(bound);
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
@@ -1497,6 +1500,22 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
         (Some(Exit::Unknown), Some(words))
     );
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// The review's B-9 (ROOT's ruling of 2026-11-14, shards-image-class.md §1): an image VM's diagnostics are its own output
+/// on the node's disk, charged to it, so their file is held within the disk its box's allocation was admitted with
+/// (Shards' bounded `keep_diagnostics`), no number picked. Do start an image VM whose box was admitted with the sim's VM
+/// allocation. Expect Shards told once to keep its diagnostics, within exactly that allocation's disk.
+#[test]
+fn b9_an_image_vms_diagnostics_are_held_within_the_disk_its_box_was_admitted_with() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-diagnostics-bound", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        *images.run.diagnostics_bounds.lock().unwrap(),
+        [allocation().resources.disk_bytes]
+    );
 }
 
 /// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one

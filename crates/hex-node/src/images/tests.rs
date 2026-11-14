@@ -133,7 +133,7 @@ impl ImageGuest for Held {
             .clone()
             .map(|end| RunEnded::unused(end, Unused::Killed)))
     }
-    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, _: std::fs::File, _: u64) -> Result<(), ImageRefusal> {
         Ok(())
     }
     fn wait_channel(

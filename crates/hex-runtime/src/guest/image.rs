@@ -834,6 +834,15 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::GpuProbe(why) => {
             Refusal::Broken(format!("Shards refused {op} as a GPU report: {why}"))
         }
+        // The disk its box was admitted with is short of what Shards keeps of its run host's diagnostics to quote a
+        // run's end (the review's B-9): the box can't keep them.
+        ImageRefusal::DiagnosticsBound { bound, tail } => Refusal::Invalid {
+            what: "shards image",
+            why: format!(
+                "its admitted disk, {bound} bytes, is short of the {tail} bytes of its run host's diagnostics Shards \
+                 keeps to quote a run's end"
+            ),
+        },
     }
 }
 
@@ -1693,7 +1702,7 @@ fn boot_on_its_thread(
             let booted = images
                 .boot_stoppable(&spec, Duration::MAX, &stop)
                 .and_then(|guest| {
-                    guest.keep_diagnostics(kept)?;
+                    guest.keep_diagnostics(kept, u64::MAX)?;
                     Ok(guest)
                 });
             party.0.put(booted);

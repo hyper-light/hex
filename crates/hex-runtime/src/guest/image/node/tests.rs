@@ -183,7 +183,7 @@ impl ImageGuest for Run {
         Err(unasked())
     }
 
-    fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+    fn keep_diagnostics(&self, _: std::fs::File, _: u64) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
 
