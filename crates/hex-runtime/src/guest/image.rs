@@ -1661,21 +1661,22 @@ impl ImageBoot {
     }
 }
 
-/// Boots `spec` on a thread of its own, its answer `slot`'s: Shards waits for the run's start or its host's end alone
-/// (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps its diagnostics in
-/// `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends it, and its boot
-/// is refused in those words.
+/// Boots `spec` on a thread of its own, its answer its `party`'s slot's, the party going with the thread, or with its
+/// closure where no thread starts, so a follower sees the boot end with no answer: Shards waits for the run's start or
+/// its host's end alone (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps
+/// its diagnostics in `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends
+/// it, and its boot is refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
     kept: std::fs::File,
-    slot: Arc<Slot<Booted>>,
+    party: Party<Booted>,
     stop: Arc<BootStop>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("hex-image-boot".to_owned())
         .spawn(move || {
-            let party = Party(slot);
+            let party = party;
             let booted = images
                 .boot_stoppable(&spec, Duration::MAX, &stop)
                 .and_then(|guest| {
@@ -2203,8 +2204,19 @@ impl ImageClass {
         // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
+        let slot = Arc::new(Slot::new());
+        let stop = Arc::new(BootStop::new());
+        // Its boot's party, held here until its thread holds it: a call following a boot that never began sees it end
+        // with no answer, never waits for good.
+        let party = Party(Arc::clone(&slot));
+        // Its boot in this process's runs before its Ready is written (the review's F4 side finding 1): a call that reads
+        // the box Ready finds the boot this process runs, never a run of an earlier process, held. A call that reads it
+        // Creating sees it Created, and never looks.
+        image
+            .runs
+            .insert(&id, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
         // The boot's intent, durable before any effect: a crash from here on holds the box.
-        devices::with_record_transaction(self.image_books()?, &id, |transaction| {
+        let intent = devices::with_record_transaction(self.image_books()?, &id, |transaction| {
             let mut current = transaction
                 .read(&id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -2220,7 +2232,12 @@ impl ImageClass {
             current.phase = Phase::Ready;
             current.diagnostics = Some(diagnostics.clone());
             transaction.put(&current)
-        })?;
+        });
+        if let Err(why) = intent {
+            // No call read it Ready, so none follows its boot: its run goes.
+            image.runs.forget(&id)?;
+            return Err(why);
+        }
         // Its file made before its boot, so the run host keeps there all it says from its start on.
         let kept = match diagnostics_file(&diagnostics) {
             Ok(file) => file,
@@ -2233,17 +2250,12 @@ impl ImageClass {
                 return Err(why);
             }
         };
-        let slot = Arc::new(Slot::new());
-        let stop = Arc::new(BootStop::new());
-        image
-            .runs
-            .insert(&id, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
         // Shards waits for the run's start or its host's end alone (`Duration::MAX`): the boot's learned W* is where
         // the start answers Pending and tells the census, never where a boot ends (decision 9, the person's ruling of
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, party, stop) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
@@ -2783,7 +2795,14 @@ impl ImageClass {
             }
             match told {
                 Told::Came => wait.answered(asked.elapsed()),
-                Told::Gone | Told::NotYet => return Err(follower.gone(id)),
+                Told::Gone | Told::NotYet => {
+                    // A boot whose start was refused before its thread began has its end recorded first (the review's
+                    // F4 side finding 1): that end is the answer; any other boot's thread ended with none.
+                    return match self.settle(&record_now(self, id)?)? {
+                        state @ State::Ended(_) => Ok(state),
+                        _ => Err(follower.gone(id)),
+                    };
+                }
             }
         }
         self.settle(&record_now(self, id)?)

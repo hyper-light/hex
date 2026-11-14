@@ -17,7 +17,7 @@ use shards_api::image::{
 };
 
 use super::{
-    Booted, End, ImageClass, Run, Settled, Slot, Told, admitted_size, boot_on_its_thread,
+    Booted, End, ImageClass, Party, Run, Settled, Slot, Told, admitted_size, boot_on_its_thread,
     diagnostics_file, host_use_of, started_from, timed_stats,
 };
 use crate::devices::Books;
@@ -114,7 +114,7 @@ impl ImageClass {
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
             return Err(why);
         }
-        if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, Party(Arc::clone(&slot)), stop) {
             image.runs.insert(vm.run, Run::Ended(End::unknown(None)))?;
             image.runs.forget(vm.run)?;
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;

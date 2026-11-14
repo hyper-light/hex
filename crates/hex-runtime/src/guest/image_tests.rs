@@ -32,6 +32,9 @@ struct Owner {
     /// Its next write of a Deleting record, held once written where the test asks it, until the test lets it go: a
     /// delete's intent as slow to return as its disk's flush may be, so another call moves the box on meanwhile.
     deleting: Holding,
+    /// Its next write of a box's start, Creating to Ready, held once written where the test asks it, until the test lets
+    /// it go: a start's intent as slow to return as its disk's flush may be, so another call reads the box meanwhile.
+    readying: Holding,
     /// Its next scan of every record ([`Books::records`]), held once read where the test asks it, until the test lets it
     /// go: a call whose read other calls' writes then outdate, as its thread's preemption may leave it.
     reading: Holding,
@@ -101,6 +104,7 @@ impl Owner {
             scans: AtomicUsize::new(0),
             state: tempfile::tempdir().unwrap(),
             deleting: Holding::default(),
+            readying: Holding::default(),
             reading: Holding::default(),
             ending: Holding::default(),
             refuse_ready: AtomicBool::new(false),
@@ -166,6 +170,10 @@ impl Transaction for Owner {
             self.ending.here();
         }
         let mut records = self.records.lock().unwrap();
+        let readies = record.phase == Phase::Ready
+            && records
+                .get(&record.spec.id)
+                .is_some_and(|current| current.as_ref().unwrap().phase == Phase::Creating);
         let allowed = match records.get(&record.spec.id) {
             None => record.phase == Phase::Creating,
             Some(current) => {
@@ -187,6 +195,9 @@ impl Transaction for Owner {
         drop(records);
         if record.phase == Phase::Deleting {
             self.deleting.here();
+        }
+        if readies {
+            self.readying.here();
         }
         Ok(())
     }
@@ -6032,6 +6043,46 @@ fn c10_a_cold_ready_wait_is_told_as_it_starts() {
         })
         .collect();
     assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
+}
+
+/// The start held at its Ready write, as this case's fact: no recorded operation makes it.
+static READYING_HELD: Patience = Patience::measuring("test.hex_runtime.image_readying_held");
+
+/// The review's F4 side finding (1) (AC-T7.4.1; T-T7.1.2): a start puts its boot under way in this process's runs before
+/// it writes its box Ready, so a call that reads the box Ready finds the boot this process runs, never a run of an
+/// earlier process held. Do create an image VM and start it, holding the start once its Ready is written; inspect the
+/// box meanwhile; then let the start go. Expect the inspect not refused as a held run (`Awaits(AttachAfterCrash)`), and
+/// the start to boot the box.
+#[test]
+fn f4s1_a_box_whose_start_has_written_it_ready_is_never_held() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("ready-window", None)).unwrap().id;
+    owner.readying.ask();
+    std::thread::scope(|scope| {
+        let start = scope.spawn(|| runtime.start(&id));
+        // A look: the owner tells no event as it holds a write; its party is the start's thread.
+        follow::until(
+            &READYING_HELD,
+            "the start held at its Ready write",
+            || spawned(&start),
+            || owner.readying.holds(),
+        )
+        .unwrap();
+        let seen = runtime.inspect(&id);
+        owner.readying.let_go();
+        assert!(
+            !matches!(
+                seen,
+                Err(Refusal::Awaits {
+                    needs: Upstream::AttachAfterCrash
+                })
+            ),
+            "its own start's box read as held: {seen:?}"
+        );
+        start.join().unwrap().unwrap();
+    });
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
 /// The review's B-12 (AC-T7.4.1): a call on an image VM whose record can't be read is refused saying why it can't. Do
