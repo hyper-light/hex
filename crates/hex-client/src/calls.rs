@@ -85,10 +85,13 @@ pub enum BoxKind {
     Capacity,
     /// A member of a Shards image box handed over (`Call::Member`, joint plan step 17).
     Member,
+    /// A start followed to its end (`Call::Started`; ROOT, 2026-11-14): the rest of a boot its start answered Pending
+    /// for, timed apart from a start's own answer.
+    Started,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Member as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Started as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -113,8 +116,8 @@ macro_rules! class_wait {
 }
 
 /// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
-/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) has no
-/// census row for any class, so it measures in every table.
+/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) and a start
+/// followed to its end have no census row for any class, so they measure in every table.
 macro_rules! class_waits {
     ($prefix:literal, $class:literal, measuring) => {
         $crate::calls::class_waits!(
@@ -145,6 +148,7 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".run.", $class), $run),
             $crate::calls::class_wait!(concat!($prefix, ".capacity.", $class), $capacity),
             $crate::calls::class_wait!(concat!($prefix, ".member.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".started.", $class), measuring),
         ]
     };
 }
@@ -192,7 +196,8 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Run { .. }
             | Call::Capacity(_)
             | Call::Member { .. }
-            | Call::MemberSignal { .. } => return None,
+            | Call::MemberSignal { .. }
+            | Call::Started(_) => return None,
         },
         Request::Release
         | Request::Taken
@@ -232,6 +237,7 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::Capacity(class) => (BoxKind::Capacity, Timed::Class(*class)),
         Call::Member { id, .. } => (BoxKind::Member, Timed::Box(id)),
         Call::MemberSignal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
+        Call::Started(id) => (BoxKind::Started, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -3263,16 +3269,10 @@ impl<T: Transport> Runtime for Core<T> {
         })
     }
 
-    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no call that follows a box's
-    /// start to its end, and the trait's inspect at once would answer a box still booting as made only.
+    /// The node follows the box's start to its end (`Call::Started`, appended; ROOT, 2026-11-14), so a start answered
+    /// Pending is waited for on the fact, never by looks.
     fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        Err(Refusal::Invalid {
-            what: "started",
-            why: format!(
-                "box {id}: the node's wire carries no call that follows a start to its end yet; a box's start is \
-                 followed in the node's own process"
-            ),
-        })
+        self.info(Call::Started(id.clone()), "started")
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
