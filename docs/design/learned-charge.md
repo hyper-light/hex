@@ -453,8 +453,8 @@ reaches the view settled with goal 13 the same day:
   native owner (`Recover::managed_usage`) and capped through its own governor (D255; ROOT, 2026-11-13): the node asks
   the guest it boots the VM in (`Recover::managed_rate`, `GuestRuntime::managed_rate`, Shards' `ManagedGuest::rate`
   on its VM process's socket), a measured wait of its own (`managed.rate`, decision 9: Shards follows the VM with no
-  bound of Hex's; past the slowest answer seen a watcher tells the run-out while the ask goes on, refused only at the
-  VM's end). A refusal is Hex's in its process's words, and the VM's end is its end. Where its process takes no rate
+  bound of Hex's; past the slowest answer seen the process's one run-out watcher, `guest::run_out`, tells the run-out
+  while the ask goes on, refused only at the VM's end). A refusal is Hex's in its process's words, and the VM's end is its end. Where its process takes no rate
   its platform's cap holds it (`Recover::set_managed_rate`), told: on macOS a native-helper `rate` request (kind
   0x0014, the scope's whole key and its rate) sets its control's rate, its debt kept and what came before charged at
   the old rate; on Windows the job's hard cap, at least the machine's least. Every VM a governor holds, managed or
