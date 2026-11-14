@@ -496,15 +496,15 @@ fn corrupt_or_overflow_read_budget_refuses_before_runtime_inspect_or_create() {
 
 /// The review's E-10 (AC-T7.4.1; crash-only, CV11): a core that stops is told to its shell once, so the shell can end
 /// its process for its supervisor to start again from the records, where until now it refused every placement for the
-/// process's life and told no one. Do boot a driver, its shell listening for its stop; fail a record write (its epoch's
-/// temp file a directory); then ask it again, and listen once more after it stopped. Expect the write refused, its stop
-/// told once, naming the write's failure; the next ask refused by that stop and nothing told again; a shell that listens
-/// after the stop told it at once.
+/// process's life and told no one. Do boot a driver, its shell listening for its stop; submit a box and fail the write of
+/// its create's acknowledgement (its temp file a directory, made as the runtime creates the box); then retry, and listen
+/// once more after it stopped. Expect the hear refused by the stop, told once and naming the write's failure; the retry
+/// refused and nothing told again; a shell that listens after the stop told it at once.
 #[test]
 fn e10_a_core_that_stops_tells_its_shell_once() {
     let dir = tempfile::tempdir().unwrap();
     let rt = Arc::new(Counting::default());
-    let driver = try_boot_with_budget(dir.path(), rt, Budget { owned: 1, ran: 1 }).unwrap();
+    let driver = boot(dir.path(), rt.clone());
     let told = Arc::new(Mutex::new(Vec::new()));
     let heard = Arc::clone(&told);
     driver
@@ -512,13 +512,15 @@ fn e10_a_core_that_stops_tells_its_shell_once() {
             heard.lock().unwrap().push(format!("{stop:?}"))
         }))
         .unwrap();
-    let blocked = dir.path().join("epoch.tmp");
-    std::fs::create_dir(&blocked).unwrap();
-    let stopped = driver.set_budget(Budget { owned: 2, ran: 2 });
-    assert!(
-        matches!(stopped, Err(Error::Core(Stop::Io(_)))),
-        "{stopped:?}"
-    );
+    let (d, p) = request();
+    let (key, step) = driver.submit(d, p).unwrap();
+    let tmp = dir.path().join(format!("{}.tmp", name("ran", key)));
+    *rt.fail_record.lock().unwrap() = Some(tmp.clone());
+    let (_, start) = step.send.into_iter().next().unwrap();
+    assert!(matches!(
+        driver.hear(NodeId(0), start),
+        Err(Error::Core(Stop::Io(_)))
+    ));
     assert!(
         matches!(told.lock().unwrap().as_slice(), [why] if why.starts_with("Io(")),
         "{:?}",
@@ -534,7 +536,8 @@ fn e10_a_core_that_stops_tells_its_shell_once() {
         }))
         .unwrap();
     assert_eq!(late.lock().unwrap().len(), 1, "a shell listening late");
-    std::fs::remove_dir(blocked).unwrap();
+    drop(driver);
+    std::fs::remove_dir(tmp).unwrap();
 }
 
 /// AC-T7.4.1: a larger admission ceiling cannot precede its durable epoch envelope. A failed
