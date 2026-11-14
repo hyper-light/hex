@@ -71,8 +71,8 @@ impl ImageGuest for Held {
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
         None
     }
-    fn rate_period(&self) -> Duration {
-        Duration::from_millis(100)
+    fn rate_period(&self) -> Option<Duration> {
+        Some(Duration::from_millis(100))
     }
     fn started_from(&self) -> StartedFrom {
         StartedFrom::Booted

@@ -73,8 +73,8 @@ impl ImageGuest for Run {
         None
     }
 
-    fn rate_period(&self) -> Duration {
-        Duration::ZERO
+    fn rate_period(&self) -> Option<Duration> {
+        None
     }
 
     fn started_from(&self) -> shards_api::image::StartedFrom {

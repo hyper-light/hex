@@ -1832,10 +1832,10 @@ impl crate::recorded::Recover for Images {
             footprint_bytes: GIB,
             resident_bytes: GIB,
             guest_ns: Vec::new(),
-            window: self.node_vm_rate_period(run)?,
+            window: self.node_vm_rate_period(run)?.unwrap_or_default(),
         })
     }
-    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Duration, Refusal> {
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Option<Duration>, Refusal> {
         self.ask("node_vm_rate_period");
         self.0
             .node_periods
@@ -1843,6 +1843,7 @@ impl crate::recorded::Recover for Images {
             .unwrap()
             .get(&run)
             .copied()
+            .map(Some)
             .ok_or_else(|| Refusal::Broken("a node VM this runtime doesn't run".into()))
     }
     fn node_vm_rate(
@@ -1863,13 +1864,13 @@ impl crate::recorded::Recover for Images {
         self.0.node_rooms.lock().unwrap().push((run, room));
         Ok(())
     }
-    fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+    fn image_rate_period(&self, record: &BoxRecord) -> Result<Option<Duration>, Refusal> {
         self.ask("image_rate_period");
         self.0
             .reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.0.periods.lock().unwrap().get(record.spec.id.as_str()) {
-            Some(period) => Ok(*period),
+            Some(period) => Ok(Some(*period)),
             None => Err(Refusal::NotRunning(
                 record.spec.id.try_clone()?,
                 "rate_period",
