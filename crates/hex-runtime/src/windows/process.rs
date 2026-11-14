@@ -221,7 +221,6 @@ impl JobBox {
         self.state.id.as_ref()
     }
 
-
     pub fn bounds(&self) -> Bounds {
         self.state.bounds.clone()
     }

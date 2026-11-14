@@ -254,6 +254,30 @@ impl Privileged for Sim {
         ))
     }
 
+    /// The user's lingering processes end once let go ([`SimState::linger`]): a slice's wait comes back empty-handed while
+    /// they linger, and a following wait (`Duration::MAX`) is counted and waits for them.
+    fn empties_within(&self, uid: u32, slice: Duration) -> Result<bool, hex_api::Refusal> {
+        let mut s = self.inner.lock().expect("sim lock");
+        if s.linger && slice == Duration::MAX {
+            s.following += 1;
+            while s.linger {
+                s = self.emptied.wait(s).expect("sim lock");
+            }
+        } else if s.linger {
+            s = self
+                .emptied
+                .wait_timeout_while(s, slice, |s| s.linger)
+                .expect("sim lock")
+                .0;
+            if s.linger {
+                return Ok(false);
+            }
+        }
+        let owner = s.owner.clone();
+        s.members.retain(|m| owner.get(&m.pid) != Some(&uid));
+        Ok(true)
+    }
+
     fn kill(&self, uid: u32, signal: i32) -> std::io::Result<usize> {
         let mut s = self.inner.lock().expect("sim lock");
         let owner = s.owner.clone();
@@ -844,7 +868,11 @@ fn e12_a_box_users_end_follows_its_late_emptying_to_its_end() {
         }
         state.lock().unwrap().linger = false;
         emptied.notify_all();
-        assert_eq!(ending.join().unwrap(), Ok(()), "the end once its user emptied");
+        assert_eq!(
+            ending.join().unwrap(),
+            Ok(()),
+            "the end once its user emptied"
+        );
     });
     assert_eq!(client.wait(&b1, pid).unwrap(), Some(Exit::Signal(9)));
     let b2 = BoxId::new("b2").expect("box id");
