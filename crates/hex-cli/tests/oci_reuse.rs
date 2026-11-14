@@ -69,7 +69,7 @@ use hex_core::netns_reuse::Refused as NetRefused;
 use hex_core::patience::Patience;
 use hex_core::reuse::Refused;
 use hex_node::Node;
-use hex_testkit::waits::{DELETE, EMPTYING, PROGRAM, until};
+use hex_testkit::waits::EMPTYING;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::inotify;
 use rustix::process::{Pid, PidfdFlags};
@@ -2670,19 +2670,22 @@ fn new_route() -> Vec<u8> {
     nl_request(24, &body)
 }
 
-/// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.
+/// Waits for `cond` on `wait`, measuring, by the life of the in-process node this test holds (the review's C-5), whose
+/// own threads make the fact: it lives while held. A look: the node tells no event of these facts, its state read.
+/// Says how many looks it took.
 fn wait_for(wait: &Patience, cond: impl FnMut() -> bool, what: &str) -> u64 {
-    until(wait, what, cond).unwrap()
+    hex_testkit::waits::follow::until(wait, what, || hex_testkit::waits::follow::Party::Live, cond)
+        .unwrap()
 }
 
 // Each wait here takes its own fact's record (hex_testkit::waits; the lead's rule of 2026-11-08), or measures where no
 // recorded operation makes its fact, its answers recorded for the census to come, from the suites run under it.
 /// A killed box's processes ending: `node.emptying`.
-static KILLED: Patience = Patience::seeded("test.oci_reuse.killed", EMPTYING);
+static KILLED: Patience = Patience::measuring("test.oci_reuse.killed");
 /// An init's run to its end: the program-run record.
-static INIT_ENDS: Patience = Patience::seeded("test.oci_reuse.init_ends", PROGRAM);
+static INIT_ENDS: Patience = Patience::measuring("test.oci_reuse.init_ends");
 /// An exec of `true` run to its end: the program-run record's own fact (`lifecycle.exec`, an exec of `true`).
-static TRUE_ENDS: Patience = Patience::seeded("test.oci_reuse.true_ends", PROGRAM);
+static TRUE_ENDS: Patience = Patience::measuring("test.oci_reuse.true_ends");
 /// A 3 GB sha256 burn's end, a 64 MiB hog's, a 1 MiB hog's, a hog's OOM kill past its bound, a spawn's refusal past
 /// its bound, and 64 MiB written to a box's root: none is an exec of `true`, whose end the program-run record is (each
 /// runs its own work first), and no recorded operation makes any.
@@ -2696,7 +2699,7 @@ static WRITE_ENDS: Patience = Patience::measuring("test.oci_reuse.write_ends");
 /// `true`'s, and made by no recorded operation.
 static SEND_ENDS: Patience = Patience::measuring("test.oci_reuse.send_ends");
 /// An owner's idle slot given its parked init: made within the delete (`Cgroups::give_back`), whose record bounds it.
-static PARKED: Patience = Patience::seeded("test.oci_reuse.parked", DELETE);
+static PARKED: Patience = Patience::measuring("test.oci_reuse.parked");
 /// A parked init asleep for its claim once its delete has answered: its own steps after it said it is parked, which
 /// no recorded operation makes.
 static PARKED_ASLEEP: Patience = Patience::measuring("test.oci_reuse.parked_asleep");

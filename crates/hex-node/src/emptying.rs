@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 /// How long a killed box takes to empty, from its kill (decision 9; Ada's rules of 2026-11-06 and 2026-11-13): W*, the
 /// slowest emptying this process's nodes have seen, from every delete, scrub and removal, since all wait on one kernel,
@@ -50,9 +50,10 @@ impl Emptying for hex_runtime::linux::cgroup::BoxCgroup {
 pub(crate) fn wait_killed(
     wait: &Patience,
     killed: Instant,
+    party: &[Piece<'_>],
     mut fact: impl FnMut(Duration) -> Result<bool, hex_api::Refusal>,
 ) -> Result<bool, hex_api::Refusal> {
-    match within_kill(wait, killed, &mut fact)? {
+    match within_kill(wait, killed, party, &mut fact)? {
         Within::Came => Ok(true),
         Within::Follow => follow_rest(wait, killed, fact),
     }
@@ -70,13 +71,14 @@ pub(crate) enum Within {
 }
 
 /// [`wait_killed`]'s bounded half, for a thread other boxes share (the supervising thread): the wait within W* alone,
-/// so it holds the thread no longer than the slowest answer seen, its answer told; past W*, its run-out told once, and
-/// the follow ([`follow_rest`]) is the caller's to hand to a thread of the box's own (decision 9: a wait follows its
-/// party, but not on a thread other parties share; the review's E-3, 2026-11-14).
+/// so it holds the thread no longer than the slowest answer seen, its answer told; past W*, its run-out told once,
+/// naming `party`, and the follow ([`follow_rest`]) is the caller's to hand to a thread of the box's own (decision 9: a
+/// wait follows its party, but not on a thread other parties share; the review's E-3, 2026-11-14).
 #[cfg(target_os = "linux")]
 pub(crate) fn within_kill(
     wait: &Patience,
     killed: Instant,
+    party: &[Piece<'_>],
     mut fact: impl FnMut(Duration) -> Result<bool, hex_api::Refusal>,
 ) -> Result<Within, hex_api::Refusal> {
     let Some(window) = wait.deadline() else {
@@ -86,7 +88,7 @@ pub(crate) fn within_kill(
         wait.answered(killed.elapsed());
         return Ok(Within::Came);
     }
-    wait.ran_out(window);
+    wait.ran_out(window, killed.elapsed(), party);
     Ok(Within::Follow)
 }
 
@@ -226,7 +228,19 @@ pub(crate) fn end_of_killed<P: hex_api::Proc + ?Sized>(
             EMPTYING.answered(killed.elapsed());
             return Ok(exit);
         }
-        EMPTYING.ran_out(window);
+        EMPTYING.ran_out(
+            window,
+            killed.elapsed(),
+            &[
+                Piece::Kind("the killed program pid "),
+                Piece::Pid(i64::from(proc.pid())),
+                Piece::Kind(if proc.on_this_host() {
+                    ", by its own events"
+                } else {
+                    " in its guest, by its host's events"
+                }),
+            ],
+        );
     }
     loop {
         if let Some(exit) = proc.wait_for(Duration::MAX)? {

@@ -29,7 +29,7 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::schedule::waits::WaitKind;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 use hex_wait::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
@@ -85,10 +85,13 @@ pub enum BoxKind {
     Capacity,
     /// A member of a Shards image box handed over (`Call::Member`, joint plan step 17).
     Member,
+    /// A start followed to its end (`Call::Started`; ROOT, 2026-11-14): the rest of a boot its start answered Pending
+    /// for, timed apart from a start's own answer.
+    Started,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Member as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Started as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -113,8 +116,8 @@ macro_rules! class_wait {
 }
 
 /// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
-/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) has no
-/// census row for any class, so it measures in every table.
+/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) and a start
+/// followed to its end have no census row for any class, so they measure in every table.
 macro_rules! class_waits {
     ($prefix:literal, $class:literal, measuring) => {
         $crate::calls::class_waits!(
@@ -145,6 +148,7 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".run.", $class), $run),
             $crate::calls::class_wait!(concat!($prefix, ".capacity.", $class), $capacity),
             $crate::calls::class_wait!(concat!($prefix, ".member.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".started.", $class), measuring),
         ]
     };
 }
@@ -191,7 +195,9 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::ExecStreams { .. }
             | Call::Run { .. }
             | Call::Capacity(_)
-            | Call::Member { .. } => return None,
+            | Call::Member { .. }
+            | Call::MemberSignal { .. }
+            | Call::Started(_) => return None,
         },
         Request::Release
         | Request::Taken
@@ -230,6 +236,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::Run { spec, .. } => (BoxKind::Run, Timed::Class(spec.class.class())),
         Call::Capacity(class) => (BoxKind::Capacity, Timed::Class(*class)),
         Call::Member { id, .. } => (BoxKind::Member, Timed::Box(id)),
+        Call::MemberSignal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
+        Call::Started(id) => (BoxKind::Started, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -521,17 +529,26 @@ impl ReplyDeadline {
         Refusal::Os { op, why }
     }
 
-    fn ran_out(self, waits: Option<&Patience>) {
+    /// Its learned wait passed with no answer to call `call`: a run-out to `waits`, naming the call's connection.
+    fn ran_out(self, waits: Option<&Patience>, call: u64) {
         if let (ReplyBound::Learned(wait), Some(waits)) = (self.source, waits) {
-            waits.ran_out(wait);
+            waits.ran_out(
+                wait,
+                wait,
+                &[
+                    Piece::Kind("the node agent's answer to call "),
+                    Piece::Number(call),
+                    Piece::Kind(", by its connection"),
+                ],
+            );
         }
     }
 
     /// A call's `budget` passed with no answer, and with it every learned wait before it: the call's own where its
     /// caller gave no deadline, else `learned`, the one under the caller's not yet told, each a run-out to `waits`.
-    fn ended(budget: Option<Self>, learned: Option<Self>, waits: Option<&Patience>) {
+    fn ended(budget: Option<Self>, learned: Option<Self>, waits: Option<&Patience>, call: u64) {
         for bound in [budget, learned].into_iter().flatten() {
-            bound.ran_out(waits);
+            bound.ran_out(waits, call);
         }
     }
 }
@@ -1792,7 +1809,7 @@ impl<'a, T: Transport> Caller<'a, T> {
                 return Some(answer);
             }
             *learned = None;
-            bound.ran_out(waits);
+            bound.ran_out(waits, self.id);
         }
         self.wait(deadline)
     }
@@ -1885,7 +1902,7 @@ impl<T: Transport> Conn<T> {
             Err(Sent::Full(r)) => {
                 pending = caller.wait(Some(Instant::now()));
                 if pending.is_none() {
-                    ReplyDeadline::ended(budget, learned.take(), waits);
+                    ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                     return Err(budget.map_or(r, |d| d.refusal("sending to the node agent")));
                 }
             }
@@ -1946,7 +1963,7 @@ impl<T: Transport> Conn<T> {
                         shared.send_owed_now();
                         return Err(match why {
                             Sent::Full(why) => {
-                                ReplyDeadline::ended(budget, learned.take(), waits);
+                                ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                                 budget.map_or(why, |d| d.refusal("accepting offered streams"))
                             }
                             Sent::Refused(why) => why,
@@ -1976,7 +1993,7 @@ impl<T: Transport> Conn<T> {
                         shared.owe(caller.id, &Request::Release)?;
                         shared.send_owed_now();
                     }
-                    ReplyDeadline::ended(budget, learned.take(), waits);
+                    ReplyDeadline::ended(budget, learned.take(), waits, caller.id);
                     return Err(budget.map_or_else(
                         || {
                             Refusal::Broken(
@@ -3164,6 +3181,23 @@ impl<T: Transport> Runtime for Core<T> {
         )
     }
 
+    /// Goal 2's item 2: a member's own signal, carried by the node's wire's appended call (`Call::MemberSignal`).
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        self.done(
+            Call::MemberSignal {
+                id: id.clone(),
+                member: member.clone(),
+                signal,
+            },
+            "member signal",
+        )
+    }
+
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.info(Call::Inspect(id.clone()), "inspect")
     }
@@ -3220,6 +3254,25 @@ impl<T: Transport> Runtime for Core<T> {
                  process"
             ),
         })
+    }
+
+    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no host use, so a delete here
+    /// can't answer its VM's final use, and the trait's plain delete answering none would read as a run that never
+    /// started, which kiln charges nothing for.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "delete_with_host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet, so a delete can't answer its VM's final use; \
+                 delete it with delete, or in the node's own process"
+            ),
+        })
+    }
+
+    /// The node follows the box's start to its end (`Call::Started`, appended; ROOT, 2026-11-14), so a start answered
+    /// Pending is waited for on the fact, never by looks.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.info(Call::Started(id.clone()), "started")
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {

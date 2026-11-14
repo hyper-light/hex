@@ -27,6 +27,7 @@ mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
+pub mod event;
 mod grants;
 mod id;
 pub mod lease;
@@ -52,9 +53,10 @@ pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
-    GpuEligibility, GuestTime, HostUse, ImageArch, ImageOs, ImagePlatform, IoKind, Learned,
-    LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
-    LearnedRate, LearnedUse, LearnedWindow, LifecycleCause, MAX_LEARNED_HOLDINGS,
+    GpuEligibility, GuestEnd, GuestFailure, GuestTime, HostUse, ImageArch, ImageOs, ImagePlatform,
+    IoKind, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
+    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedUnacted, LearnedUnread,
+    LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_LEARNED_HOLDINGS,
     MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, MachineTime, Membership, NodeRun, NodeVmPhase,
     NodeVmReceipt, Proc, RateHeld, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime,
     RuntimeCost, Signal, StartedFrom, Upstream, Usage, VmSize,

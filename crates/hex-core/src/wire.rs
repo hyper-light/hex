@@ -47,14 +47,15 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
-    GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
-    LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
-    LearnedRate, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
-    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase,
-    NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published,
-    RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
-    check_published, check_sign_ins,
+    GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
+    IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
+    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedUnacted, LearnedUnread,
+    LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
+    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
+    Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
+    Proto, Published, RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
+    RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials,
+    check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -187,6 +188,8 @@ mod kind {
     pub const CAPTURE_ASK: u16 = 0x8015;
     pub const REFRESH_ASK: u16 = 0x8016;
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
+    pub const MEMBER_SIGNAL: u16 = 0x001e;
+    pub const START_FOLLOWED: u16 = 0x001f;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -312,6 +315,17 @@ pub enum Call {
     /// (docs/design/credential-grants.md C7): the node asks it over this connection ([`Answer::LessorAsk`],
     /// [`Answer::LeaseAsk`]). Answered [`Answer::Done`], or refused by type where the node leases through no connection.
     Lessors,
+    /// `signal` to member `member` of running Shards image box `id` alone (`Runtime::signal_member`; goal 2's item 2),
+    /// on its own lane of its run's agent-control endpoint: answered [`Answer::Done`], or refused by type. Appended.
+    MemberSignal {
+        id: BoxId,
+        member: Member,
+        signal: Signal,
+    },
+    /// Box `id` once its start has come to its end (`Runtime::started`): a box still booting followed to its boot's
+    /// answer on the node, a wait on the fact (decision 9), so a remote caller of a start answered Pending never looks;
+    /// answered [`Answer::Info`], or refused by type. Appended (ROOT, 2026-11-14).
+    Started(BoxId),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -958,13 +972,15 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 w.reserve_fixed(2)?;
                 w.option(capacity.own.cpu_ns, Writer::u64);
                 w.option(capacity.own.uptime_ns, Writer::u64);
-                // Joint plan step 39: last, after `own`.
+                // Joint plan step 39: after `own`.
                 w.reserve_fixed(size_of::<u32>())?;
                 w.device_count(capacity.node_vms.len(), NODE_VM_RECEIPT_BYTES)?;
                 for receipt in &capacity.node_vms {
                     put_node_vm_receipt(w, receipt)?;
                 }
-                Ok(())
+                // Last (A-3; ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
+                w.reserve_fixed(1)?;
+                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1310,6 +1326,15 @@ fn parse_request(
         kind::NETNS => Request::Call(Call::Netns),
         kind::LINKS => Request::Call(Call::Links),
         kind::LESSORS => Request::Call(Call::Lessors),
+        kind::MEMBER_SIGNAL => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let signal = r.u8().map_err(bad)?;
+            let signal = Signal::new(i64::from(signal))
+                .map_err(|e| bad(Fault::value("signal", e.to_string())))?;
+            Request::Call(Call::MemberSignal { id, member, signal })
+        }
+        kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1520,13 +1545,15 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     cpu_ns: r.option(Reader::u64)?,
                     uptime_ns: r.option(Reader::u64)?,
                 },
-                // Last (joint plan step 39).
+                // Then (joint plan step 39).
                 node_vms: r.bounded_list(
                     NODE_VM_RECEIPT_BYTES,
                     MAX_LEARNED_HOLDINGS,
                     "node VM receipts",
                     node_vm_receipt,
                 )?,
+                // Last (A-3).
+                unlearned: r.option(|r| r.string("why a learner learned nothing"))?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -1718,6 +1745,8 @@ fn request_name(kind: u16) -> &'static str {
         kind::LEASED => "a leased",
         kind::CAPTURED => "a captured",
         kind::REFRESHED => "a refreshed",
+        kind::MEMBER_SIGNAL => "a member's signal",
+        kind::START_FOLLOWED => "a start followed",
         _ => "a request",
     }
 }
@@ -1773,6 +1802,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             w.header(kind::START, id);
             w.string(b.as_str())
         }
+        Call::Started(b) => {
+            w.header(kind::START_FOLLOWED, id);
+            w.string(b.as_str())
+        }
         Call::Exec {
             id: b,
             program,
@@ -1818,6 +1851,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Lessors => {
             w.header(kind::LESSORS, id);
+            Ok(())
+        }
+        Call::MemberSignal {
+            id: b,
+            member,
+            signal,
+        } => {
+            w.header(kind::MEMBER_SIGNAL, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            let n = u8::try_from(signal.number())
+                .map_err(|_| Fault::value("signal", format!("{} isn't a byte", signal.number())))?;
+            w.u8(n);
             Ok(())
         }
         Call::Kill { exec } => {
@@ -2025,6 +2071,7 @@ fn put_route_key(w: &mut Writer, key: RouteKey) -> Result<(), Fault> {
         Execution::ShardsShared => 1,
         Execution::ShardsDedicated => 2,
         Execution::Firecracker => 3,
+        Execution::NodeVm => 4,
     });
     w.u8(match key.gpu {
         GpuEligibility::Any => 0,
@@ -2055,6 +2102,7 @@ fn route_key(r: &mut Reader<'_>) -> Result<RouteKey, Fault> {
         1 => Execution::ShardsShared,
         2 => Execution::ShardsDedicated,
         3 => Execution::Firecracker,
+        4 => Execution::NodeVm,
         _ => return Err(Fault::value("route.execution", "unsupported tag")),
     };
     let gpu = match r.u8()? {
@@ -2298,6 +2346,20 @@ const LEARNED_CEILING_BYTES: usize = 32 + RESOURCE_BYTES + 3 * (1 + size_of::<u6
 const LEARNED_RATE_MIN_BYTES: usize = HOLDER_MIN_BYTES + 1;
 /// A learned rate's VMM own taking its share (D260): its tag, then its own and its share.
 const OWN_TAKES_SHARE_BYTES: usize = 1 + 2 * size_of::<u64>();
+/// One VM a learner couldn't read at its least (place 4): its holder at its least, then its reason's length.
+const LEARNED_UNREAD_MIN_BYTES: usize = HOLDER_MIN_BYTES + size_of::<u32>();
+/// One guest's room's await past its holder (place 4): its capability's tag.
+const LEARNED_AWAIT_BYTES: usize = 1;
+/// One guest's room's await at its least: its holder at its least, then its capability's tag.
+const LEARNED_AWAIT_MIN_BYTES: usize = HOLDER_MIN_BYTES + LEARNED_AWAIT_BYTES;
+/// One node VM ranked above every box at its least (place 4): its run's 16 bytes, then its reason's length.
+const LEARNED_RANK_MIN_BYTES: usize = 16 + size_of::<u32>();
+/// One box whose record can't be read at its least (the review's dropped records): its holder at its least, then its
+/// reason's length.
+const LEARNED_UNRECORDED_MIN_BYTES: usize = HOLDER_MIN_BYTES + size_of::<u32>();
+/// One VM its window couldn't cap or tell its room at its least (A-7): its holder at its least, then its reason's
+/// length.
+const LEARNED_UNACTED_MIN_BYTES: usize = HOLDER_MIN_BYTES + size_of::<u32>();
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
@@ -2311,6 +2373,11 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
     let holdings = std::mem::take(&mut learned.holdings);
     let ended = std::mem::take(&mut learned.ended);
     let rates = std::mem::take(&mut learned.rates);
+    let unread = std::mem::take(&mut learned.unread);
+    let awaits = std::mem::take(&mut learned.awaits);
+    let ranked = std::mem::take(&mut learned.ranked);
+    let unrecorded = std::mem::take(&mut learned.unrecorded);
+    let unacted = std::mem::take(&mut learned.unacted);
     let probe = capacity
         .try_clone()
         .map_err(|e| Fault::value("capacity", e.to_string()))?;
@@ -2359,12 +2426,64 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
         room = left;
         told.push(rate);
     }
+    // Then, in the room the rates leave, as many of the VMs it couldn't read, then of the rooms' awaits, then of the
+    // node VMs it ranks above every box, as fit (place 4), then of the boxes whose records can't be read (the review's
+    // dropped records), then of the VMs its window couldn't cap or tell their room (A-7), each list in its order.
+    let unread = fitted(unread, &mut room, "learned unread VMs", |unread| {
+        holder_bytes(&unread.id).saturating_add(words_bytes(&unread.why))
+    })?;
+    let awaits = fitted(awaits, &mut room, "learned awaits", |awaited| {
+        holder_bytes(&awaited.id).saturating_add(LEARNED_AWAIT_BYTES)
+    })?;
+    let ranked = fitted(ranked, &mut room, "learned ranked VMs", |ranked| {
+        16usize.saturating_add(words_bytes(&ranked.why))
+    })?;
+    let unrecorded = fitted(unrecorded, &mut room, "learned unrecorded boxes", |told| {
+        holder_bytes(&told.id).saturating_add(words_bytes(&told.why))
+    })?;
+    let unacted = fitted(unacted, &mut room, "learned unacted VMs", |told| {
+        holder_bytes(&told.id).saturating_add(words_bytes(&told.why))
+    })?;
     if let Some(learned) = capacity.learned.as_mut() {
         learned.holdings = kept;
         learned.ended = ends;
         learned.rates = told;
+        learned.unread = unread;
+        learned.awaits = awaits;
+        learned.ranked = ranked;
+        learned.unrecorded = unrecorded;
+        learned.unacted = unacted;
     }
     Ok(())
+}
+
+/// As many of `values`, in their order, as fit `room`, each `bytes` of it, taken from `room`: the first that doesn't
+/// fit, and every one after it, left out (place 4).
+fn fitted<T>(
+    values: Vec<T>,
+    room: &mut usize,
+    what: &'static str,
+    bytes: impl Fn(&T) -> usize,
+) -> Result<Vec<T>, Fault> {
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(values.len())
+        .map_err(|_| Fault::Storage {
+            what,
+            bound: values.len(),
+        })?;
+    for value in values {
+        let Some(left) = room.checked_sub(bytes(&value)) else {
+            break;
+        };
+        *room = left;
+        kept.push(value);
+    }
+    Ok(kept)
+}
+
+/// What [`Writer::string`] writes of `words`: their length, then their bytes.
+fn words_bytes(words: &str) -> usize {
+    size_of::<u32>().saturating_add(words.len())
 }
 
 /// What a node learned of a class's microVMs (joint plan step 14): its priors, then its learned use.
@@ -2411,13 +2530,51 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     for rate in &learned.rates {
         put_learned_rate(w, rate)?;
     }
-    // Last (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
+    // Then (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
     w.reserve_fixed(1)?;
     w.option_with(learned.window.as_ref(), |w, window| {
         w.reserve_fixed(size_of::<u64>().saturating_add(1))?;
         w.u64(window.window_ns);
         w.option_with(window.slowed_by.as_ref(), put_holder)
-    })
+    })?;
+    // Then (place 4; ROOT, 2026-11-13): each VM its window couldn't read and why, each guest's room's await, and each
+    // node VM it ranks above every box and why.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.unread.len(), LEARNED_UNREAD_MIN_BYTES)?;
+    for unread in &learned.unread {
+        put_holder(w, &unread.id)?;
+        w.string(&unread.why)?;
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.awaits.len(), LEARNED_AWAIT_MIN_BYTES)?;
+    for awaited in &learned.awaits {
+        put_holder(w, &awaited.id)?;
+        w.reserve_fixed(LEARNED_AWAIT_BYTES)?;
+        put_upstream(w, awaited.needs)?;
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.ranked.len(), LEARNED_RANK_MIN_BYTES)?;
+    for ranked in &learned.ranked {
+        w.reserve_fixed(16)?;
+        w.raw(ranked.run.bytes());
+        w.string(&ranked.why)?;
+    }
+    // Then (the review's dropped records; ROOT, 2026-11-14): each box whose record can't be read and why.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.unrecorded.len(), LEARNED_UNRECORDED_MIN_BYTES)?;
+    for told in &learned.unrecorded {
+        put_holder(w, &told.id)?;
+        w.string(&told.why)?;
+    }
+    // Last (A-7; ROOT, 2026-11-14): each VM its window couldn't cap or tell its room, held at what was last set, and
+    // why.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.unacted.len(), LEARNED_UNACTED_MIN_BYTES)?;
+    for told in &learned.unacted {
+        put_holder(w, &told.id)?;
+        w.string(&told.why)?;
+    }
+    Ok(())
 }
 
 /// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
@@ -2515,10 +2672,11 @@ fn holder_bytes(holder: &LearnedHolder) -> usize {
     }
 }
 
-/// One node VM's receipt (joint plan step 39): its run, its booking, then its phase's tag.
-const NODE_VM_RECEIPT_BYTES: usize = 16 + RESOURCE_BYTES + 1;
+/// One node VM's receipt (joint plan step 39): its run, its booking, its phase's tag, then its guest's room (V2).
+const NODE_VM_RECEIPT_BYTES: usize = 16 + RESOURCE_BYTES + 1 + RESOURCE_BYTES;
 
-/// A node VM's receipt: its run's 16 bytes, its booking, then its phase, 0 Booting, 1 Ready and 2 Ended.
+/// A node VM's receipt: its run's 16 bytes, its booking, its phase, 0 Booting, 1 Ready and 2 Ended, then what its guest
+/// is admitted at (V2).
 fn put_node_vm_receipt(w: &mut Writer, receipt: &NodeVmReceipt) -> Result<(), Fault> {
     w.reserve_fixed(NODE_VM_RECEIPT_BYTES)?;
     w.raw(receipt.run.bytes());
@@ -2528,6 +2686,7 @@ fn put_node_vm_receipt(w: &mut Writer, receipt: &NodeVmReceipt) -> Result<(), Fa
         NodeVmPhase::Ready => 1,
         NodeVmPhase::Ended => 2,
     });
+    put_resources(w, receipt.guest);
     Ok(())
 }
 
@@ -2547,6 +2706,7 @@ fn node_vm_receipt(r: &mut Reader<'_>) -> Result<NodeVmReceipt, Fault> {
                 ));
             }
         },
+        guest: resources(r)?,
     })
 }
 
@@ -2661,6 +2821,61 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         ceilings,
         rates,
         window,
+        unread: r.bounded_list(
+            LEARNED_UNREAD_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned unread VMs",
+            |r| {
+                Ok(LearnedUnread {
+                    id: holder(r)?,
+                    why: r.string("why a learner couldn't read a VM")?,
+                })
+            },
+        )?,
+        awaits: r.bounded_list(
+            LEARNED_AWAIT_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned awaits",
+            |r| {
+                Ok(LearnedAwait {
+                    id: holder(r)?,
+                    needs: upstream(r)?,
+                })
+            },
+        )?,
+        ranked: r.bounded_list(
+            LEARNED_RANK_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned ranked VMs",
+            |r| {
+                Ok(LearnedRank {
+                    run: hex_api::NodeRun::from_bytes(r.array::<16>()?),
+                    why: r.string("why a node VM ranks above every box")?,
+                })
+            },
+        )?,
+        unrecorded: r.bounded_list(
+            LEARNED_UNRECORDED_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned unrecorded boxes",
+            |r| {
+                Ok(LearnedUnrecorded {
+                    id: holder(r)?,
+                    why: r.string("why a node couldn't read a box's record")?,
+                })
+            },
+        )?,
+        unacted: r.bounded_list(
+            LEARNED_UNACTED_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned unacted VMs",
+            |r| {
+                Ok(LearnedUnacted {
+                    id: holder(r)?,
+                    why: r.string("why a window couldn't act on a VM")?,
+                })
+            },
+        )?,
     })
 }
 
@@ -3700,6 +3915,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
+                LifecycleCause::NodeVmEnded => 4,
             });
             // Appended after its cause (joint plan step 12): its reason in the refusing site's words, absent a byte 0.
             w.option_with(why.as_deref(), |w, why| w.string(why))
@@ -3717,6 +3933,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
+                LifecycleCause::NodeVmEnded => 4,
             });
             // Appended after its cause (joint plan step 14): its reason in the refusing site's words, absent a byte 0.
             w.option_with(why.as_deref(), |w, why| w.string(why))
@@ -3752,7 +3969,82 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.string(what)?;
             w.string(why)
         }
+        // The review's B-15: a Shards guest's failure in its own kind, after every older refusal.
+        Refusal::Guest { op, failure } => {
+            w.u8(16);
+            w.string(op)?;
+            put_guest_failure(w, failure)
+        }
     }
+}
+
+/// A Shards guest's failure ([`Refusal::Guest`]): its kind's tag, then its fields, each duration in whole nanoseconds.
+fn put_guest_failure(w: &mut Writer, failure: &GuestFailure) -> Result<(), Fault> {
+    match failure {
+        GuestFailure::Stalled {
+            waited,
+            over,
+            slowest,
+        } => {
+            w.u8(0);
+            for d in [waited, over, slowest] {
+                let nanos = u64::try_from(d.as_nanos())
+                    .map_err(|_| Fault::value("guest stall", "it passes a u64 of nanoseconds"))?;
+                w.u64(nanos);
+            }
+            Ok(())
+        }
+        GuestFailure::Ended(end) => {
+            w.u8(1);
+            match end {
+                GuestEnd::PowerOff => w.u8(0),
+                GuestEnd::Reset => w.u8(1),
+                GuestEnd::Stopped => w.u8(2),
+                GuestEnd::Failed(why) => {
+                    w.u8(3);
+                    return w.string(why);
+                }
+            }
+            Ok(())
+        }
+        GuestFailure::Gone { pid, why } => {
+            w.u8(2);
+            w.u32(*pid);
+            w.string(why)
+        }
+        GuestFailure::Rate(why) => {
+            w.u8(3);
+            w.string(why)
+        }
+        GuestFailure::HostUse(why) => {
+            w.u8(4);
+            w.string(why)
+        }
+    }
+}
+
+fn guest_failure(r: &mut Reader<'_>) -> Result<GuestFailure, Fault> {
+    Ok(match r.u8()? {
+        0 => GuestFailure::Stalled {
+            waited: std::time::Duration::from_nanos(r.u64()?),
+            over: std::time::Duration::from_nanos(r.u64()?),
+            slowest: std::time::Duration::from_nanos(r.u64()?),
+        },
+        1 => GuestFailure::Ended(match r.u8()? {
+            0 => GuestEnd::PowerOff,
+            1 => GuestEnd::Reset,
+            2 => GuestEnd::Stopped,
+            3 => GuestEnd::Failed(r.string("guest end")?),
+            t => return Err(Fault::value("guest end", format!("variant {t}"))),
+        }),
+        2 => GuestFailure::Gone {
+            pid: r.u32()?,
+            why: r.string("guest gone")?,
+        },
+        3 => GuestFailure::Rate(r.string("guest rate")?),
+        4 => GuestFailure::HostUse(r.string("guest host use")?),
+        t => return Err(Fault::value("guest failure", format!("variant {t}"))),
+    })
 }
 
 /// A capability by its place in [`Upstream::ALL`] (append-only).
@@ -3846,6 +4138,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
                 3 => LifecycleCause::Retired,
+                4 => LifecycleCause::NodeVmEnded,
                 t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
             },
             why: r.option(|r| r.string("lifecycle refusal reason"))?,
@@ -3857,6 +4150,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
                 3 => LifecycleCause::Retired,
+                4 => LifecycleCause::NodeVmEnded,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
             why: r.option(|r| r.string("backing refusal reason"))?,
@@ -3881,6 +4175,10 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         15 => Refusal::Unconfigured {
             what: name(&r.string("refusal name")?)?,
             why: r.string("refusal reason")?,
+        },
+        16 => Refusal::Guest {
+            op: name(&r.string("refusal name")?)?,
+            failure: guest_failure(r)?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })

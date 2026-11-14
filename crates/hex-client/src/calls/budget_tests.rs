@@ -9,7 +9,6 @@
 use super::*;
 use crate::guest::{self, Duplex, DuplexOwner, Link, own_duplex};
 use hex_testkit::waits::follow::{self, Party};
-use hex_testkit::waits::within;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -29,9 +28,37 @@ fn recv_by<T>(from: &mpsc::Receiver<T>, by: Option<Instant>) -> Result<T, mpsc::
     }
 }
 
-/// Waits on `wait`, its fact's own patience, for the next message from `from`.
-fn recv_on<T>(wait: &Patience, from: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvTimeoutError> {
-    within(wait, |by| recv_by(from, by))
+/// Waits on `wait` for `what`, the next message from `from`, by the life of its senders (the review's C-5): the
+/// channel's end, once every sender has dropped with its thread, is the party's, which the receive sees itself.
+fn recv_on<T>(wait: &Patience, what: &str, from: &mpsc::Receiver<T>) -> Result<T, follow::Unmet> {
+    let ended = std::cell::Cell::new(false);
+    follow::within(
+        wait,
+        what,
+        || {
+            if ended.get() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        |by| match recv_by(from, by) {
+            Ok(got) => Some(got),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                ended.set(true);
+                None
+            }
+            Err(_) => None,
+        },
+    )
+}
+
+/// An io call's answer, as a slice of [`follow::within`] takes it: its own deadline passing is no answer yet.
+fn io_slice<T>(got: io::Result<T>) -> Option<io::Result<T>> {
+    match got {
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => None,
+        got => Some(got),
+    }
 }
 
 /// Waits on `wait` for the next message from `from`, following `sender`, the thread that sends it, by its life
@@ -380,9 +407,20 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {
     let wake = Arc::new(Wake::new().unwrap());
     let (agent_stop, agent_wake) = (Arc::clone(&stop), Arc::clone(&wake));
     let agent = std::thread::spawn(move || -> io::Result<TcpStream> {
-        let mut peer = within(&DIALED, |by| {
-            accept_before(&listener, &agent_stop, &agent_wake, by)
-        })?;
+        // By the life of the test's stop word, which ends the accept too.
+        let mut peer = follow::within(
+            &DIALED,
+            "the client's dial",
+            || {
+                if agent_stop.load(Ordering::Acquire) {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
+            |by| io_slice(accept_before(&listener, &agent_stop, &agent_wake, by)),
+        )
+        .map_err(|unmet| io::Error::other(unmet.to_string()))??;
         peer.write_all(&TOKEN.to_le_bytes())?;
         answer_to(&mut peer, 1, agents_hello())?;
         Ok(peer)
@@ -622,7 +660,7 @@ fn default_none_preserves_the_unarmed_wait() {
         let result = control.list();
         let _ = finished.send((result, armed()));
     });
-    let observed_send = recv_on(&SENT, &request);
+    let observed_send = recv_on(&SENT, "the request sent", &request);
     // Pending once its send has gone: nothing it armed has an end of its own.
     let before = answer.try_recv();
     client
@@ -1571,9 +1609,17 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     let agent = std::thread::spawn(move || -> io::Result<(Vec<Request>, usize)> {
         let mut asked = Vec::new();
         for _ in 0..4 {
-            asked.push(within(&ASKED, |_| next_request(&mut agent_peer))?.1);
+            // A read that can't be cut: it ends at the client's request or at the connection's end.
+            asked.push(
+                follow::whole(&ASKED, "the client's next request", || {
+                    next_request(&mut agent_peer)
+                })?
+                .1,
+            );
         }
-        let end = within(&AGENT_ENDED, |_| agent_peer.read(&mut [0]))?;
+        let end = follow::whole(&AGENT_ENDED, "the connection's end", || {
+            agent_peer.read(&mut [0])
+        })?;
         Ok((asked, end))
     });
     let stop = Arc::new(AtomicBool::new(false));
@@ -1585,19 +1631,25 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
         (Arc::clone(&stop), Arc::clone(&wake), Arc::clone(&owned));
     let streams = std::thread::spawn(move || -> io::Result<Vec<Named>> {
         // The first exec's three dials, one fact: one wait for all three accepted and named.
-        let mut held = within(&STREAMS_DIALED, |by| -> io::Result<Vec<_>> {
-            let mut held = Vec::new();
-            for _ in 0..3 {
-                let mut peer = accept_before(&stdio, &streams_stop, &streams_wake, by)?;
-                streams_owned.lock().unwrap().push(peer.try_clone()?);
-                peer.set_nodelay(true)?;
-                peer.set_read_timeout(timeout_by(by)?)?;
-                let mut name = [0; stream::NAME_BYTES];
-                peer.read_exact(&mut name)?;
-                held.push((stream::read_name(&name).unwrap(), peer));
-            }
-            Ok(held)
-        })?;
+        // One wait that can't be cut: three accepts and their names, made whole, each ending at its stop word.
+        let by = None;
+        let mut held = follow::whole(
+            &STREAMS_DIALED,
+            "the first exec's three dials",
+            || -> io::Result<Vec<_>> {
+                let mut held = Vec::new();
+                for _ in 0..3 {
+                    let mut peer = accept_before(&stdio, &streams_stop, &streams_wake, by)?;
+                    streams_owned.lock().unwrap().push(peer.try_clone()?);
+                    peer.set_nodelay(true)?;
+                    peer.set_read_timeout(timeout_by(by)?)?;
+                    let mut name = [0; stream::NAME_BYTES];
+                    peer.read_exact(&mut name)?;
+                    held.push((stream::read_name(&name).unwrap(), peer));
+                }
+                Ok(held)
+            },
+        )?;
         if matches!(stream_phase.recv(), Ok(StreamPhase::WriteLate)) {
             for (name, peer) in &mut held {
                 if name.stream == stream::Stdio::Out {
@@ -1640,7 +1692,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             let result = stdout.read_exact(&mut bytes).map(|()| bytes);
             let _ = read.send(result);
         }));
-        let bytes = recv_on(&LATE_READ, &bytes)
+        let bytes = recv_on(&LATE_READ, "the late fixture's bytes", &bytes)
             .map_err(|error| Refusal::os("observing requested late fixture bytes", error))?
             .map_err(|error| Refusal::os("reading late fixture stdio", error))?;
         // A second exec on the same connection, after the first's setup: its own cap.
@@ -2024,7 +2076,7 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
             .unwrap();
     });
     // The open began, or the exec ended without one: both are facts the worker sends.
-    let first = recv_on(&FIRST, &events).unwrap();
+    let first = recv_on(&FIRST, "the first event", &events).unwrap();
     let opened = matches!(first, Offered::Opening);
     let reading = client.conn.shared.state().unwrap().reading;
     // The sibling's own deadline is one no answer here comes near: its answer while the open holds is the fact.
@@ -2042,7 +2094,7 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
     sibling_done.send(()).unwrap();
     let ended = match first {
         Offered::Ended(..) => first,
-        Offered::Opening => match recv_on(&ENDED, &events).unwrap() {
+        Offered::Opening => match recv_on(&ENDED, "the stream's end", &events).unwrap() {
             Offered::Opening => panic!("the exec opened its offer twice"),
             ended => ended,
         },
@@ -2914,7 +2966,7 @@ fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
     let expired = until(original);
     let released = release.send(());
     // Its notice that it began precedes its answer, so it is read once the answer has come.
-    let before_cleanup = recv_on(&RETURNED, &answer);
+    let before_cleanup = recv_on(&RETURNED, "the worker's answer", &answer);
     let began = started.try_recv();
     let before_release_at = Instant::now();
     drop(held);
@@ -3172,7 +3224,11 @@ fn absolute_bootstrap_preserves_requests_and_typed_answers() {
         let reply = kind.reply();
         let expected = wire::answer(0, &reply, wire::MAX_MESSAGE).unwrap();
         let (client, _) = bootstrap_probe(Some(reply));
-        let got = within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))).unwrap();
+        // A call that can't be cut: its answer, or its refusal, given no deadline.
+        let got = follow::whole(&ANSWERED, "the bootstrap call's answer", || {
+            kind.invoke(&client, answer_by(None))
+        })
+        .unwrap();
         assert_eq!(wire::answer(0, &got, wire::MAX_MESSAGE).unwrap(), expected);
         let outbound = client.conn.shared.transport.io.outbound.lock().unwrap();
         assert_eq!(outbound.len(), 1);
@@ -3182,14 +3238,16 @@ fn absolute_bootstrap_preserves_requests_and_typed_answers() {
 
         let (client, _) = bootstrap_probe(Some(Answer::Done));
         assert!(matches!(
-            within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))),
+            follow::whole(&ANSWERED, "the bootstrap call's answer", || kind
+                .invoke(&client, answer_by(None))),
             Err(Refusal::Broken(_))
         ));
 
         let why = Refusal::Broken("owned typed bootstrap refusal".into());
         let (client, _) = bootstrap_probe(Some(Answer::Refused(why.clone())));
         assert_eq!(
-            within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))),
+            follow::whole(&ANSWERED, "the bootstrap call's answer", || kind
+                .invoke(&client, answer_by(None))),
             Err(why)
         );
     }
@@ -3472,7 +3530,7 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     // Capture every error branch; end ONLY this connection, close its retained
     // pipe, and join this worker BEFORE asserting any result or phase witness. Its Started
     // and its Kill precede its answer, so each is read once the answer has come.
-    let before_cleanup = recv_on(&RETURNED, &answer);
+    let before_cleanup = recv_on(&RETURNED, "the worker's answer", &answer);
     let actual_started = started.try_recv();
     let actual_kill = killed.try_recv();
     client
@@ -3698,8 +3756,9 @@ fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
         .into_iter()
         .map(|start| {
             let refused = Refusal::os("killing the program", "the model agent refuses");
-            within(&SETTLED, |by| {
-                settle_failure(start, Answer::Refused(refused), by)
+            // A whole scenario, which can't be cut: given no deadline, its own waits following their parties.
+            follow::whole(&SETTLED, "a settle failure's scenario", || {
+                settle_failure(start, Answer::Refused(refused), None)
             })
         })
         .collect();
@@ -3738,7 +3797,11 @@ fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
 fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases() {
     let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
         .into_iter()
-        .map(|start| within(&SETTLED, |by| settle_failure(start, Answer::Done, by)))
+        .map(|start| {
+            follow::whole(&SETTLED, "a settle failure's scenario", || {
+                settle_failure(start, Answer::Done, None)
+            })
+        })
         .collect();
     for settled in &seen {
         eprintln!("client_settle_kill kill=done {settled:?}");
@@ -3830,7 +3893,7 @@ fn selected_callers_setup_expiry_prevents_send() {
         let _ = finished.send((original, Instant::now(), result, armed()));
     });
     // Its selected deadline's notice precedes its answer, so it is read once the answer has come.
-    let observed = recv_on(&RETURNED, &answer);
+    let observed = recv_on(&RETURNED, "the worker's answer", &answer);
     let selected = selection.try_recv();
     client.conn.shared.end(Refusal::Broken(
         "owned selected-deadline observation cleanup".into(),
@@ -4336,12 +4399,12 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         })
         .unwrap();
 
-    let actor_ready = recv_on(&READY, &readiness);
+    let actor_ready = recv_on(&READY, "the actor ready", &readiness);
     let released = actor_ready.is_ok().then(|| release.try_send(()));
     // Every early branch closes this owned barrier so joining can never wait for a lost start.
     drop(release);
     // Its Started and its Kill precede its answer, so each is read once the answer has come.
-    let before_cleanup = recv_on(&RETURNED, &answer);
+    let before_cleanup = recv_on(&RETURNED, "the worker's answer", &answer);
     let actual_started = started.try_recv();
     let actual_kill = killed.try_recv();
     client
@@ -4828,10 +4891,13 @@ fn readerless(program: &std::io::PipeWriter) -> bool {
         }
     }
     let mut room = [PollFd::new(program, PollFlags::OUT)];
-    let polled = within(&READERLESS, |by| {
-        let left = by.map(|by| timespec(by.saturating_duration_since(Instant::now())));
-        rustix::event::poll(&mut room, left.as_ref())
-    });
+    // A poll with no deadline, which ends at its party's end, the pipe's last reader gone (its HUP or ERR), or at its
+    // room.
+    let polled = follow::whole(
+        &READERLESS,
+        "the late end's reader gone or its room",
+        || rustix::event::poll(&mut room, None),
+    );
     polled.unwrap() == 1
         && room[0]
             .revents()

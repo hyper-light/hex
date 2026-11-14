@@ -28,7 +28,7 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen};
 use hex_core::reuse;
@@ -68,13 +68,31 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// Waits for `cg`, killed at `killed`, to empty, as [`wait_empty_with`] waits on the learned wait ([`EMPTYING`]), which
 /// it teaches when it empties: the time from its kill. Says whether it emptied, and how long it waited from the kill.
 pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
-    wait_empty_with(cg, killed, &EMPTYING)
+    wait_empty_with(
+        cg,
+        killed,
+        &EMPTYING,
+        &[
+            Piece::Kind("box cgroup "),
+            Piece::Path(cg.dir()),
+            Piece::Kind(", by its cgroup.events"),
+        ],
+    )
 }
 
 /// [`wait_empty`]'s bounded half, for a thread other boxes share ([`within_kill`]): `cg`, killed at `killed`, waited for
 /// within W* alone.
 pub(crate) fn empties_within_bound(cg: &BoxCgroup, killed: Instant) -> Result<Within, Refusal> {
-    within_kill(&EMPTYING, killed, |slice| cg.empties_within(slice))
+    within_kill(
+        &EMPTYING,
+        killed,
+        &[
+            Piece::Kind("box cgroup "),
+            Piece::Path(cg.dir()),
+            Piece::Kind(", by its cgroup.events"),
+        ],
+        |slice| cg.empties_within(slice),
+    )
 }
 
 /// [`wait_empty`]'s following half, on a thread of the box's own ([`follow_rest`]): whether `cg` emptied.
@@ -90,17 +108,29 @@ fn wait_empty_with(
     cg: &impl crate::emptying::Emptying,
     killed: Instant,
     wait: &Patience,
+    party: &[Piece<'_>],
 ) -> Result<(bool, Duration), Refusal> {
-    let came = wait_killed(wait, killed, |slice| cg.empties_within(slice))?;
+    let came = wait_killed(wait, killed, party, |slice| cg.empties_within(slice))?;
     Ok((came, killed.elapsed()))
 }
 
-/// Whether a program of a box killed at `killed` has ended, its pidfd `pidfd`: waited for as [`wait_killed`] waits on
-/// the learned wait for a box to empty ([`EMPTYING`]), by its life alone past it.
-fn ended_after_kill(killed: Instant, pidfd: std::os::fd::BorrowedFd<'_>) -> Result<bool, Refusal> {
-    wait_killed(&EMPTYING, killed, |slice| {
-        supervise::pidfd_ends_within(pidfd, slice)
-    })
+/// Whether a program of box `id`, killed at `killed`, has ended, its pidfd `pidfd`: waited for as [`wait_killed`] waits
+/// on the learned wait for a box to empty ([`EMPTYING`]), by its life alone past it.
+fn ended_after_kill(
+    id: &BoxId,
+    killed: Instant,
+    pidfd: std::os::fd::BorrowedFd<'_>,
+) -> Result<bool, Refusal> {
+    wait_killed(
+        &EMPTYING,
+        killed,
+        &[
+            Piece::Kind("a killed program of box "),
+            Piece::Name(id.as_str()),
+            Piece::Kind(", by its pidfd"),
+        ],
+        |slice| supervise::pidfd_ends_within(pidfd, slice),
+    )
 }
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
@@ -1008,11 +1038,22 @@ impl Node {
     }
 
     fn info(&self, record: &BoxRecord, adopted: bool) -> Result<BoxInfo, Refusal> {
+        self.info_by(record, adopted, |backend, id| backend.inspect(id))
+    }
+
+    /// [`Node::info`], a VM box's answer its backend's `answer`: its inspect, or its start followed to its end
+    /// (`Runtime::started`, the review's B-6), held to its record as an inspect is.
+    fn info_by(
+        &self,
+        record: &BoxRecord,
+        adopted: bool,
+        answer: impl FnOnce(&dyn Runtime, &BoxId) -> Result<BoxInfo, Refusal>,
+    ) -> Result<BoxInfo, Refusal> {
         let id = &record.spec.id;
         if let Some(backend) = self.backend(record.spec.backend_class()?).map_err(|_| {
             backends::uncertain(id, "this node has no backend for its record's class")
         })? {
-            let mut info = backend.inspect(id)?;
+            let mut info = answer(backend, id)?;
             if info.class != record.spec.class.class()
                 || info.allocation != record.spec.allocation
                 || info.route != record.spec.route
@@ -1377,8 +1418,17 @@ impl Node {
         {
             init.kill()?;
             self.supervisor
-                .reap_programs(id, &mut |pidfd| ended_after_kill(killed, pidfd))?;
-            let ended = wait_killed(&EMPTYING, killed, |slice| init.ended_within(slice))?;
+                .reap_programs(id, &mut |pidfd| ended_after_kill(id, killed, pidfd))?;
+            let ended = wait_killed(
+                &EMPTYING,
+                killed,
+                &[
+                    Piece::Kind("the killed init of box "),
+                    Piece::Name(id.as_str()),
+                    Piece::Kind(", by its pidfd"),
+                ],
+                |slice| init.ended_within(slice),
+            )?;
             if !ended {
                 return Err(Refusal::Os {
                     op: "emptying a box",
@@ -1406,7 +1456,7 @@ impl Node {
         // it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until the
         // programs in that namespace are reaped — can finish exiting and the box empty.
         self.supervisor
-            .reap_programs(id, &mut |pidfd| ended_after_kill(killed, pidfd))?;
+            .reap_programs(id, &mut |pidfd| ended_after_kill(id, killed, pidfd))?;
         let (emptied, patience) = wait_empty(cg, killed)?;
         if !emptied {
             let op = "emptying a box";
@@ -2122,6 +2172,16 @@ impl Runtime for Node {
         self.info(&record, false)
     }
 
+    /// A VM box's backend answers it, held to its record as its inspect is (the review's B-6): an image VM's start
+    /// followed to its end, never the trait's inspect at once. Any other box's start answers only once it runs, so it is
+    /// answered as its inspect is.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let record = self
+            .record(id)?
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        self.info_by(&record, false, |backend, id| backend.started(id))
+    }
+
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         if let Some(backend) = self.backend_record(id)? {
             return backend.member(id, member);
@@ -2133,6 +2193,27 @@ impl Runtime for Node {
             what: "member",
             why: format!(
                 "box {id} isn't a Shards image box: only one has members its caller drives"
+            ),
+        })
+    }
+
+    /// A VM box's backend signals its member (goal 2's item 2); any other box has none, refused as the trait refuses it.
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.signal_member(id, member, signal);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members a signal reaches"
             ),
         })
     }
@@ -2257,6 +2338,15 @@ impl Runtime for Node {
             }
         }
         Ok(out)
+    }
+
+    /// A VM box's backend deletes it and answers its VM's final use (the review's B-6), never the trait's plain delete
+    /// answering none, read as a run that never started; any other box runs no VM process of its own, so none.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.delete_with_host_use(id);
+        }
+        self.delete(id).map(|()| None)
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -2649,8 +2739,17 @@ fn ids_with(dir: &Path, prefix: &str, learned: &Patience) -> Result<BTreeSet<Box
             && !ran_out
             && began.elapsed() > per_entry.saturating_mul(listed)
         {
-            // Past W*: no sample (Karn's point), but the census is told, once, and the listing goes on.
-            learned.ran_out(per_entry);
+            // Past W*: no sample (Karn's point), but the run-out is told, once, and the listing goes on.
+            learned.ran_out(
+                per_entry,
+                began.elapsed(),
+                &[
+                    Piece::Kind("the listing of "),
+                    Piece::Path(dir),
+                    Piece::Kind(", at entry "),
+                    Piece::Number(u64::from(listed)),
+                ],
+            );
             ran_out = true;
         }
         let entry = entry.map_err(listing)?;
@@ -2912,7 +3011,13 @@ mod tests {
         let killed = Killed {
             looks: std::cell::Cell::new(0),
         };
-        let (emptied, _) = wait_empty_with(&killed, Instant::now(), &wait).unwrap();
+        let (emptied, _) = wait_empty_with(
+            &killed,
+            Instant::now(),
+            &wait,
+            &[Piece::Kind("the test's killed box")],
+        )
+        .unwrap();
         assert!(emptied, "refused at W*");
         assert_eq!(killed.looks.get(), 2);
         assert!(wait.slowest().is_some_and(|slowest| slowest > learned));
@@ -2931,12 +3036,22 @@ mod tests {
         let killed = Killed {
             looks: std::cell::Cell::new(0),
         };
-        let within = within_kill(&wait, Instant::now(), |slice| killed.empties_within(slice));
+        let within = within_kill(
+            &wait,
+            Instant::now(),
+            &[Piece::Kind("the test's killed box")],
+            |slice| killed.empties_within(slice),
+        );
         assert_eq!(within, Ok(Within::Follow));
         assert_eq!(killed.looks.get(), 1, "looked until the box emptied");
         assert_eq!(wait.deadline(), None, "the run-out untold");
         let cold = Patience::measuring("test.node.emptying.shared_cold");
-        let within = within_kill(&cold, Instant::now(), |slice| killed.empties_within(slice));
+        let within = within_kill(
+            &cold,
+            Instant::now(),
+            &[Piece::Kind("the test's killed box")],
+            |slice| killed.empties_within(slice),
+        );
         assert_eq!(within, Ok(Within::Follow));
         assert_eq!(killed.looks.get(), 1, "a wait with no W* looked");
     }
@@ -2970,7 +3085,13 @@ mod tests {
             wait: &wait,
             at_follow: std::cell::Cell::new(None),
         };
-        let (emptied, _) = wait_empty_with(&killed, Instant::now(), &wait).unwrap();
+        let (emptied, _) = wait_empty_with(
+            &killed,
+            Instant::now(),
+            &wait,
+            &[Piece::Kind("the test's killed box")],
+        )
+        .unwrap();
         assert!(emptied, "refused at W*");
         assert_eq!(
             killed.at_follow.get(),

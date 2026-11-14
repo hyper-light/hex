@@ -14,7 +14,7 @@ use super::*;
 /// Shards' image boot in the model: each boot answered at once with a run that holds until its stop, but while the
 /// test holds the model's boots, when each waits until it lets them go, and where the test has it refuse the next.
 #[derive(Default)]
-struct Model {
+pub(crate) struct Model {
     asked: Mutex<Vec<ImageSpec>>,
     held: Mutex<bool>,
     let_go: Condvar,
@@ -140,7 +140,7 @@ fn allocation() -> Allocation {
     hex_api::sim::sim_vm_allocation().unwrap()
 }
 
-fn image_box(id: &str) -> BoxSpec {
+pub(crate) fn image_box(id: &str) -> BoxSpec {
     BoxSpec {
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),
@@ -210,9 +210,20 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
         })
     ));
     model.hold(false);
-    hex_testkit::waits::until(&SHOWN, "the second box shown running", || {
-        images.inspect(&gone).unwrap().state == BoxState::Running
-    })
+    // A look: the image runtime tells no event as a boot's run starts, its inspect read. Its party, the box's boot,
+    // ends where the box shows an end instead.
+    hex_testkit::waits::follow::until(
+        &SHOWN,
+        "the second box shown running",
+        || {
+            if images.inspect(&gone).is_ok_and(|info| info.exit.is_none()) {
+                hex_testkit::waits::follow::Party::Live
+            } else {
+                hex_testkit::waits::follow::Party::Ended
+            }
+        },
+        || images.inspect(&gone).unwrap().state == BoxState::Running,
+    )
     .unwrap();
     assert_eq!(model.asked.lock().unwrap().len(), 2);
     images.delete(&gone).unwrap();

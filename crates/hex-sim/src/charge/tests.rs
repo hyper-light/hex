@@ -257,7 +257,7 @@ fn w14_a_reading_is_charged_over_its_span_never_less_than_the_window() {
             },
         )
         .unwrap();
-        n.vms[&1].held[0]
+        n.vms[&1].held.unwrap()[0]
     };
     assert_eq!(read(&mut n, WINDOW, WINDOW * 2), 500);
     assert_eq!(read(&mut n, WINDOW / 2, WINDOW / 2), 500);
@@ -286,7 +286,7 @@ fn w14_a_reading_is_charged_over_at_least_the_window_its_node_reads_over_now() {
             },
         )
         .unwrap();
-        n.vms[&1].held[0]
+        n.vms[&1].held.unwrap()[0]
     };
     assert_eq!(read(&mut n, WINDOW, WINDOW / 2), 1_000);
     n.set_window(Some(WINDOW * 2)).unwrap();
@@ -318,7 +318,8 @@ fn w14_a_node_reading_over_no_window_refuses_a_reading() {
 
 /// Joint plan step 14 (AC-T7.4.1), C5's growth as C1's window changes: the fastest growth on record is a rate, kept
 /// with the window it was seen over and projected over the window the node reads over now. Do admit two VMs of 4 GiB
-/// allocations in an 8 GiB budget, each booked at 4 GiB, and grow them to 1 and 2 GiB in one window; then have the node
+/// allocations in an 8 GiB budget, each booked at 4 GiB, read them holding nothing, their baselines, and grow them to 1
+/// and 2 GiB in one window; then have the node
 /// read over twice the window, then over half of it. Expect the growth on record 3 GiB over the window, 6 GiB over
 /// twice it and 1.5 GiB over half of it; and the last resort holding over the window (3 GiB held and 3 GiB of growth
 /// within 8 GiB), past it over twice the window (3 GiB and 6 GiB), every VM within its own budget so none ended.
@@ -327,6 +328,7 @@ fn w14_the_fastest_growth_is_projected_over_the_window_its_node_reads_over_now()
     let mut n = node(res(16_000, 8 * GIB, 0));
     n.admit(1, class_of(1, 1_000, 4 * GIB), 0, 1).unwrap();
     n.admit(2, class_of(2, 1_000, 4 * GIB), 0, 1).unwrap();
+    window(&mut n, &[(1, 0, 0), (2, 0, 0)]);
     window(&mut n, &[(1, 0, GIB), (2, 0, 2 * GIB)]);
     assert_eq!(n.growth(), 3 * GIB);
     assert_eq!(n.last_resort().unwrap(), Resort::Held);
@@ -370,7 +372,7 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
         Err(ChargeError::Invalid { .. })
     ));
     n.observe(1, &split(vec![WINDOW, WINDOW / 2])).unwrap();
-    assert_eq!(n.vms[&1].held[0], 1_600);
+    assert_eq!(n.vms[&1].held.unwrap()[0], 1_600);
     assert_eq!(
         split(vec![WINDOW, WINDOW / 2]).cpu.per_vcpu().unwrap(),
         &[WINDOW, WINDOW / 2]
@@ -455,7 +457,7 @@ fn w14_budgets_sum_to_the_fleet_budget_and_cover_every_booking() {
         let booking = n.booking(id).unwrap().mem_bytes;
         let share = slack * booking / (6 * GIB);
         assert!(budget.bytes >= booking + share && budget.bytes <= booking + share + 1);
-        let held = n.vms[id].held[1];
+        let [_, held, _] = n.vms[id].holding();
         assert_eq!(
             budget.room,
             i64::try_from(budget.bytes).unwrap() - i64::try_from(held).unwrap()
@@ -520,6 +522,7 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
             )
             .unwrap();
     }
+    window(&mut within, &[(1, 0, 0), (2, 0, 0)]);
     window(&mut within, &[(1, 0, 5 * GIB), (2, 0, 5 * GIB)]);
     assert_eq!(within.growth(), 10 * GIB);
     assert_eq!(
@@ -558,13 +561,14 @@ fn w14_of_vms_equally_past_their_budgets_the_later_begun_is_ended() {
 /// Joint plan step 14 (AC-T7.4.1), C5 as ROOT took it (2026-11-12): a VM `memory.high` holds within its budget is
 /// never ended for growth to come. Do warm two VMs of 4 GiB allocations at 2 GiB each in an 8 GiB budget, so each is
 /// booked at 2 GiB with a 4 GiB budget, and let the first hold 3 GiB, past its booking but within its budget, while the
-/// growth on record (4 GiB, their first window) and what they hold pass the fleet's budget; expect none ended. Let
-/// the first then hold 5 GiB, past its budget; expect it ended.
+/// growth on record (4 GiB, their first window past baselines of nothing) and what they hold pass the fleet's budget;
+/// expect none ended. Let the first then hold 5 GiB, past its budget; expect it ended.
 #[test]
 fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
     let mut n = node(res(16_000, 8 * GIB, 0));
     n.admit(1, class_of(1, 1_000, 4 * GIB), 0, 1).unwrap();
     n.admit(2, class_of(2, 1_000, 4 * GIB), 0, 1).unwrap();
+    window(&mut n, &[(1, 0, 0), (2, 0, 0)]);
     for _ in 0..SEEDABLE {
         window(&mut n, &[(1, 0, 2 * GIB), (2, 0, 2 * GIB)]);
     }
@@ -579,13 +583,15 @@ fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
     assert_eq!(ended(&n), Some(1));
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C5's growth: do grow two VMs' memory by 1 and 2 GiB in one window and by 1 GiB
-/// in the next; expect the node's fastest growth on record 3 GiB, and it never falls.
+/// Joint plan step 14 (AC-T7.4.1), C5's growth: do read two VMs holding nothing, their first readings their
+/// baselines, then grow their memory by 1 and 2 GiB in one window and by 1 GiB in the next; expect the node's fastest
+/// growth on record 3 GiB, and it never falls.
 #[test]
 fn w14_the_fastest_growth_is_learned_from_the_windows() {
     let mut n = node(res(16_000, 64 * GIB, 0));
     n.admit(1, class_of(1, 1_000, 8 * GIB), 0, 1).unwrap();
     n.admit(2, class_of(2, 1_000, 8 * GIB), 0, 1).unwrap();
+    window(&mut n, &[(1, 0, 0), (2, 0, 0)]);
     window(&mut n, &[(1, 0, GIB), (2, 0, 2 * GIB)]);
     assert_eq!(n.growth(), 3 * GIB);
     window(&mut n, &[(1, 0, 2 * GIB), (2, 0, 2 * GIB)]);
@@ -738,6 +744,45 @@ fn w14_a_capping_platforms_rates_keep_every_booking_and_share_the_rest() {
     let idle = BTreeMap::from([(1, (0, 1)), (2, (0, 1)), (3, (0, 1))]);
     let least = none.rates(1, &idle, |_| 10).unwrap();
     assert!(least.iter().all(|(_, cap)| *cap == 10), "{least:?}");
+}
+
+/// A-7 (the review's, 2026-11-14; ROOT's ruling (ii); AC-T7.4.1), C4 and C5: a VM its shell couldn't move from what it
+/// last set is counted at what holds it, and the rest share what it leaves. Do cap three VMs booked 4, 2 and 1 CPUs and
+/// 1 GiB each in a 10-CPU, 8 GiB budget, each asking its ceiling, then hold the first at a 6-CPU cap and a 3 GiB
+/// budget, then hold none. Expect the first at 6 CPUs and 3 GiB, the others' caps summing to the 4 CPUs it leaves and
+/// their budgets to the 5 GiB; and with none held, the caps and budgets as before.
+#[test]
+fn a7_a_held_vm_is_counted_at_what_holds_it_and_the_rest_share_what_it_leaves() {
+    let mut n = node(res(10_000, 8 * GIB, 0));
+    for (id, booking) in [(1, 4_000), (2, 2_000), (3, 1_000)] {
+        n.track(
+            id,
+            class_of(u8::try_from(id).unwrap(), 8_000, 8 * GIB),
+            0,
+            8,
+            res(booking, GIB, 0),
+        )
+        .unwrap();
+    }
+    let ceilings = BTreeMap::new();
+    let free = n.rates(10_000, &ceilings, |_| 10).unwrap();
+    let budgets = n.budgets().unwrap();
+    n.set_held(BTreeMap::from([(
+        1,
+        Held {
+            cpu_milli: Some(6_000),
+            mem_bytes: Some(3 * GIB),
+        },
+    )]));
+    let rates = n.rates(10_000, &ceilings, |_| 10).unwrap();
+    assert_eq!(rates[0], (1, 6_000));
+    assert_eq!(rates[1..].iter().map(|(_, cap)| cap).sum::<u64>(), 4_000);
+    let held = n.budgets().unwrap();
+    assert_eq!(held[0].1.bytes, 3 * GIB);
+    assert_eq!(held[1..].iter().map(|(_, b)| b.bytes).sum::<u64>(), 5 * GIB);
+    n.set_held(BTreeMap::new());
+    assert_eq!(n.rates(10_000, &ceilings, |_| 10).unwrap(), free);
+    assert_eq!(n.budgets().unwrap(), budgets);
 }
 
 /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13): each VM's cap is held at least at the least its own actuator takes,
@@ -1016,4 +1061,63 @@ proptest! {
             prop_assert!(*got >= (k * unit).min(*need), "{} for booking {}, need {}", got, k * unit, need);
         }
     }
+}
+
+/// Joint plan step 14 (C5; AC-T7.4.1; ROOT, 2026-11-13, reviewer A's A-1): a VM a learner meets already holding memory,
+/// as a restarted node's learner meets its whole fleet (it tracks each VM, then first reads it a window later), has
+/// grown by nothing: its first reading is a baseline. Do track two VMs of an 8 GiB fleet, then read them through five
+/// windows holding 1 GiB and 3.5 GiB, nothing growing. Expect no growth on record.
+#[test]
+fn w14_a_vm_met_holding_memory_has_grown_by_nothing() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.track(1, class_of(1, 1_000, 5 * GIB), 0, 1, res(1_000, 5 * GIB, 0))
+        .unwrap();
+    n.track(2, class_of(2, 1_000, 3 * GIB), 0, 1, res(1_000, 3 * GIB, 0))
+        .unwrap();
+    for _ in 0..5 {
+        window(&mut n, &[(1, 0, GIB), (2, 0, 3 * GIB + GIB / 2)]);
+    }
+    assert_eq!(n.growth(), 0, "growth on record though nothing grew");
+}
+
+/// Joint plan step 14 (C5; AC-T7.4.1; ROOT, 2026-11-13, reviewer A's A-1): a steady fleet a restarted learner meets is
+/// held, none of its VMs ended for what it held before the learner met it. Do track two VMs of an 8 GiB fleet, then
+/// read them through five windows holding 1 GiB and 3.5 GiB, 4.5 GiB in all. Expect the last resort to hold.
+#[test]
+fn w14_a_steady_fleet_a_restarted_learner_meets_ends_no_vm() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.track(1, class_of(1, 1_000, 5 * GIB), 0, 1, res(1_000, 5 * GIB, 0))
+        .unwrap();
+    n.track(2, class_of(2, 1_000, 3 * GIB), 0, 1, res(1_000, 3 * GIB, 0))
+        .unwrap();
+    for _ in 0..5 {
+        window(&mut n, &[(1, 0, GIB), (2, 0, 3 * GIB + GIB / 2)]);
+    }
+    assert_eq!(n.last_resort().unwrap(), Resort::Held);
+}
+
+/// Joint plan step 14 (C5; AC-T7.4.1; ROOT, 2026-11-13): before its first reading a VM holds, as the rule counts it,
+/// its booking, and its learner's first reading of it is its baseline: its room from then is its budget less what it
+/// holds, and growth is counted from it. Do track one VM booked at 4 GiB of an 8 GiB fleet and take its budgets; give it
+/// a baseline of 3 GiB and take them again; give it another; then read it holding 3 GiB a window on. Expect its room
+/// 4 GiB (8 less its booking), then 5 GiB (8 less the 3 it holds), the second baseline refused, typed, and no growth.
+#[test]
+fn w14_a_vms_first_reading_is_its_baseline_and_before_it_its_booking() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.track(1, class_of(1, 1_000, 8 * GIB), 0, 1, res(1_000, 4 * GIB, 0))
+        .unwrap();
+    n.settle().unwrap();
+    let room = |n: &Node<u32>| n.budgets().unwrap()[0].1.room;
+    assert_eq!(room(&n), i64::try_from(4 * GIB).unwrap());
+    n.baseline(&1, 3 * GIB).unwrap();
+    assert_eq!(room(&n), i64::try_from(5 * GIB).unwrap());
+    assert!(matches!(
+        n.baseline(&1, 3 * GIB),
+        Err(ChargeError::Invalid {
+            what: "a VM's baseline",
+            ..
+        })
+    ));
+    window(&mut n, &[(1, 0, 3 * GIB)]);
+    assert_eq!(n.growth(), 0);
 }

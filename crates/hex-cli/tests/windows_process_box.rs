@@ -24,7 +24,6 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal,
 use hex_core::patience::Patience;
 use hex_runtime::windows::WinRuntime;
 use hex_testkit::waits::follow::{self, Party};
-use hex_testkit::waits::until;
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -298,7 +297,14 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
             .err()
             .expect("a node whose guest ends at once is refused");
         assert!(
-            matches!(&refused, hex_api::Refusal::Os { why, .. } if why.contains("the guest has ended")),
+            // Shards' own kind of the guest's failure, its end (the review's B-15).
+            matches!(
+                &refused,
+                hex_api::Refusal::Guest {
+                    failure: hex_api::GuestFailure::Ended(_),
+                    ..
+                }
+            ),
             "{refused:?}"
         );
         assert_eq!(
@@ -401,12 +407,18 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     assert_eq!(exit, Exit::Code(7));
     // Once the member has ended and its exit is read, the box is empty (wait on the fact: the ended
     // process leaves the job once its handle is closed).
-    // Its party is the runtime, which lives while the test holds it: the wait follows the fact.
-    until(&EMPTIED, "the box empty after its program ends", || {
-        rt.inspect(&id)
-            .map(|i| i.state == hex_api::BoxState::Empty)
-            .unwrap_or(false)
-    })
+    // Its party is the runtime, which lives while the test holds it (the review's C-5). A look: a job tells this test
+    // no event as it empties, its inspect read.
+    follow::until(
+        &EMPTIED,
+        "the box empty after its program ends",
+        || Party::Live,
+        || {
+            rt.inspect(&id)
+                .map(|i| i.state == hex_api::BoxState::Empty)
+                .unwrap_or(false)
+        },
+    )
     .expect("the box empties");
     rt.delete(&id).expect("delete");
     assert_eq!(rt.inspect(&id), Err(hex_api::Refusal::NoSuchBox(id)));
@@ -572,9 +584,14 @@ fn delete_ends_a_boxs_grandchildren() {
     assert!(matches!(exit, Exit::Signal(_)), "member exit {exit:?}");
     // The grandchild is ended too: wait on the fact (its pid gone), not a guessed delay.
     // The delete ended the box's job, every process in it with it: the kernel's to finish, followed to the fact.
-    until(&GONE, "the grandchild's end with the box", || {
-        !alive(grandchild)
-    })
+    // A look: the grandchild is no child of this test's, so it has no handle here but tasklist's listing; its end is
+    // the kernel's to finish, the party this test (the review's C-5).
+    follow::until(
+        &GONE,
+        "the grandchild's end with the box",
+        || Party::Live,
+        || !alive(grandchild),
+    )
     .expect("the grandchild ends with the box");
 }
 

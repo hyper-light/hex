@@ -160,7 +160,9 @@ There is no count constant: a box's credential grants cross the node's wire in o
 its record (`MAX_RECORD_BYTES`). Nor is there a field's length of Hex's own: since Shards `17fc36ecd` (at `097ec0047`)
 its boot refuses a credential or sign-in grant's field past what its network process's wire carries behind a two-byte
 length (`shards_dns::credential::WIRE_MOST`, 65,535 bytes or hosts), by field and never quoting it, as a spec's
-(`ImageRefusal::Spec`), which the image class says as `Invalid` naming `shards image` as it says every spec refusal. The check's three working lists (each grant's hosts, its member and credential, its
+(`ImageRefusal::Spec`), which the image class says as `Invalid` naming `shards image` as it says every spec refusal. The roots a run's
+injector trusts toward a credential's host are its host's (Shards' D242 upstream roots, `37ddeb080`): Hex names none
+of its own (`ImageSpec::upstream_roots` empty), and since then no `SSL_CERT_FILE` or `SSL_CERT_DIR` adds one. The check's three working lists (each grant's hosts, its member and credential, its
 placeholder and credential) are reserved fallibly (refused `Exhausted` past what memory gives), sorted, O(n log n) in
 the hosts named, with no recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
 Shards' run host only as long as each passes it on, wiped as each lets go of it, and never printed.
@@ -199,11 +201,21 @@ are its caller's (`hex_client::Core::with_lessors`).
   `Answer::LessorEnded` (`0x8014`), neither answered. Each kind is appended after every one before it, and the wire's
   `IDENTITY` moves.
 - **The value.** It crosses in its `Leased` message alone (`wire::carries_secret`), read straight into a `lease::Value`,
-  wiped as it drops and never printed. The node wipes its read buffer once that message is read. The client wipes its
-  unframed copy as it frames it, and each word it owes the node once it has gone or its connection has ended. The
-  wire's writer wipes what it held of a message that fails, and reserves the message's room before the value goes in,
-  so no copy is left as it grows. The buffers of a transport below the wire (the kernel's, and TLS's in hyper-quic) are
-  not Hex's to wipe.
+  wiped as it drops and never printed. Every copy Hex makes of a message that carries a secret is wiped, its whole
+  allocation, as it goes, sent or let go (`lease::Wiped`; the review's E-6). The node wipes its read buffer once what it
+  read is framed or refused, each whole message it holds until the core reads it, the framed copy its socket sends on
+  macOS and Windows with any rest a stream took only part of, the send Windows' completion gives back, each answer
+  queued behind others, and a frame cut short as its stream ends. The client wipes its unframed copy as it frames it,
+  its read buffer whichever way a read ends, and each word it owes the node once it has gone or its connection has
+  ended. Over QUIC, the node wipes the framed copy it writes and each message it holds, and hex-quic wipes what a
+  control data lane holds: each connection's outbox and the frames come and not read, its bridge's buffers, and each
+  frame its driver holds back. The wire's writer wipes what it held of a message that fails, and reserves the
+  message's room before the value goes in, so no copy is left as it grows. `crates/hex-node/tests/wipes.rs` holds it:
+  every block its test binary frees is read for the secret, on this OS's socket and over QUIC. What hyper-raft holds
+  below hex-quic isn't wiped: hyper-quic's stream send buffer keeps each frame until it is acked, and
+  hyper-transport's receive pool keeps the decrypted chunk. Not built yet: Hex sealing each message that carries a
+  secret before it reaches hex-quic's lanes, so those buffers hold ciphertext alone (ROOT, 2026-11-14); the test's QUIC
+  leg is ignored until it lands. The kernel's buffers are not Hex's to wipe.
 - **Waits.** Every ask waits for its answer while its connection stands (decision 9): the answer, or the connection's
   end, ends it, however long that takes, and no ask is bounded by a time of its own. From `with_lessors` on, the client
   reads its connection with a thread of its own (the event form's loop), so the node's asks are read whatever its calls
@@ -263,7 +275,8 @@ answered outside too. Hex passes each through, adding none:
 - **Over the node's wire** (C7's connection): `Answer::CaptureAsk { run, sign_in, tokens, key }` (`0x8015`),
   `RefreshAsk` (`0x8016`) and `SignInRevoked` (`0x8017`, not answered), answered `Request::Captured` (`0x001c`) and
   `Request::Refreshed` (`0x001d`); appended, the wire's `IDENTITY` moving. A capture's ask, and the captured and
-  refreshed answers, carry secrets (`wire::carries_secret`): wiped where Hex held them, on both sides, as a lease is.
+  refreshed answers, carry secrets (`wire::carries_secret`): every copy Hex makes of them is wiped as a lease's is
+  (C7), on the node and its client alike, and what hyper-raft holds below hex-quic waits on the seal C7 names.
   A create granting a sign-in on a connection that sent no `Lessors` is refused `Unconfigured` (default deny).
 
 Not built: an inspect's report of a box's sign-ins (its record holds them); kiln's broker answering captures and

@@ -213,10 +213,11 @@ removed from the records, the other holders are hinted, and what was released (i
 sum) is returned for the shell to log on the node's capacity event target: the person says
 `hex schedule forget --socket <path> --holder <name>` (`schedule::Command::Forget`, its own wait, a typed
 `Reply::forget`), and the scheduler logs `hex.capacity event=forgotten holder="<name>" epoch= count= cpu_milli=
-mem_bytes= disk_bytes= gpus=`. Its epoch stays, so a process
-of it from before is still fenced; and if the person was wrong and some of its work still runs, the
-holder's own next sync adopts it (CV5), so the release never hides running work from the view for
-longer than the holder is away.
+mem_bytes= disk_bytes= gpus=`. Its record goes after its reservations' (a crash between leaves
+a holder recorded with none, which the person forgets again), so its place among the holders the host's
+configuration authorizes is free for its replacement (CV8; the review's E-2). A process of it that comes back
+is a new holder; and if the person was wrong and some of its work still runs, that holder's own sync adopts it
+(CV5), so the release never hides running work from the view for longer than the holder is away.
 
 ### CV7. The view reaches every decider, by hints
 
@@ -235,7 +236,7 @@ view, so the next decision is made on the room there is (Omega §3.4: resync, th
 
 | Bound | Value | Derivation | Overflow |
 |---|---|---|---|
-| Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` |
+| Holders a keeper serves | `Budget::holders` | the holders the host's configuration authorizes on this machine (its declared peers) | `Closed { HoldersFull }` for a new holder; a configuration that shrinks below the holders recorded is no damage: each recorded one keeps what it holds until its own word or the person's release frees its place (CV6) |
 | Reservations per holder | `Budget::reservations` | the most one sync lists (`hex_core::capacity::most_held`: the wire's message bound over the widest reservation), so every holder's sync fits one message (CV9); the keeper's records folder is sized to it, whatever runtime classes the host runs of its own (a Mac that places none still keeps a holder's) | `Refused { Full }`; a sync longer is `Closed { Invalid }` |
 | A holder's name | `Budget::name_bytes` | the host's wire message bound (`hex_core::wire::MAX_MESSAGE` on Hex's shell), so a hello always fits one message | `Closed { Invalid }` |
 | Hints owed | one per holder | coalesced: the newest view replaces the unsent one | none: a flag |
@@ -259,9 +260,12 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   their widest (`hex_core::capacity::most_held`), its bound (CV8).
 - **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
   a link within the endpoint's connection bound, to the holders its host authorizes alone, each by the name its
-  certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it delivers each hint to the
-  link it is owed to after each message and when its host calls `Server::hint`; `hex_quic::capacity::Link` is a
-  holder's end.
+  certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it hands each hint owed to the
+  link it is owed to, after each message and when its host calls `Server::hint`, and a writer thread of that link's
+  own says it, coalesced while unsent, once the connection drains (CV7), in the order the keeper decided the link's
+  words, so a holder that stops reading stalls its own link alone, never its host or another link (the review's
+  E-1); its writes are measured waits (`capacity.say`, decision 9: past W* the run-out told, naming the holder, and
+  the write following its link); `hex_quic::capacity::Link` is a holder's end.
 - **In production**: `hex schedule serve` serves the node's keeper as `placement::DriverView` where its
   configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
   kiln's CA's answer completed, read whole before anything binds, and `holders`, each by its `name`). The view
@@ -471,18 +475,33 @@ window, which would under-count Hex here.
   `placement::view::tests`); and the node's own admission and a holder's reserve checking one view
   through the placement `Driver`.
 - hex-sim (`hex_sim::capacity`): one machine, the recorded fleet's smallest host where Hex's own boxes and kiln's runs
-  share a room (fedora: 32 threads, 62.5 GiB; read from H10's fleet trace by a test), its keeper's bounds derived (each
-  runner's reservations the most of the generator's smallest charge the room holds, a name the longest its runners
-  say), Hex's own boxes and kiln's
+  share a room (fedora: 32 threads, 62.5 GiB; read from H10's fleet trace by a test), every charge a recorded one
+  (kiln's runs its fourteen days of CI legs, a leg below kiln's resolution drawn as one unit of it; Hex's own boxes
+  the fleet day's `oci` legs), its keeper's bounds derived (each runner's reservations as many of the smallest recorded
+  charge as the room holds, but never more than one sync carries, `hex_core::capacity::most_held`; a name the longest
+  its runners say), Hex's own boxes and kiln's
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
-  (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
+  (before and after a write lands), crashes runners (their runs outliving them in one case, ending with them in the
+  other: kiln states neither), drops links with
   what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
   runner's process and its runs use, the runs held besides (counted twice: CV12). Each run uses memory within its
-  reservation, moved by the nemesis between samples and, both ways, several times, on either side of the free
-  memory's read in a sample's window. After every step:
+  reservation, moving at every step, a sample's window among them (its reads a step apart): no bound on the moves.
+  Every rate is a record's: kiln's runs arrive as they did at fedora (696 legs in the export's fourteen days), Hex's
+  boxes as the fleet day's `oci` boxes did at each of its 15 `oci` hosts, each run and box ends at one over its recorded
+  length, and links drop (a drop and a partition, each cause at the whole rate), runners crash and outages end at kiln's
+  records of its runners' links (topo's drops, time up and outage, read 2026-11-14). A step is one event of that
+  continuous-time chain, each kind as likely as its rate in the machine's state (Gillespie's direct method), delivery
+  at the least rate that drains the links (each kind's rate times the deliveries the protocol has it say). The faults no
+  record times (the keeper's crash between messages and at its next write, the write lost or landed; a wait run out; the
+  person's wrong release; a retirement) each strike once a run, at a step drawn for them or the first after where they
+  can. What the code does on its own trigger, the nemesis does there: a runner dials again as soon as its link can open
+  (kiln's `links`), the keeper's hints go out after each message it hears and each command of its host, and Hex's node
+  measures its room as it is asked to admit (`Submit`'s refresh). The bounded suite's time stretches each run's and box's
+  length by the one factor at which the recorded mean demand fills the room (ρ, by Little's law, 1 in memory), every
+  other ratio as recorded; the record sweep also runs every rate and length as recorded. After every step:
   every running run is in the keeper's books while it is up, but one so released, until its runner's next
   sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
   adopted; what the keeper books past the room (only an adoption's), its view says it is over by; and the
@@ -493,11 +512,12 @@ window, which would under-count Hex here.
   restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
   boxes alone, a sync that drops what the keeper lacks instead of adopting it, and a host crediting the room its
   runners' use (CV12's withdrawn rule, standing for any credit; the three credit shapes planted before it, the
-  larger of two reads, whole reservations and a scope holding its runner, are folded into it). Bounded seeds here
-  (64 of
-  2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
-  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
-  of which must hold, and each mistake caught on some.
+  larger of two reads, whole reservations and a scope holding its runner, are folded into it). The runner counts: one,
+  as the recorded fleet configures each machine's keeper, and two for a retirement, which takes a live runner and never
+  the last. Bounded seeds here (64 of 2,000 steps with one runner, 32 with two, each with runs outliving their runner
+  and not), owed to ROOT's sweep, which gives the fewest at which every planted mistake is caught:
+  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS` as a list of budgets,
+  `HEX_CAPACITY_TIME` `filled` or `recorded`), every seed of which must hold, and each mistake caught on some.
 - The stand-in holder (`crates/hex-cli/tests/capacity_view/stand_in.rs`): kiln's runner's side of the contract above,
   item by item, driving `hex_api::capacity::Holder` over `hex_quic::capacity::Link`, its epoch and runs in a ledger
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md

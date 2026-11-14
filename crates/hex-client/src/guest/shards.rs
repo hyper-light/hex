@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
-use hex_core::patience::Patience;
+use hex_api::{
+    ConnectFailure, ConnectPhase, ConnectReply, GuestEnd, GuestFailure, IoKind, Refusal,
+};
+use hex_core::patience::{Patience, Piece};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
@@ -218,8 +220,16 @@ impl ShardsLink {
                 }
                 Err(_) => {
                     if !told {
-                        // No sample (Karn's point): the census is told, and the dial goes on.
-                        FOLLOWED.ran_out(self.bound);
+                        // No sample (Karn's point): the run-out is told, and the dial goes on.
+                        FOLLOWED.ran_out(
+                            self.bound,
+                            began.elapsed(),
+                            &[
+                                Piece::Kind("the guest's VM, its port "),
+                                Piece::Number(u64::from(port)),
+                                Piece::Kind("'s answer to a dial"),
+                            ],
+                        );
                         told = true;
                     }
                 }
@@ -365,6 +375,39 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
         } => Refusal::Connect {
             port: *port,
             failure: connect_failure(failure),
+        },
+        // The guest's own failures, each in its kind (the review's B-15).
+        shards_api::Refusal::Stalled(stall) => Refusal::Guest {
+            op,
+            failure: GuestFailure::Stalled {
+                waited: stall.waited(),
+                over: stall.over(),
+                slowest: stall.slowest(),
+            },
+        },
+        shards_api::Refusal::Ended(end) => Refusal::Guest {
+            op,
+            failure: GuestFailure::Ended(match end {
+                shards_api::End::PowerOff => GuestEnd::PowerOff,
+                shards_api::End::Reset => GuestEnd::Reset,
+                shards_api::End::Stopped => GuestEnd::Stopped,
+                shards_api::End::Failed(why) => GuestEnd::Failed(why.clone()),
+            }),
+        },
+        shards_api::Refusal::Gone { pid, why } => Refusal::Guest {
+            op,
+            failure: GuestFailure::Gone {
+                pid: *pid,
+                why: why.clone(),
+            },
+        },
+        shards_api::Refusal::Rate(why) => Refusal::Guest {
+            op,
+            failure: GuestFailure::Rate(why.clone()),
+        },
+        shards_api::Refusal::HostUse(why) => Refusal::Guest {
+            op,
+            failure: GuestFailure::HostUse(why.to_string()),
         },
         other => Refusal::os(op, other),
     }
