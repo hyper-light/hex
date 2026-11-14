@@ -1275,19 +1275,20 @@ pub fn exit_code(process: &Handle) -> io::Result<u32> {
     Ok(code)
 }
 
-// The guest-cost producer's reads of a VM process from outside it (crates/hex-cli/examples/guest_cost, AC-T7.4.1): as
-// macOS's are (`macos::sys`), so its VMM's own CPU and memory are told from its guest's.
+// The guest-cost producer's reads (crates/hex-cli/examples/guest_cost, AC-T7.4.1), beside what a node reads of a
+// managed VM (its job's accounting, `JobBox::usage`, and its vCPUs' guest time from Shards' answer): where a VM
+// process's guest RAM lies and what it has committed, so its VMM's own memory is told from its guest's; the memory and
+// disk quanta; and what its folders hold.
 
 /// `ERROR_INVALID_PARAMETER`: what Windows answers for a process id no process has now, or an address past a process's
 /// highest.
 const INVALID_PARAMETER: i32 = 87;
 
-/// Process `pid` opened for the guest-cost producer's reads: its times and memory counters, its address space's
-/// regions and its working set's pages (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, what `VirtualQueryEx` and
-/// `GetProcessMemoryInfo` ask); `None` where no process has the pid.
+/// Process `pid` opened for the guest-cost producer's reads of its address space's regions
+/// (`PROCESS_QUERY_INFORMATION`, what `VirtualQueryEx` asks); `None` where no process has the pid.
 pub fn open_for_reading(pid: u32) -> io::Result<Option<Handle>> {
-    use windows_sys::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-    match process_with_rights(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ) {
+    use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
+    match process_with_rights(pid, PROCESS_QUERY_INFORMATION) {
         Ok(process) => Ok(Some(process)),
         Err(error) if error.raw_os_error() == Some(INVALID_PARAMETER) => Ok(None),
         Err(error) => Err(error),
@@ -1296,7 +1297,8 @@ pub fn open_for_reading(pid: u32) -> io::Result<Option<Handle>> {
 
 /// One region of a process's address space, as `VirtualQueryEx` reads it: where it starts, how long it is, and whether
 /// it is committed private read/write memory (`MEM_COMMIT`, `MEM_PRIVATE`, `PAGE_READWRITE`), as Shards' WHP guest RAM
-/// is (its `reserve_ram`: a placeholder replaced by committed read/write memory, which pages in as it is touched).
+/// is (its `reserve_ram`: a placeholder replaced at once by committed read/write memory, its whole commit charged from
+/// the start, which its job's accounting counts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {
     pub base: u64,
@@ -1338,62 +1340,6 @@ pub fn region(process: &Handle, at: u64) -> io::Result<Option<Region>> {
             && info.Type == MEM_PRIVATE
             && info.Protect == PAGE_READWRITE,
     }))
-}
-
-/// `PSAPI_WORKING_SET_EX_BLOCK`'s Valid bit (bit 0) and Shared bit (bit 15), as psapi.h lays its bitfield out.
-const PAGE_VALID: usize = 1;
-const PAGE_SHARED: usize = 1 << 15;
-
-/// The bytes of `range` (`[start, end)`, on page boundaries) of `process` that its working set holds as pages of its
-/// own (`QueryWorkingSetEx`: each page's Valid bit set and Shared bit clear), in `page`-byte pages: every page of the
-/// range asked at once, one entry each, so the buffer is as long as the range has pages (a guest's RAM read takes as
-/// long as its RAM is large, as Linux's smaps and macOS's region reads do).
-pub fn resident_private(process: &Handle, range: (u64, u64), page: u64) -> io::Result<u64> {
-    use windows_sys::Win32::System::ProcessStatus::{
-        K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
-    };
-    let (start, end) = range;
-    let on_page = |at: u64| at.checked_rem(page) == Some(0);
-    let pages = end
-        .checked_sub(start)
-        .filter(|_| on_page(start) && on_page(end))
-        .and_then(|span| span.checked_div(page))
-        .ok_or_else(|| io::Error::other("a range not on page boundaries"))?;
-    let pages = usize::try_from(pages).map_err(|_| io::Error::other("a page count past usize"))?;
-    let mut entries: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = Vec::new();
-    entries
-        .try_reserve_exact(pages)
-        .map_err(|_| io::Error::other("no room for a range's pages"))?;
-    let mut at = start;
-    while at < end {
-        let address = usize::try_from(at).map_err(|_| io::Error::other("an address past usize"))?;
-        let mut entry: PSAPI_WORKING_SET_EX_INFORMATION = zeroed_struct();
-        entry.VirtualAddress = std::ptr::without_provenance_mut(address);
-        entries.push(entry);
-        at = at
-            .checked_add(page)
-            .ok_or_else(|| io::Error::other("a range past the address space"))?;
-    }
-    let bytes = pages
-        .checked_mul(size_of::<PSAPI_WORKING_SET_EX_INFORMATION>())
-        .and_then(|bytes| u32::try_from(bytes).ok())
-        .ok_or_else(|| io::Error::other("a range's pages past one QueryWorkingSetEx"))?;
-    // SAFETY: a process handle with query rights; `entries` holds `bytes` of entries, each naming an address of the
-    // process's, read and never dereferenced here, whose attributes the call writes.
-    if unsafe { K32QueryWorkingSetEx(process.raw(), entries.as_mut_ptr().cast(), bytes) } == 0 {
-        return Err(last_error());
-    }
-    let mut held = 0u64;
-    for entry in &entries {
-        // SAFETY: the union's whole word, which every bit pattern makes a valid usize, as the call wrote it.
-        let flags = unsafe { entry.VirtualAttributes.Flags };
-        if flags & PAGE_VALID != 0 && flags & PAGE_SHARED == 0 {
-            held = held
-                .checked_add(page)
-                .ok_or_else(|| io::Error::other("a range's pages past u64"))?;
-        }
-    }
-    Ok(held)
 }
 
 /// This machine's page size (`GetSystemInfo`'s `dwPageSize`).
@@ -1990,5 +1936,79 @@ mod observer_socket_tests {
         stderr.read_exact(&mut byte).unwrap();
         assert_eq!(byte, *b"S");
         assert!(readable_pair([None, None], Duration::ZERO).is_err());
+    }
+
+    /// AC-T7.4.1 (the guest-cost producer's readers): do: commit 64 pages of read/write memory as Shards' WHP guest RAM
+    /// is committed (`VirtualAlloc`, `MEM_RESERVE | MEM_COMMIT`), reserve 64 more uncommitted, and read this process from
+    /// outside as the producer reads a VM process (`open_for_reading` by its own pid). Expect: the committed run one
+    /// region, exactly the allocation, committed private read/write memory; the reserved run one region of its own,
+    /// not committed read/write memory; and no process at a pid none has.
+    #[test]
+    fn a_committed_run_is_read_as_one_private_read_write_region() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        let page = u64::from(page_size());
+        let len = usize::try_from(64 * page).unwrap();
+        // SAFETY: two fresh allocations of `len` bytes this test owns, each released below.
+        let (committed, reserved) = unsafe {
+            (
+                VirtualAlloc(null(), len, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),
+                VirtualAlloc(null(), len, MEM_RESERVE, PAGE_READWRITE),
+            )
+        };
+        assert!(
+            !committed.is_null() && !reserved.is_null(),
+            "{}",
+            last_error()
+        );
+        let me = open_for_reading(std::process::id()).unwrap().unwrap();
+        let at = |base: *mut std::ffi::c_void| u64::try_from(base.addr()).unwrap();
+        let read = (region(&me, at(committed)), region(&me, at(reserved)));
+        // SAFETY: the allocations above, each released once and not used after.
+        unsafe {
+            VirtualFree(committed, 0, MEM_RELEASE);
+            VirtualFree(reserved, 0, MEM_RELEASE);
+        }
+        let size = 64 * page;
+        assert_eq!(
+            read.0.unwrap().unwrap(),
+            Region {
+                base: at(committed),
+                size,
+                private_rw: true
+            }
+        );
+        assert_eq!(
+            read.1.unwrap().unwrap(),
+            Region {
+                base: at(reserved),
+                size,
+                private_rw: false
+            }
+        );
+        // Process ids are multiples of four (Windows Internals, 7th ed., ch. 3): none has an odd one.
+        assert!(open_for_reading(1).unwrap().is_none());
+    }
+
+    /// AC-T7.4.1 (the guest-cost producer's readers): do: write a file one byte past its volume's allocation unit
+    /// (`cluster_bytes` of its folder) and read it as the producer reads what a folder holds (`file_held`), then rename
+    /// it, link it and read it again. Expect: two units allocated to it; the same file (its volume and index) by its
+    /// new name and through its link; and nothing at its old name.
+    #[test]
+    fn a_file_is_held_in_its_volumes_units_and_named_by_its_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = cluster_bytes(dir.path()).unwrap();
+        let path = dir.path().join("held");
+        std::fs::write(&path, vec![7u8; usize::try_from(unit + 1).unwrap()]).unwrap();
+        let (file, bytes) = file_held(&path).unwrap().unwrap();
+        assert_eq!(bytes, 2 * unit, "{unit}-byte units");
+        let moved = dir.path().join("moved");
+        std::fs::rename(&path, &moved).unwrap();
+        assert_eq!(file_held(&moved).unwrap().unwrap().0, file);
+        let linked = dir.path().join("linked");
+        std::fs::hard_link(&moved, &linked).unwrap();
+        assert_eq!(file_held(&linked).unwrap().unwrap().0, file);
+        assert_eq!(file_held(&path).unwrap(), None);
     }
 }
