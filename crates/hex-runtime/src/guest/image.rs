@@ -799,8 +799,13 @@ impl Proc for MemberProc {
         }
         let exit = match self.guest.wait_member(&self.name, timeout) {
             Ok(None) => return Ok(None),
-            Ok(Some(MemberEnd::Exited(status))) => {
-                i32::try_from(status).map_or(Exit::Unknown, Exit::Code)
+            Ok(Some(MemberEnd::Exited(code))) => {
+                i32::try_from(code).map_or(Exit::Unknown, Exit::Code)
+            }
+            // Killed by a signal, its Linux number (image channel v27): its own end, never folded into the code
+            // `docker run` reports for it (128 plus it), which an exit can be too.
+            Ok(Some(MemberEnd::Signaled(signal))) => {
+                i32::try_from(signal).map_or(Exit::Unknown, Exit::Signal)
             }
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {

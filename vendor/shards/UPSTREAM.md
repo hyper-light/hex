@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `37ddeb080d7e91d515c0506743dce55b6a5b07ce` (main).
+Revision: `16451e19f172cfb29882efcab6502cc43b8bd061` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -22,7 +22,7 @@ own CPU, `Refusal::HostUse` an answer none of the protocol's; Hex reads it nowhe
 through a client's native owner (D233); GPU selection
 by exact identity (D232), a VM process's refusal of its selection typed in place of a receipt
 (`GpuProbeError::Refused`, `Unreported`; 18f59d497); and an image booted under shards-init for an
-orchestrator (D231, `shards_api::image`, image channel version 26), with its nesting grant (D234)
+orchestrator (D231, `shards_api::image`, image channel version 27), with its nesting grant (D234)
 and, under it, the run's GPUs by identity (`ImageSpec::gpu_devices`, `gpus=`, version 16, e46299c07;
 its workload's cgroup sized by its microVM's CPUs, a853a8138), plugs (D235), destinations by name
 and the receivers a published port reaches (D236), a member's stdin, the room its orchestrator's
@@ -69,6 +69,11 @@ the roots a run's injector trusts toward its credentials' hosts, its host's and 
 orchestrator names (D242, `ImageSpec::upstream_roots`, version 26, b6814785d, fd61d46da), each
 checked at request and refused as a spec (`an upstream root`), its environment's
 `SSL_CERT_FILE` and `SSL_CERT_DIR` trusted on no OS (Hex names none);
+a member's end typed, `Signaled(n)` beside its exit, from its namespace's reaper to both ends (#72,
+7aab838e0: `shards_abi::run::members::End`, `MemberEnd::Signaled`, version 27; its lane's
+`exec::End`, `Member::Ended` and `MemberEnd::wait`), which Hex maps to `Exit::Signal(n)`, never
+folded into the status `docker run` reports; a member's MCP connections' handles re-exported by
+`shards_api::control` (`McpConnection`, `Output`, `Input`, `Got`, `ExecControl`; D254);
 a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
