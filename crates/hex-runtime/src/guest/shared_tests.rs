@@ -66,6 +66,8 @@ struct Owner {
     launches: AtomicUsize,
     /// Each launch's kernel command line.
     cmdlines: Mutex<Vec<String>>,
+    /// Each launch's deadline, as what is left of it: none for one that follows its guest.
+    patience: Mutex<Vec<Option<Duration>>>,
     preparations: AtomicUsize,
     removals: AtomicUsize,
     submission: Mutex<Submission>,
@@ -90,6 +92,7 @@ impl Owner {
             boxes: Mutex::new(Records::new()),
             launches: AtomicUsize::new(0),
             cmdlines: Mutex::new(Vec::new()),
+            patience: Mutex::new(Vec::new()),
             preparations: AtomicUsize::new(0),
             removals: AtomicUsize::new(0),
             submission: Mutex::new(Submission::Absent),
@@ -214,8 +217,9 @@ impl Transaction for Owner {
         &self,
         plan: &devices::ManagedLaunch<'_>,
         _: shards_api::LaunchIo,
-        _: Duration,
+        patience: Duration,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        self.patience.lock().unwrap().push(Some(patience));
         let devices::ManagedLaunch::Shards(prepared) = plan else {
             panic!("a shared backing launches Shards")
         };
@@ -527,6 +531,20 @@ fn c9_a_managed_shards_boot_tells_its_guest_no_boot_deadline() {
         !cmdlines[0].contains(super::super::tests::READY_MS),
         "{cmdlines:?}"
     );
+}
+
+/// The review's C-9 (1) (decision 9; ROOT's (c1)): a managed create that isn't a GPU create follows its guest, its
+/// budget no deadline of the record's, each wait in it within its own W* and past it following its party. Do: initialize
+/// a shared backing, whose launch the owner reads, then refuses. Expect its native launch given no deadline.
+#[test]
+fn c9_a_shared_backings_launch_is_given_no_deadline() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let offer = runtime.prepare_backing().unwrap();
+    let initialized = runtime.initialize_backing(grant(&offer)).map(drop);
+    let patience = owner.patience.lock().unwrap().clone();
+    eprintln!("c9_shared_launch initialized={initialized:?} patience={patience:?}");
+    assert_eq!(patience, [None], "its launch was given a deadline");
 }
 
 #[test]
