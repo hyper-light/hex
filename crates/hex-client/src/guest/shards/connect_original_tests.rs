@@ -224,6 +224,7 @@ fn b15_each_of_shards_guest_failures_is_its_own_typed_refusal() {
         SdkRefusal::Rate("its governor's thread wasn't made".to_owned()),
         SdkRefusal::HostUse(shards_abi::rate::UseBroken::Word),
     ];
+    let mut told = Vec::new();
     for kind in &kinds {
         let adapted = refusal("booting the node's guest", kind);
         assert!(
@@ -231,5 +232,28 @@ fn b15_each_of_shards_guest_failures_is_its_own_typed_refusal() {
             "Shards' {kind:?} became an OS error: {adapted:?}"
         );
         assert_eq!(on_the_wire(&adapted), adapted, "{kind:?}");
+        let Refusal::Guest { op, failure } = adapted else {
+            panic!("Shards' {kind:?} is no guest's failure: {adapted:?}");
+        };
+        assert_eq!(op, "booting the node's guest");
+        told.push(failure);
     }
+    assert_eq!(
+        told[0],
+        hex_api::GuestFailure::Stalled {
+            waited: stall.waited(),
+            over: stall.over(),
+            slowest: stall.slowest(),
+        },
+        "the stall as Shards' judge found it"
+    );
+    let distinct: std::collections::BTreeSet<String> = told
+        .iter()
+        .map(|failure| format!("{:?}", std::mem::discriminant(failure)))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        5,
+        "Shards' five kinds, each its own: {told:?}"
+    );
 }

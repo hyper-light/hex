@@ -2569,6 +2569,34 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
         (any_id(), any_text()).prop_map(|(id, why)| Refusal::Failed { id, why }),
         (proptest::sample::select(&SOME_NAMES[..]), any_text())
             .prop_map(|(what, why)| Refusal::Unconfigured { what, why }),
+        (
+            proptest::sample::select(&SOME_NAMES[..]),
+            any_guest_failure()
+        )
+            .prop_map(|(op, failure)| Refusal::Guest { op, failure }),
+    ]
+}
+
+/// Each of a Shards guest's failures (the review's B-15), its durations whole nanoseconds of a u64, as Shards keeps
+/// them.
+fn any_guest_failure() -> impl Strategy<Value = GuestFailure> {
+    let nanos = || any::<u64>().prop_map(std::time::Duration::from_nanos);
+    prop_oneof![
+        (nanos(), nanos(), nanos()).prop_map(|(waited, over, slowest)| GuestFailure::Stalled {
+            waited,
+            over,
+            slowest
+        }),
+        prop_oneof![
+            Just(GuestEnd::PowerOff),
+            Just(GuestEnd::Reset),
+            Just(GuestEnd::Stopped),
+            any_text().prop_map(GuestEnd::Failed),
+        ]
+        .prop_map(GuestFailure::Ended),
+        (any::<u32>(), any_text()).prop_map(|(pid, why)| GuestFailure::Gone { pid, why }),
+        any_text().prop_map(GuestFailure::Rate),
+        any_text().prop_map(GuestFailure::HostUse),
     ]
 }
 

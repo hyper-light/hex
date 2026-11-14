@@ -684,6 +684,7 @@ fn kind(r: &Refusal) -> &'static str {
         },
         Refusal::Failed { .. } => "Failed",
         Refusal::Unconfigured { .. } => "Unconfigured",
+        Refusal::Guest { .. } => "Guest",
     }
 }
 
