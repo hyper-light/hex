@@ -394,6 +394,20 @@ pub(crate) fn armed() -> Vec<Armed> {
     ARMED.with(|log| log.take())
 }
 
+/// Whether `armed`, an operation's armed log, holds each of `waits` armed at `at` and every entry that isn't a learned
+/// wait's at `at` too: the one deadline the operation took, by value, whatever it armed besides.
+#[cfg(test)]
+pub(crate) fn armed_at(armed: &[Armed], waits: &[&str], at: Option<Instant>) -> bool {
+    waits.iter().all(|what| {
+        armed
+            .iter()
+            .any(|armed| armed.what == *what && !armed.learned && armed.at == at)
+    }) && armed
+        .iter()
+        .filter(|armed| !armed.learned)
+        .all(|armed| armed.at == at)
+}
+
 /// One operation's absolute reply/setup deadline. The caller's authority and the learned answer
 /// wait stay distinct: exhausting caller authority is not a slower-answer calibration sample.
 #[derive(Clone, Copy, Debug)]
@@ -817,7 +831,7 @@ fn wait_refused(why: hex_wait::Failed) -> Refusal {
 /// The longest one wait on a connection can be: `i32::MAX` milliseconds, the most poll(2) takes where it has no
 /// `ppoll` (macOS; Windows' `WSAPoll`), its timeout a C `int` of milliseconds. A longer wait waits this long at a
 /// time, its caller waiting again until its own deadline.
-const MOST_ONE_WAIT: Duration = Duration::from_millis(2_147_483_647);
+pub(crate) const MOST_ONE_WAIT: Duration = Duration::from_millis(2_147_483_647);
 /// [`MOST_ONE_WAIT`] as poll(2) takes it.
 const MOST_ONE_WAIT_SPEC: rustix::event::Timespec = rustix::event::Timespec {
     tv_sec: 2_147_483,
