@@ -4,8 +4,9 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `2246a8829`, image channel v30 (`d91ebb32`, `d7179108`, every socket a run's agent-control
-endpoint holds told, its waker and wake in inspect; `2737fc4ec` before it, v29, at `20015fb5`, a run's stop returning
+Merged on Hex's main at Shards `d7ff8a094`, image channel v30 (a member's stdio read and written without waiting, and an
+exec's hangup; `2246a8829` before it, at `d91ebb32` and `d7179108`, every socket a run's agent-control endpoint holds
+told, its waker and wake in inspect; `2737fc4ec` before it, v29, at `20015fb5`, a run's stop returning
 released, so a delete frees nothing the run still holds, the review's B-4; `ce80cbb37` before that, at `9ff60efb`, a run's end with its microVM's final
 use, of which the class reads the end alone yet, a member's lane asks waited within their W* and followed past it, told,
 and no GPU report asked; `16451e19f` before that, v27, at `cf844022`, a member's end typed, a member a signal killed
@@ -21,7 +22,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
-  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec` and `2246a8829`) and
+  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829` and `d7ff8a094`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -62,7 +63,7 @@ Sources, read at the revisions named:
   a run's stop returning released (D231, `c133bfb56`: its run host exited and reaped, every process it started gone).
   At `2246a8829`, version 30: every socket a run's agent-control endpoint holds (D252 amended, `d3950c7d1`:
   `ControlAt::waker`, `wake`, `sockets`).
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec` and `2246a8829`: `crates/api/src/image.rs` (`Images`, its `boot` and
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829` and `d7ff8a094`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -384,7 +385,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `2246a8829` or later (image channel version 30: Hex's `shards` and its shards-init, rebuilt on each host by
+  `d7ff8a094` or later (image channel version 30: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec
