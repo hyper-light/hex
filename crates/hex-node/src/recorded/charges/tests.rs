@@ -1454,12 +1454,32 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
     let records = records();
     let unmanaged = sort(&records, &[], |_| false).unwrap();
     assert_eq!(ids(&unmanaged), ["img-1"]);
-    assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
-    assert_eq!(unmanaged.native, res(2_000, GIB));
+    assert_eq!(
+        booked_sums(&unmanaged),
+        (res(16_000, 8 * GIB), res(2_000, GIB))
+    );
     let both = sort(&records, &[], |_| true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
-    assert_eq!(both.whole, CapacityResources::default());
-    assert_eq!(both.native, res(2_000, GIB));
+    assert_eq!(
+        booked_sums(&both),
+        (CapacityResources::default(), res(2_000, GIB))
+    );
+}
+
+/// What a window's sort books off the fleet's budget (A-10): of the VMs it doesn't learn, whole, and of the native boxes,
+/// at their caps, each summed.
+fn booked_sums(sorted: &Sorted<'_>) -> (CapacityResources, CapacityResources) {
+    let mut whole = CapacityResources::default();
+    let mut native = CapacityResources::default();
+    for (holder, booking) in &sorted.booked {
+        let sum = if holder.managed() || holder.image() {
+            &mut whole
+        } else {
+            &mut native
+        };
+        *sum = sum.checked_add(*booking).unwrap();
+    }
+    (whole, native)
 }
 
 /// Image VM `name`'s host use with nothing used yet, its 16 vCPUs' guest time none and `held` held.
@@ -2035,7 +2055,11 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
         .map(|holder| box_of(&holder.id().unwrap()).to_owned())
         .collect();
     assert_eq!(learned, ["vm-1"]);
-    assert_eq!(sorted.whole.cpu_milli, 16_000, "the second's receipt");
+    assert_eq!(
+        booked_sums(&sorted).0.cpu_milli,
+        16_000,
+        "the second's receipt"
+    );
     io.rates.borrow_mut().clear();
     learner
         .window(&io, &sorted.learned, res(6_000, 64 * GIB), Instant::now())
@@ -3047,8 +3071,9 @@ fn w39_a5_the_oci_boxes_a_node_vm_hosts_are_its_never_native_too() {
         capped("oci-1", oci, 2_000, 2 * GIB),
         capped("proc-1", ClassSpec::Process, 1_000, GIB),
     ];
-    let native =
-        |rows: &[hex_core::record::NodeVmRecord]| sort(&records, rows, |_| true).unwrap().native;
+    let native = |rows: &[hex_core::record::NodeVmRecord]| {
+        booked_sums(&sort(&records, rows, |_| true).unwrap()).1
+    };
     assert_eq!(
         native(&[]),
         res(3_000, 3 * GIB),
