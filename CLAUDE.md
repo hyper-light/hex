@@ -260,6 +260,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
       (GetFileInformationByHandle, GetFileInformationByHandleEx); the handle is closed once.
     - Reads no CPU or memory totals itself: those come from the VM's job, through the reader the node already
       uses (QueryInformationJobObject); guest CPU time comes from Shards' own report (ManagedGuest::host_use).
+    - Its tests also borrow and free memory regions (VirtualAlloc, VirtualFree) to read back; tests only.
 
 - `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
   turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
