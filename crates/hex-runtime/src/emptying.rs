@@ -1,6 +1,8 @@
-//! A killed `process` box's emptying on macOS, waited for as decision 9 of docs/design/runtime-architecture.md waits
-//! (the review's E-12): learned, its run-out told, the box followed by its members' own ends past it, never refused at a
-//! time. The OS's shell says what the box's emptying is and how its members' ends are seen; this is the wait itself.
+//! A killed `process` box's emptying on macOS and Windows, waited for as decision 9 of
+//! docs/design/runtime-architecture.md waits (the review's E-12): learned, its run-out told, the box followed by its
+//! members' own ends past it, never refused at a time. Each OS's shell says what the box's emptying is and how its
+//! members' ends are seen (macOS: its process group, by kqueue; Windows: its job, by its members' process handles); this
+//! is the wait they share.
 
 use std::time::{Duration, Instant};
 
@@ -43,7 +45,8 @@ pub(crate) fn followed(
 /// The review's E-12 test control: a hold on one killed box's emptying. While it stands for a box, the box reads as not
 /// yet empty, as a box whose last member's teardown runs long reads, so a test meets a wait on it past any bound: a
 /// slice's wait ends empty-handed, and a following wait stops at the hold, counted, until it goes. Keyed by what names
-/// the box to its OS's wait (a macOS box's process group, by its id), so tests side by side hold their own boxes alone.
+/// the box to its OS's wait (a macOS box's process group, by its id; a Windows box's id, or its job's name where a
+/// recovery ends it), so tests side by side hold their own boxes alone.
 #[cfg(test)]
 pub(crate) mod hold {
     use std::collections::BTreeMap;

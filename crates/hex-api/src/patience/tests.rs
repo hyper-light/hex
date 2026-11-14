@@ -251,3 +251,28 @@ fn a_party_past_what_the_line_leaves_is_cut_at_its_bound_and_the_cut_told() {
 fn the_lines_bound_is_posixs_least_pipe_buf() {
     assert_eq!(LINE_BOUND, 512);
 }
+
+/// The review's C-10 (decision 9; ROOT, 2026-11-14): a wait that starts with no W* and whose party could hang alive
+/// tells that it follows it, in the run-out's own form and bound. Do: form the following line for a party of a kind and a
+/// name; then a party ten times the line's bound; and ask a cold wait, then one that has its W*, to tell it. Expect: the
+/// fields kiln reads, the party a JSON string, one line; the long one within [`LINE_BOUND`], its cut told; the cold
+/// wait told, the one with a W* not.
+#[test]
+fn c10_a_wait_with_no_w_star_tells_that_it_follows_its_party() {
+    assert_eq!(
+        following_line(
+            "a.wait",
+            &[Piece::Kind("the node VM's run, by its READY and its end")]
+        ),
+        "hex.wait event=following wait=a.wait party=\"the node VM's run, by its READY and its end\"\n"
+    );
+    let name = "n".repeat(LINE_BOUND * 10);
+    let long = following_line("a.wait", &[Piece::Kind("the init of "), Piece::Name(&name)]);
+    assert!(long.len() <= LINE_BOUND, "{} bytes", long.len());
+    assert_eq!(long.matches('\n').count(), 1);
+    assert!(long.ends_with(" bytes]\"\n"), "{long}");
+    let cold = Patience::measuring("c10.cold");
+    assert!(cold.following(&[Piece::Kind("a party")]));
+    cold.answered(Duration::from_nanos(41));
+    assert!(!cold.following(&[Piece::Kind("a party")]));
+}

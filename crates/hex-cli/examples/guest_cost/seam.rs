@@ -31,7 +31,8 @@ pub struct Envelope {
     pub source: String,
 }
 
-/// The patience a guest is booted within, before any run-out doubles it, and its record.
+/// A guest's boot's W* (decision 9): past it the boot's run-out is told, once, and the boot followed on to its answer,
+/// never ended at it; and its record.
 pub struct Patience {
     pub bound: Duration,
     pub source: String,
@@ -99,7 +100,7 @@ pub trait Driver {
     fn describe(&self) -> Result<Lines, String>;
     /// The envelope floor and ceiling hold.
     fn envelope(&self) -> Result<Envelope, String>;
-    /// The first boot's patience.
+    /// A guest's boot's W* ([`Patience`]).
     fn patience(&self) -> Result<Patience, String>;
     /// The folder the VMM's own files go on: its filesystem's block size is the disk quantum.
     fn runtime(&self) -> &Path;
@@ -108,12 +109,13 @@ pub trait Driver {
 
     /// What is held on disk under the class's runtime folders now: before a guest, and after its end.
     fn held(&self) -> Result<Files, String>;
-    /// Starts one guest's VMM, told it has until `deadline` to be ready as the node tells its guests, and
-    /// returns it with the probes that read it.
-    fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String>;
-    /// Waits, until `deadline`, for the launched guest to be ready (its agent answering): `false` when
-    /// the deadline passed first.
-    fn ready(&mut self, guest: &mut Self::Guest, deadline: Instant) -> Result<bool, String>;
+    /// Starts one guest's VMM, its guest told no deadline (it keeps its learned bounds), and returns it with the probes
+    /// that read it.
+    fn launch(&mut self) -> Result<Launched<Self>, String>;
+    /// Follows the launched guest to its readiness (its agent answering): past the class's W* ([`Driver::patience`])
+    /// its run-out told once and the wait going on by the guest's life, never ended at a bound; refused at the
+    /// guest's end or its agent's refusal.
+    fn ready(&mut self, guest: &mut Self::Guest) -> Result<(), String>;
     /// Holds the ready guest idle until `until`: its end in that time is a failure.
     fn idle(&mut self, guest: &Self::Guest, until: Instant) -> Result<(), String>;
     /// The guest agent's own report of what it has free inside the envelope, until `deadline`.

@@ -597,8 +597,9 @@ pub enum SealFault {
     /// Its seal doesn't open under the peer's key: its header, nonce, body or tag isn't what was sealed.
     #[error("its seal doesn't open under the peer's key")]
     Broken,
-    /// This side's nonces are spent: one more would repeat one, so nothing more is sealed under its key.
-    #[error("this side's nonces under its key are spent")]
+    /// This side's key has sealed all it may: its nonces, one more of which would repeat one, or AES-GCM's limit on what
+    /// one key seals (RFC 8446 §5.5). Nothing more is sealed under it; a new connection's key seals on.
+    #[error("this side's key has sealed all it may")]
     Spent,
     /// The cipher refused what it was given.
     #[error("the cipher refused {what}")]
@@ -1166,9 +1167,13 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 for receipt in &capacity.node_vms {
                     put_node_vm_receipt(w, receipt)?;
                 }
-                // Last (A-3; ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
+                // A-3 (ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
                 w.reserve_fixed(1)?;
-                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))
+                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))?;
+                // Last (the review's A-8): its boxes' CPU time together, after `unlearned`.
+                w.reserve_fixed(1)?;
+                w.option(capacity.own.boxes_cpu_ns, Writer::u64);
+                Ok(())
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1687,7 +1692,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         kind::BACKING_OFFER => Answer::BackingOffer(backing_offer(&mut r)?),
         kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
             let id = r.string("capacity pool")?;
-            let capacity = Capacity {
+            let mut capacity = Capacity {
                 id,
                 total: resources(r)?,
                 free: resources(r)?,
@@ -1728,10 +1733,11 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 })?,
                 // Then (joint plan step 14).
                 learned: r.option(learned)?,
-                // Then (joint plan step 14, C7).
+                // Then (joint plan step 14, C7); its boxes' CPU time is the last field, read below.
                 own: hex_api::MachineTime {
                     cpu_ns: r.option(Reader::u64)?,
                     uptime_ns: r.option(Reader::u64)?,
+                    boxes_cpu_ns: None,
                 },
                 // Then (joint plan step 39).
                 node_vms: r.bounded_list(
@@ -1740,9 +1746,11 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "node VM receipts",
                     node_vm_receipt,
                 )?,
-                // Last (A-3).
+                // Then (A-3).
                 unlearned: r.option(|r| r.string("why a learner learned nothing"))?,
             };
+            // Last (the review's A-8).
+            capacity.own.boxes_cpu_ns = r.option(Reader::u64)?;
             check_capacity(&capacity)?;
             Ok(capacity)
         })?),
