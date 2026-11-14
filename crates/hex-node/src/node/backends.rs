@@ -14,7 +14,8 @@ use std::sync::Weak;
 
 pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
-    shards: Option<Arc<GuestRuntime>>,
+    /// The node's Shards guest runtime, whose managed VMs' processes answer their use (D260) to the charge learner.
+    pub(super) shards: Option<Arc<GuestRuntime>>,
     vm_root: Option<BoxRoot>,
     /// Joint plan step 14: the charge learner of the VMs under `vm_root`, where there are any.
     pub(super) learner: Option<super::charges::Shared>,

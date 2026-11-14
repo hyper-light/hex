@@ -25,7 +25,7 @@ use hex_api::{
     BoxInfo, CapacityResources, HostUse, Learned, LearnedEnd, LearnedHolder, LearnedUse,
     MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
-use hex_core::record::{BoxRecord, Phase};
+use hex_core::record::{BoxRecord, NodeVmRecord, Phase};
 use hex_runtime::guest::ManagedGuestTime;
 use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
 use hex_sim::model::Class;
@@ -76,11 +76,13 @@ impl Lifetime {
     }
 }
 
-/// What a learner holds a VM by (joint plan steps 14 and 39; ROOT, 2026-11-13): a box's record. A node VM's row, a VM
-/// the node runs for itself and a holder of its own in the node's ledger, joins it (step 39).
+/// What a learner holds a VM by (joint plan steps 14 and 39; ROOT, 2026-11-13): a box's record, or a node VM's row, a
+/// VM the node runs for itself and a holder of its own in the node's ledger, with its band, what ending it ends
+/// ([`node_band`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Holder<'a> {
     Box(&'a BoxRecord),
+    Node { row: &'a NodeVmRecord, band: u8 },
 }
 
 impl<'a> Holder<'a> {
@@ -88,6 +90,7 @@ impl<'a> Holder<'a> {
     pub(crate) fn id(self) -> Result<LearnedHolder, Refusal> {
         match self {
             Self::Box(record) => Ok(LearnedHolder::Box(record.spec.id.try_clone()?)),
+            Self::Node { row, .. } => Ok(LearnedHolder::Node(row.run)),
         }
     }
 
@@ -95,14 +98,18 @@ impl<'a> Holder<'a> {
     pub(crate) fn is(self, id: &LearnedHolder) -> bool {
         match (self, id) {
             (Self::Box(record), LearnedHolder::Box(id)) => record.spec.id == *id,
-            (Self::Box(_), LearnedHolder::Node(_)) => false,
+            (Self::Node { row, .. }, LearnedHolder::Node(run)) => row.run == *run,
+            (Self::Box(_), LearnedHolder::Node(_)) | (Self::Node { .. }, LearnedHolder::Box(_)) => {
+                false
+            }
         }
     }
 
-    /// The lifetime it names ([`Scope::of`]).
+    /// The lifetime it names ([`Scope::of`]): a node VM's its run.
     pub(crate) fn scope(self) -> Option<Scope> {
         match self {
             Self::Box(record) => Scope::of(record),
+            Self::Node { row, .. } => Some(Scope::Run(row.run)),
         }
     }
 
@@ -110,13 +117,15 @@ impl<'a> Holder<'a> {
     pub(crate) fn allocation(self) -> Option<hex_api::Allocation> {
         match self {
             Self::Box(record) => record.spec.allocation,
+            Self::Node { row, .. } => Some(row.allocation),
         }
     }
 
-    /// Its class.
+    /// Its class: a node VM is a Shards microVM, booted through the image class.
     pub(crate) fn class(self) -> hex_api::Class {
         match self {
             Self::Box(record) => record.spec.class.class(),
+            Self::Node { .. } => hex_api::Class::Shards,
         }
     }
 
@@ -124,6 +133,7 @@ impl<'a> Holder<'a> {
     pub(crate) fn band(self) -> u8 {
         match self {
             Self::Box(record) => record.spec.band,
+            Self::Node { band, .. } => band,
         }
     }
 
@@ -131,6 +141,7 @@ impl<'a> Holder<'a> {
     pub(crate) fn started(self) -> Option<u64> {
         match self {
             Self::Box(record) => record.started,
+            Self::Node { row, .. } => row.started,
         }
     }
 
@@ -138,6 +149,7 @@ impl<'a> Holder<'a> {
     pub(crate) fn intent(self) -> Option<&'a LearnedEnd> {
         match self {
             Self::Box(record) => record.last_resort.as_ref(),
+            Self::Node { row, .. } => row.last_resort.as_ref(),
         }
     }
 
@@ -145,15 +157,59 @@ impl<'a> Holder<'a> {
     pub(crate) fn managed(self) -> bool {
         match self {
             Self::Box(record) => running(record),
+            Self::Node { .. } => false,
         }
     }
 
-    /// Whether it is a Shards image VM made and not ended ([`running_image`]).
+    /// Whether it is a Shards image VM made and not ended ([`running_image`]), as a node VM that runs is: Ready, its run
+    /// not ended.
     pub(crate) fn image(self) -> bool {
         match self {
             Self::Box(record) => running_image(record),
+            Self::Node { row, .. } => {
+                row.phase == hex_api::NodeVmPhase::Ready && row.exit.is_none()
+            }
         }
     }
+}
+
+/// A node VM's band (joint plan step 39, place 3; ROOT, 2026-11-13): what ending it ends. It runs its node's `oci`
+/// class, so ending it ends every box of that class whose run hasn't ended, and its band is the highest of theirs among
+/// its node's `records`, none ranking it lowest (it ends no box). A record that can't be read may be of a box it runs,
+/// of any band, so then it ranks above every box: the highest band there is.
+pub(crate) fn node_band<'r>(
+    records: impl IntoIterator<Item = &'r Result<BoxRecord, String>>,
+) -> u8 {
+    let mut band = 0;
+    for record in records {
+        match record {
+            Err(_) => return u8::MAX,
+            Ok(record)
+                if record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none() =>
+            {
+                band = band.max(record.spec.band);
+            }
+            Ok(_) => {}
+        }
+    }
+    band
+}
+
+/// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
+pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, Refusal> {
+    let mut holders = Vec::new();
+    holders
+        .try_reserve_exact(rows.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's VMs",
+            bound: rows.len(),
+        })?;
+    holders.extend(
+        rows.iter()
+            .map(|row| Holder::Node { row, band })
+            .filter(|holder| holder.image()),
+    );
+    Ok(holders)
 }
 
 /// `records`, a node's boxes' records, as the holders a learner reads, each a box's.
@@ -451,7 +507,11 @@ fn milli_over(ns: u64, span: Duration) -> Option<u64> {
 /// its VMM's own where its host read each vCPU's both times (D241), its VMM's own the whole less its vCPUs', never less
 /// than none past the clocks' steps; whole where it didn't. Two readings naming different vCPU counts are refused,
 /// typed: no vCPU's time is paired with another's.
-fn ran(cpu_ns: u64, now: Option<&[u64]>, before: Option<&[u64]>) -> Result<Cpu, ChargeError> {
+pub(crate) fn ran(
+    cpu_ns: u64,
+    now: Option<&[u64]>,
+    before: Option<&[u64]>,
+) -> Result<Cpu, ChargeError> {
     let (Some(now), Some(before)) = (now, before) else {
         return Ok(Cpu::Whole(Duration::from_nanos(cpu_ns)));
     };

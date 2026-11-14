@@ -21,13 +21,14 @@ use hex_api::{
     MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
+use hex_runtime::guest::{GuestRuntime, ManagedGuestTime};
 use hex_runtime::linux::cgroup::BoxCgroup;
-use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
+use hex_sim::charge::{self, ChargeError, ClassKey, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
 use crate::recorded::charges::{
-    LastResort, Lifetime, Reach, Scope, Writes, bounds, record_last_resort, write_ends,
+    LastResort, Lifetime, Reach, Scope, Writes, bounds, ran, record_last_resort, write_ends,
 };
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
@@ -39,6 +40,11 @@ const CPU_MILLI: u64 = 1_000;
 /// What the learner reads and writes of cgroups: the kernel's in the node, a record's in its tests.
 pub(super) trait Cgroups {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal>;
+    /// VM `id`'s vCPUs' guest time since its boot, as its VM process answers its use (D260), asked before its cgroup's
+    /// use so its VMM's own (the cgroup's CPU less its vCPUs') is never less than none: none apart for a VM no managed
+    /// guest of the node's holds (a Firecracker VM, a node VM), whose microVM hasn't started, or whose process answers
+    /// no use, why told.
+    fn guest_time(&self, id: &LearnedHolder) -> Result<ManagedGuestTime, Refusal>;
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal>;
     /// The cgroups directly under `dir`.
     fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal>;
@@ -51,14 +57,34 @@ pub(super) trait Cgroups {
     fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
-/// The kernel's cgroups, and the node's records.
+/// The kernel's cgroups, the node's records, and its Shards guest runtime, where it runs one.
 pub(super) struct Kernel<'a> {
     pub(super) store: &'a crate::store::Store,
+    pub(super) guest: Option<&'a GuestRuntime>,
 }
 
 impl Cgroups for Kernel<'_> {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal> {
         cgroup.managed_usage()
+    }
+
+    fn guest_time(&self, id: &LearnedHolder) -> Result<ManagedGuestTime, Refusal> {
+        let unheld = |why: &str| Ok(ManagedGuestTime::Unheld(why.to_owned()));
+        let LearnedHolder::Box(id) = id else {
+            return unheld("a node VM's use is its run's, which no managed guest answers");
+        };
+        let Some(guest) = self.guest else {
+            return unheld("this node runs no Shards guest runtime");
+        };
+        let record = match self.store.get(id)? {
+            Some(Ok(record)) => record,
+            Some(Err(why)) => return Err(Refusal::Broken(format!("box {id}'s record: {why}"))),
+            None => return Err(Refusal::NoSuchBox(id.try_clone()?)),
+        };
+        if record.spec.class.class() != hex_api::Class::Shards {
+            return unheld("a Firecracker VM's process answers no use");
+        }
+        guest.managed_guest_time(&record)
     }
 
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal> {
@@ -145,6 +171,8 @@ struct Vm {
     cgroup: BoxCgroup,
     /// Its VMM's CPU so far, in microseconds, and when it was read.
     last: (u64, Instant),
+    /// Each vCPU's guest time at that reading, where its VM process answered it (D260).
+    guest_ns: Option<Vec<u64>>,
     /// What its cgroup holds as the learner last wrote it, or as its create wrote it.
     written: Vec<Write>,
     /// The CPU cap its cgroup holds it at, in milli-CPU (`cpu.max`), as last written: a window that reaches it is no
@@ -439,8 +467,13 @@ impl Learner {
             // learner untouched (ROOT, 2026-11-13: never starving its neighbours by holding nothing): no sample taken,
             // its booking as it was, and the failure told (no holding on the capacity answers, so the scheduler counts
             // it at its receipt). One that ended since its listing is ended by the next.
-            let usage = match io.usage(&cgroup) {
-                Ok(usage) => usage,
+            // D260: a managed VM's vCPUs' guest time first, then its cgroup's use, so its VMM's own (the cgroup's less its
+            // vCPUs') is never less than none; either read failing counts the VM whole, as above.
+            let read = io
+                .guest_time(&id)
+                .and_then(|guest| Ok((guest, io.usage(&cgroup)?)));
+            let (guest, usage) = match read {
+                Ok(read) => read,
                 Err(why) => {
                     if let Some(met) = record(&id)? {
                         let booked = self
@@ -478,15 +511,25 @@ impl Learner {
                     continue;
                 }
             };
+            let guest_ns = match guest {
+                ManagedGuestTime::PerVcpu(times) => Some(times),
+                ManagedGuestTime::Unheld(_) => None,
+            };
             if let Some(vm) = self.vms.get_mut(&scope) {
                 let (before, at) = vm.last;
+                // Split where both readings hold its vCPUs' guest time (D260), its VMM's own the cgroup's less theirs, as
+                // every OS's learner reads it; whole where either doesn't.
+                let cpu = ran(
+                    usage.cpu_usec.saturating_sub(before).saturating_mul(1_000),
+                    guest_ns.as_deref(),
+                    vm.guest_ns.as_deref(),
+                )
+                .map_err(refused)?;
                 self.node
                     .observe(
                         vm.lifetime,
                         &Sample {
-                            cpu: Cpu::Whole(Duration::from_micros(
-                                usage.cpu_usec.saturating_sub(before),
-                            )),
+                            cpu,
                             span: now.saturating_duration_since(at),
                             mem_bytes: usage.memory_bytes,
                             disk_bytes: None,
@@ -495,6 +538,7 @@ impl Learner {
                     )
                     .map_err(refused)?;
                 vm.last = (usage.cpu_usec, now);
+                vm.guest_ns = guest_ns;
                 continue;
             }
             let Some(Met {
@@ -540,6 +584,7 @@ impl Learner {
                     receipt,
                     cgroup,
                     last: (usage.cpu_usec, now),
+                    guest_ns,
                     written: hex_core::cgroup::writes(&created, &[])?
                         .into_iter()
                         .filter(|write| write.file != "memory.swap.max")
@@ -793,7 +838,10 @@ impl Node {
             }))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let io = Kernel { store: &self.store };
+        let io = Kernel {
+            store: &self.store,
+            guest: self.backends.get().and_then(|b| b.shards.as_deref()),
+        };
         let _ = learner.window(&io, running, record, &held, budget, Instant::now());
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.

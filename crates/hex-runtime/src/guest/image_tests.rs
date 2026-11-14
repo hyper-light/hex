@@ -3359,6 +3359,32 @@ fn w39_a_node_vm_boots_under_shards_init_through_the_image_class_and_is_never_a_
     assert!(runtime.list().unwrap().is_empty());
 }
 
+/// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is held through its run's rate, D247): do boot a
+/// node VM whose run says its governor holds a rate over 70 ms, hold it to 4 CPUs, read its period, then stop it and
+/// hold it again. Expect its run held at 4,000 milli-CPU as an image box's is, its period its run's 70 ms, and once its
+/// run has ended the hold refused, its run no longer running.
+#[test]
+fn w39_a_node_vm_is_held_to_its_rate_over_its_runs_period() {
+    let images = ModelImages::new();
+    *images.period.lock().unwrap() = Duration::from_millis(70);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    runtime.images.boot_node(&vm).unwrap();
+    let rate = std::num::NonZeroU64::new(4_000);
+    assert_eq!(runtime.images.rate_node(vm.run, rate).unwrap(), rate);
+    assert_eq!(*images.run.rates.lock().unwrap(), [rate]);
+    assert_eq!(
+        runtime.images.rate_period_node(vm.run).unwrap(),
+        Duration::from_millis(70)
+    );
+    runtime.images.stop_node(vm.run).unwrap();
+    let refused = runtime.images.rate_node(vm.run, rate).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Invalid { why, .. } if why.contains("isn't running here")),
+        "{refused:?}"
+    );
+}
+
 /// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: its HostUse readable, as an image VM's): do boot a node VM, read
 /// what it costs its host, then stop it. Expect its use its run's microVM part, through the same stats as an image
 /// box's; its stop its run's end, `KILL`, kept in its record, Ended; and its use no longer read, its run gone.

@@ -19,7 +19,8 @@ being GitHub's main (`025aae6d`):
 - Built (D260, ROOT, 2026-11-13): on macOS and Windows a managed VM is read split, its vCPUs' guest time from its VM
   process's use (Shards 097ec0047's `ManagedGuest::host_use`) and its scope's CPU from its native owner, and every VM a
   governor holds, managed or image, has its governor told its share less its VMM's own over its last window, the
-  Windows job at the share beside; Linux's learner reads the same split next, as its own slice.
+  Windows job at the share beside; Linux's learner reads the same split (its own slice), so a VM is charged by one
+  model everywhere, its vCPUs' guest time and its VMM's own, `cpu.max` holding the whole on Linux.
 - Owed: ROOT's measurements of density, fairness and the violation rates, on real harness VMs and recorded traces.
   On Hex: 2c-4b, the node's call for its macOS helper's slowest response
   (`MacRuntime::charge_window` from it, the managed control's row requirement dropped), which the platform's window
@@ -380,7 +381,8 @@ reaches the view settled with goal 13 the same day:
   for is booked whole (C2); a receiver admits an owner's receipt as it was booked, comparing charges with the booking
   aside (`model::same_charge`), so a stale view is never refused for it.
 - The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
-  cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
+  cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It asks each managed Shards VM's process its
+  vCPUs' guest time through the node's guest runtime (D260, `Cgroups::guest_time`), then reads each running VM's cgroup (the
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
   (`BoxCgroup::set`; a VM's create already wrote its ceiling's CPU and its swap off, C5): each
   VM's `cpu.weight` and `memory.high`, the fleet's parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each
@@ -473,7 +475,6 @@ reaches the view settled with goal 13 the same day:
 
 | What | Waits on | Hex meanwhile |
 |---|---|---|
-| per-vCPU guest time of a managed VM on Linux | Linux's learner reading D260's split (the next slice) | charges the VMM's whole CPU through its cgroup, `cpu.max` holding it whole (macOS and Windows read it, D260) |
 | a managed Shards guest told its room | a room call on `ManagedGuest` (asked of g121) | Linux holds the VMM at `memory.high`; `Awaits(GuestRoom)` (an image VM's is D241's, told) |
 | a Linux image VM read and placed | its run host in a cgroup of its own (shards-image-class.md §4) | booked at its receipt whole by the ledger, outside the fleet's cgroup |
 | moving an over VM instead of ending it | Shards D176 in shards-api's image run (66113379 has none; D235 plugs directories) | ends it, last; `Awaits(LiveMove)` |

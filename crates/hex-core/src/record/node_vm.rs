@@ -33,6 +33,11 @@ pub struct NodeVmRecord {
     /// reads it back into its learner's ends before it lets the row go (joint plan step 39).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_resort: Option<LearnedEnd>,
+    /// Its place in its node's start order (C3), which its node's store gives it as its row is first written, so its
+    /// learner orders it among the host's VMs as it began: before every box its node makes after it boots. None in a
+    /// row a node wrote before it kept one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 fn damaged(why: &str) -> Refusal {

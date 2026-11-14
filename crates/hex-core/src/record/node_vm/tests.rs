@@ -35,6 +35,7 @@ fn record(phase: NodeVmPhase, exit: Option<Exit>) -> NodeVmRecord {
         diagnostics: Some(PathBuf::from("/state/node-vms/run.log")),
         exit,
         last_resort: None,
+        started: None,
     }
 }
 
