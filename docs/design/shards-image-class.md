@@ -223,7 +223,10 @@ run's start where that came first, as decision 9 has a wait follow its party, by
 delete waits on, refused only where the boot's thread ends with no answer, as the node's broken state in those words,
 its record kept), stops a run that started and follows its stop to its end however long past the stop's W*, then removes
 the box's diagnostics and record. `delete_with_host_use` answers the run's final use of its host, read as it ran before
-its stop, or none where its run never started (kiln charges nothing then); a delete retried then is NoSuchBox. A stopped
+its stop, or none where its run never started (kiln charges nothing then); a delete retried then is NoSuchBox. A run
+that started is never answered none (the review's B-5): where its final use can't be read, its run having ended, or
+being stopped, before the delete (Shards' stats answer only a running run), or its read refused, the delete is refused,
+typed (`NotRunning`, or the read's own refusal), the box as it was. A stopped
 boot's time is no sample of the boot's W*: it is the time to its stop, no boot's answer. A caller waits for a start past
 W* with `Runtime::started` rather than polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed
 to its boot's answer as a delete follows it, by a wait of its own, `hex.image.started` (refused only where the boot's

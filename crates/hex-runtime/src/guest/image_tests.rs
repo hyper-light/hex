@@ -1652,7 +1652,8 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
 /// image VM's host use twice, then delete it answering its final use; delete it again; then delete a VM whose run ended
 /// on its own before its delete. Expect each read's window to run from its run's start and grow; the delete to answer the
 /// VM's final use, its window the whole run and no less than the last read's, its counters its run host's; the second
-/// delete refused NoSuchBox; and the delete of the ended run to answer none, nothing read at its end.
+/// delete refused NoSuchBox; and the delete of the ended run refused, typed (`NotRunning`), nothing read at its end and
+/// none answered, which would read as a run that never started (the review's B-5), the box kept until a plain delete.
 #[test]
 fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
     let vcpus = allocation().vm_size().unwrap().vcpus;
@@ -1686,7 +1687,11 @@ fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
     runtime.start(&id).unwrap();
     *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
     shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
-    assert_eq!(runtime.delete_with_host_use(&id).unwrap(), None);
+    assert!(matches!(
+        runtime.delete_with_host_use(&id),
+        Err(Refusal::NotRunning(named, _)) if named == id
+    ));
+    runtime.delete(&id).unwrap();
 }
 
 /// HVF's image_real at cf535152 (ROOT's r183: HEX-IMG-1, 6 and 7, each a bare Lifecycle Uncertain where NoSuchBox was
@@ -3910,4 +3915,165 @@ fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
         other => panic!("a Shards image VM recorded as {other:?}"),
     }
     runtime.delete(&id).unwrap();
+}
+
+/// What one of the review's B-3, B-5 and B-6 tests waits for: the boot it held, answered once let go.
+static B3_HELD_BOOT_ANSWERED: Patience =
+    Patience::measuring("test.hex_runtime.b3_held_boot_answered");
+
+/// A run's own words where its command never started, as Shards' run host says them (D249).
+const NEVER_STARTED: &str =
+    "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+
+/// The review's B-3 (D249; kiln's HexVms adapter, ROOT 2026-11-13): `started` answers a run that failed as it booted, its
+/// command never started, as `start` answers it, `Refusal::Failed` in its runtime's words, never the box Running. Do:
+/// teach the boot's wait its W* by a first VM's boot, answered at once (its cold start); hold a second VM's boot past
+/// it, its start Pending; have its run fail as it boots; let the boot answer, then ask `started`, the call that takes
+/// the boot's answer. Expect: `Failed`, in those words.
+#[test]
+fn b3_started_over_a_run_that_failed_as_it_booted_answers_its_failure() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let first = runtime.create(spec("b3-first", None)).unwrap().id;
+    runtime.start(&first).unwrap();
+    runtime.delete(&first).unwrap();
+    images.gate(Gate::Host);
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("b3-failed-as-it-booted", Some(command)))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(NEVER_STARTED.to_owned()));
+    images.gate(Gate::Open);
+    hex_testkit::waits::until(&B3_HELD_BOOT_ANSWERED, "the held boot answered", || {
+        images.answered.load(Ordering::SeqCst) == 2
+    })
+    .unwrap();
+    let started = runtime.started(&id);
+    assert!(
+        matches!(&started, Err(Refusal::Failed { why, .. }) if why == NEVER_STARTED),
+        "started answered {:?} for a run whose command never started",
+        started.map(|info| info.state)
+    );
+}
+
+/// The review's B-5 (docs/design/shards-image-class.md §3; goal 54's change 3): a delete answering its VM's final use
+/// answers none only where its run never started, so kiln charges nothing. A VM whose command ran and ended before its
+/// delete has no use left to read (Shards' stats answer only a running run), so its delete is refused, typed, the box
+/// kept as it was, never answered none. Do: start a VM, read its use as it runs, have its command exit; ask its delete
+/// with its host use; then delete it. Expect: `NotRunning`, naming its final use, its record kept; then the plain delete
+/// removing it.
+#[test]
+fn b5_a_delete_with_host_use_of_a_vm_whose_command_ended_first_is_refused_and_keeps_the_box() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+    let id = runtime
+        .create(spec("b5-command-ended-first", Some(command)))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    runtime.host_use(&id).unwrap();
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
+    let refused = runtime.delete_with_host_use(&id);
+    assert!(
+        matches!(&refused, Err(Refusal::NotRunning(named, _)) if *named == id),
+        "{refused:?}"
+    );
+    assert!(
+        record(&owner, &id).is_some(),
+        "the refused delete removed the box"
+    );
+    runtime.delete(&id).unwrap();
+    assert!(record(&owner, &id).is_none());
+}
+
+/// The review's B-5: a VM running at its delete whose final read is refused (its run host told nothing of its microVM)
+/// has its delete with its host use refused in that read's words, the box kept running, never answered none. Do: start a
+/// VM whose stats carry no microVM part; ask its delete with its host use; then delete it. Expect: the read's refusal, no
+/// stop asked, the box running; then the plain delete removing it.
+#[test]
+fn b5_a_delete_with_host_use_whose_final_read_is_refused_says_so_and_keeps_the_box_running() {
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats::default();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("b5-final-read-refused", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let refused = runtime.delete_with_host_use(&id);
+    assert!(
+        matches!(
+            &refused,
+            Err(Refusal::Os {
+                op: "reading a Shards image VM's use of its host",
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    runtime.delete(&id).unwrap();
+    assert!(record(&owner, &id).is_none());
+}
+
+/// The review's B-6 (kiln's HexVms adapter; goal 54's change 3): a node's own runtime on macOS and Windows, `WithGuest`
+/// over its host's and the guest's, passes `started` and `delete_with_host_use` of an image VM to the guest runtime, as
+/// it passes `host_use`, never the trait's defaults (`started` an inspect, a delete answering none). Do, through
+/// `WithGuest`: start a VM and ask its delete with its host use; start another whose run fails as it boots and ask
+/// `started` of it. Expect: the first's final use, its record gone; the second's start its failure, or Pending where its
+/// boot took longer than the first's answer, its W* (decision 9); `started` its failure in its runtime's words either
+/// way, as the guest runtime answers it.
+#[test]
+fn b6_with_guest_passes_started_and_delete_with_host_use_to_its_guest() {
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = Stats {
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let (guest, owner) = model_runtime(&images, waits());
+    let node = crate::guest::WithGuest::new(hex_api::sim::SimRuntime::new(), guest).unwrap();
+    let id = node.create(spec("b6-with-guest-running", None)).unwrap().id;
+    node.start(&id).unwrap();
+    let last = node.delete_with_host_use(&id);
+    assert!(
+        matches!(&last, Ok(Some(used)) if used.cpu_ns == 9_000_000),
+        "{last:?}"
+    );
+    assert!(record(&owner, &id).is_none());
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(NEVER_STARTED.to_owned()));
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let failed = node
+        .create(spec("b6-with-guest-failed", Some(command)))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        node.start(&failed),
+        Err(Refusal::Failed { .. }
+            | Refusal::Lifecycle {
+                cause: LifecycleCause::Pending,
+                ..
+            })
+    ));
+    let started = node.started(&failed);
+    assert!(
+        matches!(&started, Err(Refusal::Failed { why, .. }) if why == NEVER_STARTED),
+        "{:?}",
+        started.map(|info| info.state)
+    );
 }
