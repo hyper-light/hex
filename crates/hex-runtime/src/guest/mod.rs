@@ -58,6 +58,8 @@ use shares::Share;
 /// The existing evented connection owner, shared without an unchecked new Arc.
 pub type EventedClient = triomphe::Arc<Client>;
 
+pub use dedicated::ExecClient;
+
 fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
     triomphe::Arc::try_new(client).map_err(|_| Refusal::Exhausted {
         what: "guest evented client owner",
