@@ -146,7 +146,7 @@ split, so a box can be admitted and recorded before it is needed:
 | `create` | No call. The box's record, `Creating`: admitted and named, nothing booted. |
 | `start` | `Phase::Ready` written first (the boot's intent, before any effect), then `Images::boot`, given the boot's learned bound as its patience (§6). |
 | `signal(KILL)`, Hex's stop | `ImageGuest::stop`: the VM process killed at once; it returns once the run's end, `RunEnd::Stopped`, is told, its VM gone, and the run host then exits on its own. The exit, `Signal(9)`, is recorded then. |
-| `signal(other)` | Refused `Awaits(MemberSignal)`: a member's signal is the agent-control endpoint's (step 11). |
+| `signal(other)` | To every member of the run that runs, each on its own lane of the run's agent-control endpoint (D238, D252; goal 2's item 2): the run asks the endpoint of the class's own key and no socket lane, and its controller is dialed as the first signal goes, kept for that run. The VM runs on; a member that has ended is skipped; a run none of whose members can take it is refused `NotRunning(id, "signal: its run has no member a signal reaches")`. |
 | `exec` | Refused `Awaits(MemberExec)`: a member's exec is the agent-control endpoint's (step 11). |
 | `inspect`, `list` | The record's phase and exit, and this process's run (`wait_for` with no wait). |
 | `usage` | `stats(StatsScope::Run)` (§4). |
@@ -173,8 +173,8 @@ harness member's):
 - `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
   stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
   its end (`wait_member`; `WithRun` is the run's end, as the box's own). It is no process of this host
-  (`on_this_host` false, no pid: D231 names none), and its own kill awaits the endpoint (`MemberSignal`); the box's
-  KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
+  (`on_this_host` false, no pid: D231 names none), and its own kill is KILL on its own lane of the run's endpoint,
+  its end then `Signal(9)` (a member that has ended has nothing to end); the box's KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
   and the simulator as its echo program, and the node's wire carries it to a caller elsewhere: `Call::Member` (kind
   `0x0017`), sent by `hex-client`'s `Runtime::member` as an exec asking for its streams is. On a local socket the
@@ -182,7 +182,8 @@ harness member's):
   itself, so it carries them (lanes) and the node joins each to the member's own, a copy on a thread of its own to the
   source's end (`serve.rs` `joined`). The member has no pid here for an OS watch, so a thread of the node's waits
   for its end and tells it as a remote program's (`MemberEnd`); its release under the same lock clears an end told
-  before its start was registered, and its own kill is refused `Awaits(MemberSignal)` as in process.
+  before its start was registered, and its own kill is refused `Awaits(MemberSignal)`: the node's wire carries no
+  member's signal yet.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -330,8 +331,8 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   `16451e19f` or later (image channel version 27: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
-- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and signals
-  (`MemberExec`, `MemberSignal`; step 11), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
+- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec
+  (`MemberExec`; step 11; a member's signal rides its lane since goal 2's item 2), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
   (unbuilt, D231). Given since 482c5d78: a stop for a boot under way (D231's `BootStop`, `ed1136305`), which a delete
   of a booting box asks (§3); the Windows run host (`WindowsRunHost`, 731b5e54), a boot patience (`Images::boot`'s),
   guest time per vCPU in the run's stats (D241), the run host holding only its stdio (D248, Hex's 0001 upstream), each
