@@ -2289,6 +2289,59 @@ impl BootstrapCall {
     }
 }
 
+/// Whether `armed`, an operation's armed log, holds each of `waits` armed at `at` and every entry that isn't a learned
+/// wait's at `at` too: the one deadline the operation took, by value, whatever it armed besides.
+fn armed_at(armed: &[Armed], waits: &[&str], at: Option<Instant>) -> bool {
+    waits.iter().all(|what| {
+        armed
+            .iter()
+            .any(|armed| armed.what == *what && !armed.learned && armed.at == at)
+    }) && armed
+        .iter()
+        .filter(|armed| !armed.learned)
+        .all(|armed| armed.at == at)
+}
+
+/// AC-T7.4.1, ROOT's seam of 2026-11-14: do make an actual capacity call under an absolute deadline, answered as it is
+/// asked, twice, and once with no deadline, each on this thread, then read this thread's armed log and another's. Expect
+/// the capped call's check, send, send lock and answer wait each armed at the one instant given, every other check of it
+/// too; the second call's learned wait, its kind answered by then, tagged learned and before that instant; the uncapped
+/// call's send and answer wait armed with none; and the other thread's log empty: what a call arms lands in its own
+/// thread's.
+#[test]
+fn the_armed_log_holds_each_deadline_an_operation_arms_in_its_own_thread() {
+    const CAPPED: &[&str] = &[
+        "starting a client operation",
+        "sending",
+        "the send lock",
+        "the answer",
+    ];
+    let (client, _) = bootstrap_probe(Some(Answer::Capacity(None)));
+    let _ = armed();
+    let at = answer_by(None);
+    assert_eq!(client.capacity_before(Class::Oci, at), Ok(None));
+    let first = armed();
+    assert!(armed_at(&first, CAPPED, Some(at)), "{first:?}");
+    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Capacity(None));
+    assert_eq!(client.capacity_before(Class::Oci, at), Ok(None));
+    let second = armed();
+    assert!(armed_at(&second, CAPPED, Some(at)), "{second:?}");
+    assert!(
+        second.iter().any(|armed| armed.what == "the answer"
+            && armed.learned
+            && armed.at.is_some_and(|learned| learned < at)),
+        "{second:?}"
+    );
+    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Capacity(None));
+    assert_eq!(client.capacity(Class::Oci), Ok(None));
+    let uncapped = armed();
+    assert!(
+        armed_at(&uncapped, &["sending", "the answer"], None),
+        "{uncapped:?}"
+    );
+    assert_eq!(std::thread::spawn(armed).join().unwrap(), Vec::new());
+}
+
 /// AC-T7.4.1: all three bootstrap wrappers retain typed request/answer/refusal
 /// behavior and reject an already expired original deadline before any send.
 #[test]
