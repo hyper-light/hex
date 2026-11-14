@@ -541,10 +541,21 @@ impl Job {
         self.0.raw()
     }
 
-    /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close (so closing the
-    /// last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed (neither
-    /// `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set), so no member can leave the job.
+    /// Sets the job's limits: its bounds ([`Job::set_bounds`]) and the CPU weight or hard cap.
     pub fn configure(&self, limits: &Limits) -> io::Result<()> {
+        self.set_bounds(limits)?;
+        if let Some(cpu) = limits.cpu {
+            self.set_cpu(cpu)?;
+        }
+        Ok(())
+    }
+
+    /// Sets the job's bounds alone, its CPU control left as it is: a hard commit cap, an active-process cap and
+    /// kill-on-close (so closing the last handle ends the tree). Its limit flags replace the job's, so a bound
+    /// `limits` doesn't name is lifted. Breakaway is never allowed (neither `BREAKAWAY_OK` nor
+    /// `SILENT_BREAKAWAY_OK` is set), so no member can leave the job. A node adopting a VM's job writes them
+    /// (joint plan step 14, ruling B), where the learner holds its CPU rate.
+    pub fn set_bounds(&self, limits: &Limits) -> io::Result<()> {
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
         let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if let Some(bytes) = limits.memory {
@@ -556,11 +567,7 @@ impl Job {
             ext.BasicLimitInformation.ActiveProcessLimit = n;
         }
         ext.BasicLimitInformation.LimitFlags = flags;
-        self.set(JobObjectExtendedLimitInformation, &ext)?;
-        if let Some(cpu) = limits.cpu {
-            self.set_cpu(cpu)?;
-        }
-        Ok(())
+        self.set(JobObjectExtendedLimitInformation, &ext)
     }
 
     /// Sets the job's CPU weight or hard cap, as [`Job::configure`] does; also the charge learner's, which caps a

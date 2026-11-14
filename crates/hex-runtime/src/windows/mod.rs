@@ -3748,13 +3748,8 @@ mod tests {
         let rt = device_runtime(scratch.path());
         let record = vm_record("relaunched");
         let native = hex_core::record::NativeRecord::Box(&record);
-        // A VM's job is prepared with its allocation's CPU and memory, as managed::host_bounds gives them.
-        let allocation = record.spec.allocation.unwrap();
-        let bounds = hex_api::Bounds {
-            cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).unwrap()),
-            memory_max: Some(allocation.resources.mem_bytes),
-            ..hex_api::Bounds::default()
-        };
+        // A VM's job is prepared with the bounds managed::host_bounds gives it.
+        let bounds = super::managed::host_bounds(native).unwrap();
         let stale =
             JobBox::prepare_vm(native, bounds.clone(), rt.processors, None, &rt.holding).unwrap();
         let newer = JobBox::prepare_vm(native, bounds, rt.processors, None, &rt.holding).unwrap();

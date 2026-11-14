@@ -33,11 +33,14 @@ pub(super) fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
         record.uncertain("its record holds no allocation to bound its Windows host by")
     })?;
     allocation.guest()?;
+    // No commit limit (joint plan step 14, ruling B; A-4), as a Linux VM has no memory.max: its VMM's own memory
+    // beside its guest's RAM is never refused at a bound of its guest's size. Its budget's room, the last resort and
+    // its fleet's budget hold it; a job a create before this rule bounded is lifted at its adoption
+    // (JobBox::adopt_vm).
     let bounds = Bounds {
         cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).map_err(|_| {
             record.uncertain("its allocation's CPU is past a Windows host bound's")
         })?),
-        memory_max: Some(allocation.resources.mem_bytes),
         ..Bounds::default()
     };
     bounds.check()?;
