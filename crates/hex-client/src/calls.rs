@@ -63,7 +63,7 @@ impl PlainKind {
 const SCHEDULED: usize = WaitKind::Forget as usize;
 
 /// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
-pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 7;
+pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 8;
 
 /// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
 /// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
@@ -184,6 +184,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::BackingUsage(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(3)?,
             Call::Links => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(5)?,
             Call::Lessors => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(6)?,
+            Call::Reserved(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(7)?,
             Call::Create(_)
             | Call::Start(_)
             | Call::Exec { .. }
@@ -246,7 +247,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         | Call::ReleaseBacking(_)
         | Call::BackingUsage(_)
         | Call::Links
-        | Call::Lessors => return None,
+        | Call::Lessors
+        | Call::Reserved(_) => return None,
     })
 }
 
@@ -3309,6 +3311,12 @@ impl<T: Transport> Runtime for Core<T> {
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         self.done(Call::Delete(id.clone()), "delete")
+    }
+
+    /// The machine's capacity view's word to its node (`Call::Reserved`, appended; the review's A-10), which the node's
+    /// charge learner takes off its fleet's budget.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        self.done(Call::Reserved(word), "reserved")
     }
 }
 

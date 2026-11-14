@@ -2424,6 +2424,8 @@ impl<O: Os> Shared<O> {
             // A start followed to its end on this worker, as decision 9 has a wait follow its party: a boot past its W*
             // is followed to its answer here, so its remote caller waits on the fact (ROOT, 2026-11-14).
             Call::Started(id) => host.started(&id).map(Answer::Info),
+            // The machine's capacity view's word, kept for the node's charge learner (the review's A-10).
+            Call::Reserved(word) => host.reserved(word).map(|()| Answer::Done),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => {
                 let deleted = host.delete(&id);
