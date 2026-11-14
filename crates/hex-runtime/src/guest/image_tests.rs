@@ -3385,6 +3385,29 @@ fn w39_a_node_vm_is_held_to_its_rate_over_its_runs_period() {
     );
 }
 
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: a node VM's guest is told its room like any guest's, D188): do boot a
+/// node VM, tell its guest a room of 1 GiB, then stop it and tell it again. Expect its run told the 1 GiB as an image box's
+/// is, and once its run has ended the room refused, its run no longer running.
+#[test]
+fn w39_a_node_vms_guest_is_told_its_room_through_its_run() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let vm = node_vm();
+    runtime.images.boot_node(&vm).unwrap();
+    let room = Some(1_i64 << 30);
+    assert_eq!(
+        runtime.images.room_node(vm.run, room).unwrap(),
+        Some(1 << 30)
+    );
+    assert_eq!(*images.run.rooms.lock().unwrap(), [room]);
+    runtime.images.stop_node(vm.run).unwrap();
+    let refused = runtime.images.room_node(vm.run, room).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Invalid { why, .. } if why.contains("isn't running here")),
+        "{refused:?}"
+    );
+}
+
 /// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13: its HostUse readable, as an image VM's): do boot a node VM, read
 /// what it costs its host, then stop it. Expect its use its run's microVM part, through the same stats as an image
 /// box's; its stop its run's end, `KILL`, kept in its record, Ended; and its use no longer read, its run gone.
