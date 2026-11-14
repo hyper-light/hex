@@ -101,17 +101,6 @@ impl<'a> Holder<'a> {
         }
     }
 
-    /// Whether it is holder `id`.
-    pub(crate) fn is(self, id: &LearnedHolder) -> bool {
-        match (self, id) {
-            (Self::Box(record), LearnedHolder::Box(id)) => record.spec.id == *id,
-            (Self::Node { row, .. }, LearnedHolder::Node(run)) => row.run == *run,
-            (Self::Box(_), LearnedHolder::Node(_)) | (Self::Node { .. }, LearnedHolder::Box(_)) => {
-                false
-            }
-        }
-    }
-
     /// The lifetime it names ([`Scope::of`]): a node VM's its run.
     pub(crate) fn scope(self) -> Option<Scope> {
         match self {
@@ -397,9 +386,9 @@ pub(crate) trait Managed {
     /// A managed VM's use, through its native owner: its scope's CPU so far and the memory it holds, its VM process's
     /// and every process beside it in its scope (the platform's cap holds them all).
     fn usage(&self, holder: Holder<'_>) -> Result<Usage, Refusal>;
-    /// A managed VM's vCPUs' guest time since its boot, as its VM process answers its use (D260), asked before its
-    /// [`Managed::usage`] so its VMM's own, the scope's CPU less its vCPUs', is never less than none: none apart where
-    /// its microVM hasn't started or its process answers no use, why told.
+    /// A managed VM's vCPUs' guest time since its boot, as its VM process answers its use (D260), asked between two
+    /// reads of its [`Managed::usage`] so its scope's CPU is taken at the instant its process sampled it (the review's
+    /// A-11): none apart where its microVM hasn't started or its process answers no use, why told.
     fn guest_time(&self, holder: Holder<'_>) -> Result<ManagedGuestTime, Refusal>;
     /// How long a managed VM has run (D260): from its VM process's start to now, the span its first split's counters
     /// cover.
@@ -408,9 +397,10 @@ pub(crate) trait Managed {
     /// ([`GOVERNOR_LEAST`]), a managed VM's its platform's cap's, which holds its share whatever its governor does.
     fn least(&self, holder: Holder<'_>) -> u64;
     /// The cycle its platform's cap holds a managed VM at `rate` over (C1; ROOT, 2026-11-13; 2c-4b): macOS's CPU
-    /// control's, its run and its hold at the stop response its helper learned, so the VM keeps its rate on average over
-    /// one; never at a rate it never holds a VM below; cold, told, until its helper has measured a stop. Refused where its
-    /// platform derives none (Windows' job: its interval undocumented).
+    /// control's, its run and its hold at the stop response its helper estimates, so the VM keeps its rate on average over
+    /// one; never at a rate it never holds a VM below; cold, told, until its helper has measured a stop, and used but
+    /// told cold while its estimate is (the review's A-14). Refused where its platform derives none (Windows' job: its
+    /// interval undocumented).
     fn cap_cycle(&self, rate: u64) -> Result<CapCycle, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal>;
@@ -686,34 +676,62 @@ struct Read {
     /// The span its counters cover, from the VM's start, where read: an image VM's run's (D241's window), a managed VM's
     /// life where its learner splits it first ([`Read::of`]).
     life: Option<Duration>,
+    /// The instant its CPU so far holds at (the review's A-11): a managed VM's its VM process's sample of its guest time,
+    /// its scope's CPU taken there between two reads around it, or its later read where no sample came; an image VM's
+    /// its read's own.
+    at: Instant,
 }
 
 impl Read {
-    /// `holder`'s reading, its life read too where `first`, its learner holding no split of it yet.
-    fn of(io: &impl Managed, holder: Holder<'_>, first: bool) -> Result<Self, Refusal> {
+    /// `holder`'s reading, its life read too where `first`, its learner holding no split of it yet, each read timed by
+    /// `clock` (the review's A-11).
+    fn of(
+        io: &impl Managed,
+        holder: Holder<'_>,
+        first: bool,
+        clock: &impl Fn() -> Instant,
+    ) -> Result<Self, Refusal> {
         if holder.image() {
-            let host = io.host_use(holder)?;
+            let (host, at) = timed(clock, || io.host_use(holder))?;
             return Ok(Self {
                 cpu_ns: host.cpu_ns,
                 memory_bytes: host.footprint_bytes,
                 guest_ns: Ok(host.guest_ns),
                 life: Some(host.window),
+                at,
             });
         }
-        let guest_ns = match io.guest_time(holder)? {
-            ManagedGuestTime::PerVcpu(times) => Ok(times),
-            ManagedGuestTime::Unheld(why) => Err(why),
+        // Its scope's use read on each side of its VM process's sample of its vCPUs' guest time (D260), its CPU taken at
+        // that sample, so its VMM's own, the scope's less its vCPUs', counts nothing its vCPUs ran between the reads (the
+        // review's A-11).
+        let (before, from) = timed(clock, || io.usage(holder))?;
+        let guest = io.guest_time(holder)?;
+        let (usage, to) = timed(clock, || io.usage(holder))?;
+        let (cpu_usec, at, guest_ns) = match guest {
+            ManagedGuestTime::PerVcpu {
+                ns,
+                asked,
+                answered,
+            } => {
+                let (cpu, at) = between(
+                    (before.cpu_usec, from),
+                    (usage.cpu_usec, to),
+                    mid(asked, answered),
+                );
+                (cpu, at, Ok(ns))
+            }
+            ManagedGuestTime::Unheld(why) => (usage.cpu_usec, to, Err(why)),
         };
-        let usage = io.usage(holder)?;
         let life = match (&guest_ns, first) {
             (Ok(_), true) => Some(io.life(holder)?),
             _ => None,
         };
         Ok(Self {
-            cpu_ns: usage.cpu_usec.saturating_mul(1_000),
+            cpu_ns: cpu_usec.saturating_mul(1_000),
             memory_bytes: usage.memory_bytes,
             guest_ns,
             life,
+            at,
         })
     }
 
@@ -731,6 +749,85 @@ impl Read {
 /// `duration` in nanoseconds, at most a u64's.
 fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The midpoint of `from` and `to`, where an instant read between them most likely fell (the review's A-11): `to` where
+/// `from` is later.
+pub(crate) fn mid(from: Instant, to: Instant) -> Instant {
+    to.saturating_duration_since(from)
+        .checked_div(2)
+        .and_then(|half| from.checked_add(half))
+        .unwrap_or(to)
+}
+
+/// What `read` answers, and the instant it read at: the midpoint of the time `clock` tells on each side of it (the
+/// review's A-11).
+pub(crate) fn timed<T>(
+    clock: &impl Fn() -> Instant,
+    read: impl FnOnce() -> Result<T, Refusal>,
+) -> Result<(T, Instant), Refusal> {
+    let from = clock();
+    let value = read()?;
+    Ok((value, mid(from, clock())))
+}
+
+/// A counter read as `before` and `after`, each its value and the instant it was read at, taken at `at` (the review's
+/// A-11): `before`'s and what it ran up to the reads' span's share before `at`, as a counter moves on between two reads
+/// close together, `at` held within that span; the later read where the span is none. With the instant it holds at.
+pub(crate) fn between(
+    before: (u64, Instant),
+    after: (u64, Instant),
+    at: Instant,
+) -> (u64, Instant) {
+    let (from, to) = (before.1, after.1.max(before.1));
+    let at = at.max(from).min(to);
+    let span = to.saturating_duration_since(from).as_nanos();
+    let part = at.saturating_duration_since(from).as_nanos();
+    let value = u128::from(after.0.saturating_sub(before.0))
+        .checked_mul(part)
+        .and_then(|ran| ran.checked_div(span))
+        .and_then(|ran| u64::try_from(ran).ok())
+        .map_or(after.0, |ran| before.0.saturating_add(ran));
+    (value, at)
+}
+
+/// The holders of `holders` that have a scope, sorted by it, for a window's keyed lookups ([`find`]; the review's O(n²)
+/// matching).
+fn by_scope<'h>(holders: &[Holder<'h>]) -> Result<Vec<(Scope, Holder<'h>)>, Refusal> {
+    let mut sorted = Vec::new();
+    sorted
+        .try_reserve_exact(holders.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's VM scopes",
+            bound: holders.len(),
+        })?;
+    sorted.extend(
+        holders
+            .iter()
+            .filter_map(|holder| holder.scope().map(|scope| (scope, *holder))),
+    );
+    sorted.sort_unstable_by_key(|(scope, _)| *scope);
+    Ok(sorted)
+}
+
+/// The holder of `scope` among `sorted` ([`by_scope`]), by one search.
+fn find<'s, 'h>(sorted: &'s [(Scope, Holder<'h>)], scope: &Scope) -> Option<&'s Holder<'h>> {
+    sorted
+        .binary_search_by(|(kept, _)| kept.cmp(scope))
+        .ok()
+        .and_then(|at| sorted.get(at))
+        .map(|(_, holder)| holder)
+}
+
+/// Where `id` falls beside `holder`'s own id in `LearnedHolder`'s order (a box's before a node VM's, each by its own
+/// id), so ids kept sorted are searched by a holder without making its id (the review's O(n²) matching).
+fn order(id: &LearnedHolder, holder: Holder<'_>) -> std::cmp::Ordering {
+    match (id, holder) {
+        (LearnedHolder::Box(id), Holder::Box(record)) => id.cmp(&record.spec.id),
+        (LearnedHolder::Node(run), Holder::Node { row, .. }) => run.cmp(&row.run),
+        (LearnedHolder::Box(_), Holder::Node { .. }) => std::cmp::Ordering::Less,
+        (LearnedHolder::Node(_), Holder::Box(_)) => std::cmp::Ordering::Greater,
+    }
 }
 
 /// `ns` of CPU over `span` in milli-CPU: none over no span.
@@ -1379,7 +1476,7 @@ struct Vm {
     class: Class,
     /// What its receipt booked: what the ledger holds of it.
     receipt: CapacityResources,
-    /// Its VMM's CPU so far, in nanoseconds, and when it was read.
+    /// Its VMM's CPU so far, in nanoseconds, and the instant it holds at ([`Read::at`]).
     last: (u64, Instant),
     /// Each vCPU's guest time at that reading, where its host reads it (D241, D260).
     guest_ns: Option<Vec<u64>>,
@@ -1500,7 +1597,8 @@ pub(crate) struct Learner {
     fault: Option<Refusal>,
     /// Why no VM's memory budget is held on this platform (C5), typed.
     unheld: Refusal,
-    /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
+    /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13),
+    /// in their ids' order ([`order`]).
     unread: Vec<(LearnedHolder, Refusal)>,
     /// The machine it runs on, which a box whose record can't be read is counted at ([`Learner::learn`]).
     machine: CapacityResources,
@@ -1608,8 +1706,9 @@ impl Learner {
     /// The managed VMs among `records` whose governors a window asks (D255; ROOT, 2026-11-13), on a platform with no
     /// window: each it hasn't asked, and each whose ask failed. Those no longer running are forgotten.
     fn governing<'h>(&mut self, records: &[Holder<'h>]) -> Result<Vec<Governing<'h>>, Refusal> {
+        let live = by_scope(records)?;
         self.governors
-            .retain(|scope, _| records.iter().any(|record| record.scope() == Some(*scope)));
+            .retain(|scope, _| find(&live, scope).is_some());
         let mut asks = Vec::new();
         if self.manages() {
             return Ok(asks);
@@ -1720,7 +1819,7 @@ impl Learner {
     }
 
     /// Runs a window as a node does ([`window`]), the learner held alone, every record read, within the fleet's
-    /// `budget` as given.
+    /// `budget` as given, every read at `now`.
     #[cfg(test)]
     pub(crate) fn window(
         &mut self,
@@ -1729,7 +1828,19 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        window(self, io, running, Vec::new(), |_| Ok(budget), now)
+        window(self, io, running, Vec::new(), |_| Ok(budget), || now)
+    }
+
+    /// Runs a window as [`Self::window`] does, the time told by `clock` as the window and each of its reads ask it.
+    #[cfg(test)]
+    pub(crate) fn window_by(
+        &mut self,
+        io: &impl Managed,
+        running: &[Holder<'_>],
+        budget: CapacityResources,
+        clock: impl Fn() -> Instant,
+    ) -> Result<(), Refusal> {
+        window(self, io, running, Vec::new(), |_| Ok(budget), clock)
     }
 
     /// What a window asks of the VMs it learns among `running` (A-2): each one's reading, its life too where it holds no
@@ -1757,22 +1868,23 @@ impl Learner {
         Ok(asks)
     }
 
-    /// Learns a window's `answers` at `now` (C1 to C5, C7; under its lock, A-2), its VMs `running` and the boxes whose
-    /// records its node couldn't read `unreadable`, within the fleet's `budget`: what it then acts on outside its lock
-    /// ([`act`]).
+    /// Learns a window's `answers`, each at its own reads' instants (C1 to C5, C7; under its lock, A-2; the review's
+    /// A-11), its VMs `running` and the boxes whose records its node couldn't read `unreadable`, within the fleet's
+    /// `budget`: what it then acts on outside its lock ([`act`]).
     fn learn<'h>(
         &mut self,
         running: &[Holder<'h>],
         unreadable: Unreadable,
         answers: Vec<Answer<'h>>,
         budget: CapacityResources,
-        now: Instant,
     ) -> Result<Acts<'h>, Refusal> {
-        let scope_of = |holder: &Holder<'_>| holder.scope();
+        // Each VM it holds looked up among the running, sorted once, never compared with each of them (the review's
+        // O(n²) matching).
+        let live = by_scope(running)?;
         let gone: Vec<Scope> = self
             .vms
             .keys()
-            .filter(|scope| !running.iter().any(|r| scope_of(r) == Some(**scope)))
+            .filter(|scope| find(&live, scope).is_none())
             .copied()
             .collect();
         for scope in gone {
@@ -1814,14 +1926,22 @@ impl Learner {
                         what: "the charge learner's unread VMs",
                         bound: running.len(),
                     })?;
-                    self.unread.push((record.id()?, why));
+                    // Kept in its ids' order, so a capacity answer finds each running VM's by one search (the review's
+                    // O(n²) matching).
+                    let id = record.id()?;
+                    let at = self
+                        .unread
+                        .binary_search_by(|(kept, _)| kept.cmp(&id))
+                        .unwrap_or_else(|at| at);
+                    self.unread.insert(at, (id, why));
                     continue;
                 }
             };
             if let Some(vm) = self.vms.get_mut(&scope) {
+                // Over the span between its own reads (the review's A-11), not between the windows' starts.
                 let (before, at) = vm.last;
                 let cpu_ns = read.cpu_ns.saturating_sub(before);
-                let span = now.saturating_duration_since(at);
+                let span = read.at.saturating_duration_since(at);
                 let cpu = ran(
                     cpu_ns,
                     read.guest_ns.as_deref().ok(),
@@ -1852,7 +1972,7 @@ impl Learner {
                     .and_then(|n| u64::try_from(n).ok())
                     .unwrap_or(u64::MAX);
                 used.insert(vm.lifetime, (milli, vm.rate));
-                vm.last = (read.cpu_ns, now);
+                vm.last = (read.cpu_ns, read.at);
                 match read.guest_ns {
                     Ok(guest) => {
                         vm.guest_ns = Some(guest);
@@ -1904,7 +2024,7 @@ impl Learner {
                     lifetime,
                     class,
                     receipt,
-                    last: (read.cpu_ns, now),
+                    last: (read.cpu_ns, read.at),
                     guest_ns,
                     own,
                     rate: allocation.resources.cpu_milli,
@@ -1986,9 +2106,7 @@ impl Learner {
             if vm.held.is_some() && vm.rate == rate && vm.told == told && vm.unset.is_none() {
                 continue;
             }
-            let holder = running
-                .iter()
-                .find(|record| scope_of(record) == Some(scope))
+            let holder = find(&live, &scope)
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
             caps.push(Capping {
                 holder: *holder,
@@ -2020,9 +2138,7 @@ impl Learner {
             {
                 continue;
             }
-            let holder = running
-                .iter()
-                .find(|record| scope_of(record) == Some(scope))
+            let holder = find(&live, &scope)
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
             rooms.push((*holder, scope, budget.room));
         }
@@ -2140,7 +2256,11 @@ impl Learner {
             };
             // One its last window couldn't read carries no holding, so the scheduler counts it at its receipt, whole
             // (C8; ROOT, 2026-11-13): the failure told where its booking would be.
-            if self.unread.iter().any(|(id, _)| record.is(id)) {
+            if self
+                .unread
+                .binary_search_by(|(id, _)| order(id, *record))
+                .is_ok()
+            {
                 continue;
             }
             if let Some(vm) = self.vms.get(&scope)
@@ -2237,7 +2357,12 @@ impl Learner {
             if vm_class(record.class()) != Some(class) {
                 continue;
             }
-            let Some((id, why)) = self.unread.iter().find(|(id, _)| record.is(id)) else {
+            let Some((id, why)) = self
+                .unread
+                .binary_search_by(|(id, _)| order(id, *record))
+                .ok()
+                .and_then(|at| self.unread.get(at))
+            else {
                 continue;
             };
             told.try_reserve(1).map_err(|_| Refusal::Exhausted {
@@ -2417,17 +2542,15 @@ pub(crate) fn window(
     running: &[Holder<'_>],
     unreadable: Unreadable,
     budget: impl FnOnce(u64) -> Result<CapacityResources, Refusal>,
-    now: Instant,
+    clock: impl Fn() -> Instant,
 ) -> Result<(), Refusal> {
     let asks = learner.take()?.asks(running);
     // The fleet's budget once its VMs are read (C7; the review's A-10), given what they hold ([`measured`]).
     let read = asks
-        .and_then(|asks| ask(io, asks))
+        .and_then(|asks| ask(io, asks, &clock))
         .and_then(|answers| Ok((budget(held(&answers)?)?, answers)));
     let learned = match read {
-        Ok((budget, answers)) => learner
-            .take()?
-            .learn(running, unreadable, answers, budget, now),
+        Ok((budget, answers)) => learner.take()?.learn(running, unreadable, answers, budget),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, running, acts));
@@ -2542,9 +2665,13 @@ pub(crate) fn measured(
 }
 
 /// Asks each VM of `asks` its reading (outside its learner's lock; A-2): the period its cap holds over and its use, an
-/// image VM's from its run host (D241), a managed VM's guest time first and then its scope's use (D260); and the least
-/// share its actuator holds it at.
-fn ask<'h>(io: &impl Managed, asks: Vec<Ask<'h>>) -> Result<Vec<Answer<'h>>, Refusal> {
+/// image VM's from its run host (D241), a managed VM's guest time between two reads of its scope's use (D260; the
+/// review's A-11), each read timed by `clock`; and the least share its actuator holds it at.
+fn ask<'h>(
+    io: &impl Managed,
+    asks: Vec<Ask<'h>>,
+    clock: &impl Fn() -> Instant,
+) -> Result<Vec<Answer<'h>>, Refusal> {
     let mut answers = Vec::new();
     answers
         .try_reserve_exact(asks.len())
@@ -2555,9 +2682,9 @@ fn ask<'h>(io: &impl Managed, asks: Vec<Ask<'h>>) -> Result<Vec<Answer<'h>>, Ref
     for ask in asks {
         answers.push(Answer {
             holder: ask.holder,
-            read: io
-                .rate_period(ask.holder)
-                .and_then(|period| Read::of(io, ask.holder, ask.first).map(|read| (period, read))),
+            read: io.rate_period(ask.holder).and_then(|period| {
+                Read::of(io, ask.holder, ask.first, clock).map(|read| (period, read))
+            }),
             least: io.least(ask.holder),
         });
     }
@@ -2619,7 +2746,8 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
             )
             .and_then(|held| {
                 // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1); a cycle not yet
-                // known is told on what holds its rate (2c-4b), never guessed.
+                // known is told on what holds its rate (2c-4b), never guessed, and one at a cold estimate is taken and
+                // told cold there (the review's A-14).
                 Ok(match held {
                     hex_api::RateHeld::Platform(why) => match io.cap_cycle(cap.share)? {
                         CapCycle::Of(cycle) => (hex_api::RateHeld::Platform(why), Some(cycle)),
@@ -2627,6 +2755,10 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
                         CapCycle::Cold(cold) => {
                             (hex_api::RateHeld::Platform(format!("{why}; {cold}")), None)
                         }
+                        CapCycle::ColdOf { cycle, why: cold } => (
+                            hex_api::RateHeld::Platform(format!("{why}; {cold}")),
+                            Some(cycle),
+                        ),
                     },
                     held => (held, None),
                 })

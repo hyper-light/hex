@@ -2521,10 +2521,12 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
-  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the guest's
-  first boot takes records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
-  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation, by a dial sliced against
-  the guest's liveness (HEX-GUEST-33). hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
+  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed: the managed
+  creates' budgets take records.tsv's `boot_ready` (`hex_client::guest::shards::recorded_boot`, through
+  `hex_runtime::guest::first_dial_bound` into `managed::Budget`), a production R03 violation. The guest's own boot no
+  longer does (the review's C-9, 2026-11-14): within W*, the slowest boot its node has seen, past it told and followed
+  by its VM's life through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34).
+  hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
   `conformance::PATIENCE` and `ENDS` from per-class end records until 2026-11-13; it now follows each program to its
   end (`conformance::end_of`, `ENDS` measuring), and each differential reading the runtime's party. `Patience::seeded`,
   now `hex_api::patience`'s, exists for tests alone (`cfg(test)`, or hex-api's `test-seeds` feature, which only

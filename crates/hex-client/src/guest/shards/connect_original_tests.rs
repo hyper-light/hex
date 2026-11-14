@@ -87,7 +87,7 @@ struct Roundtrip {
 
 fn roundtrip(label: &str, model: &Arc<ModelGuest>, caller: Instant) -> Roundtrip {
     // The relative dial path must remain unused; this model performs no I/O.
-    let link = ShardsLink::new(model.clone(), Duration::ZERO);
+    let link = ShardsLink::new(model.clone(), None);
     let result = link.dial_before(stream::CONTROL_PORT, Some(caller));
     let trace = model.trace.lock().unwrap();
     eprintln!(

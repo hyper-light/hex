@@ -171,16 +171,11 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         "oci boxes through a real Shards guest: {failures:#?}"
     );
     assert!(node.list().unwrap().is_empty(), "a box is left");
-    // One guest per node (docs/design/shards-guest.md §1): every box of the suite went to one guest. A
-    // boot not ready within its learned bound is retired and booted again (HEX-GUEST-34), which a loaded
-    // host may ask of the first: those are counted and said, never a guest that served a box.
-    let (boots, retired) = (guests.boots.load(Ordering::SeqCst), node.retired());
-    eprintln!("guest boots {boots}, retired before ready {retired}");
-    assert_eq!(
-        boots - usize::try_from(retired).unwrap(),
-        1,
-        "the node's boxes went to more than one guest ({boots} boots, {retired} retired)"
-    );
+    // One guest per node (docs/design/shards-guest.md §1): every box of the suite went to one guest, booted once. A
+    // boot slower than its W* is followed to its answer, never stopped and booted again (the review's C-9).
+    let boots = guests.boots.load(Ordering::SeqCst);
+    eprintln!("guest boots {boots}");
+    assert_eq!(boots, 1, "the node booted more than one guest");
 }
 
 /// Shards, counting each guest it is asked to boot.

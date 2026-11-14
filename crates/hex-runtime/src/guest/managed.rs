@@ -279,6 +279,9 @@ pub enum CapCycle {
     Never,
     /// Not known yet: its control has measured no stop to derive it from, why told (decision 9's cold start).
     Cold(String),
+    /// Its run and its hold at a cold estimate of its control's stop response, the slowest of too few holds to have seen
+    /// their p99.9: used, and why it is cold told (the review's A-14).
+    ColdOf { cycle: Duration, why: String },
 }
 
 /// A managed VM's rate's ask (decision 9; D255; ROOT, 2026-11-13), from its ask until its VM process answers: a wait
@@ -333,8 +336,14 @@ pub(super) fn rate(
 /// What a managed VM's VM process answered of its vCPUs' guest time (joint plan step 14, D260).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedGuestTime {
-    /// Each of its vCPUs' guest time since its boot, in nanoseconds, by index.
-    PerVcpu(Vec<u64>),
+    /// Each of its vCPUs' guest time since its boot, in nanoseconds, by index (`ns`), as its VM process read them after
+    /// `asked` and before `answered` (Shards' `ManagedUse`, D260): the instant they hold at is known within that span
+    /// (the review's A-11).
+    PerVcpu {
+        ns: Vec<u64>,
+        asked: Instant,
+        answered: Instant,
+    },
     /// None apart, why in its words: its microVM not started yet, or a VM process that answers no use (one not booted
     /// `--host-managed`, or a shards before D260).
     Unheld(String),
@@ -363,13 +372,18 @@ pub(super) fn guest_time(
     match answer {
         Ok(shards_api::ManagedUsed::Running(used)) => {
             USE.answered(took);
+            let (asked, answered) = (used.asked, used.answered);
             match used.microvm.guest {
                 Ok(times) => super::image::vcpus_ns(
                     &times,
                     vcpus,
                     "reading a managed VM's guest time per vCPU",
                 )
-                .map(ManagedGuestTime::PerVcpu),
+                .map(|ns| ManagedGuestTime::PerVcpu {
+                    ns,
+                    asked,
+                    answered,
+                }),
                 Err(why) => Ok(ManagedGuestTime::Unheld(why)),
             }
         }
@@ -634,9 +648,10 @@ mod tests {
         );
         let (guest, running) = managed_at(&socket);
         let id = BoxId::new("vm-1").unwrap();
-        assert_eq!(
-            guest_time(&guest, &id, 2),
-            Ok(ManagedGuestTime::PerVcpu(vec![1_000, 2_000]))
+        let first = guest_time(&guest, &id, 2);
+        assert!(
+            matches!(&first, Ok(ManagedGuestTime::PerVcpu { ns, asked, answered }) if *ns == [1_000u64, 2_000] && asked <= answered),
+            "{first:?}"
         );
         assert_eq!(
             guest_time(&guest, &id, 2),

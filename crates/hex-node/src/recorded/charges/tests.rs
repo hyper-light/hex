@@ -113,7 +113,8 @@ struct Record {
     governed: RefCell<BTreeMap<String, Duration>>,
     /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
     cycle: std::cell::Cell<Option<Duration>>,
-    /// Why that cycle is cold, where the test says it is (2c-4b): its helper has measured no stop.
+    /// Why that cycle is cold, where the test says it is: with no cycle, its helper has measured no stop (2c-4b); with
+    /// one, it is at a cold estimate, used (the review's A-14).
     cold: RefCell<Option<String>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
@@ -149,6 +150,37 @@ struct Record {
     /// Each read of a VM's use, of what a holder takes and of what is free, in order: `usage <vm>`, `host_use <vm>`,
     /// `taken <holder>`, `free`.
     reads: RefCell<Vec<String>>,
+    /// The time as the test's clock tells it, where it keeps one (the review's A-11): a steady VM's use is read there, a
+    /// window's first ask of a VM moving it on by `lag`, and its VM process's use answer by `round_trip`.
+    time: std::cell::Cell<Option<Instant>>,
+    /// How long a window's reads of the VMs before a VM take: its first ask of the VM moves the test's clock on so far.
+    lag: std::cell::Cell<Duration>,
+    /// How long a VM process's use answer takes, its sample taken halfway (Shards' `ManagedUse`).
+    round_trip: std::cell::Cell<Duration>,
+    /// The VMs whose use moves on with the test's clock (the review's A-11).
+    steady: RefCell<BTreeMap<String, Steady>>,
+}
+
+/// A managed VM of 16 vCPUs whose use moves on at steady rates from `from` (the review's A-11): its scope's CPU from
+/// `scope_usec` at `scope_milli`, and each vCPU's guest time from `vcpu_ns` at `vcpu_milli`.
+#[derive(Clone, Copy)]
+struct Steady {
+    from: Instant,
+    scope_usec: u64,
+    scope_milli: u64,
+    vcpu_ns: u64,
+    vcpu_milli: u64,
+}
+
+impl Steady {
+    /// Its scope's CPU in microseconds and each vCPU's guest time in nanoseconds at `now`.
+    fn at(self, now: Instant) -> (u64, u64) {
+        let ns = u64::try_from(now.saturating_duration_since(self.from).as_nanos()).unwrap();
+        (
+            self.scope_usec + ns * self.scope_milli / 1_000_000,
+            self.vcpu_ns + ns * self.vcpu_milli / 1_000,
+        )
+    }
 }
 
 impl Managed for Record {
@@ -156,6 +188,14 @@ impl Managed for Record {
         self.reads
             .borrow_mut()
             .push(format!("usage {}", named(holder)));
+        let steady = self.steady.borrow().get(&named(holder)).copied();
+        if let (Some(now), Some(steady)) = (self.time.get(), steady) {
+            return Ok(Usage {
+                cpu_usec: steady.at(now).0,
+                memory_bytes: GIB,
+                ..Usage::default()
+            });
+        }
         self.usage
             .borrow()
             .get(&named(holder))
@@ -164,6 +204,17 @@ impl Managed for Record {
     }
 
     fn guest_time(&self, holder: Holder<'_>) -> Result<ManagedGuestTime, Refusal> {
+        let steady = self.steady.borrow().get(&named(holder)).copied();
+        if let (Some(asked), Some(steady)) = (self.time.get(), steady) {
+            let half = self.round_trip.get() / 2;
+            let answered = asked + half + half;
+            self.time.set(Some(answered));
+            return Ok(ManagedGuestTime::PerVcpu {
+                ns: vec![steady.at(asked + half).1; 16],
+                asked,
+                answered,
+            });
+        }
         Ok(self
             .guest
             .borrow()
@@ -173,10 +224,15 @@ impl Managed for Record {
     }
 
     fn cap_cycle(&self, _: u64) -> Result<CapCycle, Refusal> {
-        if let Some(cold) = self.cold.borrow().as_ref() {
-            return Ok(CapCycle::Cold(cold.clone()));
-        }
-        Ok(self.cycle.get().map_or(CapCycle::Never, CapCycle::Of))
+        Ok(match (self.cycle.get(), self.cold.borrow().as_ref()) {
+            (Some(cycle), Some(why)) => CapCycle::ColdOf {
+                cycle,
+                why: why.clone(),
+            },
+            (None, Some(why)) => CapCycle::Cold(why.clone()),
+            (Some(cycle), None) => CapCycle::Of(cycle),
+            (None, None) => CapCycle::Never,
+        })
     }
 
     fn least(&self, holder: Holder<'_>) -> u64 {
@@ -222,6 +278,9 @@ impl Managed for Record {
     }
 
     fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal> {
+        if let Some(now) = self.time.get() {
+            self.time.set(Some(now + self.lag.get()));
+        }
         let name = named(holder);
         if self.unread_periods.borrow().contains(&name) {
             return Err(Refusal::Broken("its run's period unread".into()));
@@ -489,7 +548,7 @@ fn a10_a_window_reads_what_is_free_after_its_vms_and_its_boxes() {
                 CapacityResources::default(),
             )
         },
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     let reads = io.reads.borrow().clone();
@@ -521,7 +580,7 @@ fn a10_a_box_whose_record_cant_be_read_is_counted_at_its_use_for_memory() {
             "its record is torn".to_owned(),
         )],
         |_| Ok(res(24_000, 64 * GIB)),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     assert_eq!(*io.rates.borrow(), [("img-1".to_owned(), 4_000)]);
@@ -2138,9 +2197,15 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
     );
 }
 
-/// A managed Shards VM's guest time as its VM process answers its use (D260): each of its 16 vCPUs at `each_ns`.
+/// A managed Shards VM's guest time as its VM process answers its use (D260): each of its 16 vCPUs at `each_ns`, read
+/// now.
 fn sixteen(each_ns: u64) -> ManagedGuestTime {
-    ManagedGuestTime::PerVcpu(vec![each_ns; 16])
+    let at = Instant::now();
+    ManagedGuestTime::PerVcpu {
+        ns: vec![each_ns; 16],
+        asked: at,
+        answered: at,
+    }
 }
 
 /// Joint plan step 14 (D260; AC-T7.4.1; ROOT, 2026-11-13): a managed VM is held split from its VM process's first use
@@ -2183,6 +2248,86 @@ fn w14_d260_a_managed_vm_is_held_split_from_its_first_use_answer() {
     assert_eq!(
         io.caps.borrow().last(),
         Some(&("vm-1".to_owned(), 4_000, Ok(200)))
+    );
+}
+
+/// The review's A-11: a managed VM of 16 vCPUs whose scope runs 1.8 CPUs, 1.6 of them its vCPUs' (200 milli-CPU its
+/// VMM's own), from 3 s of scope CPU and 2.5 s of guest time in the 10 s it has run as its first window reads it.
+fn a11_steady(io: &Record, start: Instant) -> BoxRecord {
+    io.time.set(Some(start));
+    io.steady.borrow_mut().insert(
+        "vm-1".to_owned(),
+        Steady {
+            from: start,
+            scope_usec: 3_000_000,
+            scope_milli: 1_800,
+            vcpu_ns: 156_250_000,
+            vcpu_milli: 100,
+        },
+    );
+    io.lives
+        .borrow_mut()
+        .insert("vm-1".to_owned(), Duration::from_secs(10));
+    vm("vm-1", 1)
+}
+
+/// The review's A-11: a VM's use over a window is over the span between its own reads, not between the windows' starts,
+/// as the reads of the VMs before it in its window take time. Do run two windows 300 ms apart over a managed VM whose
+/// VMM runs 200 milli-CPU of its own ([`a11_steady`]), its second window's reads of it coming 100 ms after that window
+/// starts. Expect its second cap's VMM's own at 200 milli-CPU, 80 ms over the 400 ms between its reads, never over the
+/// windows' 300 ms.
+#[test]
+fn a11_a_vms_window_is_the_span_between_its_own_reads() {
+    let io = Record::default();
+    let start = Instant::now();
+    let vm = a11_steady(&io, start);
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let clock = || io.time.get().unwrap();
+    learner
+        .window_by(&io, &holders(std::slice::from_ref(&vm)), budget, clock)
+        .unwrap();
+    io.time.set(Some(start + WINDOW));
+    io.lag.set(Duration::from_millis(100));
+    learner
+        .window_by(&io, &holders(std::slice::from_ref(&vm)), budget, clock)
+        .unwrap();
+    let caps = io.caps.borrow();
+    assert!(
+        matches!(caps.last(), Some((name, _, Ok(200))) if name == "vm-1"),
+        "{caps:?}"
+    );
+}
+
+/// The review's A-11: a VM's VMM's own is its scope's CPU less its vCPUs' at the same instant, its VM process's sample
+/// of its guest time, never counting what its busy vCPUs ran while its use's answer came back. Do run a window over a
+/// managed VM whose VMM runs 200 milli-CPU of its own ([`a11_steady`]), its process answering its use at once; then one
+/// 300 ms on whose answer takes 40 ms, its sample taken halfway. Expect its first cap's VMM's own over its life,
+/// 50 milli-CPU; its second's 200 milli-CPU, never what its 1.6 busy CPUs ran in the answer's last 20 ms.
+#[test]
+fn a11_a_vms_own_is_its_scope_less_its_vcpus_at_its_sample() {
+    let io = Record::default();
+    let start = Instant::now();
+    let vm = a11_steady(&io, start);
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let clock = || io.time.get().unwrap();
+    learner
+        .window_by(&io, &holders(std::slice::from_ref(&vm)), budget, clock)
+        .unwrap();
+    io.time.set(Some(start + WINDOW));
+    io.round_trip.set(Duration::from_millis(40));
+    learner
+        .window_by(&io, &holders(std::slice::from_ref(&vm)), budget, clock)
+        .unwrap();
+    let caps = io.caps.borrow();
+    assert!(
+        matches!(caps.first(), Some((name, _, Ok(50))) if name == "vm-1"),
+        "{caps:?}"
+    );
+    assert!(
+        matches!(caps.last(), Some((name, _, Ok(200))) if name == "vm-1"),
+        "{caps:?}"
     );
 }
 
@@ -2634,6 +2779,60 @@ fn w14_2c4b_a_cold_cap_cycle_is_told_on_its_vms_rate() {
             id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
             held: hex_api::RateHeld::Platform(
                 "its VM process takes no rate; its helper has measured no stop".to_owned()
+            ),
+        }]
+    );
+}
+
+/// The review's A-14 (ROOT, 2026-11-14; AC-T7.4.1): a VM its platform's cap holds, whose cap's cycle is at a cold
+/// estimate (its helper's slowest stop, too few holds to have seen their p99.9), has that cycle taken into the learner's
+/// window, and what holds its rate says it is cold. Do run a window of a managed VM whose process takes no rate, so its
+/// platform's cap holds it, on a learner whose platform's cap's cycle is 2 s at a cold estimate; then answer the class's
+/// capacity. Expect the next window 2 s, told naming the VM, and its rate told held by its platform's cap, naming why
+/// its cycle is cold.
+#[test]
+fn a14_a_cold_estimates_cycle_sets_the_window_and_is_told_on_its_vms_rate() {
+    let io = Record::default();
+    let held = vm("vm-2", 2);
+    io.set("vm-2", 0, GIB);
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    io.cycle.set(Some(Duration::from_secs(2)));
+    *io.cold.borrow_mut() = Some("its helper's slowest stop, not their p99.9".to_owned());
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&held)),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(learner.next_window(), Some(Duration::from_secs(2)));
+    let learned = learner
+        .learned(
+            Class::Shards,
+            &[cost()],
+            &holders(std::slice::from_ref(&held)),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.window,
+        Some(hex_api::LearnedWindow {
+            window_ns: 2_000_000_000,
+            slowed_by: Some(LearnedHolder::Box(BoxId::new("vm-2").unwrap())),
+        })
+    );
+    assert_eq!(
+        learned.rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            held: hex_api::RateHeld::Platform(
+                "its VM process takes no rate; its helper's slowest stop, not their p99.9"
+                    .to_owned()
             ),
         }]
     );
