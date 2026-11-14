@@ -1450,4 +1450,146 @@ pub(super) mod tests {
         malformed.cost.floor.cpu_milli = 500;
         assert!(observer_cost(&malformed).is_err());
     }
+
+    /// A VMM slower to stop than any wait of a time (A-13): its scope ends, released, only for a wait that follows it
+    /// (`Duration::MAX`), as a stop that outlasts `stop_ms` ends.
+    struct SlowStop {
+        identity: shards_api::Identity,
+        followed: std::sync::atomic::AtomicBool,
+    }
+
+    impl shards_api::ManagedProcess for SlowStop {
+        fn identity(&self) -> Result<&shards_api::Identity, shards_api::Refusal> {
+            Ok(&self.identity)
+        }
+        fn wait_for(
+            &self,
+            patience: Duration,
+        ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            if patience == Duration::MAX {
+                self.followed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.terminal()
+        }
+        fn stop(&self) -> Result<(), shards_api::Refusal> {
+            Ok(())
+        }
+        fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            Ok(self
+                .followed
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then_some(shards_api::ManagedEnd {
+                    status: shards_api::ManagedStatus::Code(0),
+                    scope: shards_api::TerminalScope::Released,
+                }))
+        }
+    }
+
+    /// One turn as a stop takes it: each VMM it attaches slow to stop ([`SlowStop`]), the scopes it finalizes counted.
+    #[derive(Default)]
+    struct Stopping {
+        finalized: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transaction for Stopping {
+        fn records(&self) -> Result<crate::devices::Records, Refusal> {
+            panic!("a stop lists no records")
+        }
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            panic!("a stop lists no pool records")
+        }
+        fn read_pool(&self, _: &BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            panic!("a stop reads no pool record")
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn grant_pool(&self, _: &BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a stop grants no pool")
+        }
+        fn remove_pool(&self, _: &BackingKey) -> Result<(), Refusal> {
+            panic!("a stop removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            panic!("a stop checks no unsubmitted pool")
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            panic!("a stop reads no record")
+        }
+        fn put(&self, _: &BoxRecord) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            panic!("a stop removes no record")
+        }
+        fn launch_managed(
+            &self,
+            _: &crate::devices::ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("a stop launches no VMM")
+        }
+        fn attach_managed(
+            &self,
+            identity: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            let identity = identity.expect("a stop attaches a published VMM");
+            Ok(shards_api::managed_receipt(triomphe::Arc::new(SlowStop {
+                identity: shards_api::Identity {
+                    pid: identity.pid,
+                    started: identity.started,
+                    vsock: identity.vsock.clone(),
+                },
+                followed: std::sync::atomic::AtomicBool::new(false),
+            })))
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            self.finalized
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("a stop reads no usage")
+        }
+    }
+
+    /// A-13 (decision 9; ROOT, 2026-11-14), AC-T7.4.1: a VM's stop is its managed scope's, a wait of its own, measured
+    /// (`managed.stop`) and past the slowest stop seen following the scope to its end, never refused at the configured
+    /// `stop_ms`: census retirement at a node's start stops each census VM, and was refused Uncertain past it, so `hex
+    /// node` couldn't start until the timer was raised. Do: a VM whose VMM's scope ends only for a wait that follows it,
+    /// slower to stop than any timer; stop it as census retirement does (`stop_vm`). Expect: stopped, its scope seen
+    /// released and finalized, its exit recorded.
+    #[test]
+    fn a13_a_vm_slower_to_stop_than_any_timer_is_followed_to_its_end() {
+        let state = tempfile::tempdir().unwrap();
+        let (mut runtime, _no_calls) = family_fixture();
+        runtime.config.state_dir = state.path().to_path_buf();
+        let source = family_row(&runtime, &[256], BackingPhase::Live);
+        let mut vm = consuming_box(&runtime, &source, "first-consumer");
+        let turn = Stopping::default();
+        let stopped = runtime.stop_vm(&mut vm, &turn);
+        assert_eq!(stopped, Ok(()), "a stop slower than stop_ms");
+        assert_eq!(vm.exit, Some(hex_api::Exit::Code(0)));
+        assert_eq!(turn.finalized.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// A-13, as above for an observer's stop: census retirement at a node's start stops each census observer
+    /// (`retire_census_observers`, `stop_observer` with no deadline of a caller's), and was refused Uncertain past
+    /// `stop_ms`. Do: a live observer whose VMM's scope ends only for a wait that follows it; stop it as retirement
+    /// does. Expect: Released, its exit recorded, its scope finalized.
+    #[test]
+    fn a13_an_observer_slower_to_stop_than_any_timer_is_followed_to_its_end() {
+        let state = tempfile::tempdir().unwrap();
+        let (mut runtime, _no_calls) = family_fixture();
+        runtime.config.state_dir = state.path().to_path_buf();
+        let mut observer = family_row(&runtime, &[256], BackingPhase::Live);
+        let turn = Stopping::default();
+        let stopped = runtime.stop_observer(&turn, &mut observer, None);
+        assert_eq!(stopped, Ok(()), "a stop slower than stop_ms");
+        assert_eq!(observer.phase, BackingPhase::Released);
+        assert_eq!(observer.exit, Some(hex_api::Exit::Code(0)));
+        assert_eq!(turn.finalized.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 }
