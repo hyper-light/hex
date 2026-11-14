@@ -605,6 +605,17 @@ impl Node {
         crate::emptying::HOLD.hold(id.as_str())
     }
 
+    /// Ends the node as its process's end would, in this process (T-T7.1.2: a test's crash): its store's hold of its
+    /// directory let go, as the kernel lets a dead process's lock go, so a node opened after over its state takes it;
+    /// its store, every clone its threads keep, writes nothing more; and none of its own code runs, nothing of it
+    /// dropped. A test control of debug builds alone, armed by the node's caller alone.
+    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-controls")]
+    pub fn crash(self) {
+        self.store.end_as_a_crash();
+        let _ended = std::mem::ManuallyDrop::new(self);
+    }
+
     /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
     /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
     /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the
