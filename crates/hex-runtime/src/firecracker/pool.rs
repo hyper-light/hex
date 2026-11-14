@@ -805,24 +805,26 @@ impl FirecrackerRuntime {
         transaction.put_pool(record)?;
         let identity = self.pool_identity(record)?;
         let native = transaction.attach_managed(identity.as_ref())?;
+        let began = Instant::now();
         native
             .stop()
             .map_err(|_| backing_uncertain(key, "its observer's stop failed"))?;
-        let patience = until
-            .map(remaining)
-            .transpose()?
-            .map_or(self.config.stop_timeout, |left| {
-                left.min(self.config.stop_timeout)
-            });
-        let terminal = native
-            .wait_for(patience)
+        // A caller's deadline bounds the stop it waits on; with none, the stop's own wait (managed.stop; decision 9):
+        // past the slowest stop seen, its scope followed by its life to its end, never refused at a configured time
+        // (A-13: census retirement at a node's start stops observers this way).
+        let released = match until {
+            Some(until) => native
+                .wait_for(remaining(until)?)
+                .map(|end| end.filter(|end| end.scope == shards_api::TerminalScope::Released)),
+            None => crate::guest::wait_stopped(&*native, began),
+        };
+        let terminal = released
             .map_err(|_| {
                 backing_uncertain(
                     key,
                     "its observer's end couldn't be waited on after its stop",
                 )
             })?
-            .filter(|end| end.scope == shards_api::TerminalScope::Released)
             .ok_or_else(|| {
                 backing_uncertain(key, "its observer's scope wasn't released after its stop")
             })?;
@@ -1476,13 +1478,13 @@ pub(super) mod tests {
             Ok(())
         }
         fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
-            Ok(self
-                .followed
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .then_some(shards_api::ManagedEnd {
-                    status: shards_api::ManagedStatus::Code(0),
-                    scope: shards_api::TerminalScope::Released,
-                }))
+            if !self.followed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(None);
+            }
+            Ok(Some(shards_api::ManagedEnd {
+                status: shards_api::ManagedStatus::Code(0),
+                scope: shards_api::TerminalScope::Released,
+            }))
         }
     }
 

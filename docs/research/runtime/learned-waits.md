@@ -77,7 +77,10 @@ is wired:
 | `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
 | `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
 | the guest's first boot (`GuestRuntime::first_dial_bound`) | the guest's VM | its process's end | its CPU time | not following: records.tsv's `boot_ready`, a production R03 violation ("Owed", 1) |
-| `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)) |
+| `oci.start` (hex-runtime `linux::oci::run`'s start) | a created container's init, taking the start | its pidfd, polled with the exec FIFO: its byte, or its end without it | none: a local site | liveness alone past W* (the review's (c), 2026-11-14: it was 10 s, a stopped init refused Broken there) |
+| `oci.delete.exit`, `oci.delete.emptying`, `oci.shim.exit` (hex-runtime `linux::oci::run`) | a killed init with no cgroup; a killed container's cgroup; a create's shim once its container is ready | the init's pidfd; the cgroup's `cgroup.events`; the shim's pidfd, which it exits by itself, never killed at a time | none: a local site | liveness alone past W* (the review's (c): each was 10 s) |
+| `boxrun.emptying` (hex-cli `box_run`) | a `hex box run` box whose strays it killed | its `cgroup.events` | none: a local site | liveness alone past W*, only after a kill that went (the review's (c): it was 10 s) |
+| `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)); a Firecracker VM's and observer's stop too (`guest::wait_stopped`; A-13, 2026-11-14: they waited the configured `stop_ms`, so census retirement failed past it), an observer's under a caller's deadline to that deadline |
 | `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life
@@ -205,12 +208,14 @@ Tests, waiting on a time rather than on their party:
    `absolute_connect_completes_and_evented_retains_the_same_link`: each failed only under load on adacachy2 (their
    runs 12 s against 2.5 s quiet), so each waits on a time, not on its party. Owed.
 9. **A fixed duration as a test's wait** (hex-cli's tests): `FIXTURE`'s 30 s in `guest_boot_deadline.rs` went
-   (6042219c, its waits following the relay). Left: `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `DELETE_PATIENCE` 10 s
-   (`delete_flake.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`,
-   `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `HANG_GUARD` 39.507 s and
-   `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
-   (`windows_oci_box.rs`, a seeded test wait), and inline durations in `completion_backends.rs`,
-   `completion_managed_api.rs`, `oci_box.rs` and `process_box.rs`; the real-VM tests (`charge_fleet.rs`,
+   (6042219c, its waits following the relay), and the process class's (df13d537: `DELETE_PATIENCE` in
+   `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations). Left:
+   `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`,
+   `windows_node.rs`, `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD`
+   (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
+   (`windows_oci_box.rs`, a seeded test wait), the bystander's 10 s in hex-runtime's `linux::oci::run` tests, and
+   inline durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
+   (`charge_fleet.rs`,
    `guest_boot_record.rs`, `image_real.rs`, `image_record.rs`, `native_firecracker_smoke.rs`,
    `native_windows_hcs_compute.rs`, `node_hosted_real.rs`) after goal 12's batch, built and linted here, run by the
    Hex lead on KVM, HVF and WHP.
