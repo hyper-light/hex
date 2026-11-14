@@ -2651,7 +2651,10 @@ mod relay_token {
         let w_star = OWN_TOKEN.slowest();
         eprintln!("d_2_relay_token first={first:?} w_star={w_star:?}");
         assert_eq!(first, Ok(TOKEN));
-        assert!(w_star.is_some(), "the first token was no sample of its wait");
+        assert!(
+            w_star.is_some(),
+            "the first token was no sample of its wait"
+        );
 
         let connect = connecting(&link);
         let (mut relay, _) = control.accept().unwrap();
@@ -2662,7 +2665,11 @@ mod relay_token {
         let risen = OWN_TOKEN.slowest();
         eprintln!("d_2_relay_token past={past:?} second={second:?} risen={risen:?}");
         assert!(past.is_ok(), "{past:?}: no run-out was told past W*");
-        assert_eq!(second, Ok(TOKEN), "the half read before W* passed wasn't kept");
+        assert_eq!(
+            second,
+            Ok(TOKEN),
+            "the half read before W* passed wasn't kept"
+        );
         assert!(
             risen > w_star,
             "W* didn't rise to the late token: {w_star:?}, then {risen:?}"
