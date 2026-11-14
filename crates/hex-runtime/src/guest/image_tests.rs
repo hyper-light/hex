@@ -1510,7 +1510,10 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
 fn b9_an_image_vms_diagnostics_are_held_within_the_disk_its_box_was_admitted_with() {
     let images = ModelImages::new();
     let (runtime, _owner) = model_runtime(&images, waits());
-    let id = runtime.create(spec("image-diagnostics-bound", None)).unwrap().id;
+    let id = runtime
+        .create(spec("image-diagnostics-bound", None))
+        .unwrap()
+        .id;
     runtime.start(&id).unwrap();
     assert_eq!(
         *images.run.diagnostics_bounds.lock().unwrap(),
@@ -2159,7 +2162,23 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
     );
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
-    let id = runtime.create(spec("b4-release", None)).unwrap().id;
+    // A disk that holds its run host's diagnostics' quoted tail, as a real image VM's does (the review's B-9): the sim's
+    // VM allocation admits none. The fixture's own VM, with as much disk as memory, under its cost profile so widened.
+    let mut admitted = spec("b4-release", None);
+    let fixture = allocation();
+    let vm = CapacityResources {
+        disk_bytes: fixture.resources.mem_bytes,
+        ..fixture.resources
+    };
+    admitted.allocation = Some(
+        hex_api::RuntimeCost {
+            ceiling: vm,
+            ..fixture.cost
+        }
+        .allocate(vm)
+        .unwrap(),
+    );
+    let id = runtime.create(admitted).unwrap().id;
     runtime.start(&id).unwrap();
     // Each open waits for its other end: the run host's, its VM's, then the VM's gate, each held from here.
     let mut host_end = std::io::BufReader::new(std::fs::File::open(&host_seen).unwrap());

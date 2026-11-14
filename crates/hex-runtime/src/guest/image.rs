@@ -1686,12 +1686,14 @@ impl ImageBoot {
 /// Boots `spec` on a thread of its own, its answer its `party`'s slot's, the party going with the thread, or with its
 /// closure where no thread starts, so a follower sees the boot end with no answer: Shards waits for the run's start or
 /// its host's end alone (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps
-/// its diagnostics in `kept` from then on, after what it kept until then; a run whose host can't is dropped, which ends
-/// it, and its boot is refused in those words.
+/// its diagnostics in `kept` from then on, after what it kept until then, the file held within `bound` bytes (the
+/// review's B-9); a run whose host can't is stopped, its host and every process it started followed to their end, and
+/// its boot is refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
     kept: std::fs::File,
+    bound: u64,
     party: Party<Booted>,
     stop: Arc<BootStop>,
 ) -> std::io::Result<()> {
@@ -1702,8 +1704,15 @@ fn boot_on_its_thread(
             let booted = images
                 .boot_stoppable(&spec, Duration::MAX, &stop)
                 .and_then(|guest| {
-                    guest.keep_diagnostics(kept, u64::MAX)?;
-                    Ok(guest)
+                    match guest.keep_diagnostics(kept, bound) {
+                        Ok(()) => Ok(guest),
+                        // Never left to its drop: the run is stopped, which answers once its host and every process
+                        // it started are gone (D231's stop), and the boot refused in the keep's words.
+                        Err(why) => {
+                            let _ = guest.stop();
+                            Err(why)
+                        }
+                    }
                 });
             party.0.put(booted);
         })
@@ -2277,7 +2286,15 @@ impl ImageClass {
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        if let Err(why) = boot_on_its_thread(images, spec, kept, party, stop) {
+        // Its diagnostics are its own output on the node's disk, charged to it: their file is held within the disk its box
+        // was admitted with, no number picked (the review's B-9, ROOT's ruling of 2026-11-14); a box admitted with no
+        // receipt has no disk to hold it within.
+        let kept_within = record
+            .spec
+            .allocation
+            .as_ref()
+            .map_or(u64::MAX, |allocation| allocation.resources.disk_bytes);
+        if let Err(why) = boot_on_its_thread(images, spec, kept, kept_within, party, stop) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;

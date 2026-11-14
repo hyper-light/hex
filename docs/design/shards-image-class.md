@@ -147,8 +147,8 @@ Sources, read at the revisions named:
   is bounded by the disk the box's allocation was admitted with (ROOT, 2026-11-14; the review's B-9): the diagnostics
   are the box's own output on the node's disk, so they are charged to it, and no number is picked. Past that bound the
   file is cut back to the tail Shards keeps for quoting, and its run host's words go on after it, through Shards'
-  bounded `keep_diagnostics(to, bound)`, asked of Shards and owed: until Hex vendors it and passes the bound, the file
-  has no bound of Hex's. A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
+  bounded `keep_diagnostics(to, bound)` (`9d8a05f6a`); a box admitted with no allocation has no disk to bound its file
+  by, and it has none. A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
   quotes of a VM's end (`shards_abi::bounds::console_said` over the kernel's console records, as the dedicated guest
   reads them). The node Store keeps the file's name, the run's
   words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the
