@@ -17,14 +17,8 @@ use hex_core::patience::{Patience, Piece};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
-/// The slowest recorded value of each guest wait, by host class (bench/native/guest/records.tsv): read by no production
-/// wait since a GPU create's budget followed its guest (the review's C-9, (c2)), its last reader hex-cli's measuring
-/// tools (the guest_cost and macos_cpu_response examples), owed until their waits follow. A class with no row for a
-/// measure seeds from the slowest row of any class
-/// ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code change.
-pub const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
-
-/// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
+/// This host's class, as the records name it (bench/native/guest/records.tsv, evidence alone: no wait reads it, the
+/// review's C-9): the hypervisor Shards boots its guests with here.
 pub const CLASS: &str = if cfg!(target_os = "macos") {
     "macOS-HVF"
 } else if cfg!(target_os = "windows") {
@@ -32,61 +26,6 @@ pub const CLASS: &str = if cfg!(target_os = "macos") {
 } else {
     "Linux-KVM"
 };
-
-/// The slowest value `table` records for `measure` on host class `class`: each line `measure`, `class`,
-/// microseconds and its record, tab-separated; `#` lines are comments. `None` where no row names both.
-pub fn slowest_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
-    table
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .map(|line| line.split('\t'))
-        .find_map(|mut row| {
-            (row.next()? == measure && row.next()? == class)
-                .then(|| row.next()?.parse().ok().map(Duration::from_micros))?
-        })
-}
-
-/// The seed `table` gives `measure` on host class `class`: its own slowest row where it has one; else the slowest
-/// row of any class, every class's records taken as one (decision 9: a bound is the slowest answer on record, with no
-/// margin past it), a class with no record of its own starting from the slowest any host has been seen to take,
-/// then rising with its node's own and backing off past each bound it runs out at (the learned bounds take the max
-/// with what the node sees). `None` where no class records the measure.
-pub fn seed_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
-    if let Some(own) = slowest_in(table, measure, class) {
-        return Some(own);
-    }
-    table
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| {
-            let mut row = line.split('\t');
-            if row.next()? != measure {
-                return None;
-            }
-            row.next()?;
-            row.next()?.parse().ok().map(Duration::from_micros)
-        })
-        .max()
-}
-
-/// The seed for `measure` on this host's class ([`seed_in`] over records.tsv), or the refusal naming the
-/// record to take where no class records it.
-fn recorded(measure: &str) -> Result<Duration, Refusal> {
-    seed_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
-        what: "the oci class's guest",
-        platform: std::env::consts::OS,
-        why: format!(
-            "no {measure} record for any host class yet (bench/native/guest/records.tsv): record one first"
-        ),
-    })
-}
-
-/// The slowest boot to ready on record for this host's class, or with none, the slowest of any class
-/// (bench/native/guest/boot-ready/RECORD.md, its rows in records.tsv): the measuring tools' bound alone, owed
-/// ([`RECORDS`]).
-pub fn recorded_boot() -> Result<Duration, Refusal> {
-    recorded("boot_ready")
-}
 
 /// A connection to one of the guest's ports, as Shards gives it.
 pub struct ShardsStream(pub(crate) Box<dyn shards_api::Stream>);
