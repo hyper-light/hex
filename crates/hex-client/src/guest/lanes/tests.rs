@@ -365,6 +365,7 @@ fn a_lane_cut_while_its_owner_sends_keeps_the_bytes_before_the_cut_for_a_later_r
     assert_eq!(got, b"before the cut\n", "the bytes before the cut");
     let cut = end.expect_err("a cut read as the lane's end in order");
     assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
+}
 
 /// The relay's token on its control connection for these cases.
 const TOKEN: u64 = 0x6c61_6e65;
