@@ -597,8 +597,9 @@ pub enum SealFault {
     /// Its seal doesn't open under the peer's key: its header, nonce, body or tag isn't what was sealed.
     #[error("its seal doesn't open under the peer's key")]
     Broken,
-    /// This side's nonces are spent: one more would repeat one, so nothing more is sealed under its key.
-    #[error("this side's nonces under its key are spent")]
+    /// This side's key has sealed all it may: its nonces, one more of which would repeat one, or AES-GCM's limit on what
+    /// one key seals (RFC 8446 §5.5). Nothing more is sealed under it; a new connection's key seals on.
+    #[error("this side's key has sealed all it may")]
     Spent,
     /// The cipher refused what it was given.
     #[error("the cipher refused {what}")]

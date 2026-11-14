@@ -46,7 +46,7 @@ asm-generic.
 | Recorded growth rates | 47,464,532,324 B/s; 10,437 spawns/s | watch.rs `RECORDED` | (b) | The worst aggregate on record, one member per core filling or spawning at once (box-aggregate-growth-f83189c, studio-2). Tests and the bench reckon at it |
 | Overshoot bar | 64 MiB | watch.rs `OVERSHOOT` | (b) | Step 1's bar: each wait is (bound + bar - footprint) / rate. Cost record watcher-headroom-cpu-f18e6ee |
 | RT computation budget | 150 µs per 250 µs | process.rs | (b) | rtbudget on studio-3 |
-| Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) to start, then raised by this node's slower drains | hex_core::drain::Learned, process.rs | (b)/(a) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac; only rises (the learned-waits rule): 2bc6963 test, d1c004e, 25652c9 |
+| Group drain | none: W*, the slowest kill-to-empty this process has seen (`process.emptying`), past it the group followed by its members' ends, never refused | hex-runtime emptying.rs, process.rs `end_followed` | (a) | Was DRAIN_PATIENCE 10 s, then 2 x (0.883 ms + 0.298 ms x (n-1)) from record killscale-a84e094 (hex_core::drain), raised by slower drains, refused past it; gone with the review's E-12 (decision 9), 2026-11-14 |
 | Listing size | kern.maxproc, or refused naming it | sys::listing | (c) | Was a 4096 fallback at five sites. 54e8ad0 test, 4f41305 |
 | Event batch | EVENTS = 28 + 2, also the registration chunk | sys.rs | (b) | The most events one wait met in the bench, 28 (one a member of its largest box, all killed at once), plus the timer and user events (record watcher-readcost-events-a7d13c6-20261106T165609Z; `macos_box events`). Was 64. A larger box's further events wait a call, none lost (EV_CLEAR, kern_event.c:1139). 038c607, 1d46147 |
 | Background clamp | cpu_weight < 100 | process.rs | (c) | 100 is cgroup v2's default cpu.weight |
@@ -60,7 +60,7 @@ asm-generic.
 |---|---|---|---|---|
 | Ledger reserve | 16 MiB, capped at bound/4 | macos/mod.rs | (d) | Step 2 derives it from Ada's root lab record (armlat); its SHA comes before the lab is re-pinned |
 | Sweep pace | none | helper | none | Was pump(500). Event-driven: crossings and member forks and ends wake it (step 2's b05d3a0, merged) |
-| End drain | hex_core::drain::Learned, the helper's own | helper_daemon.rs | (b)/(a) | As the group drain, learned per helper (25652c9). Step 2 checks Ada's box-user drain record against it |
+| End drain | none: the helper's own W* of the same wait (`process.emptying`), past it the user followed by its processes' ends; its programs kept until their ends come | helper_daemon.rs `Daemon::end`, kids.rs `close` | (a) | Was hex_core::drain::Learned, the helper's own (25652c9), refused past it, its programs reaped to it and `Exit::Unknown` past it; gone with the review's E-12, 2026-11-14 |
 | Reap wait | none | helper_daemon.rs | none | Was REAP_PATIENCE 100 ms. Wait answers at once, try_wait (step 2's 469b093) |
 | Listen backlog | SOMAXCONN | helper_daemon.rs | (c) | `bsd/sys/socket.h:597` (step 2) |
 | Message cap | from ARG_MAX, PATH_MAX, NGROUPS_MAX | hex-core helper.rs | (c) | Step 2's 469b093 |
