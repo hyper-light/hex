@@ -70,10 +70,12 @@ pub trait Fixture {
     fn party(&self) -> Party {
         Party::Live
     }
-    /// A wait past W* tells this once: what it waits on, what it wants and what the runtime last showed, for the test's
-    /// output. Where a runtime that differs stays alive, the wait goes on, and this is what the person sees of it.
+    /// A wait past W* tells this once: what it waits on, what it wants and what the runtime last showed, on the test's
+    /// stderr, where the person running it reads it (the review's E-4: a no-op told no one). Where a runtime that
+    /// differs stays alive, the wait goes on, and this is what the person sees of it.
     fn told(&self, note: &str) {
-        let _ = note;
+        // A test with no stderr has nowhere to tell it: the wait's run-out line and census row still say it ran out.
+        let _ = writeln!(std::io::stderr().lock(), "{note}");
     }
 }
 
