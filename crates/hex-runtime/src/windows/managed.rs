@@ -982,6 +982,28 @@ mod runtime_environment_tests {
         );
     }
 
+    /// AC-T7.4.1 (goal 5's Windows driver, item4-whp's step B): do make a managed VM's environment; expect beside its
+    /// configured pair this process's `LOCALAPPDATA` and `SystemRoot`, which Shards' VM process gives the confined VM
+    /// process it starts (Shards' crates/ipc windows.rs `KEPT`, PM M208: without `LOCALAPPDATA` Windows makes no child
+    /// in an AppContainer, ERROR_ENVVAR_NOT_FOUND), the four in Windows' case-insensitive order.
+    #[test]
+    fn a_managed_vms_environment_carries_what_shards_gives_its_confined_vm_process() {
+        let paths = shards_api::RuntimePaths::new(
+            std::path::PathBuf::from("C:\\cache"),
+            std::path::PathBuf::from("C:\\home"),
+        )
+        .unwrap();
+        let ours = |name: &str| std::env::var_os(name).unwrap().into_string().unwrap();
+        let expected: Vec<u16> = format!(
+            "LOCALAPPDATA={}\0SHARDS_CACHE=C:\\cache\0SHARDS_HOME=C:\\home\0SystemRoot={}\0\0",
+            ours("LOCALAPPDATA"),
+            ours("SystemRoot")
+        )
+        .encode_utf16()
+        .collect();
+        assert_eq!(runtime_environment(&paths).unwrap(), expected);
+    }
+
     /// AC-T7.4.1: native and probe receive exactly the same explicitly configured runtime pair.
     #[test]
     fn runtime_environment_contains_only_the_explicit_provider_paths() {
