@@ -121,11 +121,12 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   PID/start/socket identity, a dedicated control token, the reserved guest request id, the wanted streams and its
   guest link's own setup bound. The caller opens and names each stream through `shards_api::connect_borrowed`,
   within the call's deadline where it has one. A call with none (a plain exec, which HEX-RT-17 holds on every OS)
-  waits for each CONNECT's OK as decision 9 waits, its W* the link's setup bound, the one finite deadline the
-  borrowed connector waits in: within it the OK is the answer; past it, the run-out told
-  (`client.guest.offered.connect`), it follows the VM by its life, the CONNECT made again as each bound passes,
-  refused at the VM's end or by any failure but a deadline's, never at a bound. No CONNECT is given up sooner: one
-  given up costs the guest a connection it takes for nothing. Then it sends `StreamsReady` with the original outer
+  makes each stream's one CONNECT with no clock (`shards_api::connect_borrowed_before` with no deadline, Shards
+  9156058fb) and waits for its OK as decision 9 waits, its W* the link's setup bound: within it the OK is the
+  answer; past it the run-out is told (`client.guest.offered.connect`) and the same dial goes on, ending at its OK
+  however late, its connection's end or the VM's, whose process it holds by pid and start and waits on beside the
+  socket. It is never given up and made again, which would drop a late OK, redial a slow guest forever and cost
+  the guest a connection it takes for nothing (the review's D-3). Then it sends `StreamsReady` with the original outer
   request id. The node commits the reserved request and returns `Started`/`Exited`
   on that same id. The common client retains the caller-owned socket ends through this preparation; its
   reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with

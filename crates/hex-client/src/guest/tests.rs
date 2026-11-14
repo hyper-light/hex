@@ -1413,26 +1413,22 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     drop(held);
 }
 
-/// HEX-RT-17, decision 9 (AC-T7.4.1): open an offered guest exec's stdin and stdout as a Windows caller does for an
-/// exec with no deadline of its own (a plain exec, which HEX-RT-17 holds), the offer carrying its guest link's setup
-/// bound, as a node's does. The muxer never answers the first CONNECT and answers each after it at once. Expect the
-/// streams opened: the first CONNECT given up at its deadline and made again, the wait following the VM past it, never
-/// refused there; then each stream named for the exec in its turn.
+/// HEX-RT-17, decision 9 (AC-T7.4.1; the review's D-3): open an offered guest exec's stdin and stdout as a Windows
+/// caller does for an exec with no deadline of its own (a plain exec, which HEX-RT-17 holds), its link with no setup
+/// bound, so each CONNECT follows its VM from its start. The muxer answers each CONNECT at once. Expect the streams
+/// opened, each on one CONNECT and named for the exec in its turn.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
+fn an_offered_streams_connect_with_no_deadline_is_one_connect_each_named() {
     use std::os::unix::net::{UnixListener, UnixStream};
 
     let dir = tempfile::tempdir().unwrap();
     let (mut vm, started) = offered_vm();
     let path = dir.path().join("m");
-    let muxer = offered_muxer(UnixListener::bind(&path).unwrap(), |n| n == 0, drop);
-    let opened = open_offered(
-        &offered(&vm, started, path.clone(), Some(CONNECT_CAP)),
-        None,
-    );
+    let muxer = offered_muxer(UnixListener::bind(&path).unwrap(), |_| false, drop);
+    let opened = open_offered(&offered(&vm, started, path.clone(), None), None);
     eprintln!("hex_rt_17_offered_following opened={opened:?}");
-    let given = opened.expect("an offer's streams, opened past its first CONNECT's deadline");
+    let given = opened.expect("an offer's streams, each on one CONNECT");
     UnixStream::connect(&path)
         .unwrap()
         .write_all(b"STOP\n")
@@ -1442,11 +1438,9 @@ fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
     let reaped = vm.wait();
     eprintln!("hex_rt_17_offered_following did={did:?} reaped={reaped:?}");
     assert!(given.stdin.is_some() && given.stdout.is_some() && given.stderr.is_none());
-    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
     assert_eq!(
         did,
         [
-            Muxed::GivenUp(connect),
             Muxed::Named(offered_named(stream::Stdio::In)),
             Muxed::Named(offered_named(stream::Stdio::Out)),
         ]
@@ -1454,10 +1448,9 @@ fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
     drop(held);
 }
 
-/// HEX-RT-17, decision 9 (AC-T7.4.1): an offered stream's CONNECT for an exec with no deadline, its muxer never
-/// answering, the VM killed as its second CONNECT comes: the first was given up at its deadline and made again while
-/// the VM lived. Expect the open refused by type at the VM's end (its process, never a CONNECT's deadline), once the
-/// CONNECT under way is given up, and no CONNECT made after it.
+/// HEX-RT-17, decision 9 (AC-T7.4.1; the review's D-3): an offered stream's CONNECT for an exec with no deadline, its
+/// muxer never answering, the VM killed as its CONNECT comes. Expect the open refused by type at the VM's end (its
+/// process, which the dial waits on beside its socket, never a deadline), and no CONNECT made after it.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
@@ -1467,14 +1460,14 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
     let dir = tempfile::tempdir().unwrap();
     let (vm, started) = offered_vm();
     let path = dir.path().join("m");
-    let offer = offered(&vm, started, path.clone(), Some(CONNECT_CAP));
+    let offer = offered(&vm, started, path.clone(), None);
     let vm = Arc::new(Mutex::new(vm));
     let killed = Arc::clone(&vm);
     let muxer = offered_muxer(
         UnixListener::bind(&path).unwrap(),
         |_| true,
         move |n| {
-            if n == 1 {
+            if n == 0 {
                 killed.lock().unwrap().kill().unwrap();
             }
         },
@@ -1499,10 +1492,7 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
     let reaped = vm.lock().unwrap().wait();
     eprintln!("hex_rt_17_offered_vm_end did={did:?} reaped={reaped:?}");
     let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
-    assert_eq!(
-        did,
-        [Muxed::GivenUp(connect.clone()), Muxed::GivenUp(connect)]
-    );
+    assert_eq!(did, [Muxed::GivenUp(connect)]);
 }
 
 /// The review's D-3 (decision 9; AC-T7.4.1): an offered stream's CONNECT with no deadline is one dial, its OK taken
