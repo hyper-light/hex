@@ -29,7 +29,9 @@ fn record(phase: NodeVmPhase, exit: Option<Exit>) -> NodeVmRecord {
     NodeVmRecord {
         version: RECORD_VERSION,
         run: NodeRun::from_bytes([9; 16]),
-        image: "hex-node:rev@sha256:00".to_owned(),
+        image:
+            "hex-node:rev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
         allocation: allocation(),
         phase,
         diagnostics: Some(PathBuf::from("/state/node-vms/run.log")),

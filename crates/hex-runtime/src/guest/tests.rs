@@ -598,12 +598,21 @@ fn w39_a_guest_under_shards_init_is_read_from_its_image() {
     // Inputs to the parse, not a guest's size or an image: any values do.
     let image = [
         ("SHARDS_BIN", "/opt/shards"),
-        ("HEX_GUEST_IMAGE", "hex-node@sha256:0123"),
+        (
+            "HEX_GUEST_IMAGE",
+            "hex-node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
         ("HEX_GUEST_CPUS", "2"),
         ("HEX_GUEST_MEMORY_MIB", "1024"),
     ];
     let config = read(&image).unwrap();
-    assert_eq!(config.boot, Boot::Image("hex-node@sha256:0123".to_owned()));
+    assert_eq!(
+        config.boot,
+        Boot::Image(
+            "hex-node@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned()
+        )
+    );
     assert_eq!(
         (
             config.binary.as_path(),
@@ -662,7 +671,13 @@ fn c17_a_guest_image_its_digest_doesnt_pin_is_refused_by_name() {
     ] {
         let read = read(&unpinned);
         assert!(
-            matches!(read, Err(Refusal::Invalid { what: ENV_IMAGE, .. })),
+            matches!(
+                read,
+                Err(Refusal::Invalid {
+                    what: ENV_IMAGE,
+                    ..
+                })
+            ),
             "{unpinned}: {read:?}"
         );
     }
