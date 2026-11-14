@@ -766,6 +766,16 @@ mod tests {
         );
     }
 
+    /// The review's C-9, (c2) (decision 9; Shards b4a018090's `Until::Released`): a GPU create's budget follows its
+    /// guest as every managed create's does, no deadline and none left, its report taken with no clock. Do take a GPU
+    /// create's budget. Expect it to follow, as a following budget does.
+    #[test]
+    fn c9_c2_a_gpu_creates_budget_follows_its_guest() {
+        let gpu = gpu_create().unwrap();
+        assert_eq!(gpu.deadline(), None, "a GPU create's budget has a deadline");
+        assert_eq!(gpu.remaining().unwrap(), None);
+    }
+
     /// The review's C-9 (decision 9): a managed create's budget that follows its guest has no deadline and none left,
     /// spent never; a GPU create's is finite, the record's, until Shards' GPU report takes none (owed).
     #[test]
