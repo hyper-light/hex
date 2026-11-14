@@ -112,9 +112,8 @@ fn pool_from_name(name: &std::ffi::OsStr) -> Option<[u8; 32]> {
     Some(pool)
 }
 
-fn read_pool_file(file: File, pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
-    let bytes = super::read_record_bytes(file)?;
-    let record = PoolRecord::decode(&bytes)?;
+fn read_pool_file(bytes: &[u8], pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
+    let record = PoolRecord::decode(bytes)?;
     if record.key.pool != *pool {
         return Err(refused(record.key, "its pool file names another pool"));
     }
@@ -377,7 +376,7 @@ impl Store {
             .open(&path)
             .map_err(|error| Refusal::os("claiming a fresh native backing record", error))?;
         drop(file);
-        self.publish_durable(&directory, &temporary, &path, &bytes)?;
+        self.publish_durable(&directory, &temporary, &path, &bytes, || ())?;
         #[cfg(not(windows))]
         self.sync_dir(&self.disk)?;
         Ok(record)
@@ -390,7 +389,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(Refusal::os("opening a native backing record", error)),
         };
-        read_pool_file(file, pool).map(Some)
+        read_pool_file(&self.read_bytes(file)?, pool).map(Some)
     }
 
     /// Same canonical source/generation/profile and sole consuming reference, never a fresh
@@ -465,7 +464,7 @@ impl Store {
         let bytes = record.encode()?;
         let directory = self.pool_directory()?;
         let (temporary, final_path) = scoped_paths(&directory, &name(&record.key.pool)?)?;
-        self.publish_durable(&directory, &temporary, &final_path, &bytes)
+        self.publish_durable(&directory, &temporary, &final_path, &bytes, || ())
     }
 
     /// A strict bounded SAME-Store snapshot, not a reference cache. Unknown/incomplete rows
@@ -577,7 +576,7 @@ impl Store {
             )?;
             let file = File::open(path)
                 .map_err(|error| Refusal::os("opening a retained native backing record", error))?;
-            let record = read_pool_file(file, &pool)?;
+            let record = read_pool_file(&self.read_bytes(file)?, &pool)?;
             records.try_reserve(1).map_err(|_| allocation(bound))?;
             records.push(record);
         }
@@ -593,13 +592,15 @@ impl Store {
 
     /// Shared scoped Box/Pool publication. The caller has encoded/reserved all bytes and paths. A write that fails
     /// before its rename removes its temporary file (the review's C-12), so no stray of it counts against its directory's
-    /// scan bound; a crash's are its directory's recovery's.
+    /// scan bound; a crash's are its directory's recovery's. `renamed` is told once the record's file holds `bytes`,
+    /// before its directory's flush, which may still fail: what the store's index then holds.
     pub(super) fn publish_durable(
         &self,
         directory: &Path,
         temporary: &Path,
         final_path: &Path,
         bytes: &[u8],
+        renamed: impl FnOnce(),
     ) -> Result<(), Refusal> {
         if let Err(why) = self.publish_temporary(temporary, final_path, bytes) {
             return Err(match fs::remove_file(temporary) {
@@ -611,6 +612,7 @@ impl Store {
                 },
             });
         }
+        renamed();
         self.flush_pool_directory(directory)
     }
 

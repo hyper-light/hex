@@ -1839,14 +1839,13 @@ impl ImageClass {
             .ok_or_else(|| Refusal::Broken("a Shards image VM has no live record authority".into()))
     }
 
-    /// Box `id`'s record, as its record authority holds it now.
+    /// Box `id`'s record, as its record authority holds it now: read by its id alone (the review's B-8).
     fn recorded_box(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
         if !self.uses_books() {
             return Ok(None);
         }
         self.authority()?
-            .records()?
-            .remove(id)
+            .record(id)?
             .map(|record| {
                 record.map_err(|why| {
                     Refusal::Broken(format!("a Shards image VM's record is unreadable: {why}"))
@@ -2177,12 +2176,11 @@ impl ImageClass {
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
         let made = info(&spec, BoxState::Created, None)?;
+        // A box past the node's box budget is refused by its record authority as its record is first written, a place
+        // taken under the bound in the same change (the review's B-14), so boxes made at once never pass it together.
         devices::with_record_transaction(books, &id, |transaction| {
             if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
-            }
-            if transaction.records()?.len() >= crate::MAX_BOXES {
-                return Err(Refusal::Full(crate::MAX_BOXES));
             }
             transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))
         })?;
