@@ -16,15 +16,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_api::{Refusal, Stdio};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{
     BOX_KINDS, CLASSES, Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take,
-    Transport, by_class, class_waits, poisoned, protocol_ready,
+    Transport, by_class, class_waits, poisoned, protocol_ready, readable,
 };
-use crate::copy::{Cut, Cuts, DuplexIo, Waiting, copy, copy_in};
+use crate::copy::{Cut, Cuts, DuplexIo, copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -237,6 +237,10 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.guest.answer", "shards", measuring),
 ];
 
+/// The relay's token on a guest's control connection whose caller gave no deadline (the review's D-2), learned as
+/// [`ANSWERS`] are.
+static RELAY_TOKEN: Patience = Patience::measuring("client.guest.relay.token");
+
 /// The learned waits a guest's protocol carries a client's calls under (decision 9; AC-T7.4.1): each transport that
 /// carries it learns its own, never another's record, so the type names whose tables a [`Stream`] times by.
 pub trait Waits: Send + Sync + 'static {
@@ -244,6 +248,9 @@ pub trait Waits: Send + Sync + 'static {
     fn answers() -> &'static [Patience; KINDS];
     /// A class's box kinds' waits ([`Transport::class_answers`]).
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS];
+    /// The wait for the relay's token on a control connection whose caller gave no deadline (the review's D-2): the
+    /// slowest token this transport has carried to this process ([`token_following`]).
+    fn token() -> &'static Patience;
 }
 
 /// A guest's node, over vsock or its stand-in: the tables above.
@@ -256,6 +263,10 @@ impl Waits for Guest {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &RELAY_TOKEN
     }
 }
 
@@ -296,6 +307,8 @@ static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.quic.answer", "shards", measuring),
 ];
 
+static QUIC_RELAY_TOKEN: Patience = Patience::measuring("client.quic.relay.token");
+
 impl Waits for Quic {
     fn answers() -> &'static [Patience; KINDS] {
         &QUIC_ANSWERS
@@ -303,6 +316,10 @@ impl Waits for Quic {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&QUIC_CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &QUIC_RELAY_TOKEN
     }
 }
 
@@ -404,6 +421,62 @@ fn protocol_write(
             Err(e) => return Err(Refusal::os(op, e)),
         }
     }
+    Ok(())
+}
+
+/// The relay's token on a control connection whose caller gave no deadline, read as decision 9 waits (the review's
+/// D-2; AC-T7.4.1). Its W* is `wait`'s ([`Waits::token`]), the slowest token its transport has carried to this process.
+/// - **Within it** the token is the answer.
+/// - **Past it** the run-out is told, once, and the read follows the connection: refused at its end or reset, never at
+///   a bound, the bytes read before kept.
+/// - **With none** (before the first token, and from a run-out to the next) the read follows the connection from its
+///   start.
+///
+/// The token, however long it took, is the sample W* rises to; a refusal is none. Each wait is poll(2)'s on the
+/// connection (Winsock's `WSAPoll`), which on macOS sees the relay's end where a read waiting in recv(2) can sleep
+/// through it (Shards M236).
+fn token_following(
+    conn: &mut dyn Duplex,
+    mut token: &mut [u8],
+    wait: &Patience,
+) -> Result<(), Refusal> {
+    const OP: &str = "reading the relay's token for the connection";
+    conn.set_nonblocking(true)
+        .map_err(os("reading the relay token without waiting"))?;
+    let began = Instant::now();
+    let mut w_star = wait.deadline();
+    while !token.is_empty() {
+        match conn.read(token) {
+            Ok(0) => return Err(Refusal::os(OP, io::ErrorKind::UnexpectedEof)),
+            Ok(n) => {
+                token = token.get_mut(n..).ok_or_else(|| {
+                    Refusal::Broken("a guest stream read more bytes than it was lent".to_owned())
+                })?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let left = match w_star {
+                    Some(bound) => match bound.checked_sub(began.elapsed()) {
+                        Some(left) if !left.is_zero() => Some(left),
+                        _ => {
+                            // No sample (Karn's point): the run-out is told, and the read goes on.
+                            wait.ran_out(
+                                bound,
+                                began.elapsed(),
+                                &[Piece::Kind("the relay's token, by its control connection")],
+                            );
+                            w_star = None;
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                readable(conn.handle(), left)?;
+            }
+            Err(e) => return Err(Refusal::os(OP, e)),
+        }
+    }
+    wait.answered(began.elapsed());
     Ok(())
 }
 
@@ -1216,8 +1289,8 @@ impl<W: Waits> Stream<W> {
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {
         // Decision 9 (AC-T7.4.1): a caller's deadline bounds the dial and the relay's token together. With
-        // none, the dial follows the guest past its link's bound (`Link::dial_before`), and the token is read
-        // as long as the link's transport takes, refused at the connection's end, never at a bound.
+        // none, the dial follows the guest past its link's bound (`Link::dial_before`), and the token's read
+        // follows the connection past its own W* (`token_following`), refused at its end, never at a bound.
         if let Some(deadline) = deadline {
             deadline.remaining("dialing the guest control connection")?;
         }
@@ -1234,10 +1307,7 @@ impl<W: Waits> Stream<W> {
                     "reading the relay's token for the connection",
                 )?;
             }
-            // As long as the link's transport takes, in poll(2) first on macOS (AC-T7.4.1, joint plan step 4, 2(a)).
-            None => Waiting(&mut *conn)
-                .read_exact(&mut token)
-                .map_err(os("reading the relay's token for the connection"))?,
+            None => token_following(&mut *conn, &mut token, W::token())?,
         }
         let token = u64::from_le_bytes(token);
         let read = conn

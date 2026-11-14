@@ -855,6 +855,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         },
         last_resort: None,
         ended: None,
+        control: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),
@@ -2043,6 +2044,9 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
+                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
+                // from a socket no grant made.
+                shown.control = guest.control().map(|at| at.address);
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),

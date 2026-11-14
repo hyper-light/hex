@@ -1344,3 +1344,76 @@ fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
         Exit::Unknown,
     );
 }
+
+/// A delete's or a recovery's end's wait on a killed box's group past W*, stopped at the hold on its emptying, or its
+/// answer: a fact no recorded operation makes, waited for measuring, following the ending thread.
+static EMPTYING_FOLLOWED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_runtime.emptying_followed");
+
+/// How a test ends a box's killed group: the box's delete, or a recovery's end of its group `(pgid, leader's start)`.
+type EndGroup = fn(&MacRuntime, &BoxId, (i32, u64)) -> Result<(), Refusal>;
+
+/// The review's E-12 (decision 9), AC-T7.4.1: a killed box's group that empties late is followed to its emptying, never
+/// refused at a bound. Do: make rootless box `name` and start a program in it until it is ended; hold its group's
+/// emptying, as a group whose last member's teardown runs long reads; end the group from another thread (`end`); once
+/// that end follows the group past W* (stopped at the hold) or answers, let the hold go. Expect: the end hadn't answered
+/// while the group read as not yet empty, then answers Ok; the program ends Signal(9).
+fn a_late_emptying_is_followed_to_its_end(name: &str, end: EndGroup) {
+    let rt = rootless();
+    let id = BoxId::new(name).unwrap();
+    rt.create(run_spec(&id)).expect("make the box");
+    let mut program = rt
+        .exec(&id, until_ended(), fed())
+        .expect("start a program until it is ended");
+    let _feeding = program.streams().unwrap().stdin;
+    let group = rt
+        .group(&id)
+        .unwrap()
+        .expect("the box's group, its program started");
+    let held = crate::emptying::hold::hold(&group.0.to_string());
+    thread::scope(|s| {
+        let ending = s.spawn(|| end(&rt, &id, group));
+        hex_testkit::waits::follow::until(
+            &EMPTYING_FOLLOWED,
+            "the end's wait following the group past W*, or its answer",
+            || party(&ending),
+            || held.following() || ending.is_finished(),
+        )
+        .unwrap();
+        if ending.is_finished() {
+            panic!(
+                "the end answered while the group read as not yet empty: {:?}",
+                ending.join()
+            );
+        }
+        drop(held);
+        assert_eq!(
+            ending.join().unwrap(),
+            Ok(()),
+            "the end once the group emptied"
+        );
+    });
+    assert_eq!(
+        hex_api::conformance::end_of(&mut *program),
+        Ok(Exit::Signal(9))
+    );
+    let cleanup = rt.delete(&id);
+    assert!(
+        matches!(cleanup, Ok(()) | Err(Refusal::NoSuchBox(_))),
+        "{cleanup:?}"
+    );
+}
+
+/// E-12 at a box's delete (`ProcessBox::delete`).
+#[test]
+fn e12_a_delete_follows_a_late_emptying_to_its_end() {
+    a_late_emptying_is_followed_to_its_end("e12-delete", |rt, id, _| rt.delete(id));
+}
+
+/// E-12 at a recovery's end of a box's group (`MacRuntime::end`, `process::end_group`).
+#[test]
+fn e12_a_recoverys_end_follows_a_late_emptying_to_its_end() {
+    a_late_emptying_is_followed_to_its_end("e12-recovery", |_, _, group| {
+        MacRuntime::end(Some(group))
+    });
+}
