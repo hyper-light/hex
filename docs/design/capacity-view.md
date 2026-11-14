@@ -259,9 +259,12 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   their widest (`hex_core::capacity::most_held`), its bound (CV8).
 - **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
   a link within the endpoint's connection bound, to the holders its host authorizes alone, each by the name its
-  certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it delivers each hint to the
-  link it is owed to after each message and when its host calls `Server::hint`; `hex_quic::capacity::Link` is a
-  holder's end.
+  certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it hands each hint owed to the
+  link it is owed to, after each message and when its host calls `Server::hint`, and a writer thread of that link's
+  own says it, coalesced while unsent, once the connection drains (CV7), in the order the keeper decided the link's
+  words, so a holder that stops reading stalls its own link alone, never its host or another link (the review's
+  E-1); its writes are measured waits (`capacity.say`, decision 9: past W* the run-out told, naming the holder, and
+  the write following its link); `hex_quic::capacity::Link` is a holder's end.
 - **In production**: `hex schedule serve` serves the node's keeper as `placement::DriverView` where its
   configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
   kiln's CA's answer completed, read whole before anything binds, and `holders`, each by its `name`). The view
