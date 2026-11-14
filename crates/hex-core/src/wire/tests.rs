@@ -807,6 +807,19 @@ fn requests() -> Vec<(u64, Request, usize)> {
         ),
         // A start followed to its end (`Runtime::started`), appended (ROOT, 2026-11-14).
         (209, Request::Call(Call::Started(id("image"))), 0),
+        // The machine's capacity view's word to its node (the review's A-10), appended (ROOT, 2026-11-14).
+        (
+            210,
+            Request::Call(Call::Reserved(hex_api::Reserved {
+                keeper: 7,
+                reserved: CapacityResources {
+                    cpu_milli: 1_500,
+                    mem_bytes: 3 << 30,
+                    disk_bytes: 9 << 30,
+                },
+            })),
+            0,
+        ),
         // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
         (205, Request::Call(Call::Lessors), 0),
         (206, Request::Lessor(Ok(())), 0),
@@ -2181,7 +2194,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0020, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0021, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -4828,8 +4841,66 @@ fn learned_capacity() -> Capacity {
         ranked: Vec::new(),
         unrecorded: Vec::new(),
         unacted: Vec::new(),
+        reservations: None,
     });
     capacity
+}
+
+/// The review's A-10 (AC-T7.4.1; ROOT, 2026-11-14): what a node's learner takes off its fleet's budget for the capacity
+/// view's holders crosses the wire last on a class's learned answer, each state told. Do encode a capacity answer telling
+/// none served, kiln's reservations unheard, and a keeper's word heard with and without the node's configuration naming
+/// it; then one whose state byte names no state. Expect each back exactly, and the last refused, naming the field.
+#[test]
+fn a10_kilns_reservations_cross_the_wire_on_a_learned_answer() {
+    for told in [
+        LearnedReservations::Unserved,
+        LearnedReservations::Unheard,
+        LearnedReservations::Heard {
+            keeper: 3,
+            reserved: learned_resources(1_500, 6),
+            unconfigured: false,
+        },
+        LearnedReservations::Heard {
+            keeper: u64::MAX,
+            reserved: learned_resources(0, 0),
+            unconfigured: true,
+        },
+    ] {
+        let mut capacity = learned_capacity();
+        if let Some(learned) = capacity.learned.as_mut() {
+            learned.reservations = Some(told);
+        }
+        let offered = Answer::Capacity(Some(capacity));
+        let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            offered
+        );
+    }
+    // The state's byte: where an answer telling it unheard and one telling none served differ, and only there.
+    let encoded = |told| {
+        let mut capacity = learned_capacity();
+        if let Some(learned) = capacity.learned.as_mut() {
+            learned.reservations = Some(told);
+        }
+        answer(14, &Answer::Capacity(Some(capacity)), MAX_MESSAGE).unwrap()
+    };
+    let mut bytes = encoded(LearnedReservations::Unheard);
+    let unserved = encoded(LearnedReservations::Unserved);
+    let apart: Vec<usize> = bytes
+        .iter()
+        .zip(&unserved)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(apart.len(), 1, "one state byte apart: {apart:?}");
+    bytes[apart[0]] = 9;
+    let refused = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+    assert!(
+        refused.to_string().contains("learned reservations"),
+        "{refused}"
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1, C2, C5 and C8): what a node learned of a class's microVMs crosses the wire on its

@@ -154,6 +154,21 @@ impl Runtimes {
             .ok_or_else(|| invalid("no registered runtime for placement class").into())
     }
 
+    /// Each runtime it holds once, however many classes it is registered for.
+    fn distinct(&self) -> impl Iterator<Item = &Arc<dyn Runtime>> {
+        self.by_class
+            .values()
+            .enumerate()
+            .filter_map(|(at, runtime)| {
+                let earlier = self
+                    .by_class
+                    .values()
+                    .take(at)
+                    .any(|other| Arc::ptr_eq(other, runtime));
+                if earlier { None } else { Some(runtime) }
+            })
+    }
+
     /// Query each configured backend without holding any placement or record lock.
     pub fn capacities(&self) -> Result<Vec<(Class, Option<hex_api::Capacity>)>, Error> {
         let snapshot = self.capacity_snapshot()?;
@@ -607,6 +622,9 @@ pub struct Driver {
     runtimes: Runtimes,
     peers: Vec<NodeId>,
     namespace: String,
+    /// What wakes the thread that tells its node what every holder has reserved ([`Driver::on_reserved`]; the review's
+    /// A-10): told each time that changes, so the word reaches the node off the holders' path.
+    reserved_wake: std::sync::OnceLock<hex_wait::mpsc::SyncSender<()>>,
 }
 
 impl Driver {
@@ -803,6 +821,7 @@ impl Driver {
             runtimes,
             peers: nodes.iter().map(|n| n.id).collect(),
             namespace,
+            reserved_wake: std::sync::OnceLock::new(),
         })
     }
 
@@ -1163,8 +1182,53 @@ impl Driver {
         let (forgotten, changed) = finish(&mut state, forgotten, false)?;
         if changed {
             readmit(&mut state)?;
+            self.wake_reserved();
         }
         Ok(forgotten)
+    }
+
+    /// Wakes, where one is waiting, the thread that tells its node what every holder has reserved
+    /// ([`Driver::on_reserved`]): a wake already told is the same word, and one whose thread has ended tells nothing.
+    pub fn wake_reserved(&self) {
+        let _ = &self.reserved_wake;
+    }
+
+    /// The wake of the thread that tells its node what every holder has reserved (the review's A-10): told at each change
+    /// of what the holders hold and at each wake its caller makes ([`Driver::wake_reserved`]). Set once.
+    pub fn on_reserved(&self, wake: hex_wait::mpsc::SyncSender<()>) -> Result<(), Error> {
+        self.reserved_wake.set(wake).map_err(|_| {
+            Refusal::Invalid {
+                what: "capacity view",
+                why: "its word's wake is set already".into(),
+            }
+            .into()
+        })
+    }
+
+    /// The machine's capacity view's word to its node (joint plan steps 13 and 14, C7; the review's A-10): what every
+    /// holder has reserved through its keeper, as the keeper of this boot holds it; none where no view is open. It reads
+    /// only state under the core lock, as rebook does.
+    pub fn reserved_word(&self) -> Result<Option<hex_api::Reserved>, Error> {
+        let state = self.lock()?;
+        Ok(state.view.as_ref().map(|view| {
+            let foreign = view.foreign();
+            hex_api::Reserved {
+                keeper: view.epoch(),
+                reserved: hex_api::CapacityResources {
+                    cpu_milli: foreign.cpu_milli,
+                    mem_bytes: foreign.mem_bytes,
+                    disk_bytes: foreign.disk_bytes,
+                },
+            }
+        }))
+    }
+
+    /// Tells each of its runtimes the machine's capacity view's word ([`Driver::reserved_word`]) with its lock let go, as
+    /// its node's charge learner takes it off its fleet's budget (the review's A-10): each runtime's refusal is answered,
+    /// for its caller to tell. Nothing where no view is open.
+    pub fn tell_reserved(&self) -> Result<Vec<Refusal>, Error> {
+        let _ = self.reserved_word()?;
+        Ok(Vec::new())
     }
 
     /// The machine's view as the keeper would answer it now.

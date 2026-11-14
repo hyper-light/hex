@@ -197,6 +197,17 @@ pub trait Runtime: Send + Sync {
             ),
         })
     }
+
+    /// The machine's capacity view's word, what every holder has reserved through its keeper (joint plan steps 13 and
+    /// 14, C7; the review's A-10), which a node's charge learner takes off its fleet's budget: a node keeps the latest
+    /// keeper's, refusing an older keeper's, typed. A runtime that runs no charge learner refuses it, naming why.
+    fn reserved(&self, word: Reserved) -> Result<(), Refusal> {
+        let _ = word;
+        Err(Refusal::Invalid {
+            what: "reserved",
+            why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
+        })
+    }
 }
 
 /// What a box's VM costs its host beside its guest (Shards' D241, `Stats::microvm`; joint plan steps 12 and 14), each
@@ -1485,6 +1496,42 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_unacted"
     )]
     pub unacted: Vec<LearnedUnacted>,
+    /// What its node's learner takes off its fleet's budget for the holders the machine's capacity view serves (C7; the
+    /// review's A-10), as its node's configuration and its keeper's word say. Added after the unacted VMs, so absent
+    /// means none told (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservations: Option<LearnedReservations>,
+}
+
+/// The machine's capacity view's word to its node (joint plan steps 13 and 14, C7; the review's A-10): what every holder
+/// has reserved through its keeper (`capacity::Keeper::foreign`), as the keeper of epoch `keeper` holds it, which the
+/// node's charge learner takes off its fleet's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reserved {
+    /// The keeper's epoch, which grows at each of its boots (CV2, CV11): a node keeps the latest keeper's word.
+    pub keeper: u64,
+    pub reserved: CapacityResources,
+}
+
+/// What a node's charge learner takes off its fleet's budget for the holders the machine's capacity view serves (C7;
+/// the review's A-10), each state told, never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LearnedReservations {
+    /// No capacity view serves its machine, as its node's configuration says (no `--capacity-view`): no holder reserves
+    /// room there, so none is counted.
+    Unserved,
+    /// A capacity view serves its machine, and its keeper hasn't spoken since its node started: kiln's reservations not
+    /// yet heard, so its VMs are booked whole, at their receipts, and none is learned until it speaks.
+    Unheard,
+    /// Its keeper's word, counted: `reserved` as the keeper of epoch `keeper` holds it, `unconfigured` where its node's
+    /// configuration names no capacity view though a keeper spoke (`--capacity-view` missing).
+    Heard {
+        keeper: u64,
+        reserved: CapacityResources,
+        unconfigured: bool,
+    },
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1777,6 +1824,7 @@ impl Learned {
                 "learned unacted VMs",
                 LearnedUnacted::try_clone,
             )?,
+            reservations: self.reservations,
         })
     }
 }

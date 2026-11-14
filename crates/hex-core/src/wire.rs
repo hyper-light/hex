@@ -53,8 +53,8 @@ use hex_api::{
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
     IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
-    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedUnacted, LearnedUnread,
-    LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
+    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedReservations, LearnedUnacted,
+    LearnedUnread, LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
     MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
     Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
     Proto, Published, RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
@@ -199,6 +199,7 @@ mod kind {
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
     pub const MEMBER_SIGNAL: u16 = 0x001e;
     pub const START_FOLLOWED: u16 = 0x001f;
+    pub const RESERVED: u16 = 0x0020;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -335,6 +336,10 @@ pub enum Call {
     /// answer on the node, a wait on the fact (decision 9), so a remote caller of a start answered Pending never looks;
     /// answered [`Answer::Info`], or refused by type. Appended (ROOT, 2026-11-14).
     Started(BoxId),
+    /// The machine's capacity view's word to its node (`Runtime::reserved`; the review's A-10): what every holder has
+    /// reserved through its keeper, which the node's charge learner takes off its fleet's budget; answered
+    /// [`Answer::Done`], or refused by type. Appended (ROOT, 2026-11-14).
+    Reserved(hex_api::Reserved),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1524,6 +1529,10 @@ fn parse_request(
             Request::Call(Call::MemberSignal { id, member, signal })
         }
         kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
+        kind::RESERVED => Request::Call(Call::Reserved(hex_api::Reserved {
+            keeper: r.u64().map_err(bad)?,
+            reserved: resources(&mut r).map_err(bad)?,
+        })),
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1936,6 +1945,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::REFRESHED => "a refreshed",
         kind::MEMBER_SIGNAL => "a member's signal",
         kind::START_FOLLOWED => "a start followed",
+        kind::RESERVED => "a keeper's word",
         _ => "a request",
     }
 }
@@ -1994,6 +2004,13 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         Call::Started(b) => {
             w.header(kind::START_FOLLOWED, id);
             w.string(b.as_str())
+        }
+        Call::Reserved(word) => {
+            w.header(kind::RESERVED, id);
+            w.reserve_fixed(size_of::<u64>().saturating_add(RESOURCE_BYTES))?;
+            w.u64(word.keeper);
+            put_resources(w, word.reserved);
+            Ok(())
         }
         Call::Exec {
             id: b,
@@ -2763,7 +2780,32 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
         put_holder(w, &told.id)?;
         w.string(&told.why)?;
     }
-    Ok(())
+    // Last (the review's A-10; ROOT, 2026-11-14): what the learner takes off its fleet's budget for the capacity view's
+    // holders, where told: 0 none served, 1 unheard, 2 heard, its keeper, what is reserved and whether unconfigured.
+    w.reserve_fixed(1)?;
+    w.option_with(learned.reservations.as_ref(), |w, reservations| {
+        w.reserve_fixed(1)?;
+        match reservations {
+            LearnedReservations::Unserved => w.u8(0),
+            LearnedReservations::Unheard => w.u8(1),
+            LearnedReservations::Heard {
+                keeper,
+                reserved,
+                unconfigured,
+            } => {
+                w.u8(2);
+                w.reserve_fixed(
+                    size_of::<u64>()
+                        .saturating_add(RESOURCE_BYTES)
+                        .saturating_add(1),
+                )?;
+                w.u64(*keeper);
+                put_resources(w, *reserved);
+                w.u8(u8::from(*unconfigured));
+            }
+        }
+        Ok(())
+    })
 }
 
 /// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
@@ -3065,6 +3107,35 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
                 })
             },
         )?,
+        reservations: r.option(learned_reservations)?,
+    })
+}
+
+/// What a learner takes off its fleet's budget for the capacity view's holders ([`put_learned`]'s last field).
+fn learned_reservations(r: &mut Reader<'_>) -> Result<LearnedReservations, Fault> {
+    Ok(match r.u8()? {
+        0 => LearnedReservations::Unserved,
+        1 => LearnedReservations::Unheard,
+        2 => LearnedReservations::Heard {
+            keeper: r.u64()?,
+            reserved: resources(r)?,
+            unconfigured: match r.u8()? {
+                0 => false,
+                1 => true,
+                other => {
+                    return Err(Fault::value(
+                        "learned reservations",
+                        format!("{other} is neither of a flag's values"),
+                    ));
+                }
+            },
+        },
+        other => {
+            return Err(Fault::value(
+                "learned reservations",
+                format!("{other} names no state of kiln's reservations"),
+            ));
+        }
     })
 }
 
