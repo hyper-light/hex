@@ -267,7 +267,7 @@ pub const IMAGE_CASES: &[Case] = &[
     },
     Case {
         id: "HEX-IMG-5",
-        says: "a program exec'd in a running VM is refused Awaits(MemberExec), and a signal but KILL Awaits(MemberSignal); the VM runs on",
+        says: "a program exec'd in a running VM is refused Awaits(MemberExec); TERM is taken, its members' to take, and the VM runs on",
         run: image_members,
     },
     Case {
@@ -1243,16 +1243,12 @@ fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             ),
             || format!("exec in a VM: {:?}", exec.as_ref().err()),
         )?;
+        // A signal but KILL is its run's members' (goal 2's item 2): taken, each member's lane given it.
         let term = rt.signal(&id, Signal::TERM);
-        ensure(
-            term == Err(Refusal::Awaits {
-                needs: Upstream::MemberSignal,
-            }),
-            || format!("TERM to a VM: {term:?}"),
-        )?;
+        ensure(term == Ok(()), || format!("TERM to a VM: {term:?}"))?;
         let info = rt.inspect(&id).map_err(|e| e.to_string())?;
         ensure((info.state, info.exit) == (BoxState::Running, None), || {
-            format!("a VM after its members were refused: {info:?}")
+            format!("a VM after its members were signalled: {info:?}")
         })
     })
 }

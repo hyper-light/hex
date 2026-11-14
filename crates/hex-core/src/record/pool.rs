@@ -414,7 +414,7 @@ impl<'a> NativeRecord<'a> {
                 Ok(match record.execution {
                     Execution::ShardsShared | Execution::ShardsDedicated => Class::Shards,
                     Execution::Firecracker => Class::Firecracker,
-                    Execution::Native => {
+                    Execution::Native | Execution::NodeVm => {
                         return Err(uncertain(
                             record.key,
                             "its record's execution is native, which has no VM class",

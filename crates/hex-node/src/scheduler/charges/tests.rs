@@ -334,6 +334,7 @@ fn w39_a_node_vms_receipt_is_booked_from_its_answer_while_it_runs_and_released_a
                 run,
                 booking,
                 phase,
+                guest: CapacityResources::default(),
             })
             .into_iter()
             .collect();
@@ -365,6 +366,7 @@ fn w39_answers_naming_a_node_vm_twice_are_refused() {
         run: hex_api::NodeRun::from_bytes([39; 16]),
         booking: CapacityResources::default(),
         phase: NodeVmPhase::Ready,
+        guest: CapacityResources::default(),
     }];
     let twice = [
         (Class::Oci, Some(answer.try_clone().unwrap())),
