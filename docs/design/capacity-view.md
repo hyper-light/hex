@@ -178,9 +178,10 @@ authors "imperfect" and is not taken (CV6).
   node's word that it doesn't hold it ... never on its silence, so no box starts twice") and kiln's
   (`docs/lb.md` "A dropped link": at most once, no per-run log).
 - A release is idempotent: releasing an id the keeper doesn't hold answers `Released`.
-- A reserve the holder heard no answer to (its link dropped, or its wait ran out) is **abandoned**: its
-  work never starts; the holder releases it at once if its link is up (the keeper may have granted it),
-  or leaves it out of its next sync.
+- A reserve the holder heard no answer to (its link ended or was reset, or its session closed) is
+  **abandoned**: its work never starts, and the holder leaves it out of its next sync, which releases it.
+  One the holder lets go of itself while it waits is abandoned too, and released at once where its link
+  is up (the keeper may have granted it).
 
 **What "the counts agree after a partition heals" means.** Once a holder's sync is answered and no
 reserve or release of its is in flight, the keeper's set of that holder's reservations, ids and
@@ -194,9 +195,11 @@ quiescent step after a heal.
 **The choice.** No term ends a reservation. A holder's wait for an answer (reserve, release, sync) is
 hex-core's Patience, per call kind and class, on kiln's side as on Hex's (decision 9 of `runtime-architecture.md`,
 as the person ruled it on 2026-11-13): within the slowest answer it has seen, the answer; past that, its run-out is
-told and the wait follows the keeper by its link, ending unanswered only at the link's end, a reset, or a whole
-window of that slowest answer with nothing from the keeper. No record seeds it and no constant is picked. A wait
-that ends unanswered abandons its reserve (CV5, `Holder::ran_out`); it never ends anything the keeper holds.
+told and the wait follows the keeper by its link, ending unanswered only at the link's end or a reset
+(`Holder::link_down`). No stall of the keeper is judged, a window with nothing from it included: a keeper that
+answers again a moment later would be taken for stalled (decision 9's bound, `learned-waits.md`; the review's E-8).
+No record seeds it and no constant is picked. A wait that ends unanswered abandons its reserve (CV5); it never ends
+anything the keeper holds.
 
 **Why.** A lease (Gray and Cheriton, SOSP 1989) lets the grantor take back what it granted when the term
 ends without the holder's word, because the holder stops using it at the term. A reservation here is
@@ -420,9 +423,9 @@ core kiln drives through hex-api (Shards R12: one implementation), feeding it wh
      on `Synced`, its own count and sum must be the keeper's (`Event::Synced { agree }`), and where they aren't, the
      keeper's books are the machine's and it reports the difference;
    - only then `Reserve { fence, id, amount }`, `id` its epoch and a count never reused, and the work starts on
-     `Granted` for that id alone; a reserve whose wait ends with no answer (CV6: the keeper's link ended, was reset, or
-     stood still a whole window past the slowest answer seen) is abandoned: never started, and released at once where
-     the link is up;
+     `Granted` for that id alone; a reserve whose wait ends with no answer (CV6: the keeper's link ended or was reset,
+     never a time with nothing from the keeper) is abandoned: never started, and left out of the next sync, which
+     releases it;
    - `Release { fence, id }` once that work can no longer run.
 5. **What each answer asks.** `Refused { why }`: `Room` (decide again on the view it carries), `Full` (it holds the
    keeper's bound), `Empty`, `Devices` (a GPU by count, refused until device grants by identity), `Disagrees`.
@@ -483,7 +486,7 @@ window, which would under-count Hex here.
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them in one case, ending with them in the
   other: kiln states neither), drops links with
-  what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
+  what was on them, partitions and heals them, has a runner let go of a reserve before its answer, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
@@ -495,7 +498,8 @@ window, which would under-count Hex here.
   records of its runners' links (topo's drops, time up and outage, read 2026-11-14). A step is one event of that
   continuous-time chain, each kind as likely as its rate in the machine's state (Gillespie's direct method), delivery
   at the least rate that drains the links (each kind's rate times the deliveries the protocol has it say). The faults no
-  record times (the keeper's crash between messages and at its next write, the write lost or landed; a wait run out; the
+  record times (the keeper's crash between messages and at its next write, the write lost or landed; a reserve let go
+  of before its answer, no wait of a holder's ending at a time (CV6); the
   person's wrong release; a retirement) each strike once a run, at a step drawn for them or the first after where they
   can. What the code does on its own trigger, the nemesis does there: a runner dials again as soon as its link can open
   (kiln's `links`), the keeper's hints go out after each message it hears and each command of its host, and Hex's node
@@ -523,10 +527,15 @@ window, which would under-count Hex here.
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md
   section 13; Shards R05, R13). Against `hex node` and `hex schedule serve` as processes of their own, the scheduler
   enrolled by `hex node enroll` and a CA's answer: HEX-CV-L1 (`capacity_view::hex_cv_l1`, a normal test on every OS,
-  over loopback): a peer the lane doesn't name refused at its handshake, Hex's boxes and the holder's runs filling the
+  over loopback): a peer the lane doesn't name refused at its handshake, Hex's box and the holder's runs filling the
   room and refused past it, the scheduler killed and started again, a link dropped, kiln-shaped work, every view's CPU
   held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
-  records once it has ended, the holder's own. Hex's boxes are `process` boxes, placed where its scheduler places one
+  records once it has ended, the holder's own. Every size is a record's and no step is counted (ROOT's ruling 7,
+  2026-11-14): the holder asks kiln's recorded legs in recorded order (hex-sim's `kiln_needs`) until the room refuses
+  one, ends every run, and asks again until refused, ending with that set held, so a loss after it and the books it
+  ends with hold the holder's runs, never nothing; Hex's own box is the first recorded `oci` leg (`oci_needs`), one
+  being the fewest that puts Hex's admission in the view and hints it (the recorded fleet ran 0.045 at once on an `oci`
+  host, by Little's law). Hex's box is a `process` box, placed where its scheduler places one
   under its `oci` class: on Linux and Windows, whose `oci` form offers a `process` route beside its `oci` one; not on a
   Mac, which places Shards microVMs alone, where the holder meets the machine's room alone. HEX-CV-2H
   (`capacity_view::two_hosts`, ignored phases, ROOT's): the same

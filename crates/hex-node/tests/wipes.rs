@@ -306,12 +306,12 @@ fn enrolled(ca: &SimCa, name: &str) -> hex_quic::tls::Credentials {
     enroll::enroll(ca, name, name.as_bytes().to_vec()).unwrap()
 }
 
-/// E-6, over QUIC (docs/design/hex-quic.md): as on the socket, a harness VM's lease, capture and refresh, each
+/// E-6, over QUIC (docs/design/hex-quic.md Q13): as on the socket, a harness VM's lease, capture and refresh, each
 /// carrying the secret, between the node and a client that reached it over QUIC, through hex-quic's control lane;
-/// expect every flow to have carried the secret whole, and no block freed meanwhile, the node's, hex-quic's or its
-/// client's, to have held it.
+/// expect every flow to have carried the secret whole, and no block freed meanwhile, the node's, hex-quic's, hyper-quic's
+/// and hyper-transport's beneath it, or its client's, to have held it: each message that carries one is sealed before
+/// hex-quic's lanes, so what hyper-quic's send buffer and hyper-transport's receive pool hold of it is ciphertext.
 #[test]
-#[ignore = "awaits Hex's seal (ROOT, 2026-11-14): hyper-quic's stream send buffer keeps each frame until it is acked, and hyper-transport's receive pool keeps the decrypted chunk; sealed before hex-quic's lanes, a message that carries a secret leaves them ciphertext alone"]
 fn e6_no_block_freed_holds_a_secret_the_node_carried_over_quic() {
     let secret = secret();
     let dir = scratch();

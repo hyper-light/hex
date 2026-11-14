@@ -486,17 +486,18 @@ fn cv5_a_holder_told_counts_that_differ_says_they_dont_agree() {
     );
 }
 
-/// AC-T7.4.1, CV5 and CV6: let a reserve's wait run out before its answer; expect its work never to run,
-/// its release said at once, and the keeper to hold nothing once both arrive.
+/// AC-T7.4.1, CV5 and CV6 (the review's E-8: no wait of a holder's ends at a time, so a reserve abandoned with its
+/// link up is its holder's own letting go): let go of a reserve before its answer; expect its work never to run, its
+/// release said at once, and the keeper to hold nothing once both arrive.
 #[test]
-fn cv5_a_reserve_whose_wait_ran_out_never_runs_and_is_freed() {
+fn cv5_a_reserve_its_holder_lets_go_of_before_its_answer_never_runs_and_is_freed() {
     let mut m = Machine::new(cpu(8000));
     let mut a = holder("kiln-a", 1);
     m.join(&mut a);
     let (id, reserve) = a.reserve(cpu(1000)).unwrap();
     let mut out = Out::default();
-    a.ran_out(id, &mut out);
-    assert_eq!(out.events, vec![Event::Unanswered(id)]);
+    a.release(id, &mut out);
+    assert!(out.events.is_empty(), "{:?}", out.events);
     assert!(!a.may_run(id));
     let mut msgs = vec![reserve];
     msgs.extend(out.send);

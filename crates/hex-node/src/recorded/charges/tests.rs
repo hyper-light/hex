@@ -46,6 +46,18 @@ fn cost() -> RuntimeCost {
     }
 }
 
+/// [`cost`]'s profile sized to `machine`, the host a test runs on (`Recorded::machine`): as many CPUs as it has, and
+/// 8 GiB where it has them, so a class answered over the real machine names a VM that machine can hold. [`cost`]'s 16 CPUs
+/// passed the 12 of ROOT's Windows test VM ("minimum initialized runtime charge exceeds its physical pool").
+fn machine_cost(machine: CapacityResources) -> RuntimeCost {
+    let envelope = res(machine.cpu_milli, (8 * GIB).min(machine.mem_bytes));
+    RuntimeCost {
+        floor: envelope,
+        ceiling: envelope,
+        ..cost()
+    }
+}
+
 /// A running Shards VM's record, booked at 4 CPUs and 4 GiB (its class's prior), its lifetime `n`.
 fn vm(name: &str, n: u8) -> BoxRecord {
     let allocation: Allocation = cost()
@@ -127,10 +139,21 @@ struct Record {
     records: RefCell<Option<Store>>,
     /// Every intent asked and every stop, in order: `intend <box>`, `stop <box>`.
     events: RefCell<Vec<String>>,
+    /// What each holder a window doesn't learn takes of the machine's free memory, as the test sets it (A-10): unread
+    /// for one it sets none for.
+    taken: RefCell<BTreeMap<String, u64>>,
+    /// The machine's memory and disk free, as the test sets it (A-10).
+    free: std::cell::Cell<CapacityResources>,
+    /// Each read of a VM's use, of what a holder takes and of what is free, in order: `usage <vm>`, `host_use <vm>`,
+    /// `taken <holder>`, `free`.
+    reads: RefCell<Vec<String>>,
 }
 
 impl Managed for Record {
     fn usage(&self, holder: Holder<'_>) -> Result<Usage, Refusal> {
+        self.reads
+            .borrow_mut()
+            .push(format!("usage {}", named(holder)));
         self.usage
             .borrow()
             .get(&named(holder))
@@ -168,11 +191,29 @@ impl Managed for Record {
     }
 
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal> {
+        self.reads
+            .borrow_mut()
+            .push(format!("host_use {}", named(holder)));
         self.host
             .borrow()
             .get(&named(holder))
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
+    }
+
+    fn taken(&self, holder: Holder<'_>) -> Result<u64, Refusal> {
+        let name = named(holder);
+        self.reads.borrow_mut().push(format!("taken {name}"));
+        self.taken
+            .borrow()
+            .get(&name)
+            .copied()
+            .ok_or_else(|| Refusal::Broken(format!("{name}'s use unread")))
+    }
+
+    fn free(&self) -> Result<CapacityResources, Refusal> {
+        self.reads.borrow_mut().push("free".to_owned());
+        Ok(self.free.get())
     }
 
     fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal> {
@@ -277,6 +318,185 @@ impl Record {
             },
         );
     }
+
+    /// The machine reads `mem_bytes` of memory and `disk_bytes` of disk free.
+    fn set_free(&self, mem_bytes: u64, disk_bytes: u64) {
+        self.free.set(CapacityResources {
+            cpu_milli: 0,
+            mem_bytes,
+            disk_bytes,
+        });
+    }
+}
+
+/// A Ready process box's record, `name`, capped at `cpu_milli` of CPU and `memory` bytes.
+fn process_box(name: &str, cpu_milli: u32, memory: u64) -> BoxRecord {
+    BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(cpu_milli),
+                memory_max: Some(memory),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+            band: 0,
+        },
+        Phase::Ready,
+        Vec::new(),
+    )
+}
+
+/// `cpu_milli` of CPU, `mem_bytes` of memory and `disk_bytes` of disk.
+fn res3(cpu_milli: u64, mem_bytes: u64, disk_bytes: u64) -> CapacityResources {
+    CapacityResources {
+        cpu_milli,
+        mem_bytes,
+        disk_bytes,
+    }
+}
+
+/// The review's A-10 (AC-T7.4.1; C7): the fleet's budget was the machine's whole less Hex's own bookings, so the person's
+/// own work, kiln's runs and what nobody books went unseen, and its disk was never reduced. It is the room Hex has now:
+/// every CPU less what the holders it doesn't learn book; the memory and disk free now and what its VMs hold, less what
+/// each holder it doesn't learn may still grow into, its booking past what it takes. Do measure the budget of a 32-CPU
+/// machine of 64 GiB and 100 GiB of disk, 10 GiB of memory and 20 GiB of disk free, its learned VMs holding 4 GiB, beside
+/// a process box capped at 2 CPUs and 8 GiB taking 6 GiB, and a VM booked whole at 4 CPUs, 4 GiB and 10 GiB of disk
+/// taking 1 GiB. Expect 26 CPUs, 10 + 4 - 2 - 3 = 9 GiB of memory, and 20 - 10 = 10 GiB of disk.
+#[test]
+fn a10_the_fleets_budget_is_what_is_free_and_what_its_vms_hold() {
+    let io = Record::default();
+    io.set_free(10 * GIB, 20 * GIB);
+    io.taken.borrow_mut().insert("proc-1".to_owned(), 6 * GIB);
+    io.taken.borrow_mut().insert("vm-9".to_owned(), GIB);
+    let native = process_box("proc-1", 2_000, 8 * GIB);
+    let whole = vm("vm-9", 9);
+    let booked = [
+        (Holder::Box(&native), res3(2_000, 8 * GIB, 0)),
+        (Holder::Box(&whole), res3(4_000, 4 * GIB, 10 * GIB)),
+    ];
+    let budget = measured(&io, res3(32_000, 64 * GIB, 100 * GIB), &booked, 4 * GIB).unwrap();
+    assert_eq!(budget, res3(26_000, 9 * GIB, 10 * GIB));
+}
+
+/// The review's A-10 (ROOT, 2026-11-14: Hex's own boxes are never counted twice): what a box uses is missing from the
+/// machine's free memory already, so the fleet loses what it may still grow into, its booking past its use, never its
+/// whole booking beside its use; and a box past its booking takes the excess from the fleet. Do measure the budget of a
+/// machine of 64 GiB beside one process box capped at 8 GiB, with no VM held: while the box takes nothing, 20 GiB free;
+/// as it takes 6 GiB, 14 GiB free; as it takes 10 GiB, past its cap, 10 GiB free. Expect 12 GiB, 12 GiB, then 10 GiB.
+#[test]
+fn a10_hexs_own_boxes_are_never_counted_twice() {
+    let native = process_box("proc-1", 2_000, 8 * GIB);
+    let booked = [(Holder::Box(&native), res3(2_000, 8 * GIB, 0))];
+    let budgets: Vec<u64> = [(0, 20 * GIB), (6 * GIB, 14 * GIB), (10 * GIB, 10 * GIB)]
+        .into_iter()
+        .map(|(taken, free)| {
+            let io = Record::default();
+            io.taken.borrow_mut().insert("proc-1".to_owned(), taken);
+            io.set_free(free, 0);
+            measured(&io, res3(32_000, 64 * GIB, 0), &booked, 0)
+                .unwrap()
+                .mem_bytes
+        })
+        .collect();
+    assert_eq!(budgets, [12 * GIB, 12 * GIB, 10 * GIB]);
+}
+
+/// The review's A-10 (ROOT, 2026-11-14: the budget never passes what is free and what the VMs hold): whatever its holders
+/// book or take, the fleet's memory budget is at most the machine's free memory and what its VMs hold, its disk budget at
+/// most the disk free. Do measure budgets over machines of 16 and 64 GiB, 0, 8 and 48 GiB of memory and disk free, VMs
+/// holding 0 and 12 GiB, and one box booking 0, 4 and 32 GiB taking 0, half and twice its booking. Expect each within.
+#[test]
+fn a10_the_fleets_budget_never_passes_what_is_free_and_what_its_vms_hold() {
+    let native = process_box("proc-1", 2_000, 8 * GIB);
+    for machine in [16 * GIB, 64 * GIB] {
+        for free in [0, 8 * GIB, 48 * GIB] {
+            for held in [0, 12 * GIB] {
+                for booking in [0, 4 * GIB, 32 * GIB] {
+                    for taken in [0, booking / 2, booking * 2] {
+                        let io = Record::default();
+                        io.taken.borrow_mut().insert("proc-1".to_owned(), taken);
+                        io.set_free(free, free);
+                        let booked = [(Holder::Box(&native), res3(0, booking, booking))];
+                        let budget =
+                            measured(&io, res3(32_000, machine, machine), &booked, held).unwrap();
+                        assert!(
+                            budget.mem_bytes <= free + held && budget.disk_bytes <= free,
+                            "machine {machine}, free {free}, held {held}, booking {booking}, taken {taken}: \
+                             {budget:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The review's A-10 (C7): the machine's free memory is read after the window's VMs and the holders it doesn't learn,
+/// so a VM or box that grows between the reads shrinks the fleet's budget, never swells it. Do run a window of an image
+/// VM and a managed VM beside a process box, its budget measured. Expect the free memory read once, after every other.
+#[test]
+fn a10_a_window_reads_what_is_free_after_its_vms_and_its_boxes() {
+    let io = Record::default();
+    let image = image_vm("img-1", 1);
+    let managed = vm("vm-1", 2);
+    let native = process_box("proc-1", 2_000, 8 * GIB);
+    unused(&io, "img-1", GIB);
+    io.set("vm-1", 0, GIB);
+    io.taken.borrow_mut().insert("proc-1".to_owned(), GIB);
+    io.set_free(32 * GIB, 0);
+    let booked = [(Holder::Box(&native), res3(2_000, 8 * GIB, 0))];
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    window(
+        &mut learner,
+        &io,
+        &holders(&[image, managed]),
+        Vec::new(),
+        |held| measured(&io, res3(32_000, 64 * GIB, 0), &booked, held),
+        Instant::now(),
+    )
+    .unwrap();
+    let reads = io.reads.borrow().clone();
+    assert_eq!(
+        reads.iter().filter(|read| *read == "free").count(),
+        1,
+        "{reads:?}"
+    );
+    assert_eq!(reads.last().map(String::as_str), Some("free"), "{reads:?}");
+}
+
+/// The review's A-10 and its dropped records (ROOT, 2026-11-14): what a box whose record can't be read takes of memory
+/// and disk is missing from what is measured free already, so its count at the machine gives way there; its CPU, which no
+/// measure of what is free holds, stays counted at its machine. Do run a window of one image VM booked at 4 CPUs and
+/// 4 GiB, holding 1 GiB, in a fleet budget of 24 CPUs and 64 GiB, beside a box whose record can't be read. Expect the VM
+/// capped at its 4-CPU booking, and its guest told the room of the whole memory budget less what it holds: 63 GiB.
+#[test]
+fn a10_a_box_whose_record_cant_be_read_is_counted_at_its_use_for_memory() {
+    let io = Record::default();
+    let image = image_vm("img-1", 1);
+    unused(&io, "img-1", GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    window(
+        &mut learner,
+        &io,
+        &holders(std::slice::from_ref(&image)),
+        vec![(
+            BoxId::new("torn-1").unwrap(),
+            "its record is torn".to_owned(),
+        )],
+        |_| Ok(res(24_000, 64 * GIB)),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(*io.rates.borrow(), [("img-1".to_owned(), 4_000)]);
+    assert_eq!(
+        *io.rooms.borrow(),
+        [("img-1".to_owned(), i64::try_from(63 * GIB).unwrap())]
+    );
 }
 
 const WINDOW: Duration = Duration::from_millis(300);
@@ -726,6 +946,7 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
             published: Vec::new(),
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
         .unwrap();
@@ -1245,12 +1466,32 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
     let records = records();
     let unmanaged = sort(&records, &[], |_| false).unwrap();
     assert_eq!(ids(&unmanaged), ["img-1"]);
-    assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
-    assert_eq!(unmanaged.native, res(2_000, GIB));
+    assert_eq!(
+        booked_sums(&unmanaged),
+        (res(16_000, 8 * GIB), res(2_000, GIB))
+    );
     let both = sort(&records, &[], |_| true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
-    assert_eq!(both.whole, CapacityResources::default());
-    assert_eq!(both.native, res(2_000, GIB));
+    assert_eq!(
+        booked_sums(&both),
+        (CapacityResources::default(), res(2_000, GIB))
+    );
+}
+
+/// What a window's sort books off the fleet's budget (A-10): of the VMs it doesn't learn, whole, and of the native boxes,
+/// at their caps, each summed.
+fn booked_sums(sorted: &Sorted<'_>) -> (CapacityResources, CapacityResources) {
+    let mut whole = CapacityResources::default();
+    let mut native = CapacityResources::default();
+    for (holder, booking) in &sorted.booked {
+        let sum = if holder.managed() || holder.image() {
+            &mut whole
+        } else {
+            &mut native
+        };
+        *sum = sum.checked_add(*booking).unwrap();
+    }
+    (whole, native)
 }
 
 /// Image VM `name`'s host use with nothing used yet, its 16 vCPUs' guest time none and `held` held.
@@ -1349,6 +1590,24 @@ fn w14_the_learners_thread_waits_out_its_window_and_with_none_for_a_box_to_begin
     drop(begun);
     assert_eq!(wait(&waits, None).unwrap(), Waited::Gone);
     assert_eq!(wait(&waits, Some(window)).unwrap(), Waited::Gone);
+}
+
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a learner whose platform holds no window waited for a box to begin before
+/// its first window, so the VMs its node's recovery took back and its node VM went unread, uncapped and untold on an
+/// idle node until one did. Its thread runs a window as it starts, before it waits. Do run the learner's thread with
+/// nothing ever to tell it (its wake's sender gone before it starts), counting its windows. Expect one window, its
+/// start's, then its end.
+#[test]
+fn a9_the_learners_thread_runs_a_window_at_its_start_before_it_waits() {
+    let (begun, waits) = hex_wait::mpsc::sync_channel(1).unwrap();
+    drop(begun);
+    let mut windows = 0;
+    learn(&waits, || {
+        windows += 1;
+        Some(None)
+    })
+    .unwrap();
+    assert_eq!(windows, 1, "its start's window, then its end");
 }
 
 /// A native owner with no window of its own, as Windows' is (its job's hard cap holds per an undocumented interval),
@@ -1808,7 +2067,11 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
         .map(|holder| box_of(&holder.id().unwrap()).to_owned())
         .collect();
     assert_eq!(learned, ["vm-1"]);
-    assert_eq!(sorted.whole.cpu_milli, 16_000, "the second's receipt");
+    assert_eq!(
+        booked_sums(&sorted).0.cpu_milli,
+        16_000,
+        "the second's receipt"
+    );
     io.rates.borrow_mut().clear();
     learner
         .window(&io, &sorted.learned, res(6_000, 64 * GIB), Instant::now())
@@ -2068,6 +2331,97 @@ fn leave_node_row(dir: &std::path::Path, row: &hex_core::record::NodeVmRecord) {
     std::fs::create_dir_all(&rows).unwrap();
     let name: String = row.run.bytes().iter().map(|b| format!("{b:02x}")).collect();
     std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
+}
+
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a node VM's boot tells its node's learner, as a box's create and start
+/// do, so a learner holding no cap reads it as it boots, never at the next box's beginning. Do set the charge learner of
+/// a node whose platform holds no window, then write a node VM's row through the node's books as the image class's boot
+/// does: Booting, then Ready. Expect no wake told while it boots, and one once it is Ready.
+#[test]
+fn a9_a_node_vms_boot_wakes_its_learner() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = std::sync::Arc::new(
+        crate::recorded::Recorded::open(Images::default(), dir.path()).unwrap(),
+    );
+    let (waits, _, _) = node.set_charges().unwrap();
+    let books: &dyn hex_runtime::devices::Books = &*node;
+    books
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    assert!(
+        matches!(waits.try_recv(), Err(hex_wait::mpsc::TryRecvError::Empty)),
+        "a booting node VM is no VM to learn yet"
+    );
+    books
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    assert!(
+        matches!(waits.try_recv(), Ok(())),
+        "its Ready row wakes the learner"
+    );
+}
+
+/// The learner's start window, read from the stand-in's asks: a fact no recorded operation makes, so it measures, for
+/// its fact alone (hex_testkit::waits).
+static STARTED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_node.charges_started");
+
+/// A-9 (the review's, 2026-11-14; AC-T7.4.1): a node's learner reads what its node holds as it starts, with no box
+/// begun, its own thread's first window reading, capping and telling each VM then held. Do keep, on a node whose
+/// platform holds no window, a Shards image VM and a node VM's row Ready, each run saying 70 ms; then start its charge
+/// learner and begin no box. Expect each VM's use read, its rate held and its guest told its room.
+#[test]
+fn a9_a_learner_reads_what_its_node_holds_at_its_start_with_no_box_begun() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    store.put(&image_vm("img-1", 1)).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    node.start_charges().unwrap();
+    let wanted = [
+        "host_use",
+        "rate",
+        "room",
+        "node_vm_host_use",
+        "node_vm_rate",
+        "node_vm_room",
+    ];
+    // A look: the stand-in tells no event as the learner asks it. Its party, the learner, ends where it has failed: its
+    // thread, detached, records why on the learner.
+    hex_testkit::waits::follow::until(
+        &STARTED,
+        "the learner's start window",
+        || match node.books.charges.get() {
+            Some((learner, _)) if learner.lock().is_ok_and(|learner| learner.fault.is_none()) => {
+                hex_testkit::waits::follow::Party::Live
+            }
+            _ => hex_testkit::waits::follow::Party::Ended,
+        },
+        || {
+            let asked = images.0.asked.lock().unwrap();
+            wanted.iter().all(|what| asked.contains(what))
+        },
+    )
+    .unwrap();
 }
 
 /// Joint plan step 39, place 1 (C5, intent first; ROOT, 2026-11-13: a node VM's last-resort end lives in its row): the
@@ -2344,10 +2698,10 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is capped through its run's rate, D247, told
 /// Governor): a node whose guest is a node VM under shards-init learns that VM as it learns an image VM, over its run's
 /// period, and holds it through its run's rate. Do open a node whose platform holds no window, keep its node VM's row
-/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, and a process box capped at all but 6 CPUs of the
-/// machine; start its charge learner, run a window, and answer the Shards class. Expect the node VM's host use read, its
-/// run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer naming its holding and its
-/// rate held by its governor, by its run.
+/// Ready, its receipt as large as the machine ([`machine_cost`]) booked at 4 CPUs and its run saying 70 ms, and a process
+/// box capped at all but 6 CPUs of the machine; set its charge learner, with no thread of its own, run a window, and
+/// answer the Shards class. Expect the node VM's host use read, its run held to a rate below its ceiling, the window its
+/// run's 70 ms, and the answer naming its holding and its rate held by its governor, by its run.
 #[test]
 fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rate() {
     let dir = tempfile::tempdir().unwrap();
@@ -2361,9 +2715,14 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     let node =
         std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let sized = machine_cost(machine);
     let booked = |phase| {
         let mut row = node_row(7, phase);
-        row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+        row.allocation = sized
+            .allocate(CapacityResources::default())
+            .unwrap()
+            .booked_at(res(4_000, 4 * GIB));
         row
     };
     store
@@ -2372,7 +2731,6 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     store
         .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
         .unwrap();
-    let machine = node.machine().unwrap();
     let cap = u32::try_from(machine.cpu_milli.saturating_sub(6_000)).unwrap();
     let capped = BoxRecord::new(
         BoxSpec {
@@ -2392,7 +2750,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         Vec::new(),
     );
     store.put(&capped).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
     assert!(
         images
@@ -2404,7 +2762,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     );
     let rates = images.0.node_rates.lock().unwrap().clone();
     assert!(
-        matches!(rates.as_slice(), [(run, rate)] if *run == node_run(7) && *rate < 16_000),
+        matches!(rates.as_slice(), [(run, rate)] if *run == node_run(7) && *rate < sized.ceiling.cpu_milli),
         "{rates:?}"
     );
     let mut capacity = hex_api::Capacity {
@@ -2413,7 +2771,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         total: machine,
         free: CapacityResources::default(),
         devices: Vec::new(),
-        cost: Some(cost()),
+        cost: Some(sized),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
@@ -2489,8 +2847,8 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
 
 /// Joint plan step 39 (ROOT, 2026-11-13; D188): a node whose guest is a node VM under shards-init tells that VM's guest its
 /// room through its run, as it tells an image VM's. Do open a node whose platform holds no window, keep its node VM's row
-/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, start its charge learner and run a window.
-/// Expect its guest told a room through its run, and only its.
+/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, set its charge learner, with no thread of its
+/// own, and run a window. Expect its guest told a room through its run, and only its.
 #[test]
 fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -2515,7 +2873,7 @@ fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
     store
         .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
         .unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     let told: Vec<hex_api::NodeRun> = images
         .0
@@ -2577,7 +2935,7 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
     let mut booting = node_row(8, hex_api::NodeVmPhase::Booting);
     booting.allocation = booting.allocation.booked_at(booking);
     store.put_node_vm(&booting).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     assert_eq!(
         *images.0.box_rates.lock().unwrap(),
@@ -2587,14 +2945,14 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
 
 /// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): a record its node can't read names a box it may still
 /// run, whose class, caps and receipt only that record says, so nothing bounds the box below its machine. Its window
-/// counts it there, leaving the fleet only the bookings it reads, and every VM class's answer names it and why, never
-/// dropping it. Interim, pinned here: once A-10 (goal 4) sources the fleet's budget from what is measured free, what such
-/// a box holds is outside that budget already, and this count gives way to it. Do keep, on a node whose platform holds
-/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM of 16 vCPUs booked at 2 CPUs
-/// whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
-/// image VM, run another window and answer the Shards class. Expect the first VM capped at the 8 CPUs the process box
-/// leaves; then the second held at its 2-CPU booking though it asks its ceiling, as the box whose record can't be read
-/// may hold all the rest; and the answer naming that box among the unrecorded, with its record's words and its count.
+/// counts its CPU there, leaving the fleet only the CPU bookings it reads (what it takes of memory and disk is missing
+/// from what the machine reads free already, A-10), and every VM class's answer names it and why, never dropping it. Do
+/// keep, on a node whose platform holds no window, a process box capped at all but 8 CPUs of the machine and a Shards
+/// image VM as large as the machine ([`machine_cost`]) booked at 2 CPUs whose run says 70 ms, and run a window; then end
+/// that VM, make the process box's record unreadable, keep a second such image VM, run another window and answer the
+/// Shards class. Expect the first VM capped at the 8 CPUs the process box leaves; then the second held at its 2-CPU
+/// booking though it asks its ceiling, as the box whose record can't be read may hold all the rest of the CPU; and the
+/// answer naming that box among the unrecorded, with its record's words and its count.
 #[test]
 fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_told() {
     let dir = tempfile::tempdir().unwrap();
@@ -2611,6 +2969,7 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     let store = &node.books.store;
     let machine = node.machine().unwrap();
+    let sized = machine_cost(machine);
     let left = 8_000;
     let capped = BoxRecord::new(
         BoxSpec {
@@ -2633,14 +2992,16 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
     let booking = res(2_000, 2 * GIB);
     let booked = |name: &str, started: u64| {
         let mut image = image_vm(name, started);
-        image.spec.allocation = image
-            .spec
-            .allocation
-            .map(|allocation| allocation.booked_at(booking));
+        image.spec.allocation = Some(
+            sized
+                .allocate(CapacityResources::default())
+                .unwrap()
+                .booked_at(booking),
+        );
         image
     };
     store.put(&booked("img-1", 1)).unwrap();
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     node.learn_window();
     assert_eq!(
         *images.0.box_rates.lock().unwrap(),
@@ -2660,7 +3021,7 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         total: machine,
         free: CapacityResources::default(),
         devices: Vec::new(),
-        cost: Some(cost()),
+        cost: Some(sized),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
@@ -2731,8 +3092,9 @@ fn w39_a5_the_oci_boxes_a_node_vm_hosts_are_its_never_native_too() {
         capped("oci-1", oci, 2_000, 2 * GIB),
         capped("proc-1", ClassSpec::Process, 1_000, GIB),
     ];
-    let native =
-        |rows: &[hex_core::record::NodeVmRecord]| sort(&records, rows, |_| true).unwrap().native;
+    let native = |rows: &[hex_core::record::NodeVmRecord]| {
+        booked_sums(&sort(&records, rows, |_| true).unwrap()).1
+    };
     assert_eq!(
         native(&[]),
         res(3_000, 3 * GIB),
@@ -3113,10 +3475,10 @@ fn w39_a6_an_oci_box_its_node_vm_ended_is_kept_with_why_across_a_restart() {
 
 /// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
 /// stalled every capacity answer; AC-T7.4.1): a window asks its VMs with the lock its capacity answers take let go. Do
-/// start the charge learner of a node whose platform holds no window, before any VM is on record, so its own thread waits
-/// for a box to begin and runs no window beside this one; then keep a Shards image VM and a node VM's row Ready, each run
-/// saying 70 ms, and run a window, noting at each ask of either whether that lock is held. Expect each VM asked its
-/// period, its use, its rate and its room, and none of those asked while that lock is held.
+/// set the charge learner of a node whose platform holds no window, with no thread of its own, so no window runs beside
+/// this one; then keep a Shards image VM and a node VM's row Ready, each run saying 70 ms, and run a window, noting at
+/// each ask of either whether that lock is held. Expect each VM asked its period, its use, its rate and its room, and
+/// none of those asked while that lock is held.
 #[test]
 fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
     let dir = tempfile::tempdir().unwrap();
@@ -3133,7 +3495,7 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         })
     }));
     assert!(watching.is_ok(), "the lock watched once");
-    node.start_charges().unwrap();
+    node.set_charges().unwrap();
     images
         .0
         .periods

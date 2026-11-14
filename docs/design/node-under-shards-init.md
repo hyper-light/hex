@@ -345,15 +345,20 @@ form, `HEX_NODE_GUEST_FORM`, through production code alone (ROOT, 2026-11-13: ne
   a feature with no need: step 39's acceptance is macOS's and Windows'. KVM gives the third OS's numbers for the
   both-ways comparison through each form's production class, with no suite: the image form through
   `ImageClass::boot_node`, as a node's guest runtime boots its node VM (hex-node's image runtime its record authority),
-  and the kernel form through a live `hex node`'s managed shared guest, granted as above.
+  and the kernel form through a live `hex node`'s Shards class. Linux's node has no managed shared guest: its oci class
+  is native, so nothing there needs one, and its Shards guest prepares a shared backing only where one is retained. So
+  the KVM kernel form is a Shards box (ROOT, 2026-11-14): one box, created through the node's socket at its dedicated
+  route's cost, whose create boots the box's own VM from `HEX_GUEST_KERNEL` and `HEX_GUEST_INITRD`, Hex's init its
+  PID 1, and makes the box in it.
 - **Both forms measured, the same way.** Start latency is the node's spawn to its ready line, then its first create
-  (macOS, Windows), the kernel form's grant to Live between them; on Linux, `boot_node`'s READY time and the grant's.
-  Memory is the VM's processes as their OS counts them (macOS's physical footprint, Windows' private working set,
-  Linux's anonymous resident pages, each with its peak), beside Hex's own reading: the node VM's host use (Shards'
-  D241 reading) and the shared guest's backing usage. Cold and restored starts are never one figure. The image form's
-  run hosts boot the guest its Shards home keeps (`shards guest use`, timed on its own line, so no boot fetches a
-  kernel), never one given them, so D253's templates engage. Its first start saves its template, and its restarts on
-  the same state restore it. A kernel-form start is a fresh run, a direct boot having no template.
+  (macOS, Windows), the kernel form's grant to Live between them; on Linux, `boot_node`'s READY time and the kernel
+  form's box create. Memory is the VM's processes as their OS counts them (macOS's physical footprint, Windows' private
+  working set, Linux's anonymous resident pages, each with its peak), beside Hex's own reading: the node VM's host use
+  (Shards' D241 reading) and the kernel form's usage, its shared guest's backing's (on Linux its box's). Cold and
+  restored starts are never one figure. The image form's run hosts boot the guest its Shards home keeps (`shards
+  guest use`, timed on its own line, so no boot fetches a kernel), never one given them, so D253's templates engage.
+  Its first start saves its template, and its restarts on the same state restore it. A kernel-form start is a fresh
+  run, a direct boot having no template.
 - **On every OS, with no VM.** The image form's w39 cases in hex-runtime's `guest::image` and `guest` tests (its read,
   boot, lanes, greeting, record, rate, room and stop, through a run host of the test's) run in each OS's `cargo test`,
   Windows' through the lane ends its run host makes there (`5cc5efbc`). Their native Windows run is ROOT's.

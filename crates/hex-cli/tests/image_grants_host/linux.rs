@@ -142,33 +142,42 @@ fn socket_inodes(pid: u32) -> Vec<u64> {
     out
 }
 
-/// The TCP and UDP sockets the processes `pids` hold, each once.
+/// The TCP and UDP sockets the processes `pids` hold, each once, by its inode, with every one of them holding it.
 pub fn sockets(pids: &[u32]) -> Vec<Socket> {
-    let mut seen: Vec<u64> = Vec::new();
-    let mut out = Vec::new();
+    let mut found: Vec<(u64, Socket)> = Vec::new();
     for &pid in pids {
         let held = socket_inodes(pid);
         if held.is_empty() {
             continue;
         }
         for row in rows_seen_by(pid) {
-            if held.contains(&row.inode) && !seen.contains(&row.inode) {
-                seen.push(row.inode);
-                let peer = if row.remote.ip().is_unspecified() && row.remote.port() == 0 {
-                    None
-                } else {
-                    Some(row.remote)
-                };
-                out.push(Socket {
+            if !held.contains(&row.inode) {
+                continue;
+            }
+            if let Some((_, known)) = found.iter_mut().find(|(inode, _)| *inode == row.inode) {
+                if !known.pids.contains(&pid) {
+                    known.pids.push(pid);
+                }
+                continue;
+            }
+            let peer = if row.remote.ip().is_unspecified() && row.remote.port() == 0 {
+                None
+            } else {
+                Some(row.remote)
+            };
+            found.push((
+                row.inode,
+                Socket {
                     tcp: row.tcp,
                     local: row.local,
                     remote: peer,
                     listening: row.tcp && row.state == TCP_LISTEN,
-                });
-            }
+                    pids: vec![pid],
+                },
+            ));
         }
     }
-    out
+    found.into_iter().map(|(_, socket)| socket).collect()
 }
 
 /// The /proc reading's address form (no VM): do read addresses as a little-endian kernel writes them, an IPv4
