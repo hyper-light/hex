@@ -107,6 +107,7 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
             offers: routes,
             device_routes: Vec::new(),
             backings: vec![report.backings[0].try_clone().unwrap()],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -341,6 +342,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
             offers: catalog.offers.clone(),
             device_routes: catalog.device_routes.clone(),
             backings: vec![report.backings[0].try_clone().unwrap()],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -387,6 +389,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
             offers: catalog.offers.clone(),
             device_routes: catalog.device_routes.clone(),
             backings: vec![released.try_clone().unwrap()],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),
@@ -408,6 +411,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
             offers,
             device_routes: catalog.device_routes.clone(),
             backings: vec![prepared],
+            node_vm_room: None,
         }
         .share()
         .unwrap(),

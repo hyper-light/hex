@@ -234,6 +234,22 @@ impl Writer {
 /// Where the lane says what it refused, a line at a time (`hex.capacity event=...`): its host's log.
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// A holder refused, what the lane says of it: `hex.capacity event=refused peer=<n> link=<n> holder=<a JSON string>
+/// why="not-authorized"`, the name it gave, if any, as it gave it.
+fn refused_line(peer: PeerId, link: u64, holder: &str) -> String {
+    use hex_api::event::Value::{Number, Text};
+    hex_api::event::line(
+        "hex.capacity",
+        "refused",
+        &[
+            ("peer", Number(u128::from(peer))),
+            ("link", Number(u128::from(link))),
+            ("holder", Text(holder)),
+            ("why", Text("not-authorized")),
+        ],
+    )
+}
+
 /// A keeper served on its port (module docs): its view, behind the lock each link's messages take in turn, each
 /// link's connection, so a hint reaches the link it is owed to, and the holders it serves.
 pub struct Server<V> {
@@ -400,9 +416,7 @@ impl<V: CapacityView + Send + 'static> Server<V> {
                             ToKeeper::Hello { holder, .. } => holder.as_str(),
                             _ => "",
                         };
-                        (self.log)(&format!(
-                            "hex.capacity event=refused peer={peer:?} link={id} holder={said:?} why=not-authorized"
-                        ));
+                        (self.log)(&refused_line(peer, id, said));
                     }
                     let said = writer
                         .answer(closed)

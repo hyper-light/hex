@@ -1,7 +1,40 @@
-//! Hex's event lines on a process's log (CLAUDE.md §10): `hex.<area> event=<name> key=value ...`, one line each. A
-//! value that may hold a space, a quote, a backslash or a newline (a path, an error's words, what a wait follows) is
-//! written as a JSON string (RFC 8259 §7), so nothing it says can split an event across lines or run into the next
-//! key. kiln's metrics read these lines (`hex.wait event=ran_out`, ROOT and kiln's metrics owner, 2026-11-14).
+//! Hex's event lines on a process's log (CLAUDE.md §10): `hex.<area> event=<name> key=value ...`, one line each, which
+//! kiln keeps verbatim and its metrics read (`hex.wait event=ran_out`; ROOT and kiln's metrics owner, 2026-11-14). The
+//! code's own words are bare: the area, the event's name, each key, and a wait's name (dotted lowercase words). Every
+//! other text value (a name a person gave, a path, an error's words, what a wait follows) is a JSON string (RFC 8259
+//! §7), so nothing it says can split an event across lines or run into the next key, and every number is whole.
+
+/// A value of an event line's field: a JSON string ([`json_string`]), or a whole number written as itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Value<'a> {
+    Text(&'a str),
+    Number(u128),
+}
+
+/// The event line `<area> event=<name> <key>=<value> ...`, no newline (its writer ends it): each value a JSON string or
+/// a whole number ([`Value`]), so the line is one line whatever its values say. The area, the event's name and the
+/// keys are the code's own words.
+pub fn line(
+    area: &'static str,
+    event: &'static str,
+    fields: &[(&'static str, Value<'_>)],
+) -> String {
+    let mut line = format!("{area} event={event}");
+    for (key, value) in fields {
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        match value {
+            Value::Text(text) => {
+                line.push('"');
+                push_json_contents(&mut line, text, usize::MAX);
+                line.push('"');
+            }
+            Value::Number(n) => line.push_str(&n.to_string()),
+        }
+    }
+    line
+}
 
 /// `text` as a JSON string, quoted (RFC 8259 §7): a `"` and a `\` escaped by a `\`, and every control character,
 /// U+0000 to U+001F, escaped as `\b`, `\f`, `\n`, `\r`, `\t` or `\u00XX`. Every other character is itself.

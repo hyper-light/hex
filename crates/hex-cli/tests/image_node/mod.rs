@@ -122,6 +122,12 @@ impl Node {
     /// which refuses the start with its stderr (the person's rule of 2026-11-13: a cold start waits while its party
     /// lives, with no deadline picked for it).
     pub fn start(work: &Path, boxes: Option<&Path>) -> Self {
+        Self::start_with(work, boxes, &[])
+    }
+
+    /// [`Node::start`], its environment this process's with `set` over it (joint plan step 39: node_guest_real gives
+    /// the node the image it built).
+    pub fn start_with(work: &Path, boxes: Option<&Path>, set: &[(&str, &std::ffi::OsStr)]) -> Self {
         let socket = work.join("node.sock");
         let stderr = work.join("node.stderr");
         let begun = Instant::now();
@@ -134,6 +140,7 @@ impl Node {
         if let Some(boxes) = boxes {
             node.arg("--box-root").arg(boxes);
         }
+        node.envs(set.iter().copied());
         let mut child = node
             .env("HEX_WAITS_CENSUS", work.join("census.txt"))
             .env("HEX_WAITS_CENSUS_MAX", input("HEX_WAITS_CENSUS_MAX"))

@@ -3,9 +3,9 @@
 //! command under the nesting grant (D234), PID 1 of the workload's own PID namespace, and the boot is followed to the
 //! READY that init says once its node and relay are ready.
 //!
-//! Its host reaches that node only through a lane of Shards' agent-control endpoint to the relay's sockets (§5), which
-//! Shards doesn't give yet. Until it does, a node configured for this form is refused `Awaits(NestedChannel)`
-//! ([`super::GuestConfig::from_vars`]), and `node_hosted_real` boots it to READY for ROOT's measurement.
+//! This boot is `node_hosted_real`'s, which measures READY alone, so its run asks no agent-control endpoint. A node
+//! boots its node VM through the image class instead (`ImageClass::boot_node`), which follows READY as this does
+//! ([`follow_ready`]) and asks its run's endpoint, the node's channel to its relay's sockets (§5).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -81,9 +81,10 @@ impl HostedConfig {
             ready_by: None,
             binary: Some(self.binary.clone()),
             env: self.env.clone(),
-            // No agent-control endpoint yet (D252): step 39's Link asks for one.
+            // No agent-control endpoint: READY alone is measured here. A node's own boot asks one
+            // (ImageClass::node_spec).
             control: None,
-            // No GPU: the node VM renders on none (D234's `gpus=` is step 39's).
+            // No GPU: a node VM under shards-init is CPU-only (docs/design/node-under-shards-init.md §5).
             gpu_devices: Vec::new(),
             // No sign-in grant (Shards' D242 step 8, image channel v24): its pass-through is goal 13's.
             sign_ins: Vec::new(),

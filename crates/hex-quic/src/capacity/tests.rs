@@ -10,7 +10,7 @@ use hex_api::capacity::{
     Amounts, Budget, Close, Event, Holder, Host, Out, ReservationId, ToHolder, ToKeeper, Why,
 };
 use hex_core::patience::Patience;
-use hex_testkit::waits::follow::{self, Party};
+use hex_testkit::waits::follow;
 use hyper_quic::rustls;
 
 use super::*;
@@ -34,13 +34,14 @@ fn sliced<T>(answer: Result<T, Refused>) -> Option<Result<T, Refused>> {
     }
 }
 
-/// The keeper's next word on `link`.
+/// The keeper's next word on `link`, by the life of the link's connection, whose end ends its hear too.
 fn heard(link: &mut Link) -> ToHolder {
+    let link = std::cell::RefCell::new(link);
     follow::within(
         &HEAR,
         "the keeper's next word",
-        || Party::Live,
-        |by| sliced(link.hear(by)),
+        || crate::tests::conn_party(&link.borrow().conn),
+        |by| sliced(link.borrow_mut().hear(by)),
     )
     .unwrap()
     .unwrap()
@@ -246,7 +247,7 @@ fn a_connection_that_breaks_the_protocol_is_reset() {
     let read = follow::within(
         &RESET,
         "the keeper's reset",
-        || Party::Live,
+        || crate::tests::conn_party(&conn),
         |by| match conn.read(&mut buf, by) {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => None,
             read => Some(read),
@@ -350,7 +351,7 @@ fn only_the_holders_its_host_authorizes_are_served() {
         lines
             .iter()
             .all(|line| line.starts_with("hex.capacity event=refused ")
-                && line.ends_with(" why=not-authorized")),
+                && line.ends_with(" why=\"not-authorized\"")),
         "{lines:?}"
     );
     assert!(
@@ -521,5 +522,17 @@ fn e1_a_holder_that_stops_reading_stalls_no_host_and_no_other_link() {
     assert!(
         said <= 2 && said < owed,
         "{said} hints said to b after its link filled, of the {owed} views owed it since"
+    );
+}
+
+/// The lane's refused line (CLAUDE.md §10; ROOT, 2026-11-14): its values JSON strings or whole numbers, so a holder's
+/// name can't split it. Do: form it for a name holding a quote, a backslash and a newline. Expect: one line, the name a
+/// JSON string, the peer and the link whole numbers.
+#[test]
+fn a_refused_holders_line_is_one_line_its_name_a_json_string() {
+    assert_eq!(
+        super::refused_line(7, 3, "mallory \"x\" \\\nhex.capacity event=forged"),
+        "hex.capacity event=refused peer=7 link=3 holder=\"mallory \\\"x\\\" \\\\\\nhex.capacity event=forged\" \
+         why=\"not-authorized\""
     );
 }

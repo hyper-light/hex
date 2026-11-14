@@ -474,18 +474,21 @@ window, which would under-count Hex here.
   `placement::view::tests`); and the node's own admission and a holder's reserve checking one view
   through the placement `Driver`.
 - hex-sim (`hex_sim::capacity`): one machine, the recorded fleet's smallest host where Hex's own boxes and kiln's runs
-  share a room (fedora: 32 threads, 62.5 GiB; read from H10's fleet trace by a test), its keeper's bounds derived (each
-  runner's reservations the most of the generator's smallest charge the room holds, a name the longest its runners
-  say), Hex's own boxes and kiln's
+  share a room (fedora: 32 threads, 62.5 GiB; read from H10's fleet trace by a test), every charge a recorded one
+  (kiln's runs its fourteen days of CI legs, a leg below kiln's resolution drawn as one unit of it; Hex's own boxes
+  the fleet day's `oci` legs), its keeper's bounds derived (each runner's reservations as many of the smallest recorded
+  charge as the room holds, but never more than one sync carries, `hex_core::capacity::most_held`; a name the longest
+  its runners say), Hex's own boxes and kiln's
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
-  (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
+  (before and after a write lands), crashes runners (their runs outliving them in one case, ending with them in the
+  other: kiln states neither), drops links with
   what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
   runner's process and its runs use, the runs held besides (counted twice: CV12). Each run uses memory within its
-  reservation, moved by the nemesis between samples and, both ways, several times, on either side of the free
-  memory's read in a sample's window. After every step:
+  reservation, moved by the nemesis at any step, a sample's window among them (its reads a step apart), as often as it
+  has them: no bound on the moves. After every step:
   every running run is in the keeper's books while it is up, but one so released, until its runner's next
   sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
   adopted; what the keeper books past the room (only an adoption's), its view says it is over by; and the
@@ -496,11 +499,11 @@ window, which would under-count Hex here.
   restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
   boxes alone, a sync that drops what the keeper lacks instead of adopting it, and a host crediting the room its
   runners' use (CV12's withdrawn rule, standing for any credit; the three credit shapes planted before it, the
-  larger of two reads, whole reservations and a scope holding its runner, are folded into it). Bounded seeds here
-  (64 of
-  2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
-  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
-  of which must hold, and each mistake caught on some.
+  larger of two reads, whole reservations and a scope holding its runner, are folded into it). The runner counts: one,
+  as the recorded fleet configures each machine's keeper, and two for a retirement, which takes a live runner and never
+  the last. Bounded seeds here (64 of 2,000 steps with one runner, 32 with two, each with runs outliving their runner
+  and not); ROOT's sweeps take `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`,
+  `HEX_CAPACITY_STEPS`), every seed of which must hold, and each mistake caught on some.
 - The stand-in holder (`crates/hex-cli/tests/capacity_view/stand_in.rs`): kiln's runner's side of the contract above,
   item by item, driving `hex_api::capacity::Holder` over `hex_quic::capacity::Link`, its epoch and runs in a ledger
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md

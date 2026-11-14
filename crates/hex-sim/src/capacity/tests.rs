@@ -24,27 +24,40 @@ fn total(all: Report, r: Report) -> Report {
     }
 }
 
+/// The runner counts the suite runs (ROOT, 2026-11-14): one, as the recorded fleet configures each machine's keeper
+/// (one kiln runner a machine); and two, the fewest a retirement needs, since it takes a live runner and never the last
+/// ([`World::retire`]): a structural edge, no number picked.
+const RECORDED: usize = 1;
+const RETIRING: usize = 2;
+
+/// Whether the runners' runs outlive their processes: kiln states it for neither, so each is its own case (ROOT,
+/// 2026-11-14), never a coin.
+const SURVIVE: [bool; 2] = [true, false];
+
 fn seeds(runners: usize, seeds: u64, steps: u64) -> Report {
-    (0..seeds).fold(Report::default(), |all, seed| {
-        let r = run(seed, runners, steps, None)
-            .unwrap_or_else(|v| panic!("{runners} runners, seed {seed}: {v:?}"));
-        total(all, r)
+    SURVIVE.iter().fold(Report::default(), |all, survive| {
+        (0..seeds).fold(all, |all, seed| {
+            let r = run(seed, runners, steps, *survive, None).unwrap_or_else(|v| {
+                panic!("{runners} runners, survive {survive}, seed {seed}: {v:?}")
+            });
+            total(all, r)
+        })
     })
 }
 
-/// AC-T7.4.1, joint plan step 13: do run one machine, Hex's own boxes beside two kiln runners on its
-/// keeper, for 64 seeds of 2,000 steps under the nemesis (the keeper crashing between messages and at
-/// its writes, before and after they land; runners crashing, their runs outliving them or not; links
-/// dropped with what was on them, partitioned and healed; waits run out; a runner retired and released
-/// by the person; runs' use moving, both ways, several times, in a sample's window too); expect the work
-/// running never past the room, every running run in the keeper's books and the keeper deciding in no more room
-/// than its host measured at every step, and once settled the keeper's books, each runner's and what it runs the
-/// same; and (non-vacuity) each fault struck, both sides refused for room, syncs released what ended, a sync
-/// adopted work the person had released while its runner was away (CV6), and samples saw use move in their windows.
+/// AC-T7.4.1, joint plan step 13: do run one machine, Hex's own boxes beside its one kiln runner on its keeper, as
+/// recorded, its runs outliving its process in one case and ending with it in the other, for 64 seeds of 2,000 steps
+/// each under the nemesis (the keeper crashing between messages and at its writes, before and after they land; the
+/// runner crashing; links dropped with what was on them, partitioned and healed; waits run out; runs' use moving at
+/// any step, a sample's window among them); every charge a recorded one, kiln's legs' and Hex's oci boxes'. Expect the
+/// work running never past the room, every running run in the keeper's books and the keeper deciding in no more room
+/// than its host measured at every step, and once settled the keeper's books, the runner's and what it runs the same;
+/// and (non-vacuity) each fault struck, both sides refused for room, syncs released what ended, a sync adopted work the
+/// person had released while its runner was away (CV6), and samples saw use move in their windows.
 #[test]
 fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
-    let all = seeds(2, 64, 2_000);
-    eprintln!("2 runners, 64 seeds of 2,000 steps: {all:?}");
+    let all = seeds(RECORDED, 64, 2_000);
+    eprintln!("{RECORDED} runner, 64 seeds of 2,000 steps each way: {all:?}");
     assert!(
         all.hex_started > 0
             && all.hex_refused > 0
@@ -56,7 +69,6 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.crashes_at_write > 0
             && all.runner_crashes > 0
             && all.released_at_sync > 0
-            && all.forgotten > 0
             && all.wrongly_forgotten > 0
             && all.adopted_at_sync > 0
             && all.samples > 0
@@ -65,24 +77,28 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
     );
 }
 
-/// AC-T7.4.1, joint plan step 13: do the same with one runner and with three, 32 seeds each; expect the
-/// same.
+/// AC-T7.4.1, joint plan step 13 (CV6): do the same with two runners, the fewest a retirement needs ([`RETIRING`]), 32
+/// seeds each way; expect the same, and a runner retired and its reservations released by the person.
 #[test]
-fn one_runner_or_three_keep_the_same() {
-    for runners in [1, 3] {
-        let all = seeds(runners, 32, 2_000);
-        assert!(
-            all.runs_granted > 0 && all.keeper_crashes > 0 && all.link_drops > 0,
-            "{runners}: {all:?}"
-        );
-    }
+fn a_runner_retired_beside_another_keeps_the_same() {
+    let all = seeds(RETIRING, 32, 2_000);
+    assert!(
+        all.runs_granted > 0 && all.keeper_crashes > 0 && all.link_drops > 0 && all.forgotten > 0,
+        "{RETIRING}: {all:?}"
+    );
 }
 
-/// Runs 64 seeds with `mutant` planted: the first violation.
+/// Runs 64 seeds each way with `mutant` planted, its runner's runs outliving it and not: the first violation.
 fn caught(mutant: Mutant) -> Option<Violation> {
-    let found = (0..64).find_map(|seed| run(seed, 2, 2_000, Some(mutant)).err().map(|v| (seed, v)));
+    let found = SURVIVE.iter().find_map(|survive| {
+        (0..64).find_map(|seed| {
+            run(seed, RECORDED, 2_000, *survive, Some(mutant))
+                .err()
+                .map(|v| (seed, *survive, v))
+        })
+    });
     eprintln!("{mutant:?}: {found:?}");
-    found.map(|(_, v)| v)
+    found.map(|(_, _, v)| v)
 }
 
 /// Non-vacuity, CV5: do plant a keeper's shell that releases a runner's reservations when its link
@@ -176,23 +192,26 @@ fn crediting_any_use_is_caught() {
     );
 }
 
-/// AC-T7.4.1, joint plan step 13 (CLAUDE.md §2: a loop's bound derived, never picked): do have one runner, synced,
-/// ask for 300 runs and let each one's wait run out before its answer, so 600 words wait on its link to the keeper,
-/// then settle; expect it to settle with the books agreeing: settling is bounded by the protocol's own count of what
-/// its links carry, not by a multiple of a runner's reservations.
+/// AC-T7.4.1, joint plan step 13 (CLAUDE.md §2: a loop's bound derived, never picked): do have one runner, synced, ask
+/// for one run more than its reservation bound and let each one's wait run out before its answer, so two words each
+/// wait on its link to the keeper, more than twice the bound, then settle; expect it to settle with the books agreeing:
+/// settling is bounded by the protocol's own count of what its links carry, not by a multiple of a runner's
+/// reservations.
 #[test]
 fn a_backlog_on_a_link_settles_within_the_protocols_own_bound() {
-    let mut world = World::new(0, 1, None).unwrap();
+    let mut world = World::new(0, RECORDED, true, None).unwrap();
     world.connect(Some(0));
+    // Its hello, the welcome, its sync and the answer.
     for _ in 0..4 {
         world.deliver_any().unwrap();
     }
     assert!(world.runners[0].holder.as_ref().unwrap().is_up());
-    for _ in 0..300 {
+    let asks = world.budget.reservations + 1;
+    for _ in 0..asks {
         world.ask(Some(0));
         world.ran_out(Some(0)).unwrap();
     }
-    assert_eq!(world.runners[0].link.to_keeper.len(), 600);
+    assert_eq!(world.runners[0].link.to_keeper.len(), 2 * asks);
     let settled = world.settle();
     assert!(settled.is_ok(), "{settled:?}");
 }
@@ -200,7 +219,12 @@ fn a_backlog_on_a_link_settles_within_the_protocols_own_bound() {
 /// T-T7.4.1's determinism: one seed, one run.
 #[test]
 fn a_seed_names_one_run() {
-    assert_eq!(run(7, 2, 2_000, None), run(7, 2, 2_000, None));
+    for survive in SURVIVE {
+        assert_eq!(
+            run(7, RECORDED, 2_000, survive, None),
+            run(7, RECORDED, 2_000, survive, None)
+        );
+    }
 }
 
 /// A sweep's size from the environment, for the lead's record runs: `name`'s count, else the bounded suite's.
@@ -212,9 +236,9 @@ fn sized(name: &str, bounded: u64) -> u64 {
 }
 
 /// AC-T7.4.1, joint plan step 13: the record sweep, the lead's, in release: `HEX_CAPACITY_SEEDS` seeds (the bounded
-/// suite's 64 unless set) of `HEX_CAPACITY_STEPS` steps (2,000) with one, two and three runners, then each planted
-/// mistake over the same seeds with two. Expect every seed to hold, and each mistake caught, with how many seeds of
-/// how many caught it and the first.
+/// suite's 64 unless set) of `HEX_CAPACITY_STEPS` steps (2,000) each way ([`SURVIVE`]) with the recorded runner and
+/// with retirement's two, then each planted mistake over the same seeds with the recorded runner, each way. Expect every
+/// seed to hold, and each mistake caught, with how many seeds of how many caught it and the first.
 #[test]
 #[ignore = "the record sweep, sized by HEX_CAPACITY_SEEDS and HEX_CAPACITY_STEPS, in release (the lead's)"]
 fn the_record_sweep() {
@@ -222,9 +246,9 @@ fn the_record_sweep() {
         sized("HEX_CAPACITY_SEEDS", 64),
         sized("HEX_CAPACITY_STEPS", 2_000),
     );
-    for runners in [1, 2, 3] {
+    for runners in [RECORDED, RETIRING] {
         let all = seeds(runners, n, steps);
-        eprintln!("{runners} runners, {n} seeds of {steps} steps: {all:?}");
+        eprintln!("{runners} runners, {n} seeds of {steps} steps each way: {all:?}");
     }
     for mutant in [
         Mutant::ReleaseOnSilence,
@@ -235,15 +259,33 @@ fn the_record_sweep() {
         Mutant::DropUnknownAtSync,
         Mutant::Credit,
     ] {
-        let caught: Vec<u64> = (0..n)
-            .filter(|seed| run(*seed, 2, steps, Some(mutant)).is_err())
-            .collect();
-        eprintln!(
-            "{mutant:?}: caught on {} of {n} seeds, first {:?}",
-            caught.len(),
-            caught.first()
-        );
-        assert!(!caught.is_empty(), "{mutant:?} caught on no seed of {n}");
+        for survive in SURVIVE {
+            let caught: Vec<(u64, Option<u64>)> = (0..n)
+                .filter_map(|seed| {
+                    run(seed, RECORDED, steps, survive, Some(mutant))
+                        .err()
+                        .map(|v| (seed, step_of(&v)))
+                })
+                .collect();
+            eprintln!(
+                "SWEEP mutant={mutant:?} survive={survive} seeds={n} steps={steps} caught={} first_seed={:?} first_step={:?}",
+                caught.len(),
+                caught.first().map(|(seed, _)| seed),
+                caught.first().and_then(|(_, step)| *step)
+            );
+        }
+    }
+}
+
+/// The step a violation was found at, where it names one: settling's findings come once every step has run.
+fn step_of(v: &Violation) -> Option<u64> {
+    match v {
+        Violation::Oversubscribed { step, .. }
+        | Violation::Unreported { step, .. }
+        | Violation::Unbooked { step, .. }
+        | Violation::SyncDisagreed { step, .. }
+        | Violation::Overcredited { step, .. } => Some(*step),
+        Violation::Disagree { .. } | Violation::Stopped(_) | Violation::Unsettled => None,
     }
 }
 
@@ -272,20 +314,82 @@ fn the_machine_is_the_recorded_fleets_smallest_shared_host() {
 }
 
 /// AC-T7.4.1, CV8 (R03: a bound derived, never picked): the keeper holds a holder's name to a bound, which on this machine
-/// is the longest name its runners say in their hellos. Do make a world of three runners; expect its keeper's name bound
-/// to be its longest runner's name.
+/// is the longest name its runners say in their hellos. Do make a world of the most runners the suite runs
+/// ([`RETIRING`]); expect its keeper's name bound to be its longest runner's name.
 #[test]
 fn the_keepers_name_bound_is_its_runners_longest_name() {
-    let world = World::new(0, 3, None).unwrap();
+    let world = World::new(0, RETIRING, true, None).unwrap();
     let longest = world.runners.iter().map(|r| r.name.len()).max().unwrap();
     assert_eq!(world.budget.name_bytes, longest);
 }
 
-/// AC-T7.4.1, CV8 (R03: a bound derived, never picked): the most reservations a runner holds is how many runs of the
-/// generator's smallest charge the room holds, in the dimension that holds fewest. Do compute it from the room and the
-/// charge's steps; expect the bound the keeper and every holder take.
+/// AC-T7.4.1, joint plan step 13, CV8 (ROOT, 2026-11-14: the protocol's own bound wins): a runner's reservation bound is
+/// as many runs of the smallest recorded charge as the room holds in its fewest dimension, but never more than one sync
+/// carries. Do read the room and the smallest recorded charge; expect the bound the smaller of the two, here the sync's.
 #[test]
-fn a_runners_reservation_bound_is_the_smallest_charges_that_fill_the_room() {
-    let fits = (ROOM.cpu_milli / CHARGE_CPU).min(ROOM.mem_bytes / CHARGE_MEM);
-    assert_eq!(RESERVATIONS, usize::try_from(fits).unwrap());
+fn a_runners_reservation_bound_is_the_protocols_own() {
+    let smallest = run_charges().iter().copied().reduce(Amounts::min).unwrap();
+    let fits = (ROOM.cpu_milli / smallest.cpu_milli).min(ROOM.mem_bytes / smallest.mem_bytes);
+    let most = hex_core::capacity::most_held().unwrap();
+    assert_eq!(
+        reservations().unwrap(),
+        usize::try_from(fits).unwrap().min(most)
+    );
+    assert_eq!(
+        reservations().unwrap(),
+        most,
+        "the room holds fewer: {fits}"
+    );
+}
+
+/// AC-T7.4.1, joint plan step 13 (ROOT, 2026-11-14: a leg below kiln's resolution is that unit, never 0, never dropped):
+/// a recorded leg's need is measured to a resolution, a milli-core (the trace's unit) and a 4 KiB page, of which every
+/// peak RSS kiln measured is a whole number. Do read kiln's export and every leg of the trace made from it; expect each
+/// of the export's 3,750 measured peak RSSs whole pages, the trace's legs below the resolution counted, and every charge
+/// the runners draw at least one unit in each dimension, one for each leg. (A leg kiln didn't measure takes its job's
+/// median, between two measured ones for an even count: `kiln_workload.md`.) A charge of nothing is the keeper's own
+/// edge case, refused Why::Empty (hex-api's capacity tests), which no recorded charge asks.
+#[test]
+fn a_recorded_legs_need_is_whole_units_of_its_resolution() {
+    let export: serde_json::Value = serde_json::from_reader(flate2::read::GzDecoder::new(
+        std::fs::File::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../bench/sched/kiln-ci-20261022-20261105.export.json.gz"
+        ))
+        .unwrap(),
+    ))
+    .unwrap();
+    let measured: Vec<u64> = export["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|run| run["jobs"].as_array().unwrap())
+        .filter(|job| job["started_at"].is_u64() && job["finished_at"].is_u64())
+        .filter_map(|job| job["peak_rss"].as_u64())
+        .collect();
+    assert_eq!(measured.len(), 3_750);
+    assert!(measured.iter().all(|m| m % RESOLUTION.mem_bytes == 0));
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/sched/kiln-ci-20261022-20261105.trace"
+    ))
+    .unwrap();
+    let legs: Vec<Amounts> = text.lines().filter_map(need).collect();
+    assert_eq!(legs.len(), 4_655);
+    let below = |f: fn(&Amounts) -> u64| legs.iter().filter(|l| f(l) == 0).count();
+    assert_eq!((below(|l| l.cpu_milli), below(|l| l.mem_bytes)), (631, 58));
+    assert_eq!(run_charges().len(), legs.len());
+    assert!(run_charges().iter().all(|c| RESOLUTION.fits(*c)));
+}
+
+/// AC-T7.4.1, joint plan step 13 (ROOT, 2026-11-14): Hex's own boxes are the recorded fleet's `oci` legs. Do read them;
+/// expect each drawn as recorded, 0.3 to 3.4 cores and 128 MiB to 4 GiB.
+#[test]
+fn hex_boxes_are_the_recorded_fleets_oci_legs() {
+    let boxes = box_charges();
+    assert_eq!(boxes.len(), 8_432);
+    let low = boxes.iter().copied().reduce(Amounts::min).unwrap();
+    let high = boxes.iter().copied().reduce(Amounts::max).unwrap();
+    assert_eq!((low.cpu_milli, low.mem_bytes), (300, 128 << 20));
+    assert_eq!((high.cpu_milli, high.mem_bytes), (3_400, 4 << 30));
 }
