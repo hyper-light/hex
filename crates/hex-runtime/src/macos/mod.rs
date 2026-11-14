@@ -283,13 +283,13 @@ impl MacRuntime {
     /// the charge learner's window takes it for each VM the control holds. Never at the control's ceiling or past it;
     /// cold, told, until its helper has measured a hold, or where none runs. Refused where no control is configured.
     pub fn cap_cycle(&self, rate: u64) -> Result<crate::guest::CapCycle, Refusal> {
-        let (control, ceiling) = self
+        let (_, ceiling) = self
             .cpu_control
             .ok_or_else(|| managed::configuration("managed VM CPU control is not initialized"))?;
         if rate >= ceiling {
             return Ok(crate::guest::CapCycle::Never);
         }
-        cycle_of(rate, ceiling, Some(control.response))
+        cycle_of(rate, ceiling, managed::response(self)?)
     }
 
     /// Joint plan step 14 (C4 on macOS; ROOT, 2026-11-13): the least share a managed VM's CPU control holds it at, its

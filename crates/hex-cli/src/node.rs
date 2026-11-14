@@ -686,9 +686,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     let managed = guest_config
         .as_ref()
         .filter(|_| !under_shards_init)
-        .map(|inputs| managed_control(inputs, &model))
-        .transpose()
-        .map_err(failed)?;
+        .map(managed_control);
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
         .map_err(failed)?;
     let catalog = hex_runtime::devices::shared_catalog(
@@ -1068,38 +1066,18 @@ fn configured_guest(
     Ok(Some(guest))
 }
 
-/// AC-T7.4.1: a managed VM on macOS runs only under its measured CPU control. The response is the cost
-/// evidence's row for this host class (the same evidence the cost id hashes); a host with none is
-/// refused, typed, naming the evidence it lacks. Nothing is defaulted.
+/// AC-T7.4.1: a managed VM on macOS runs only under its CPU control, which its persistent helper runs at the stop
+/// response it learns from its own holds, probing at its first (joint plan step 14, 2c; the review's A-14): the node
+/// sends the cold control, never a census row's response, which would be a record seed (ROOT, 2026-11-13), and takes
+/// its control's cycle from what its helper learned (`MacRuntime::cap_cycle`).
 #[cfg(target_os = "macos")]
 fn managed_control(
     inputs: &hex_runtime::guest::GuestInputs,
-    model: &str,
-) -> Result<(hex_runtime::macos::CpuControl, hex_api::RuntimeCost), Refusal> {
-    let row = inputs
-        .cpu_responses
-        .iter()
-        .find(|row| row.host == model)
-        .ok_or_else(|| {
-            let mut id = String::new();
-            for byte in inputs.cost.id {
-                use std::fmt::Write as _;
-                let _ = write!(id, "{byte:02x}");
-            }
-            Refusal::Invalid {
-                what: "managed VM CPU response evidence",
-                why: format!(
-                    "cost evidence {id} has no measured CPU-response row for host class {model}"
-                ),
-            }
-        })?;
-    Ok((
-        hex_runtime::macos::CpuControl {
-            cost_id: inputs.cost.id,
-            response: row.response(),
-        },
+) -> (hex_runtime::macos::CpuControl, hex_api::RuntimeCost) {
+    (
+        hex_runtime::macos::CpuControl::cold(inputs.cost.id),
         inputs.cost,
-    ))
+    )
 }
 
 /// The macOS runtime with its measured CPU control and its persistent managed-VM owner: this same
@@ -1371,7 +1349,7 @@ mod tests {
                 cpu_responses: rows,
             };
             assert_eq!(
-                managed_control(&inputs, "Mac15,1").unwrap(),
+                managed_control(&inputs),
                 (hex_runtime::macos::CpuControl::cold(cost.id), cost),
                 "{} rows",
                 inputs.cpu_responses.len()

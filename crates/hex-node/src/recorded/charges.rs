@@ -2609,8 +2609,9 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
                 Ok(match held {
                     hex_api::RateHeld::Platform(why) => match io.cap_cycle(cap.share)? {
                         CapCycle::Of(cycle) => (hex_api::RateHeld::Platform(why), Some(cycle)),
-                        CapCycle::Never | CapCycle::Cold(_) => {
-                            (hex_api::RateHeld::Platform(why), None)
+                        CapCycle::Never => (hex_api::RateHeld::Platform(why), None),
+                        CapCycle::Cold(cold) => {
+                            (hex_api::RateHeld::Platform(format!("{why}; {cold}")), None)
                         }
                     },
                     held => (held, None),
