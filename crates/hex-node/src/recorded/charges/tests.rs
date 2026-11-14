@@ -121,112 +121,104 @@ struct Record {
 
 impl Managed for Record {
     fn usage(&self, holder: Holder<'_>) -> Result<Usage, Refusal> {
-        let Holder::Box(record) = holder;
         self.usage
             .borrow()
-            .get(record.spec.id.as_str())
+            .get(&named(holder))
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
     }
 
     fn guest_time(&self, holder: Holder<'_>) -> Result<ManagedGuestTime, Refusal> {
-        let Holder::Box(record) = holder;
         Ok(self
             .guest
             .borrow()
-            .get(record.spec.id.as_str())
+            .get(&named(holder))
             .cloned()
             .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
     }
 
     fn life(&self, holder: Holder<'_>) -> Result<Duration, Refusal> {
-        let Holder::Box(record) = holder;
         self.lives
             .borrow()
-            .get(record.spec.id.as_str())
+            .get(&named(holder))
             .copied()
             .ok_or_else(|| Refusal::Broken("no life set".into()))
     }
 
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal> {
-        let Holder::Box(record) = holder;
         self.host
             .borrow()
-            .get(record.spec.id.as_str())
+            .get(&named(holder))
             .cloned()
             .ok_or_else(|| Refusal::Broken("no such VM".into()))
     }
 
     fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal> {
-        let Holder::Box(record) = holder;
-        if self
-            .unread_periods
-            .borrow()
-            .iter()
-            .any(|name| name == record.spec.id.as_str())
-        {
+        let name = named(holder);
+        if self.unread_periods.borrow().contains(&name) {
             return Err(Refusal::Broken("its run's period unread".into()));
         }
-        if !running_image(record) {
-            return Ok(self.governed.borrow().get(record.spec.id.as_str()).copied());
+        if !holder.image() {
+            return Ok(self.governed.borrow().get(&name).copied());
         }
         Ok(Some(
-            self.periods
-                .borrow()
-                .get(record.spec.id.as_str())
-                .copied()
-                .unwrap_or(WINDOW),
+            self.periods.borrow().get(&name).copied().unwrap_or(WINDOW),
         ))
     }
 
     fn set_room(&self, holder: Holder<'_>, room: i64) -> Result<(), Refusal> {
-        let Holder::Box(record) = holder;
-        self.rooms
-            .borrow_mut()
-            .push((record.spec.id.as_str().to_owned(), room));
+        self.rooms.borrow_mut().push((named(holder), room));
         Ok(())
     }
 
     fn set_rate(&self, holder: Holder<'_>, cap: Cap<'_>) -> Result<hex_api::RateHeld, Refusal> {
-        let Holder::Box(record) = holder;
         if self.refuse_rates.get() {
             return Err(Refusal::Broken("the rate was refused".into()));
         }
-        let name = record.spec.id.as_str().to_owned();
+        let name = named(holder);
         self.rates.borrow_mut().push((name.clone(), cap.share));
         let own = match cap.own {
             Own::Read(own) => Ok(own),
             Own::Unheld(why) => Err(why.to_owned()),
         };
-        self.caps.borrow_mut().push((name, cap.share, own));
+        self.caps.borrow_mut().push((name.clone(), cap.share, own));
         Ok(self
             .held
             .borrow()
-            .get(record.spec.id.as_str())
+            .get(&name)
             .cloned()
             .unwrap_or(hex_api::RateHeld::Governor))
     }
 
     fn stop(&self, holder: Holder<'_>) -> Result<(), Refusal> {
-        let Holder::Box(record) = holder;
-        self.stops
-            .borrow_mut()
-            .push(record.spec.id.as_str().to_owned());
-        self.events
-            .borrow_mut()
-            .push(format!("stop {}", record.spec.id));
+        let name = named(holder);
+        self.events.borrow_mut().push(format!("stop {name}"));
+        self.stops.borrow_mut().push(name);
         Ok(())
     }
 
     fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         self.events
             .borrow_mut()
-            .push(format!("intend {}", box_of(id)));
+            .push(format!("intend {}", holder_name(id)));
         match self.records.borrow().as_ref() {
             Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
         }
     }
+}
+
+/// The name a VM goes by in these tests: a box's id, a node VM's `node-<n>` for its run of byte `n`.
+fn holder_name(holder: &LearnedHolder) -> String {
+    match holder {
+        LearnedHolder::Box(id) => id.as_str().to_owned(),
+        LearnedHolder::Node(run) => format!("node-{}", run.bytes()[0]),
+    }
+}
+
+/// The name `holder` goes by in these tests ([`holder_name`]).
+fn named(holder: Holder<'_>) -> String {
+    holder_name(&holder.id().unwrap())
 }
 
 impl Record {
@@ -1229,6 +1221,11 @@ struct Imaging {
     sim: hex_api::sim::SimRuntime,
     periods: std::sync::Mutex<BTreeMap<String, Duration>>,
     reads: std::sync::atomic::AtomicUsize,
+    /// Each node VM's run's rate period, as the test sets it (D247): none for one it doesn't run.
+    node_periods: std::sync::Mutex<BTreeMap<hex_api::NodeRun, Duration>>,
+    /// Each node VM's host use read, and each rate its run was held to, in order.
+    node_reads: std::sync::atomic::AtomicUsize,
+    node_rates: std::sync::Mutex<Vec<(hex_api::NodeRun, u64)>>,
 }
 
 #[derive(Clone, Default)]
@@ -1313,6 +1310,40 @@ impl crate::recorded::Recover for Images {
     }
     fn end(&self, _: Option<ProcId>) -> Result<(), Refusal> {
         Ok(())
+    }
+    /// Its run's use as it reads first: nothing run yet, a GiB held, over the life it has had, one of its periods.
+    fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<HostUse, Refusal> {
+        self.0
+            .node_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(HostUse {
+            cpu_ns: 0,
+            footprint_bytes: GIB,
+            resident_bytes: GIB,
+            guest_ns: Vec::new(),
+            window: self.node_vm_rate_period(run)?,
+        })
+    }
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Duration, Refusal> {
+        self.0
+            .node_periods
+            .lock()
+            .unwrap()
+            .get(&run)
+            .copied()
+            .ok_or_else(|| Refusal::Broken("a node VM this runtime doesn't run".into()))
+    }
+    fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.0
+            .node_rates
+            .lock()
+            .unwrap()
+            .push((run, rate.map_or(0, std::num::NonZeroU64::get)));
+        Ok(rate)
     }
     fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
         self.0
@@ -1829,6 +1860,7 @@ fn node_row(n: u8, phase: hex_api::NodeVmPhase) -> hex_core::record::NodeVmRecor
             None
         },
         last_resort: None,
+        started: None,
     }
 }
 
@@ -1944,5 +1976,155 @@ fn w39_a_node_with_no_node_vm_end_on_record_says_so_at_start() {
     assert_eq!(
         recovered.node_vm_ends.to_string(),
         "node VM: no last-resort end on record"
+    );
+}
+
+/// Joint plan step 39, place 3 (ROOT, 2026-11-13: a node VM's band is what ending it ends): do derive a node VM's band
+/// from its node's records of oci boxes in bands 1 and 3, one of band 7 whose run ended and a process box of band 9;
+/// then with a record that can't be read beside them; then from no record. Expect band 3, the highest of the boxes it
+/// runs; then the highest band there is, as a box it runs may be of any band; then band 0, as ending it ends no box.
+#[test]
+fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
+    let boxed =
+        |name: &str, class: ClassSpec, band: u8, ended: bool| -> Result<BoxRecord, String> {
+            let mut record = BoxRecord::new(
+                BoxSpec {
+                    id: BoxId::new(name).unwrap(),
+                    bounds: hex_api::Bounds::default(),
+                    class,
+                    owner: None,
+                    devices: Vec::new(),
+                    allocation: None,
+                    route: None,
+                    band,
+                },
+                Phase::Ready,
+                Vec::new(),
+            );
+            if ended {
+                record.exit = Some(hex_api::Exit::Code(0));
+            }
+            Ok(record)
+        };
+    let oci = || {
+        ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: hex_api::Rootfs::Dir(std::path::PathBuf::from("/images/agent")),
+            init: hex_api::Program::of(&["/bin/true"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        }))
+    };
+    let mut records = vec![
+        boxed("oci-1", oci(), 1, false),
+        boxed("oci-3", oci(), 3, false),
+        boxed("oci-7", oci(), 7, true),
+        boxed("proc-9", ClassSpec::Process, 9, false),
+    ];
+    assert_eq!(node_band(&records), 3);
+    records.push(Err("torn".to_owned()));
+    assert_eq!(node_band(&records), u8::MAX);
+    assert_eq!(node_band(&Vec::<Result<BoxRecord, String>>::new()), 0);
+}
+
+/// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is capped through its run's rate, D247, told
+/// Governor): a node whose guest is a node VM under shards-init learns that VM as it learns an image VM, over its run's
+/// period, and holds it through its run's rate. Do open a node whose platform holds no window, keep its node VM's row
+/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, and a process box capped at all but 6 CPUs of the
+/// machine; start its charge learner, run a window, and answer the Shards class. Expect the node VM's host use read, its
+/// run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer naming its holding and its
+/// rate held by its governor, by its run.
+#[test]
+fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    let booked = |phase| {
+        let mut row = node_row(7, phase);
+        row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+        row
+    };
+    store
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    let machine = node.machine().unwrap();
+    let cap = u32::try_from(machine.cpu_milli.saturating_sub(6_000)).unwrap();
+    let capped = BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new("proc-1").unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(cap),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+            band: 0,
+        },
+        Phase::Ready,
+        Vec::new(),
+    );
+    store.put(&capped).unwrap();
+    node.start_charges().unwrap();
+    assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
+    assert!(
+        images
+            .0
+            .node_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0,
+        "its host use read"
+    );
+    let rates = images.0.node_rates.lock().unwrap().clone();
+    assert!(
+        matches!(rates.as_slice(), [(run, rate)] if *run == node_run(7) && *rate < 16_000),
+        "{rates:?}"
+    );
+    let mut capacity = hex_api::Capacity {
+        own: Default::default(),
+        id: "shards".into(),
+        total: machine,
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+    };
+    node.books
+        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .unwrap();
+    let learned = capacity.learned.unwrap();
+    assert!(
+        learned
+            .holdings
+            .iter()
+            .any(|holding| holding.id == hex_api::LearnedHolder::Node(node_run(7))),
+        "{:?}",
+        learned.holdings
+    );
+    assert_eq!(
+        learned.rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Node(node_run(7)),
+            held: hex_api::RateHeld::Governor,
+        }]
     );
 }
