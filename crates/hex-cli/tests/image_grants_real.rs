@@ -624,12 +624,65 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
 
 /// The probe's arguments for three targets: a listener of this test's, a port nothing holds and a name RFC 6761 §6.4
 /// reserves as never resolving, the probe listening at the host's loopback on a port the OS picks.
-/// The closed target's port: a listener of this test's, held while the probe binds its own listener (port 0) and let go
-/// (dropped) only just before the probe connects to its targets, so the probe's listener can't be given that port. A
-/// port let go at once could be (goal 5's r878 on Linux: the closed target answered connected). Held without listening
-/// it would do no better: macOS drops a connection to a port bound but not listening, so it times out, never refused.
+/// The closed target's port: a listener of this test's on a port below the range this host gives a connection's source
+/// port and a bind to port 0 from ([`ephemeral_first`]), held while the probe binds its own listener and let go
+/// (dropped) just before the probe connects to its targets. No bind to port 0 is given it, the probe's own listener's
+/// among them, and no connection takes it as its source port and meets itself: a port from bind(0) let go could be
+/// both (goal 5's r878 on Linux; ROOT's macOS gate at 45fc1605, where the probe's connection was given the port just let
+/// go, the one after its open target's, and met itself: "closed connected"). Held without listening it would do no
+/// better: macOS drops a connection to a port bound but not listening, so it times out, never refused.
 fn closed_port() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").unwrap()
+    // Each port picked once in this process, so a test running beside another never binds the port the other let go
+    // for its probe to find closed.
+    static PICKED: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = ephemeral_first();
+    let mut picked = PICKED.lock().unwrap();
+    let listener = (1..first)
+        .rev()
+        .filter(|port| !picked.contains(port))
+        .find_map(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok())
+        .unwrap_or_else(|| panic!("no port below this host's ephemeral range, {first}, is free"));
+    picked.insert(listener.local_addr().unwrap().port());
+    listener
+}
+
+/// The first port of the range this host gives a connection's source port and a bind to port 0 from, as its OS is
+/// configured: Linux's `net.ipv4.ip_local_port_range`, macOS's `net.inet.ip.portrange.first`, Windows' TCP dynamic port
+/// range.
+fn ephemeral_first() -> u16 {
+    #[cfg(target_os = "linux")]
+    let said = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    #[cfg(target_os = "macos")]
+    let said = String::from_utf8(
+        std::process::Command::new("sysctl")
+            .args(["-n", "net.inet.ip.portrange.first"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    #[cfg(windows)]
+    let said = {
+        let shown = String::from_utf8(
+            std::process::Command::new("netsh")
+                .args(["int", "ipv4", "show", "dynamicport", "tcp"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        shown
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Start Port"))
+            .and_then(|rest| rest.split(':').nth(1))
+            .unwrap_or_else(|| panic!("netsh shows no TCP start port: {shown}"))
+            .to_owned()
+    };
+    said.split_whitespace()
+        .next()
+        .and_then(|first| first.parse().ok())
+        .unwrap_or_else(|| panic!("no first ephemeral port in {said:?}"))
 }
 
 fn three_targets(open: &TcpListener, closed: &TcpListener) -> Vec<std::ffi::OsString> {

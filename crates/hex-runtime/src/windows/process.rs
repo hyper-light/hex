@@ -234,10 +234,9 @@ impl JobBox {
             .allocation()
             .ok_or_else(|| super::pending("VM allocation is absent"))?;
         allocation.guest()?;
-        if record.class()? != Class::Shards
-            || bounds.memory_max != Some(allocation.resources.mem_bytes)
-            || bounds.cpu_max_milli.map(u64::from) != Some(allocation.resources.cpu_milli)
-        {
+        // Its bounds are exactly what its allocation gives a VM's host (`managed::host_bounds`): its CPU, and no commit
+        // limit since ruling B (A-4), which left this check asking for its guest's RAM and refusing every VM.
+        if record.class()? != Class::Shards || bounds != super::managed::host_bounds(record)? {
             return Err(super::pending(
                 "VM native bounds differ from its allocation",
             ));

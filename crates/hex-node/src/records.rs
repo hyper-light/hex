@@ -196,11 +196,9 @@ impl Records for Files {
                 .map_err(io("writing a temp record"))?;
             f.sync_all().map_err(io("flushing a temp record"))?;
         }
-        // Windows publishes it with write-through (MoveFileExW, `replace_durable`), as the node's store does (D-1).
-        #[cfg(windows)]
-        hex_runtime::windows::sys::replace_durable(&temp, &record)
-            .map_err(io("renaming a record into place"))?;
-        #[cfg(not(windows))]
+        // std's rename, on Windows a POSIX-semantics rename that replaces a record a reader holds open (MoveFileExW's
+        // write-through move refuses it "Access is denied": ROOT's Windows host, records_are_written_whole_and_replaced_
+        // by_rename_on_every_os); its folder's flush, below, makes it outlive the host (D-1).
         fs::rename(&temp, &record).map_err(io("renaming a record into place"))?;
         self.sync_dir()
     }
