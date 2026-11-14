@@ -1813,8 +1813,9 @@ impl ImageClass {
             .records()?
             .remove(id)
             .map(|record| {
-                record
-                    .map_err(|_| Refusal::Broken("a Shards image VM's record is unreadable".into()))
+                record.map_err(|why| {
+                    Refusal::Broken(format!("a Shards image VM's record is unreadable: {why}"))
+                })
             })
             .transpose()
     }

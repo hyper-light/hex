@@ -294,7 +294,12 @@ impl FirecrackerRuntime {
         let native = self.native(record, transaction)?;
         if native
             .terminal()
-            .map_err(|_| uncertain(&record.spec.id, "its managed VM's end can't be read"))?
+            .map_err(|why| {
+                uncertain(
+                    &record.spec.id,
+                    &format!("its managed VM's end can't be read: {why}"),
+                )
+            })?
             .is_some()
         {
             return Err(Refusal::NotRunning(
@@ -598,11 +603,11 @@ impl FirecrackerRuntime {
         let began = Instant::now();
         native
             .stop()
-            .map_err(|_| uncertain(&id, "its managed VM's stop was refused"))?;
+            .map_err(|why| uncertain(&id, &format!("its managed VM's stop was refused: {why}")))?;
         // Its stop's own wait (managed.stop; decision 9): past the slowest stop seen, its scope followed by its life to
         // its end, never refused at a configured time (A-13: census retirement at a node's start stops VMs this way).
         let end = crate::guest::wait_stopped(&*native, began)
-            .map_err(|_| uncertain(&id, "its managed VM's end can't be read"))?
+            .map_err(|why| uncertain(&id, &format!("its managed VM's end can't be read: {why}")))?
             .ok_or(uncertain(
                 &id,
                 "its managed VM's scope hasn't been released",
@@ -746,7 +751,12 @@ impl FirecrackerRuntime {
             let native = self.native(&record, transaction)?;
             if native
                 .terminal()
-                .map_err(|_| uncertain(&expected.id, "its managed VM's end can't be read"))?
+                .map_err(|why| {
+                    uncertain(
+                        &expected.id,
+                        &format!("its managed VM's end can't be read: {why}"),
+                    )
+                })?
                 .is_some()
             {
                 return Ok(());
@@ -785,15 +795,18 @@ impl FirecrackerRuntime {
                 "its record isn't a Firecracker box's with a native scope",
             ));
         }
-        self.config.guest(&record.spec).map_err(|_| {
+        self.config.guest(&record.spec).map_err(|why| {
             uncertain(
                 &record.spec.id,
-                "its record's Firecracker guest can't be built",
+                &format!("its record's Firecracker guest can't be built: {why}"),
             )
         })?;
-        self.config
-            .machine_memory(&record.spec)
-            .map_err(|_| uncertain(&record.spec.id, "its record's machine memory can't be read"))?;
+        self.config.machine_memory(&record.spec).map_err(|why| {
+            uncertain(
+                &record.spec.id,
+                &format!("its record's machine memory can't be read: {why}"),
+            )
+        })?;
         let paths = self.paths(record)?;
         if record.dirs.iter().any(|owned| owned != &paths.dir) {
             return Err(uncertain(
@@ -1227,7 +1240,8 @@ impl FirecrackerRuntime {
 
     pub fn recover(&self) -> Result<(), Refusal> {
         for (id, record) in self.authority()?.records()? {
-            let record = record.map_err(|_| uncertain(&id, "its record can't be read"))?;
+            let record = record
+                .map_err(|why| uncertain(&id, &format!("its record can't be read: {why}")))?;
             if !matches!(record.spec.class, ClassSpec::Firecracker(_)) {
                 continue;
             }
@@ -1415,7 +1429,9 @@ impl Runtime for FirecrackerRuntime {
                 && let Some(end) = self
                     .native(record, transaction)?
                     .terminal()
-                    .map_err(|_| uncertain(id, "its managed VM's end can't be read"))?
+                    .map_err(|why| {
+                        uncertain(id, &format!("its managed VM's end can't be read: {why}"))
+                    })?
             {
                 return Ok(BoxInfo {
                     published: Vec::new(),

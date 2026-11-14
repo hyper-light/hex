@@ -472,19 +472,33 @@ impl Store {
         // later removal or substitution cannot authorize cleanup of a different native object.
         // Native process first-exec tracing uses Store::update and does not enter this VM seam.
         let introducing = current.phase == Phase::Creating && record.phase != Phase::Deleting;
-        let init = lifecycle_fact(current.init, record.init, introducing, &record.spec.id)?;
-        let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
-        let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
-        let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        let init = lifecycle_fact(
+            "init",
+            current.init,
+            record.init,
+            introducing,
+            &record.spec.id,
+        )?;
+        let slot = lifecycle_fact(
+            "slot",
+            current.slot,
+            record.slot,
+            introducing,
+            &record.spec.id,
+        )?;
+        let run = lifecycle_fact("run", current.run, record.run, introducing, &record.spec.id)?;
+        let exit = lifecycle_fact("exit", current.exit, record.exit, true, &record.spec.id)?;
         // A run's words where it failed (D249) and how its microVM started (D253) are facts as its exit is, a Shards
         // image VM's written through here (joint plan step 12).
         let ended = lifecycle_fact(
+            "ended",
             current.ended.take(),
             record.ended.clone(),
             true,
             &record.spec.id,
         )?;
         let started_from = lifecycle_fact(
+            "started_from",
             current.started_from,
             record.started_from,
             true,
@@ -492,6 +506,7 @@ impl Store {
         )?;
         // The file its run host's diagnostics are kept in (D258), named with its start's intent alone.
         let diagnostics = lifecycle_fact(
+            "diagnostics",
             current.diagnostics.take(),
             record.diagnostics.clone(),
             introducing,
@@ -500,6 +515,7 @@ impl Store {
         // Scope is introduced only by write_fresh before the first canonical publication. An old
         // legacy row can never gain authority over an already-alive native scope by an update.
         let native_scope = lifecycle_fact(
+            "native_scope",
             current.native_scope,
             record.native_scope,
             false,
@@ -1124,6 +1140,7 @@ fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
 
 /// A stale absence preserves an observed fact; two different positive facts are uncertainty.
 fn lifecycle_fact<T: PartialEq>(
+    fact: &str,
     current: Option<T>,
     proposed: Option<T>,
     introducing: bool,
@@ -1132,11 +1149,13 @@ fn lifecycle_fact<T: PartialEq>(
     match (current, proposed) {
         (Some(known), Some(other)) if known != other => Err(uncertain(
             id,
-            "its record holds another value of a fact once written",
+            &format!("its record's {fact} differs from the one put, a fact once written"),
         )),
         (None, Some(_)) if !introducing => Err(uncertain(
             id,
-            "a write would introduce a fact its record lacks outside the write that introduces it",
+            &format!(
+                "a write would introduce its {fact}, which its record lacks, outside the write that introduces it"
+            ),
         )),
         (Some(known), _) => Ok(Some(known)),
         (None, next) => Ok(next),
@@ -1552,9 +1571,9 @@ mod tests {
             ..written.clone()
         }));
         assert!(
-            another
-                .to_string()
-                .ends_with(": its record holds another value of a fact once written"),
+            another.to_string().ends_with(
+                ": its record's started_from differs from the one put, a fact once written"
+            ),
             "{another}"
         );
         let versioned = said(store.put_lifecycle(&BoxRecord {
