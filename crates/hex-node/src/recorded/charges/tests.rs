@@ -113,7 +113,8 @@ struct Record {
     governed: RefCell<BTreeMap<String, Duration>>,
     /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
     cycle: std::cell::Cell<Option<Duration>>,
-    /// Why that cycle is cold, where the test says it is (2c-4b): its helper has measured no stop.
+    /// Why that cycle is cold, where the test says it is: with no cycle, its helper has measured no stop (2c-4b); with
+    /// one, it is at a cold estimate, used (the review's A-14).
     cold: RefCell<Option<String>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
@@ -223,10 +224,15 @@ impl Managed for Record {
     }
 
     fn cap_cycle(&self, _: u64) -> Result<CapCycle, Refusal> {
-        if let Some(cold) = self.cold.borrow().as_ref() {
-            return Ok(CapCycle::Cold(cold.clone()));
-        }
-        Ok(self.cycle.get().map_or(CapCycle::Never, CapCycle::Of))
+        Ok(match (self.cycle.get(), self.cold.borrow().as_ref()) {
+            (Some(cycle), Some(why)) => CapCycle::ColdOf {
+                cycle,
+                why: why.clone(),
+            },
+            (None, Some(why)) => CapCycle::Cold(why.clone()),
+            (Some(cycle), None) => CapCycle::Of(cycle),
+            (None, None) => CapCycle::Never,
+        })
     }
 
     fn least(&self, holder: Holder<'_>) -> u64 {
@@ -2773,6 +2779,60 @@ fn w14_2c4b_a_cold_cap_cycle_is_told_on_its_vms_rate() {
             id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
             held: hex_api::RateHeld::Platform(
                 "its VM process takes no rate; its helper has measured no stop".to_owned()
+            ),
+        }]
+    );
+}
+
+/// The review's A-14 (ROOT, 2026-11-14; AC-T7.4.1): a VM its platform's cap holds, whose cap's cycle is at a cold
+/// estimate (its helper's slowest stop, too few holds to have seen their p99.9), has that cycle taken into the learner's
+/// window, and what holds its rate says it is cold. Do run a window of a managed VM whose process takes no rate, so its
+/// platform's cap holds it, on a learner whose platform's cap's cycle is 2 s at a cold estimate; then answer the class's
+/// capacity. Expect the next window 2 s, told naming the VM, and its rate told held by its platform's cap, naming why
+/// its cycle is cold.
+#[test]
+fn a14_a_cold_estimates_cycle_sets_the_window_and_is_told_on_its_vms_rate() {
+    let io = Record::default();
+    let held = vm("vm-2", 2);
+    io.set("vm-2", 0, GIB);
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    io.cycle.set(Some(Duration::from_secs(2)));
+    *io.cold.borrow_mut() = Some("its helper's slowest stop, not their p99.9".to_owned());
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&held)),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(learner.next_window(), Some(Duration::from_secs(2)));
+    let learned = learner
+        .learned(
+            Class::Shards,
+            &[cost()],
+            &holders(std::slice::from_ref(&held)),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.window,
+        Some(hex_api::LearnedWindow {
+            window_ns: 2_000_000_000,
+            slowed_by: Some(LearnedHolder::Box(BoxId::new("vm-2").unwrap())),
+        })
+    );
+    assert_eq!(
+        learned.rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            held: hex_api::RateHeld::Platform(
+                "its VM process takes no rate; its helper's slowest stop, not their p99.9"
+                    .to_owned()
             ),
         }]
     );

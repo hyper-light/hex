@@ -106,7 +106,7 @@ pub(super) struct Scope {
 
 impl Scope {
     /// A managed scope under `control`'s cost, its CPU control starting from `response`, the helper's own (joint plan
-    /// step 14, 2c; ROOT, 2026-11-13): the slowest stop it has seen, the cold one before any. The launch's response field
+    /// step 14, 2c; the review's A-14): its estimate from its holds, the cold one before any. The launch's response field
     /// is kept for helpers that predate learning and read here by none.
     pub(super) fn new(
         record: NativeRecord<'_>,
@@ -381,15 +381,21 @@ impl Scope {
             .map_err(|_| self.uncertain(id, "its CPU control is poisoned as its run-out is read"))?
             .ran_out())
     }
-    /// A hold's measured response, from its credit's running out to its members' stop (joint plan step 14, 2c): its
-    /// control's slowest seen rises to it, its hold topped up (`cpu::Budget::learn`).
-    pub(super) fn cpu_learn(&self, id: OwnerRef<'_>, response: Duration) -> Result<(), Refusal> {
+    /// A hold's measured response, from its credit's running out to its members' stop, and the helper's estimate after
+    /// it (joint plan step 14, 2c; the review's A-14): its hold charged its overshoot, its burst the estimate's
+    /// (`cpu::Budget::learn`).
+    pub(super) fn cpu_learn(
+        &self,
+        id: OwnerRef<'_>,
+        response: Duration,
+        estimate: Duration,
+    ) -> Result<(), Refusal> {
         self.cpu
             .as_ref()
             .ok_or_else(|| self.uncertain(id, "its native scope has no CPU control to learn on"))?
             .lock()
             .map_err(|_| self.uncertain(id, "its CPU control is poisoned as it learns"))?
-            .learn(response)
+            .learn(response, estimate)
             .map_err(|_| self.uncertain(id, "its CPU control refused a learned response"))
     }
     /// Its control's burst, the most it runs past a stop, in milli-CPU nanoseconds (2c's tests).
@@ -917,8 +923,11 @@ pub(super) fn set_rate(
 ) -> Result<(), Refusal> {
     remote::set_rate(runtime, record, rate)
 }
-/// The stop response the node's managed helper learned from its holds (2c-4b): none before its first, or with no helper.
-pub(super) fn response(runtime: &MacRuntime) -> Result<Option<std::time::Duration>, Refusal> {
+/// The stop response the node's managed helper estimates from its holds (2c-4b; the review's A-14): none before its
+/// first, or with no helper.
+pub(super) fn response(
+    runtime: &MacRuntime,
+) -> Result<Option<hex_core::helper::managed::response::Estimate>, Refusal> {
     remote::response(runtime)
 }
 pub(super) fn finalize(
