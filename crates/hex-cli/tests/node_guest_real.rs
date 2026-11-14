@@ -839,7 +839,7 @@ mod kvm {
         keep_guest(&shards, work);
         let image = node_image(&shards, hex, work);
         let (home, cache) = shards_dirs(&work.join("state"));
-        let provider = shards_api::Shards::configured(home, cache).unwrap();
+        let provider = shards_api::Shards::configured(cache, home).unwrap();
         let paths = provider.runtime_paths().try_clone().unwrap();
         let runtime =
             hex_node::images::ImageRuntime::new(shards, paths, &work.join("records")).unwrap();
