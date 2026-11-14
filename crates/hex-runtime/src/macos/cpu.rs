@@ -20,28 +20,64 @@ pub(super) const SEEDABLE: usize = 1_000;
 /// never the estimate, and every stop leaves it [`SEEDABLE`] holds later: the slowest seen held one for good.
 #[derive(Debug)]
 pub(super) struct Responses {
-    /// Red (the review's A-14): the slowest seen, only rising, as it was.
-    slowest: Option<u64>,
+    /// In nanoseconds, in the order they came; once full, the next overwrites the oldest, at `next`.
+    ring: Vec<u64>,
+    next: usize,
+    /// The same, in order of size: the estimate is read off it by its rank.
+    sorted: Vec<u64>,
 }
 
 impl Responses {
+    /// None yet: room for [`SEEDABLE`] made now, so no hold allocates.
     pub(super) fn new() -> Result<Self, std::collections::TryReserveError> {
-        Ok(Self { slowest: None })
+        let mut ring = Vec::new();
+        ring.try_reserve_exact(SEEDABLE)?;
+        let mut sorted = Vec::new();
+        sorted.try_reserve_exact(SEEDABLE)?;
+        Ok(Self {
+            ring,
+            next: 0,
+            sorted,
+        })
     }
 
+    /// A hold's measured `response`, the oldest leaving once [`SEEDABLE`] are kept: the estimate after it. Refused for a
+    /// response of no time, as [`Budget::new`] refuses one.
     pub(super) fn observe(&mut self, response: Duration) -> Result<Estimate, Failure> {
         let nanos = u64::try_from(response.as_nanos()).map_err(|_| Failure::Arithmetic)?;
         if nanos == 0 {
             return Err(Failure::Envelope);
         }
-        self.slowest = Some(self.slowest.map_or(nanos, |seen| seen.max(nanos)));
+        if self.ring.len() < SEEDABLE {
+            self.ring.push(nanos);
+        } else {
+            let oldest = self.ring.get_mut(self.next).ok_or(Failure::Transition)?;
+            // The order holds every response the ring does, the oldest among them.
+            let at = self
+                .sorted
+                .binary_search(oldest)
+                .map_err(|_| Failure::Transition)?;
+            self.sorted.remove(at);
+            *oldest = nanos;
+            self.next = self
+                .next
+                .checked_add(1)
+                .filter(|next| *next < SEEDABLE)
+                .unwrap_or(0);
+        }
+        let at = self.sorted.binary_search(&nanos).unwrap_or_else(|at| at);
+        self.sorted.insert(at, nanos);
         self.estimate().ok_or(Failure::Transition)
     }
 
+    /// Their nearest-rank p99.9, the ⌈0.999 n⌉-th fastest of n: the `n / SEEDABLE + 1`-th slowest, their slowest below
+    /// [`SEEDABLE`], cold, and their second slowest at it. None before the first.
     pub(super) fn estimate(&self) -> Option<Estimate> {
+        let n = self.sorted.len();
+        let at = n.checked_sub(1)?.checked_sub(n.checked_div(SEEDABLE)?)?;
         Some(Estimate {
-            response: Duration::from_nanos(self.slowest?),
-            cold: false,
+            response: Duration::from_nanos(*self.sorted.get(at)?),
+            cold: n < SEEDABLE,
         })
     }
 }
@@ -57,7 +93,11 @@ pub(super) enum Failure {
 enum Mode {
     Prepared,
     Running,
-    Held,
+    /// `paid`: what its hold has paid for its scope's run past its stop, in milli-CPU nanoseconds, the burst as it was
+    /// held and any overshoot charged since ([`Budget::learn`]).
+    Held {
+        paid: i128,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +194,7 @@ impl Control {
     pub(super) fn permit(&mut self) -> Result<(), Failure> {
         match self.budget.mode {
             Mode::Prepared => Err(Failure::Transition),
-            Mode::Held => self.budget.resume(),
+            Mode::Held { .. } => self.budget.resume(),
             Mode::Running => Ok(()),
         }
     }
@@ -240,18 +280,17 @@ impl Budget {
     /// its next hold pays, becomes the maximum over the estimate, falling as it does. Refused for a response or an
     /// estimate of no time, as [`Budget::new`] refuses one.
     pub(super) fn learn(&mut self, response: Duration, estimate: Duration) -> Result<(), Failure> {
-        // Red (the review's A-14): the slowest seen, only rising, as it was; the estimate unread.
-        let _ = estimate;
-        if response.is_zero() {
+        if response.is_zero() || estimate.is_zero() {
             return Err(Failure::Envelope);
         }
-        let burst = product(self.maximum, response)?;
-        if burst <= self.burst {
-            return Ok(());
-        }
-        if self.mode == Mode::Held {
-            let owed = burst.checked_sub(self.burst).ok_or(Failure::Arithmetic)?;
+        let ran = product(self.maximum, response)?;
+        let burst = product(self.maximum, estimate)?;
+        if let Mode::Held { paid } = self.mode
+            && ran > paid
+        {
+            let owed = ran.checked_sub(paid).ok_or(Failure::Arithmetic)?;
             self.credit = self.credit.checked_sub(owed).ok_or(Failure::Arithmetic)?;
+            self.mode = Mode::Held { paid: ran };
         }
         self.burst = burst;
         Ok(())
@@ -326,20 +365,20 @@ impl Budget {
     pub(super) fn held(&mut self) -> Result<(), Failure> {
         match self.mode {
             Mode::Prepared => return Err(Failure::Transition),
-            Mode::Held => return Ok(()),
+            Mode::Held { .. } => return Ok(()),
             Mode::Running => {}
         }
         self.credit = self
             .credit
             .checked_sub(self.burst)
             .ok_or(Failure::Arithmetic)?;
-        self.mode = Mode::Held;
+        self.mode = Mode::Held { paid: self.burst };
         Ok(())
     }
 
     /// Only full earned credit permits another pulse. Called before CONT/probing a held member.
     pub(super) fn resume(&mut self) -> Result<(), Failure> {
-        if self.mode != Mode::Held || self.credit < self.burst {
+        if !matches!(self.mode, Mode::Held { .. }) || self.credit < self.burst {
             return Err(Failure::Transition);
         }
         self.mode = Mode::Running;
@@ -349,13 +388,13 @@ impl Budget {
     pub(super) fn decision(&self) -> Result<Decision, Failure> {
         match self.mode {
             Mode::Prepared => Ok(Decision::Prepared),
-            Mode::Held if self.credit < self.burst => Ok(Decision::Hold(until(
+            Mode::Held { .. } if self.credit < self.burst => Ok(Decision::Hold(until(
                 self.burst
                     .checked_sub(self.credit)
                     .ok_or(Failure::Arithmetic)?,
                 self.rate,
             )?)),
-            Mode::Held | Mode::Running if self.credit > 0 => {
+            Mode::Held { .. } | Mode::Running if self.credit > 0 => {
                 let depletion = self
                     .maximum
                     .checked_sub(self.rate)
@@ -373,7 +412,7 @@ impl Budget {
                     .ok_or(Failure::Arithmetic)?,
                 self.rate,
             )?)),
-            Mode::Held => Err(Failure::Transition),
+            Mode::Held { .. } => Err(Failure::Transition),
         }
     }
 }

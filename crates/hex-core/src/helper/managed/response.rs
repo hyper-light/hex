@@ -10,8 +10,8 @@ const KIND: u16 = 0x0015;
 const ANSWER: u16 = 0x8013;
 /// The header alone.
 pub const MAX_MESSAGE: usize = HEADER_BYTES;
-/// The header, whether a response is estimated, and its nanoseconds.
-pub const MAX_ANSWER: usize = HEADER_BYTES + 1 + size_of::<u64>();
+/// The header, whether a response is estimated, its nanoseconds, and whether it is cold.
+pub const MAX_ANSWER: usize = HEADER_BYTES + 1 + size_of::<u64>() + 1;
 
 /// The stop response a helper's managed CPU control holds its scopes to (the review's A-14; ROOT, 2026-11-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,23 +49,24 @@ pub fn read(bytes: &[u8], fds: usize) -> Result<(u16, u64), Fault> {
 /// The answer naming `estimate`, none before the helper's first hold, whether it is cold appended after its response
 /// (A-14); a response of no time is refused, as a control's check refuses it.
 pub fn encode_answer(version: u16, id: u64, estimate: Option<Estimate>) -> Result<Vec<u8>, Fault> {
-    // Red (the review's A-14): the answer as it was, its response alone.
-    let nanos = match estimate {
+    let estimate = match estimate {
         Some(estimate) if estimate.response.is_zero() => {
             return Err(invalid("native CPU response"));
         }
-        Some(estimate) => Some(
+        Some(estimate) => Some((
             u64::try_from(estimate.response.as_nanos())
                 .map_err(|_| invalid("native CPU response"))?,
-        ),
+            estimate.cold,
+        )),
         None => None,
     };
     encode_bounded(MAX_ANSWER, |out| {
         header(out, version, ANSWER, id)?;
-        match nanos {
-            Some(nanos) => {
+        match estimate {
+            Some((nanos, cold)) => {
                 u8(out, 1)?;
-                u64(out, nanos)
+                u64(out, nanos)?;
+                u8(out, u8::from(cold))
             }
             None => u8(out, 0),
         }
@@ -92,10 +93,10 @@ pub fn read_answer(bytes: &[u8], fds: usize) -> Result<(u16, u64, Option<Estimat
         if nanos == 0 {
             return Err(invalid("native CPU response"));
         }
-        // Red (the review's A-14): a response as it was read, settled.
+        let cold = input.at() == bytes.len() || input.bool("native CPU response cold")?;
         Some(Estimate {
             response: Duration::from_nanos(nanos),
-            cold: false,
+            cold,
         })
     } else {
         None

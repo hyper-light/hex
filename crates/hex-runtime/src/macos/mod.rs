@@ -1073,10 +1073,18 @@ pub(crate) fn cycle_of(
     let (run, hold) = cpu::cycle(rate, ceiling, response.response).map_err(|_| {
         managed::configuration("the CPU control has no cycle at the rate it is asked")
     })?;
-    // Red (the review's A-14): every response settled, as it was.
-    run.checked_add(hold)
-        .map(crate::guest::CapCycle::Of)
-        .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
+    let cycle = run
+        .checked_add(hold)
+        .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))?;
+    Ok(if response.cold {
+        crate::guest::CapCycle::ColdOf {
+            cycle,
+            why: "its control's cycle is at the slowest stop its managed helper has measured, not their p99.9"
+                .to_owned(),
+        }
+    } else {
+        crate::guest::CapCycle::Of(cycle)
+    })
 }
 
 /// Joint plan step 14 (D260): how long the process that started at `started` has run: from its start, as `proc_pid_rusage`

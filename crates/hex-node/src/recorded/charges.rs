@@ -2697,10 +2697,10 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
                         CapCycle::Cold(cold) => {
                             (hex_api::RateHeld::Platform(format!("{why}; {cold}")), None)
                         }
-                        // Red (the review's A-14): taken as a settled cycle, as every one was.
-                        CapCycle::ColdOf { cycle, .. } => {
-                            (hex_api::RateHeld::Platform(why), Some(cycle))
-                        }
+                        CapCycle::ColdOf { cycle, why: cold } => (
+                            hex_api::RateHeld::Platform(format!("{why}; {cold}")),
+                            Some(cycle),
+                        ),
                     },
                     held => (held, None),
                 })
