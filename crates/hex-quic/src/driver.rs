@@ -10,6 +10,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use hex_api::lease::Wiped;
 use hex_core::lanes::{self, Kind, LaneId, Mux, Out, Why};
 use hyper_quic::rustls::{CipherSuite, NamedGroup};
 use hyper_transport::tls::CertificateDer;
@@ -221,8 +222,9 @@ struct PeerState {
     welcomed: bool,
     mux: Mux,
     conns: BTreeMap<lanes::Conn, Arc<Shared>>,
-    /// Frames each of this side's lanes holds back until the lane has room, in order.
-    waiting: BTreeMap<LaneId, VecDeque<(Kind, Vec<u8>)>>,
+    /// Frames each of this side's lanes holds back until the lane has room, in order: a control lane's wiped as it
+    /// goes ([`control_frame`]).
+    waiting: BTreeMap<LaneId, VecDeque<(Kind, Wiped)>>,
     /// Connections whose End waits for the frame in their outbox to go first.
     end_after: std::collections::BTreeSet<lanes::Conn>,
 }
@@ -636,7 +638,8 @@ impl Driver {
             return;
         };
         let shared = Arc::clone(shared);
-        let outs = state.mux.send(conn, &bytes);
+        // The frame wiped as it drops here, once the lane has it, where its connection wipes what it holds.
+        let outs = state.mux.send(conn, bytes.bytes());
         match outs {
             Ok(outs) => self.apply(peer, outs),
             Err(why) => shared.gone(why),
@@ -783,7 +786,7 @@ impl Driver {
             return;
         };
         while let Some((kind, payload)) = waiting.front() {
-            match self.ep.send_frame(peer, lane, *kind, payload) {
+            match self.ep.send_frame(peer, lane, *kind, payload.bytes()) {
                 Ok(()) => {
                     waiting.pop_front();
                 }
@@ -872,12 +875,13 @@ impl Driver {
 
     /// Queues a frame on this side's lane, after what the lane holds back; a lane with no room holds it back.
     fn send_frame(&mut self, peer: PeerId, lane: LaneId, kind: Kind, payload: Vec<u8>) {
+        let payload = control_frame(kind, payload);
         let Some(state) = self.peers.get_mut(&peer) else {
             return;
         };
         let waiting = state.waiting.entry(lane).or_default();
         if waiting.is_empty() {
-            match self.ep.send_frame(peer, lane, kind, &payload) {
+            match self.ep.send_frame(peer, lane, kind, payload.bytes()) {
                 Ok(()) => {
                     state.waiting.remove(&lane);
                     return;
@@ -897,6 +901,13 @@ impl Driver {
         }
         waiting.push_back((kind, payload));
     }
+}
+
+/// A frame's payload as the driver holds it until the transport has it: a control lane's, which carries the node's
+/// wire, whose messages may carry a lease's value or a sign-in's tokens, wiped as it goes (docs/design/credential-
+/// grants.md C7, C8; the review's E-6); the other lanes' carry no secret.
+fn control_frame(kind: Kind, payload: Vec<u8>) -> Wiped {
+    Wiped::new(payload, kind == Kind::ControlData)
 }
 
 /// Waits for a dial's answer until `deadline` (none: until the driver tells it, or ends).

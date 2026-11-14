@@ -5,7 +5,9 @@
 //! A test binary names it as its own, in its tests alone (CLAUDE.md §12):
 //! `#[cfg(test)] #[global_allocator] static WIPES: hex_testkit::wipes::Watch = hex_testkit::wipes::Watch;`
 //! A test then watches for its secret ([`watch`]), does what carries it, lets go of everything that held it, and reads
-//! how many freed blocks still held it ([`Watching::found`]), which is none where every holder wiped its copy.
+//! how many freed blocks still held it ([`Watching::found`]), which is none where every holder wiped its copy. The
+//! watch also notes the first sixteen such blocks' sizes and where in each the secret lay ([`Watching::seen`]), in
+//! atomics as it counts them, so a failing test names the copies it found.
 
 #![allow(unsafe_code)]
 

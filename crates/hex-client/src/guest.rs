@@ -870,33 +870,41 @@ impl<W: Waits> Transport for Stream<W> {
                 )));
             }
         };
-        let mut input = buf.get(..n).unwrap_or_default();
-        while !input.is_empty() {
-            let (took, whole) = deframer.take(input).map_err(|fault| {
-                Refusal::Broken(format!(
-                    "the node agent sent bytes that aren't a message: {fault}"
-                ))
-            })?;
-            input = input.get(took..).unwrap_or_default();
-            let Some(mut message) = whole else { continue };
-            let received = Received {
-                bytes: &message,
-                size: message.len(),
-                descriptors: 0,
-                descriptors_cut: false,
-            };
-            let taken = take(&received, Vec::new());
-            // A sign-in's tokens cross in the message the core reads alone (docs/design/credential-grants.md C8).
-            if wire::carries_secret(&message) {
-                hex_api::lease::wipe(&mut message);
+        let framed: Result<(), Refusal> = 'framed: {
+            let mut input = buf.get(..n).unwrap_or_default();
+            while !input.is_empty() {
+                let (took, whole) = match deframer.take(input) {
+                    Ok(taken) => taken,
+                    Err(fault) => {
+                        break 'framed Err(Refusal::Broken(format!(
+                            "the node agent sent bytes that aren't a message: {fault}"
+                        )));
+                    }
+                };
+                input = input.get(took..).unwrap_or_default();
+                let Some(mut message) = whole else { continue };
+                let received = Received {
+                    bytes: &message,
+                    size: message.len(),
+                    descriptors: 0,
+                    descriptors_cut: false,
+                };
+                let taken = take(&received, Vec::new());
+                // A sign-in's tokens cross in the message the core reads alone (docs/design/credential-grants.md C8).
+                if wire::carries_secret(&message) {
+                    hex_api::lease::wipe(&mut message);
+                }
+                if let Err(why) = taken {
+                    break 'framed Err(why);
+                }
             }
-            taken?;
-        }
-        // Framed into the messages handed on: what was read here wiped.
+            Ok(())
+        };
+        // Framed into the messages handed on, or refused: what was read here wiped either way (the review's E-6).
         if let Some(held) = buf.get_mut(..n) {
             hex_api::lease::wipe_in_place(held);
         }
-        Ok(true)
+        framed.map(|()| true)
     }
 
     fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
