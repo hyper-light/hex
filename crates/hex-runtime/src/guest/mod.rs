@@ -1320,7 +1320,7 @@ impl Drop for GuestRuntime {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             match &b.guest {
-                GuestHandle::Node(run) => drop(self.images.stop_node(*run)),
+                GuestHandle::Node(run) => self.images.stop_node_told(*run),
                 other => {
                     if let Some(guest) = other.shards() {
                         let _ = guest.stop();
