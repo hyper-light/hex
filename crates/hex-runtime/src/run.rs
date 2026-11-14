@@ -56,6 +56,8 @@ impl Run {
         kill: Kill,
         remove: Remove,
     ) -> Result<Self, Refusal> {
+        #[cfg(test)]
+        hold::stop_here(id, hold::At::Making);
         let given = program.streams()?;
         let pid = program.pid();
         let ended = Arc::new(Ended {
@@ -170,11 +172,12 @@ impl Proc for Run {
     }
 }
 
-/// The review's E-11 test control (runtime goal 7): a hold on one run box's thread. While it stands for box `id`, the
-/// run's thread stops where the hold says, as one descheduled there would: once its program has ended, before it
+/// The review's E-11 test control (runtime goal 7): a hold on one run box's setup or thread. While it stands for box
+/// `id`, the run stops where the hold says, as a thread descheduled there would: its setup once the box is made and its
+/// program started, before the watch starts ([`hold::At::Making`]); its thread once its program has ended, before it
 /// claims the box's removal ([`hold::At::End`]), or once it has claimed it, before it removes the box
-/// ([`hold::At::Removal`]). It counts the deletes that waited on a claimer's word, and gives the run's thread as a
-/// party to follow. Keyed by box id, so tests side by side hold their own boxes alone.
+/// ([`hold::At::Removal`]). It counts the deletes that waited on the run's setup or a claimer's word, and gives the
+/// run's thread as a party to follow. Keyed by box id, so tests side by side hold their own boxes alone.
 #[cfg(test)]
 pub(crate) mod hold {
     use std::collections::BTreeMap;
@@ -183,9 +186,11 @@ pub(crate) mod hold {
     use hex_api::BoxId;
     use hex_core::patience::Party;
 
-    /// Where a held run's thread stops.
+    /// Where a held run's setup or thread stops.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum At {
+        /// The run's setup, once its box is made and its program started, before its watch starts.
+        Making,
         /// Once its program has ended, before it claims the box's removal.
         End,
         /// Once it has claimed the box's removal, before it removes the box.
@@ -194,9 +199,9 @@ pub(crate) mod hold {
 
     struct Held {
         at: At,
-        /// Whether the run's thread is stopped at the hold now.
+        /// Whether the run's setup or thread is stopped at the hold now.
         stopped: bool,
-        /// The deletes that waited on the word of the box's claimer.
+        /// The deletes that waited on the run's setup or the word of the box's claimer.
         waiting: u64,
         /// The run's thread's token, which the thread holds for its life.
         thread: Weak<()>,
@@ -227,12 +232,12 @@ pub(crate) mod hold {
     pub(crate) struct Hold(BoxId);
 
     impl Hold {
-        /// Whether the run's thread is stopped at the hold now.
+        /// Whether the run's setup or thread is stopped at the hold now.
         pub(crate) fn stopped(&self) -> bool {
             holds().get(&self.0).is_some_and(|held| held.stopped)
         }
 
-        /// The deletes that waited on the word of the box's claimer.
+        /// The deletes that waited on the run's setup or the word of the box's claimer.
         pub(crate) fn waiting(&self) -> u64 {
             holds().get(&self.0).map_or(0, |held| held.waiting)
         }
@@ -260,7 +265,7 @@ pub(crate) mod hold {
         Some(token)
     }
 
-    /// Box `id`'s run's thread at `at`: stopped there while a hold at `at` stands for the box.
+    /// Box `id`'s run's setup or thread at `at`: stopped there while a hold at `at` stands for the box.
     pub(super) fn stop_here(id: &BoxId, at: At) {
         let mut holds = holds();
         match holds.get_mut(id) {

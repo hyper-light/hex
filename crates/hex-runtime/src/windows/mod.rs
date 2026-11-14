@@ -3786,4 +3786,75 @@ mod tests {
         );
         assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
     }
+
+    /// A thread's handle as a party: live until it has finished.
+    fn party<T>(thread: &std::thread::ScopedJoinHandle<'_, T>) -> hex_core::patience::Party {
+        if thread.is_finished() {
+            hex_core::patience::Party::Ended
+        } else {
+            hex_core::patience::Party::Live
+        }
+    }
+
+    /// The box's emptying once its program is ended, a fact no recorded operation makes, waited for measuring.
+    static RUN_EMPTIED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_runtime.run_box_emptied");
+
+    /// The review's E-11 (runtime goal 7), AC-T7.4.1: a delete of a run's box while the run is making it waits for the
+    /// box to be made whole and its program watched, then takes it, as a delete on Linux waits on the run's create turn.
+    /// Do: hold run box `e11-making-win`'s setup once its box is made and its program started, before the program's
+    /// watch starts; run a program in it until it is ended, from another thread; once the setup has stopped at the
+    /// hold, end the box's program by its KILL and, once the box holds no process, delete the box from another thread;
+    /// once that delete waits on the setup or answers, let the setup go. Expect: the delete waits rather than answer
+    /// while the box is being made, then answers Ok; the run ends Signal(9); and the box is gone.
+    #[test]
+    fn e11_a_delete_of_a_run_being_made_waits_for_its_making() {
+        let rt = WinRuntime::new();
+        let spec = process_box("e11-making-win");
+        let id = spec.id.clone();
+        let held = crate::run::hold::hold(&id, crate::run::hold::At::Making);
+        std::thread::scope(|s| {
+            let running = s.spawn(|| rt.run(spec, until_ended(), fed()));
+            hex_testkit::waits::follow::until(
+                &RUN_STOPPED,
+                "the run's setup at the hold, its box made",
+                || party(&running),
+                || held.stopped(),
+            )
+            .unwrap();
+            rt.signal(&id, Signal::KILL).unwrap();
+            hex_testkit::waits::follow::until(
+                &RUN_EMPTIED,
+                "the run's box holding no process, its program killed",
+                || party(&running),
+                || rt.usage(&id).is_ok_and(|usage| usage.pids == 0),
+            )
+            .unwrap();
+            let deleting = s.spawn(|| rt.delete(&id));
+            hex_testkit::waits::follow::until(
+                &RUN_BESIDE,
+                "the delete's wait on the run's making, or its answer",
+                || party(&deleting),
+                || held.waiting() == 1 || deleting.is_finished(),
+            )
+            .unwrap();
+            assert!(
+                !deleting.is_finished(),
+                "the delete answered beside the run's making"
+            );
+            drop(held);
+            let mut run = running.join().unwrap().expect("the run, once made");
+            let _feeding = run.streams().unwrap().stdin;
+            assert_eq!(
+                deleting.join().unwrap(),
+                Ok(()),
+                "the delete once the run was made"
+            );
+            assert_eq!(
+                hex_api::conformance::end_of(&mut *run),
+                Ok(hex_api::Exit::Signal(9))
+            );
+        });
+        assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+    }
 }

@@ -1228,6 +1228,64 @@ fn a_delete_beside_a_runs_removal_waits_for_its_word(
     assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
 }
 
+/// A thread's handle as a party: live until it has finished.
+fn party<T>(thread: &thread::ScopedJoinHandle<'_, T>) -> hex_core::patience::Party {
+    if thread.is_finished() {
+        hex_core::patience::Party::Ended
+    } else {
+        hex_core::patience::Party::Live
+    }
+}
+
+/// The review's E-11 (runtime goal 7), AC-T7.4.1: a delete of a run's box while the run is making it waits for the box
+/// to be made whole and its program watched, then takes it, as a delete on Linux waits on the run's create turn. Do:
+/// hold run box `name`'s setup once its box is made and its program started, before the program's watch starts; run a
+/// program in it until it is ended, from another thread; once the setup has stopped at the hold, delete the box from
+/// another thread; once that delete waits on the setup or answers, let the setup go; then end the run's program
+/// (`end`). Expect: the delete waits rather than answer while the box is being made, then answers Ok; the run ends
+/// Signal(9); and the box is gone.
+fn a_delete_of_a_run_being_made_waits_for_its_making(
+    rt: &MacRuntime,
+    name: &str,
+    end: fn(&mut dyn Proc),
+) {
+    let id = BoxId::new(name).unwrap();
+    let held = crate::run::hold::hold(&id, crate::run::hold::At::Making);
+    thread::scope(|s| {
+        let running = s.spawn(|| rt.run(run_spec(&id), until_ended(), fed()));
+        hex_testkit::waits::follow::until(
+            &RUN_STOPPED,
+            "the run's setup at the hold, its box made",
+            || party(&running),
+            || held.stopped(),
+        )
+        .unwrap();
+        let deleting = s.spawn(|| rt.delete(&id));
+        hex_testkit::waits::follow::until(
+            &RUN_BESIDE,
+            "the delete's wait on the run's making, or its answer",
+            || party(&deleting),
+            || held.waiting() == 1 || deleting.is_finished(),
+        )
+        .unwrap();
+        assert!(
+            !deleting.is_finished(),
+            "the delete answered beside the run's making"
+        );
+        drop(held);
+        let mut run = running.join().unwrap().expect("the run, once made");
+        let _feeding = run.streams().unwrap().stdin;
+        assert_eq!(
+            deleting.join().unwrap(),
+            Ok(()),
+            "the delete once the run was made"
+        );
+        end(&mut *run);
+        assert_eq!(hex_api::conformance::end_of(&mut *run), Ok(Exit::Signal(9)));
+    });
+    assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+}
+
 /// E-11 in the rootless process-group mode (step 1).
 #[test]
 fn e11_a_rootless_runs_late_removal_leaves_a_later_box_of_its_id() {
@@ -1258,6 +1316,27 @@ fn e11_a_box_user_delete_beside_a_runs_removal_waits_for_its_word() {
     a_delete_beside_a_runs_removal_waits_for_its_word(
         &helped(dir.path()),
         "e11-beside-helped",
+        kill_by_pid,
+    );
+}
+
+/// E-11 in the rootless process-group mode (step 1).
+#[test]
+fn e11_a_rootless_delete_of_a_run_being_made_waits_for_its_making() {
+    a_delete_of_a_run_being_made_waits_for_its_making(
+        &rootless(),
+        "e11-making-rootless",
+        kill_by_run,
+    );
+}
+
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket.
+#[test]
+fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    a_delete_of_a_run_being_made_waits_for_its_making(
+        &helped(dir.path()),
+        "e11-making-helped",
         kill_by_pid,
     );
 }
