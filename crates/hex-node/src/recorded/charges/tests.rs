@@ -916,8 +916,9 @@ fn image_vm(name: &str, started: u64) -> BoxRecord {
 /// held at its ceiling's 16 CPUs until it has run, told so from its first window with its VMM's own unheld (D260: its
 /// run here tells no span to reckon it over), then capped through its rate at the 10.667 CPUs it was charged, its
 /// governor's rate leaving out its VMM's own over the window, 2.666 CPUs; its guest told its room, its budget less what
-/// it holds, as it moves (64 GiB, then 61 GiB); and the third window refused, typed, its guest time naming a vCPU count
-/// other than its reading before's.
+/// it holds, as it moves, from what it holds as it is met, its baseline (63 GiB, then 61 GiB; ROOT, 2026-11-13: never
+/// its whole budget); and the third window refused, typed, its guest time naming a vCPU count other than its reading
+/// before's.
 #[test]
 fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     let io = Record::default();
@@ -966,7 +967,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
     assert_eq!(
         *io.rooms.borrow(),
         vec![
-            ("img-1".to_owned(), i64::try_from(64 * GIB).unwrap()),
+            ("img-1".to_owned(), i64::try_from(63 * GIB).unwrap()),
             ("img-1".to_owned(), i64::try_from(61 * GIB).unwrap()),
         ]
     );
@@ -1266,10 +1267,25 @@ struct Imaging {
     node_rooms: std::sync::Mutex<Vec<(hex_api::NodeRun, i64)>>,
     /// Each rate an image box's run was held to, in order.
     box_rates: std::sync::Mutex<Vec<(String, u64)>>,
+    /// Whether the lock its node's capacity answers take is held, where a test watches it (A-2); each ask the learner
+    /// made of it, and each made while that lock was held, in order.
+    watch: std::sync::OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
+    asked: std::sync::Mutex<Vec<&'static str>>,
+    held: std::sync::Mutex<Vec<&'static str>>,
 }
 
 #[derive(Clone, Default)]
 struct Images(std::sync::Arc<Imaging>);
+
+impl Images {
+    /// Notes the learner's ask `what`, and whether the lock its node's capacity answers take was held as it was made.
+    fn ask(&self, what: &'static str) {
+        self.0.asked.lock().unwrap().push(what);
+        if self.0.watch.get().is_some_and(|held| held()) {
+            self.0.held.lock().unwrap().push(what);
+        }
+    }
+}
 
 impl hex_api::Runtime for Images {
     fn classes(&self) -> Vec<hex_api::Class> {
@@ -1313,6 +1329,7 @@ impl hex_api::Runtime for Images {
         self.0.sim.delete(id)
     }
     fn room(&self, _: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.ask("room");
         Ok(room.and_then(|room| u64::try_from(room).ok()))
     }
     fn rate(
@@ -1320,6 +1337,7 @@ impl hex_api::Runtime for Images {
         id: &BoxId,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.ask("rate");
         self.0.box_rates.lock().unwrap().push((
             id.as_str().to_owned(),
             rate.map_or(0, std::num::NonZeroU64::get),
@@ -1327,6 +1345,7 @@ impl hex_api::Runtime for Images {
         Ok(rate)
     }
     fn host_use(&self, _: &BoxId) -> Result<HostUse, Refusal> {
+        self.ask("host_use");
         Ok(HostUse {
             cpu_ns: 0,
             footprint_bytes: GIB,
@@ -1357,6 +1376,7 @@ impl crate::recorded::Recover for Images {
     }
     /// Its run's use as it reads first: nothing run yet, a GiB held, over the life it has had, one of its periods.
     fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<HostUse, Refusal> {
+        self.ask("node_vm_host_use");
         self.0
             .node_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1369,6 +1389,7 @@ impl crate::recorded::Recover for Images {
         })
     }
     fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Duration, Refusal> {
+        self.ask("node_vm_rate_period");
         self.0
             .node_periods
             .lock()
@@ -1382,6 +1403,7 @@ impl crate::recorded::Recover for Images {
         run: hex_api::NodeRun,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.ask("node_vm_rate");
         self.0
             .node_rates
             .lock()
@@ -1390,10 +1412,12 @@ impl crate::recorded::Recover for Images {
         Ok(rate)
     }
     fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.ask("node_vm_room");
         self.0.node_rooms.lock().unwrap().push((run, room));
         Ok(())
     }
     fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
+        self.ask("image_rate_period");
         self.0
             .reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2320,7 +2344,8 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
 /// Joint plan step 39 (ROOT, 2026-11-13: a node VM's guest needs its room told like any guest's, D188): a node VM's guest is
 /// told its room as an image VM's guest is, everything it holds coming out of it. Do run a window of a node VM of 16
 /// vCPUs, booked at 4 CPUs and 4 GiB, in a 24-CPU fleet budget; then one in which its VM process ran 3.2 s of CPU in 300
-/// ms, holding 3 GiB. Expect its guest told its room, its budget less what it holds, as it moves: 64 GiB, then 61 GiB.
+/// ms, holding 3 GiB. Expect its guest told its room, its budget less what it holds, as it moves, from what it holds as
+/// it is met, its baseline (ROOT, 2026-11-13, A-1: never its whole budget): 63 GiB, then 61 GiB.
 #[test]
 fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
     let io = Record::default();
@@ -2354,7 +2379,7 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
     assert_eq!(
         *io.rooms.borrow(),
         vec![
-            ("node-7".to_owned(), i64::try_from(64 * GIB).unwrap()),
+            ("node-7".to_owned(), i64::try_from(63 * GIB).unwrap()),
             ("node-7".to_owned(), i64::try_from(61 * GIB).unwrap()),
         ]
     );
@@ -2455,6 +2480,111 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
     assert_eq!(
         *images.0.box_rates.lock().unwrap(),
         [("img-1".to_owned(), left - booking.cpu_milli)]
+    );
+}
+
+/// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): a record its node can't read names a box it may still
+/// run, whose class, caps and receipt only that record says, so nothing bounds the box below its machine. Its window
+/// counts it there, leaving the fleet only the bookings it reads, and every VM class's answer names it and why, never
+/// dropping it. Interim, pinned here: once A-10 (goal 4) sources the fleet's budget from what is measured free, what such
+/// a box holds is outside that budget already, and this count gives way to it. Do keep, on a node whose platform holds
+/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM of 16 vCPUs booked at 2 CPUs
+/// whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
+/// image VM, run another window and answer the Shards class. Expect the first VM capped at the 8 CPUs the process box
+/// leaves; then the second held at its 2-CPU booking though it asks its ceiling, as the box whose record can't be read
+/// may hold all the rest; and the answer naming that box among the unrecorded, with its record's words and its count.
+#[test]
+fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_told() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    for name in ["img-1", "img-2"] {
+        images
+            .0
+            .periods
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), Duration::from_millis(70));
+    }
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let left = 8_000;
+    let capped = BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new("proc-1").unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(u32::try_from(machine.cpu_milli.saturating_sub(left)).unwrap()),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+            band: 0,
+        },
+        Phase::Ready,
+        Vec::new(),
+    );
+    store.put(&capped).unwrap();
+    let booking = res(2_000, 2 * GIB);
+    let booked = |name: &str, started: u64| {
+        let mut image = image_vm(name, started);
+        image.spec.allocation = image
+            .spec
+            .allocation
+            .map(|allocation| allocation.booked_at(booking));
+        image
+    };
+    store.put(&booked("img-1", 1)).unwrap();
+    node.start_charges().unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), left)]
+    );
+    images.0.box_rates.lock().unwrap().clear();
+    store.remove(&BoxId::new("img-1").unwrap()).unwrap();
+    std::fs::write(store.runtime_place(&capped.spec.id), b"{\"version\":").unwrap();
+    let Some(Err(why)) = store.get(&capped.spec.id).unwrap() else {
+        panic!("the process box's record still reads");
+    };
+    store.put(&booked("img-2", 2)).unwrap();
+    node.learn_window();
+    let mut capacity = hex_api::Capacity {
+        own: Default::default(),
+        id: "shards".into(),
+        total: machine,
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    };
+    node.books
+        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .unwrap();
+    let told: Vec<(String, String)> = capacity
+        .learned
+        .iter()
+        .flat_map(|learned| &learned.unrecorded)
+        .map(|told| (holder_name(&told.id), told.why.clone()))
+        .collect();
+    assert_eq!(
+        (images.0.box_rates.lock().unwrap().clone(), told),
+        (
+            vec![("img-2".to_owned(), booking.cpu_milli)],
+            vec![(
+                "proc-1".to_owned(),
+                format!("its record can't be read: {why}; counted at its machine")
+            )]
+        )
     );
 }
 
@@ -2877,4 +3007,68 @@ fn w39_a6_an_oci_box_its_node_vm_ended_is_kept_with_why_across_a_restart() {
     );
     let info = node.books.counted(record.retired_info().unwrap()).unwrap();
     assert_eq!(info.last_resort, Some(node_end(4)));
+}
+
+/// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
+/// stalled every capacity answer; AC-T7.4.1): a window asks its VMs with the lock its capacity answers take let go. Do
+/// start the charge learner of a node whose platform holds no window, before any VM is on record, so its own thread waits
+/// for a box to begin and runs no window beside this one; then keep a Shards image VM and a node VM's row Ready, each run
+/// saying 70 ms, and run a window, noting at each ask of either whether that lock is held. Expect each VM asked its
+/// period, its use, its rate and its room, and none of those asked while that lock is held.
+#[test]
+fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let weak = std::sync::Arc::downgrade(&node);
+    let watching = images.0.watch.set(Box::new(move || {
+        weak.upgrade().is_some_and(|node| {
+            node.books
+                .charges
+                .get()
+                .is_some_and(|(learner, _)| learner.try_lock().is_err())
+        })
+    }));
+    assert!(watching.is_ok(), "the lock watched once");
+    node.start_charges().unwrap();
+    images
+        .0
+        .periods
+        .lock()
+        .unwrap()
+        .insert("img-1".to_owned(), Duration::from_millis(70));
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let store = &node.books.store;
+    store.put(&image_vm("img-1", 1)).unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    assert_eq!(node.learn_window(), Some(Duration::from_millis(70)));
+    let asked = images.0.asked.lock().unwrap().clone();
+    for what in [
+        "image_rate_period",
+        "host_use",
+        "rate",
+        "room",
+        "node_vm_rate_period",
+        "node_vm_host_use",
+        "node_vm_rate",
+        "node_vm_room",
+    ] {
+        assert!(asked.contains(&what), "{what} asked: {asked:?}");
+    }
+    assert_eq!(
+        *images.0.held.lock().unwrap(),
+        Vec::<&str>::new(),
+        "asked while the lock its capacity answers take was held"
+    );
 }

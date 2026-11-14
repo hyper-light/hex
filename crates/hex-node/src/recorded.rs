@@ -1745,6 +1745,17 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         let _method = self.books.lifecycle.try_take_devices(id, devices)?;
         self.native_transaction(TransactionOwner::Box(id), devices, callback)
     }
+    /// Waits for a turn of the box under way, following its holder (decision 9), where a method's or a native
+    /// transaction's is refused the overlap: it makes no native call (`hex_runtime::devices::with_record_transaction`
+    /// refuses each), so no holder waits on it.
+    fn with_record_transaction(
+        &self,
+        id: &BoxId,
+        callback: &mut dyn FnMut(&dyn hex_runtime::devices::Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let _turn = self.books.lifecycle.take(id)?;
+        self.native_transaction(TransactionOwner::Box(id), &[], callback)
+    }
     fn pool_records(&self) -> Result<Vec<PoolRecord>, Refusal> {
         self.books.store.all_pools()
     }
@@ -2031,8 +2042,9 @@ impl<R: Recover> Recorded<R> {
                     "changing a recorded box's lifecycle",
                     "recorded lifecycle methods",
                     crate::store::TURNS,
-                    // try_take never waits: an overlap is refused at once, no timeout guessed; the existing
-                    // Turns owner records the method's actual hold.
+                    // A method's turn never waits (try_take): an overlap is refused at once, no timeout guessed. A
+                    // record transaction's waits for its holder (take), bounded by the slowest hold seen and following
+                    // the holder past it (decision 9); the existing Turns owner records each hold.
                     hex_core::patience::Patience::measuring("recorded.lifecycle"),
                 ),
                 abandoned: Abandoned::default(),
@@ -2536,6 +2548,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// fleet's budget). Its failure is kept for the capacity answers. Answers the window it reads over next.
     fn learn_window(&self) -> Option<std::time::Duration> {
         let (shared, _) = self.books.charges.get()?;
+        // Its learner is taken for each pure step and let go while the node's records and VMs are read and its VMs acted
+        // on (A-2), so a capacity answer, which takes it, never waits on a record or a VM.
+        let fail = |why: Refusal| {
+            let mut learner = shared.lock().ok()?;
+            learner.failed(why);
+            learner.next_window()
+        };
         let read = self.books.store.all().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
@@ -2543,37 +2562,38 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             charges::retire_with_node_vms(&self.books.store, &records, &rows)?;
             Ok((records, rows, self.machine()?))
         });
-        let Ok(mut learner) = shared.lock() else {
-            return None;
-        };
         let (records, rows, machine) = match read {
             Ok(read) => read,
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         };
         // What ending its node VM ends: its node's oci boxes, an unreadable record among them (place 3).
         let band = charges::node_band(records.iter());
-        let records: Vec<BoxRecord> = records.into_values().flatten().collect();
+        // Each record it can't read is counted at its machine and told, never dropped (the review's dropped records).
+        let (records, unreadable) = match charges::readable(records) {
+            Ok(split) => split,
+            Err(why) => return fail(why),
+        };
         let io = Managed {
             runtime: &self.runtime,
             store: &self.books.store,
         };
         // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
-        if let Err(why) = charges::boxes(&records).and_then(|holders| learner.govern(&io, &holders))
+        if let Err(why) =
+            charges::boxes(&records).and_then(|holders| charges::govern(shared, &io, &holders))
         {
-            learner.failed(why);
-            return learner.next_window();
+            return fail(why);
         }
         // The VMs it learns; the rest of the node's boxes off the fleet's budget, native boxes at their caps and VMs of
         // a kind it doesn't learn whole (C4).
-        let mut sorted = match charges::sort(&records, &rows, |holder| learner.learns(holder)) {
+        let sorted = {
+            let Ok(learner) = shared.lock() else {
+                return None;
+            };
+            charges::sort(&records, &rows, |holder| learner.learns(holder))
+        };
+        let mut sorted = match sorted {
             Ok(sorted) => sorted,
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         };
         // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
         if let Err(why) = charges::booting(&rows).and_then(|booking| {
@@ -2586,8 +2606,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 })?;
             Ok(())
         }) {
-            learner.failed(why);
-            return learner.next_window();
+            return fail(why);
         }
         // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
         let nodes = charges::nodes(&rows, &band).and_then(|nodes| {
@@ -2602,10 +2621,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         });
         match nodes {
             Ok(nodes) => sorted.learned.extend(nodes),
-            Err(why) => {
-                learner.failed(why);
-                return learner.next_window();
-            }
+            Err(why) => return fail(why),
         }
         let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
             dim(&sorted.native).saturating_add(dim(&sorted.whole))
@@ -2616,12 +2632,22 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             disk_bytes: machine.disk_bytes,
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&io, &sorted.learned, budget, std::time::Instant::now());
-        let next = learner.next_window();
+        let _ = charges::window(
+            shared,
+            &io,
+            &sorted.learned,
+            unreadable,
+            budget,
+            std::time::Instant::now(),
+        );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
-        let ends = learner.unrecorded();
-        drop(learner);
+        let (next, ends) = {
+            let Ok(mut learner) = shared.lock() else {
+                return None;
+            };
+            (learner.next_window(), learner.unrecorded())
+        };
         let (left, failed) = charges::write_ends(&self.books.store, ends);
         if let Some(why) = failed
             && let Ok(mut learner) = shared.lock()
@@ -2696,6 +2722,8 @@ impl Books {
         let rows = self.store.all_node_vms()?;
         let band = charges::node_band(records.iter());
         let nodes = charges::nodes(&rows, &band)?;
+        // Its holders are the records it reads: a box whose record it can't read is told from its last window, counted
+        // at its machine (the review's dropped records).
         learner
             .lock()
             .map_err(|_| broken("the charge learner's lock was poisoned"))?
@@ -2927,9 +2955,9 @@ impl<R: Recover> Runtime for Recorded<R> {
         Ok(())
     }
 
-    /// Its runtime's to refuse: none this wraps makes a box for one program's life (macOS's and Windows' refuse a
-    /// run, naming their platform, and an `oci` spec's is refused everywhere; decision 7), so there is no run's box
-    /// to record.
+    /// Its runtime's: macOS's and Windows' `process` classes run the program in a box of its own life, which a thread
+    /// of the run's removes once the program ends (`hex_runtime::run`, decision 7), and an `oci` spec's run is refused
+    /// everywhere. No record is written for the box: it is held in its runtime's memory alone.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         spec.check_no_devices(std::env::consts::OS)?;
         self.runtime.run(spec, program, stdio)
@@ -2973,6 +3001,15 @@ impl<R: Recover> Runtime for Recorded<R> {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.runtime_at(id)?.member(id, member)
+    }
+
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        self.runtime_at(id)?.signal_member(id, member, signal)
     }
 
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
@@ -3998,6 +4035,9 @@ mod shared_outer_original_tests;
 
 #[cfg(test)]
 mod answers_tests;
+
+#[cfg(test)]
+mod image_turn_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod macos_unsubmitted_tests {

@@ -1464,6 +1464,26 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Goal 2's item 2: a signal to an image VM's member alone, on its own lane; any other box's refused as the trait
+    /// refuses it.
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.signal_member_image(record, member, signal),
+            books::Routed::Other(_) => Err(Refusal::Invalid {
+                what: "member",
+                why: format!(
+                    "box {id} isn't a Shards image box: only one has members a signal reaches"
+                ),
+            }),
+        }
+    }
+
     /// Joint plan step 14 (C7): an image VM's guest told its room (D241); a Shards guest VM's awaits its room call, its
     /// guest's init having none from Hex; any other box's refused as the trait refuses it.
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
@@ -2236,6 +2256,15 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.member(id, member)
+    }
+
+    fn signal_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        signal: Signal,
+    ) -> Result<(), Refusal> {
+        self.holder(id)?.signal_member(id, member, signal)
     }
 
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {

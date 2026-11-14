@@ -323,6 +323,32 @@ pub(crate) fn nodes<'a>(
     Ok(holders)
 }
 
+/// The boxes whose records a window couldn't read, each with its store's words (the review's dropped records).
+pub(crate) type Unreadable = Vec<(BoxId, String)>;
+
+/// `records`, a node's records by box ([`Store::all`]), as the records its window reads and the boxes whose records it
+/// can't ([`Unreadable`]): none dropped.
+pub(crate) fn readable(
+    records: BTreeMap<BoxId, Result<BoxRecord, String>>,
+) -> Result<(Vec<BoxRecord>, Unreadable), Refusal> {
+    let unreadable = records.values().filter(|record| record.is_err()).count();
+    let mut read = Vec::new();
+    let mut unread = Vec::new();
+    read.try_reserve_exact(records.len().saturating_sub(unreadable))
+        .and_then(|()| unread.try_reserve_exact(unreadable))
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's records",
+            bound: records.len(),
+        })?;
+    for (id, record) in records {
+        match record {
+            Ok(record) => read.push(record),
+            Err(why) => unread.push((id, why)),
+        }
+    }
+    Ok((read, unread))
+}
+
 /// `records`, a node's boxes' records, as the holders a learner reads, each a box's.
 pub(crate) fn boxes(records: &[BoxRecord]) -> Result<Vec<Holder<'_>>, Refusal> {
     let mut holders = Vec::new();
@@ -527,6 +553,37 @@ pub(crate) fn sort<'a>(
     Ok(sorted)
 }
 
+/// A learner as its window reaches it (A-2; the review's, 2026-11-14): taken for each of the window's pure steps and let
+/// go between them, so no VM is asked and no file read or written while the lock its capacity answers take is held: its
+/// node's lock, or a learner a caller holds alone.
+pub(crate) trait Lease<T> {
+    type Held<'g>: std::ops::DerefMut<Target = T>
+    where
+        Self: 'g;
+    fn take(&mut self) -> Result<Self::Held<'_>, Refusal>;
+}
+
+impl<T> Lease<T> for &std::sync::Mutex<T> {
+    type Held<'g>
+        = std::sync::MutexGuard<'g, T>
+    where
+        Self: 'g;
+    fn take(&mut self) -> Result<Self::Held<'_>, Refusal> {
+        self.lock()
+            .map_err(|_| Refusal::Broken("the charge learner's lock was poisoned".into()))
+    }
+}
+
+impl<T> Lease<T> for &mut T {
+    type Held<'g>
+        = &'g mut T
+    where
+        Self: 'g;
+    fn take(&mut self) -> Result<Self::Held<'_>, Refusal> {
+        Ok(&mut **self)
+    }
+}
+
 /// What the learner's thread waited for between windows (C1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Waited {
@@ -703,6 +760,84 @@ pub(crate) trait Reach {
 /// ended the VM, or none, an intent withdrawn (C5).
 pub(crate) type Writes = VecDeque<(LearnedHolder, Scope, Option<LearnedEnd>)>;
 
+/// What a window's last resort decided (C5) under its learner's lock, to be carried out outside it (A-2).
+#[derive(Debug)]
+pub(crate) enum Decision {
+    /// A VM it ended still runs: nothing more, so one end is never two.
+    Wait,
+    /// The oldest end a node before this one decided, carried out as it decided it.
+    Due {
+        scope: Scope,
+        class: Class,
+        end: LearnedEnd,
+    },
+    /// Nothing to end: held, or refused, typed, every VM within its own budget.
+    Set(Resort),
+    /// End the VM of `scope` for `why`, `end` written into its record first (intent first).
+    End {
+        scope: Scope,
+        class: Class,
+        end: LearnedEnd,
+        why: Excess,
+    },
+}
+
+/// A last resort's decision carried out ([`Decision::carry`]): what each end and intent answered.
+#[derive(Debug)]
+pub(crate) enum Carried {
+    Wait,
+    Due {
+        scope: Scope,
+        class: Class,
+        end: LearnedEnd,
+        ended: Result<(), Refusal>,
+    },
+    Set(Resort),
+    End {
+        scope: Scope,
+        class: Class,
+        end: LearnedEnd,
+        why: Excess,
+        written: Result<bool, Refusal>,
+        ended: Result<(), Refusal>,
+    },
+}
+
+impl Decision {
+    /// Carries the decision out through `reach` (outside its learner's lock; A-2): an end due is made, and an end the
+    /// rule chose is made after its why is written into its VM's record (intent first, C5), whether that write is made or
+    /// refused, the fleet's room coming first.
+    pub(crate) fn carry(self, reach: &impl Reach) -> Carried {
+        match self {
+            Self::Wait => Carried::Wait,
+            Self::Due { scope, class, end } => Carried::Due {
+                ended: reach.end(&scope),
+                scope,
+                class,
+                end,
+            },
+            Self::Set(resort) => Carried::Set(resort),
+            Self::End {
+                scope,
+                class,
+                end,
+                why,
+            } => {
+                let written = reach.intend(&end.id, scope, &end);
+                let ended = reach.end(&scope);
+                Carried::End {
+                    scope,
+                    class,
+                    end,
+                    why,
+                    written,
+                    ended,
+                }
+            }
+        }
+    }
+}
+
 /// The last resort and its record of why (C5), the same on every OS: one VM ended at a time, as the core's verdict
 /// (`charge::Node::last_resort`) chooses it, why written into its record before it is ended (intent first) and kept for
 /// its class's capacity answers.
@@ -778,97 +913,133 @@ impl LastResort {
         self.due.retain(|(due, ..)| due != scope);
     }
 
-    /// One window's last resort, once the placement holds what it can: while a VM it ended still runs (`vm` names it),
-    /// nothing more, so one end is never two; else an end a node before this one decided, as it decided it; else the
-    /// core's verdict on `node`, why written into the chosen VM's record before `reach` ends it, or refused, typed,
-    /// where the node can't act. An end refused withdraws its intent; an intent that couldn't be written holds no end,
-    /// and is written after it, its write's refusal the window's. `vm` names each VM the learner holds: its class and
-    /// box.
-    pub(crate) fn window<'a>(
-        &mut self,
+    /// One window's last resort, decided once the placement holds what it can (under its learner's lock; A-2): while a
+    /// VM it ended still runs (`vm` names it), nothing more, so one end is never two; else an end a node before this one
+    /// decided, as it decided it; else the core's verdict on `node`, the VM it chooses to end, or refused, typed, where
+    /// the node can't act. `vm` names each VM the learner holds: its class and box. Nothing is kept until its decision
+    /// is carried out ([`Decision::carry`]) and what that did kept ([`LastResort::settle`]).
+    pub(crate) fn decide<'a>(
+        &self,
         node: &charge::Node<Lifetime>,
         vm: impl Fn(&Scope) -> Option<(Class, &'a LearnedHolder)>,
-        reach: &impl Reach,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Decision, Refusal> {
         if let Resort::Ending { scope, .. } = &self.resort
             && vm(scope).is_some()
         {
-            return Ok(());
+            return Ok(Decision::Wait);
         }
-        if let Some((scope, class, end)) = self.due.pop_front() {
-            self.resort = match reach.end(&scope) {
-                Ok(()) => {
-                    self.remember(class, &end)?;
-                    Resort::Ending {
-                        scope,
-                        id: end.id.try_clone()?,
-                        why: excess(&end),
-                    }
-                }
-                Err(refusal) => {
-                    self.write(end.id.try_clone()?, scope, None)?;
-                    Resort::Refused(refusal)
-                }
-            };
-            return Ok(());
+        if let Some((scope, class, end)) = self.due.front() {
+            return Ok(Decision::Due {
+                scope: *scope,
+                class: *class,
+                end: end.try_clone()?,
+            });
         }
-        // An intent whose write was refused, told as the window's refusal once its end is decided.
-        let mut unwritten = None;
-        self.resort = match node.last_resort().map_err(refused)? {
-            charge::Resort::Held => Resort::Held,
-            charge::Resort::Within(fleet) => Resort::Refused(Refusal::Exhausted {
+        Ok(match node.last_resort().map_err(refused)? {
+            charge::Resort::Held => Decision::Set(Resort::Held),
+            charge::Resort::Within(fleet) => Decision::Set(Resort::Refused(Refusal::Exhausted {
                 what: "a microVM fleet's memory budget, every VM within its own",
                 bound: usize::try_from(fleet.budget).unwrap_or(usize::MAX),
-            }),
+            })),
             charge::Resort::End { vm: lifetime, why } => {
                 let scope = lifetime.scope;
                 let (class, id) = vm(&scope).ok_or_else(|| {
                     Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
                 })?;
-                let end = LearnedEnd {
-                    id: id.try_clone()?,
-                    held: why.held,
-                    budget: why.budget,
-                    band: why.band,
-                    fleet_held: why.fleet.held,
-                    fleet_growth: why.fleet.growth,
-                    fleet_budget: why.fleet.budget,
-                    unmoved: move_awaits(class),
+                Decision::End {
+                    scope,
+                    class,
+                    end: LearnedEnd {
+                        id: id.try_clone()?,
+                        held: why.held,
+                        budget: why.budget,
+                        band: why.band,
+                        fleet_held: why.fleet.held,
+                        fleet_growth: why.fleet.growth,
+                        fleet_budget: why.fleet.budget,
+                        unmoved: move_awaits(class),
+                    },
+                    why,
+                }
+            }
+        })
+    }
+
+    /// Keeps what carrying a window's decision out did (C5; under its learner's lock, A-2): an end made is remembered for
+    /// its class's answers and its VM's ending awaited; an end refused is kept typed and withdraws its intent; an intent
+    /// that couldn't be written held no end, and is written after it, its write's refusal the window's.
+    pub(crate) fn settle(&mut self, carried: Carried) -> Result<(), Refusal> {
+        match carried {
+            Carried::Wait => Ok(()),
+            Carried::Due {
+                scope,
+                class,
+                end,
+                ended,
+            } => {
+                // The end carried out is the oldest due, which its decision took.
+                if self.due.front().is_some_and(|(due, ..)| *due == scope) {
+                    self.due.pop_front();
+                }
+                self.resort = match ended {
+                    Ok(()) => {
+                        self.remember(class, &end)?;
+                        Resort::Ending {
+                            scope,
+                            id: end.id.try_clone()?,
+                            why: excess(&end),
+                        }
+                    }
+                    Err(refusal) => {
+                        self.write(end.id.try_clone()?, scope, None)?;
+                        Resort::Refused(refusal)
+                    }
                 };
+                Ok(())
+            }
+            Carried::Set(resort) => {
+                self.resort = resort;
+                Ok(())
+            }
+            Carried::End {
+                scope,
+                class,
+                end,
+                why,
+                written,
+                ended,
+            } => {
                 // What was kept for the VM's record before is this end's to say now.
                 self.unrecorded.retain(|(_, kept, _)| *kept != scope);
                 // Its intent first. A write refused doesn't hold the end, the fleet's room coming first: the VM is
                 // ended, why written after the window, and the window refused with the write's own refusal, typed, as
                 // a write after it is when it fails ([`write_ends`]; ROOT, 2026-11-13).
-                let written = match reach.intend(id, scope, &end) {
-                    Ok(written) => written,
-                    Err(why) => {
-                        unwritten = Some(why);
-                        false
-                    }
+                let (written, unwritten) = match written {
+                    Ok(written) => (written, None),
+                    Err(why) => (false, Some(why)),
                 };
-                match reach.end(&scope) {
+                self.resort = match ended {
                     Ok(()) => {
                         if !written {
-                            self.write(id.try_clone()?, scope, Some(end.try_clone()?))?;
+                            self.write(end.id.try_clone()?, scope, Some(end.try_clone()?))?;
                         }
                         self.remember(class, &end)?;
                         Resort::Ending {
                             scope,
-                            id: id.try_clone()?,
+                            id: end.id.try_clone()?,
                             why,
                         }
                     }
                     Err(refusal) => {
                         if written {
-                            self.write(id.try_clone()?, scope, None)?;
+                            self.write(end.id.try_clone()?, scope, None)?;
                         }
                         Resort::Refused(refusal)
                     }
-                }
+                };
+                unwritten.map_or(Ok(()), Err)
             }
-        };
-        unwritten.map_or(Ok(()), Err)
+        }
     }
 
     /// Carries `ends`, the last-resort ends of the node VMs its node's start read back from their rows before letting
@@ -1194,6 +1365,69 @@ struct Governed {
     again: bool,
 }
 
+/// What a governor a window asked answered (D255): what holds its VM's rate and whether it answered a period, or why its
+/// ask failed.
+type Governor = Result<(hex_api::RateHeld, bool), Refusal>;
+
+/// A managed VM whose governor a window asks at first sight (D255): decided under its learner's lock and asked outside
+/// it (A-2), at its ceiling, its allocation's CPU.
+struct Governing<'h> {
+    holder: Holder<'h>,
+    scope: Scope,
+    class: Class,
+    share: u64,
+}
+
+/// What a window asks of a VM it learns (A-2): decided under its learner's lock, asked outside it.
+struct Ask<'h> {
+    holder: Holder<'h>,
+    /// Whether its learner holds no split of it yet, so its life is read for its first (D260, [`Read::of`]).
+    first: bool,
+}
+
+/// What a VM a window learns answered (C1, D260): the period its cap holds over and its reading, or why not; and the
+/// least share its actuator holds it at ([`Managed::least`]).
+struct Answer<'h> {
+    holder: Holder<'h>,
+    read: Result<(Option<Duration>, Read), Refusal>,
+    least: u64,
+}
+
+/// A VM to cap (C4, D260): its share, and its VMM's own as last read, which its governor's rate leaves out, or why not.
+struct Capping<'h> {
+    holder: Holder<'h>,
+    scope: Scope,
+    share: u64,
+    own: Result<u64, String>,
+}
+
+/// What a window acts on once its learner has learned (C4, C5, C7), outside its lock (A-2), in order: each VM whose cap
+/// moved, each guest whose room moved, and its last resort's decision.
+struct Acts<'h> {
+    caps: Vec<Capping<'h>>,
+    rooms: Vec<(Holder<'h>, Scope, i64)>,
+    resort: Decision,
+}
+
+/// A VM a window capped: its share, its VMM's own its governor's rate left out, what holds it there, and its platform
+/// cap's cycle at its share where that cap holds it.
+struct Capped {
+    scope: Scope,
+    share: u64,
+    told: Option<u64>,
+    held: hex_api::RateHeld,
+    cycle: Option<Duration>,
+}
+
+/// What a window's acts did, in order, to the first that failed: each VM capped, each guest told its room or what
+/// telling it awaits, and its last resort carried out, where the acts reached it.
+struct Acted {
+    caps: Vec<Capped>,
+    rooms: Vec<(Scope, Result<i64, Upstream>)>,
+    resort: Option<Carried>,
+    failed: Option<Refusal>,
+}
+
 /// The node's learner (module docs).
 pub(crate) struct Learner {
     node: charge::Node<Lifetime>,
@@ -1208,6 +1442,10 @@ pub(crate) struct Learner {
     unheld: Refusal,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
     unread: Vec<(LearnedHolder, Refusal)>,
+    /// The machine it runs on, which a box whose record can't be read is counted at ([`Learner::learn`]).
+    machine: CapacityResources,
+    /// The boxes whose records its last window couldn't read (ROOT, 2026-11-14), counted at its machine.
+    unrecorded: Unreadable,
     /// The managed VMs it asked their governors at first sight, on a platform with no window (D255), by their scopes.
     governors: BTreeMap<Scope, Governed>,
     /// The last resort (C5).
@@ -1268,6 +1506,8 @@ impl Learner {
             fault: None,
             last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unread: Vec::new(),
+            machine,
+            unrecorded: Vec::new(),
             governors: BTreeMap::new(),
             unheld: Refusal::Platform {
                 what: "memory_high",
@@ -1294,20 +1534,14 @@ impl Learner {
                 .is_some_and(|governed| governed.period)
     }
 
-    /// Asks the governor of each managed VM among `records` it hasn't asked, on a platform with no window (D255; ROOT,
-    /// 2026-11-13), at the VM's ceiling, its allocation's CPU, which holds nothing below its vCPUs: a cold start that
-    /// can't starve it. One whose governor answers a period is learned over it from then on ([`Learner::learns`]); one
-    /// whose process takes no rate stays booked whole, told; one whose ask or period read fails stays booked whole,
-    /// told, and is asked again next window. Those no longer running are forgotten.
-    pub(crate) fn govern(
-        &mut self,
-        io: &impl Managed,
-        records: &[Holder<'_>],
-    ) -> Result<(), Refusal> {
+    /// The managed VMs among `records` whose governors a window asks (D255; ROOT, 2026-11-13), on a platform with no
+    /// window: each it hasn't asked, and each whose ask failed. Those no longer running are forgotten.
+    fn governing<'h>(&mut self, records: &[Holder<'h>]) -> Result<Vec<Governing<'h>>, Refusal> {
         self.governors
             .retain(|scope, _| records.iter().any(|record| record.scope() == Some(*scope)));
+        let mut asks = Vec::new();
         if self.manages() {
-            return Ok(());
+            return Ok(asks);
         }
         for &record in records {
             if !record.managed() {
@@ -1324,36 +1558,51 @@ impl Learner {
             {
                 continue;
             }
-            let class = match record.class() {
-                hex_api::Class::Shards => Class::Shards,
-                hex_api::Class::Firecracker => Class::Firecracker,
-                hex_api::Class::Process | hex_api::Class::Oci => continue,
+            let Some(class) = vm_class(record.class()) else {
+                continue;
             };
-            let first = Cap {
+            asks.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "a window's governors asked",
+                bound: records.len(),
+            })?;
+            asks.push(Governing {
+                holder: record,
+                scope,
+                class,
                 share: allocation.resources.cpu_milli,
-                own: Own::Unheld("its learner asks its governor before it reads its use"),
-            };
-            let asked = io.set_rate(record, first).and_then(|held| match held {
-                hex_api::RateHeld::Platform(_) => Ok((held, false)),
-                held => io
-                    .rate_period(record)
-                    .map(|period| (held, period.is_some())),
             });
+        }
+        Ok(asks)
+    }
+
+    /// Keeps what each governor a window asked answered (D255): what holds its VM's rate, and whether it answered a
+    /// period, so its VM is learned over it; an ask that failed holds its VM booked whole, told, asked again next window.
+    fn governed(&mut self, answers: Vec<(Governing<'_>, Governor)>) {
+        for (ask, asked) in answers {
             let (held, period, again) = match asked {
                 Ok((held, period)) => (held, period, false),
                 Err(why) => (hex_api::RateHeld::Platform(why.to_string()), false, true),
             };
             self.governors.insert(
-                scope,
+                ask.scope,
                 Governed {
-                    class,
+                    class: ask.class,
                     held,
                     period,
                     again,
                 },
             );
         }
-        Ok(())
+    }
+
+    /// Asks the governors of `records`' managed VMs as a window does ([`govern`]), the learner held alone.
+    #[cfg(test)]
+    pub(crate) fn govern(
+        &mut self,
+        io: &impl Managed,
+        records: &[Holder<'_>],
+    ) -> Result<(), Refusal> {
+        govern(self, io, records)
     }
 
     /// The window it reads over next (C1): the longest of its platform's and the periods of the image VMs it holds,
@@ -1399,8 +1648,8 @@ impl Learner {
             .transpose()
     }
 
-    /// One window (C1 to C5, C7) read at `now`: the VMs it learns `running` now (their records, [`sort`]), within the
-    /// fleet's `budget`. A failure is kept until a window passes.
+    /// Runs a window as a node does ([`window`]), the learner held alone, every record read.
+    #[cfg(test)]
     pub(crate) fn window(
         &mut self,
         io: &impl Managed,
@@ -1408,21 +1657,45 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        let outcome = self.learn(io, running, budget, now);
-        // Its next window is the longest period of the caps it holds whatever this one reached (C1); one that settled
-        // set it already, before its last resort.
-        let outcome = outcome.and(self.node.set_window(self.longest()).map_err(refused));
-        self.fault = outcome.as_ref().err().cloned();
-        outcome
+        window(self, io, running, Vec::new(), budget, now)
     }
 
-    fn learn(
+    /// What a window asks of the VMs it learns among `running` (A-2): each one's reading, its life too where it holds no
+    /// split of it yet (D260).
+    fn asks<'h>(&self, running: &[Holder<'h>]) -> Result<Vec<Ask<'h>>, Refusal> {
+        let mut asks = Vec::new();
+        asks.try_reserve_exact(running.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "a window's VMs",
+                bound: running.len(),
+            })?;
+        for &holder in running {
+            let Some(scope) = holder.scope() else {
+                continue;
+            };
+            if holder.allocation().is_none() {
+                continue;
+            }
+            // A VM whose last reading split it is read as one; else its first split is over its life so far (D260).
+            asks.push(Ask {
+                holder,
+                first: self.vms.get(&scope).is_none_or(|vm| vm.guest_ns.is_none()),
+            });
+        }
+        Ok(asks)
+    }
+
+    /// Learns a window's `answers` at `now` (C1 to C5, C7; under its lock, A-2), its VMs `running` and the boxes whose
+    /// records its node couldn't read `unreadable`, within the fleet's `budget`: what it then acts on outside its lock
+    /// ([`act`]).
+    fn learn<'h>(
         &mut self,
-        io: &impl Managed,
-        running: &[Holder<'_>],
+        running: &[Holder<'h>],
+        unreadable: Unreadable,
+        answers: Vec<Answer<'h>>,
         budget: CapacityResources,
         now: Instant,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Acts<'h>, Refusal> {
         let scope_of = |holder: &Holder<'_>| holder.scope();
         let gone: Vec<Scope> = self
             .vms
@@ -1442,11 +1715,9 @@ impl Learner {
         // What the VMs it couldn't read hold past their bookings, their receipts whole.
         let mut unread = CapacityResources::default();
         self.unread.clear();
-        for &record in running {
-            let Some(scope) = record.scope() else {
-                continue;
-            };
-            let Some(allocation) = record.allocation() else {
+        for answer in answers {
+            let record = answer.holder;
+            let (Some(scope), Some(allocation)) = (record.scope(), record.allocation()) else {
                 continue;
             };
             // Each window reads the VM's use and the period its cap holds over (C1): an image VM's its run's own (D247),
@@ -1454,12 +1725,7 @@ impl Learner {
             // for counts whole, at its receipt, against the fleet's budget this window, its learner untouched (ROOT,
             // 2026-11-13: never starving its neighbours by holding nothing): no sample taken, its booking as it was,
             // and the failure told ([`Learner::unread`]). One that ended since its listing is ended by the next.
-            // A VM whose last reading split it is read as one; else its first split is over its life so far (D260).
-            let first = self.vms.get(&scope).is_none_or(|vm| vm.guest_ns.is_none());
-            let reading = io
-                .rate_period(record)
-                .and_then(|period| Read::of(io, record, first).map(|read| (period, read)));
-            let (period, read) = match reading {
+            let (period, read) = match answer.read {
                 Ok(reading) => reading,
                 Err(why) => {
                     let booked = self
@@ -1546,6 +1812,10 @@ impl Learner {
                     receipt,
                 )
                 .map_err(refused)?;
+            // What it holds as it is met is its baseline, never a window's growth (ROOT, 2026-11-13).
+            self.node
+                .baseline(&lifetime, read.memory_bytes)
+                .map_err(refused)?;
             // Its first split, from its first reading holding its guest time: over its life so far (D260).
             let own = read.own_over_life();
             let (guest_ns, own) = match read.guest_ns {
@@ -1567,7 +1837,7 @@ impl Learner {
                     own,
                     rate: allocation.resources.cpu_milli,
                     told: None,
-                    least: io.least(record),
+                    least: answer.least,
                     room: None,
                     awaits: None,
                     period,
@@ -1578,6 +1848,21 @@ impl Learner {
             let intent = record.intent().map(LearnedEnd::try_clone).transpose()?;
             self.last.met(class, scope, intent)?;
         }
+        // A box whose record its node can't read is counted at its machine (the review's dropped records; ROOT,
+        // 2026-11-14): its class, caps and receipt are its record's alone, so nothing bounds it lower, as an unknown
+        // band ranks a node VM above every box ([`node_band`]). While one is, the fleet has no budget past the bookings
+        // it reads, each VM held at its booking (C3), and every VM class's answer names the box ([`Learner::learned`]).
+        // Interim: once A-10 (goal 4) makes the fleet's budget what is measured free, what such a box holds is outside
+        // that budget already, and this count gives way to it.
+        if !unreadable.is_empty() {
+            unread = unread
+                .checked_add(self.machine)
+                .ok_or_else(|| Refusal::Invalid {
+                    what: "a microVM's learned charge",
+                    why: "the unread VMs' receipts and the machine overflow".into(),
+                })?;
+        }
+        self.unrecorded = unreadable;
         // The fleet's budget this window, less what its unread VMs hold past their bookings.
         let budget = less(budget, unread);
         self.node.set_budget(budget);
@@ -1592,66 +1877,106 @@ impl Learner {
                     .map_or(GOVERNOR_LEAST.get(), |vm| vm.least)
             })
             .map_err(refused)?;
+        let mut caps = Vec::new();
+        caps.try_reserve_exact(rates.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "a window's caps",
+                bound: rates.len(),
+            })?;
         for (lifetime, rate) in rates {
             let scope = lifetime.scope;
-            let Some(vm) = self.vms.get_mut(&scope) else {
+            let Some(vm) = self.vms.get(&scope) else {
                 continue;
             };
             // Its governor is told its share less its VMM's own as last read (D260), each time either moves, and once
             // at first sight, so what holds it is told from its first window.
-            let own = match &vm.own {
-                Ok(own) => Own::Read(*own),
-                Err(why) => Own::Unheld(why),
-            };
-            let told = match own {
-                Own::Read(own) => Some(own),
-                Own::Unheld(_) => None,
-            };
+            let told = vm.own.as_ref().ok().copied();
             if vm.held.is_some() && vm.rate == rate && vm.told == told {
                 continue;
             }
-            let record = running
+            let holder = running
                 .iter()
                 .find(|record| scope_of(record) == Some(scope))
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-            let held = io.set_rate(*record, Cap { share: rate, own })?;
-            // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1; ROOT, 2026-11-13).
-            vm.cycle = match held {
-                hex_api::RateHeld::Platform(_) => io.cap_cycle(rate)?,
-                _ => None,
-            };
-            vm.held = Some(held);
-            vm.rate = rate;
-            vm.told = told;
+            caps.push(Capping {
+                holder: *holder,
+                scope,
+                share: rate,
+                own: vm.own.clone(),
+            });
         }
         // Each Shards VM's guest told its room as it moves (C5, C7; D188), a node VM's as an image VM's (joint plan
         // step 39): its budget less what it holds, everything it holds coming out of it, negative where its budget is
         // short of that. A guest its runtime can't yet tell (a managed VM's) is kept as awaiting what that needs, told
         // on its class's answers and never asked again (place 4); a Firecracker guest has no room to be told.
-        for (lifetime, budget) in self.node.budgets().map_err(refused)? {
+        let budgets = self.node.budgets().map_err(refused)?;
+        let mut rooms = Vec::new();
+        rooms
+            .try_reserve_exact(budgets.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "a window's rooms",
+                bound: budgets.len(),
+            })?;
+        for (lifetime, budget) in budgets {
             let scope = lifetime.scope;
-            let Some(vm) = self.vms.get_mut(&scope) else {
+            let Some(vm) = self.vms.get(&scope) else {
                 continue;
             };
             if vm.class != Class::Shards || vm.awaits.is_some() || vm.room == Some(budget.room) {
                 continue;
             }
-            let record = running
+            let holder = running
                 .iter()
                 .find(|record| scope_of(record) == Some(scope))
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
-            match io.set_room(*record, budget.room) {
-                Ok(()) => vm.room = Some(budget.room),
-                Err(Refusal::Awaits { needs }) => vm.awaits = Some(needs),
-                Err(why) => return Err(why),
-            }
+            rooms.push((*holder, scope, budget.room));
         }
         let vms = &self.vms;
-        self.last.window(
-            &self.node,
-            |scope| vms.get(scope).map(|vm| (vm.class, &vm.id)),
-            &Stops { io, running },
-        )
+        let resort = self.last.decide(&self.node, |scope| {
+            vms.get(scope).map(|vm| (vm.class, &vm.id))
+        })?;
+        Ok(Acts {
+            caps,
+            rooms,
+            resort,
+        })
+    }
+
+    /// Keeps what a window's acts did (under its lock; A-2), or why its learning failed, and its outcome, which is kept
+    /// until a window passes. Its next window is the longest period of the caps it holds whatever this one reached (C1);
+    /// one that settled set it already, before its last resort.
+    fn acted(&mut self, acted: Result<Acted, Refusal>) -> Result<(), Refusal> {
+        let outcome = acted.and_then(|acted| self.keep(acted));
+        let outcome = outcome.and(self.node.set_window(self.longest()).map_err(refused));
+        self.fault = outcome.as_ref().err().cloned();
+        outcome
+    }
+
+    /// Keeps each cap and room a window's acts made, and what its last resort did, to the first act that failed, whose
+    /// refusal is the window's.
+    fn keep(&mut self, acted: Acted) -> Result<(), Refusal> {
+        for capped in acted.caps {
+            if let Some(vm) = self.vms.get_mut(&capped.scope) {
+                vm.cycle = capped.cycle;
+                vm.held = Some(capped.held);
+                vm.rate = capped.share;
+                vm.told = capped.told;
+            }
+        }
+        for (scope, room) in acted.rooms {
+            if let Some(vm) = self.vms.get_mut(&scope) {
+                match room {
+                    Ok(room) => vm.room = Some(room),
+                    Err(needs) => vm.awaits = Some(needs),
+                }
+            }
+        }
+        if let Some(why) = acted.failed {
+            return Err(why);
+        }
+        acted
+            .resort
+            .map_or(Ok(()), |carried| self.last.settle(carried))
     }
 
     /// Takes the writes into VMs' records not yet made, oldest first (C5).
@@ -1732,7 +2057,26 @@ impl Learner {
         learned.unread = self.unread_of(class, running)?;
         learned.awaits = self.awaits_of(class, running)?;
         learned.ranked = ranked(class, running)?;
+        learned.unrecorded = self.unrecorded_of()?;
         Ok(Some(learned))
+    }
+
+    /// The boxes whose records its last window couldn't read, in their ids' order, each with its store's words (the
+    /// review's dropped records; ROOT, 2026-11-14): told on every VM class's answer, as a box's class is its record's.
+    fn unrecorded_of(&self) -> Result<Vec<hex_api::LearnedUnrecorded>, Refusal> {
+        let mut told = Vec::new();
+        told.try_reserve_exact(self.unrecorded.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned unrecorded boxes",
+                bound: self.unrecorded.len(),
+            })?;
+        for (id, why) in &self.unrecorded {
+            told.push(hex_api::LearnedUnrecorded {
+                id: LearnedHolder::Box(id.try_clone()?),
+                why: format!("its record can't be read: {why}; counted at its machine"),
+            });
+        }
+        Ok(told)
     }
 
     /// The VMs of `class` among `running` its last window couldn't read, in their records' order, each with its
@@ -1880,6 +2224,163 @@ impl Learner {
     }
 }
 
+/// Asks the governor of each managed VM among `records` its learner hasn't asked, on a platform with no window (D255;
+/// ROOT, 2026-11-13), at the VM's ceiling, its allocation's CPU, which holds nothing below its vCPUs: a cold start that
+/// can't starve it. One whose governor answers a period is learned over it from then on ([`Learner::learns`]); one
+/// whose process takes no rate stays booked whole, told; one whose ask or period read fails stays booked whole, told,
+/// and is asked again next window. Those no longer running are forgotten. Its learner is let go while it asks (A-2).
+pub(crate) fn govern(
+    mut learner: impl Lease<Learner>,
+    io: &impl Managed,
+    records: &[Holder<'_>],
+) -> Result<(), Refusal> {
+    let asks = learner.take()?.governing(records)?;
+    let mut answers = Vec::new();
+    answers
+        .try_reserve_exact(asks.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's governors asked",
+            bound: asks.len(),
+        })?;
+    for ask in asks {
+        let first = Cap {
+            share: ask.share,
+            own: Own::Unheld("its learner asks its governor before it reads its use"),
+        };
+        let asked = io.set_rate(ask.holder, first).and_then(|held| match held {
+            hex_api::RateHeld::Platform(_) => Ok((held, false)),
+            held => io
+                .rate_period(ask.holder)
+                .map(|period| (held, period.is_some())),
+        });
+        answers.push((ask, asked));
+    }
+    learner.take()?.governed(answers);
+    Ok(())
+}
+
+/// One window (C1 to C5, C7) read at `now`: the VMs its learner learns `running` now (their records, [`sort`]) and the
+/// boxes whose records its node can't read (`unreadable`, [`readable`]), within the fleet's `budget`. Its learner is
+/// taken for each of the window's pure steps and let go while its VMs are asked and acted on (A-2; the review's,
+/// 2026-11-14), so a capacity answer, which takes it, never waits on a VM. Its node runs one window at a time, on its
+/// learner's thread, so nothing but the window moves its learner between its steps. A failure is kept until a window
+/// passes.
+pub(crate) fn window(
+    mut learner: impl Lease<Learner>,
+    io: &impl Managed,
+    running: &[Holder<'_>],
+    unreadable: Unreadable,
+    budget: CapacityResources,
+    now: Instant,
+) -> Result<(), Refusal> {
+    let asks = learner.take()?.asks(running);
+    let learned = match asks.and_then(|asks| ask(io, asks)) {
+        Ok(answers) => learner
+            .take()?
+            .learn(running, unreadable, answers, budget, now),
+        Err(why) => Err(why),
+    };
+    let acted = learned.and_then(|acts| act(io, running, acts));
+    learner.take()?.acted(acted)
+}
+
+/// Asks each VM of `asks` its reading (outside its learner's lock; A-2): the period its cap holds over and its use, an
+/// image VM's from its run host (D241), a managed VM's guest time first and then its scope's use (D260); and the least
+/// share its actuator holds it at.
+fn ask<'h>(io: &impl Managed, asks: Vec<Ask<'h>>) -> Result<Vec<Answer<'h>>, Refusal> {
+    let mut answers = Vec::new();
+    answers
+        .try_reserve_exact(asks.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's VMs",
+            bound: asks.len(),
+        })?;
+    for ask in asks {
+        answers.push(Answer {
+            holder: ask.holder,
+            read: io
+                .rate_period(ask.holder)
+                .and_then(|period| Read::of(io, ask.holder, ask.first).map(|read| (period, read))),
+            least: io.least(ask.holder),
+        });
+    }
+    Ok(answers)
+}
+
+/// Acts on what a window's learner decided (C4, C5, C7; outside its lock, A-2), in order, to the first act that fails:
+/// each VM capped at its share, its platform cap's cycle at that share read where that cap holds it (C1; ROOT,
+/// 2026-11-13); each guest told its room, or kept awaiting what telling it needs (place 4); then its last resort's
+/// decision carried out, its VMs `running`.
+fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acted, Refusal> {
+    let mut acted = Acted {
+        caps: Vec::new(),
+        rooms: Vec::new(),
+        resort: None,
+        failed: None,
+    };
+    acted
+        .caps
+        .try_reserve_exact(acts.caps.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's caps",
+            bound: acts.caps.len(),
+        })?;
+    acted
+        .rooms
+        .try_reserve_exact(acts.rooms.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's rooms",
+            bound: acts.rooms.len(),
+        })?;
+    for cap in acts.caps {
+        let own = match &cap.own {
+            Ok(own) => Own::Read(*own),
+            Err(why) => Own::Unheld(why),
+        };
+        let capped = io
+            .set_rate(
+                cap.holder,
+                Cap {
+                    share: cap.share,
+                    own,
+                },
+            )
+            .and_then(|held| {
+                // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1).
+                let cycle = match held {
+                    hex_api::RateHeld::Platform(_) => io.cap_cycle(cap.share)?,
+                    _ => None,
+                };
+                Ok((held, cycle))
+            });
+        match capped {
+            Ok((held, cycle)) => acted.caps.push(Capped {
+                scope: cap.scope,
+                share: cap.share,
+                told: cap.own.ok(),
+                held,
+                cycle,
+            }),
+            Err(why) => {
+                acted.failed = Some(why);
+                return Ok(acted);
+            }
+        }
+    }
+    for (holder, scope, room) in acts.rooms {
+        match io.set_room(holder, room) {
+            Ok(()) => acted.rooms.push((scope, Ok(room))),
+            Err(Refusal::Awaits { needs }) => acted.rooms.push((scope, Err(needs))),
+            Err(why) => {
+                acted.failed = Some(why);
+                return Ok(acted);
+            }
+        }
+    }
+    acted.resort = Some(acts.resort.carry(&Stops { io, running }));
+    Ok(acted)
+}
+
 /// What a capacity answer for `class` carries of `node` (C1, C2, C5, C8), shared by every OS's learner: the priors of
 /// `costs`, each within its receipt, a cold class's its admission (at most one per profile and ceiling, none booked
 /// whole), so a VM is booked below its whole receipt only where a learner learns its VMs' use; each profile's ceiling,
@@ -1979,10 +2480,13 @@ pub(crate) fn learned(
         // What holds each VM's rate its learner tells (`Learner::learned`, D255); Linux's holds each by its cpu.max.
         rates: Vec::new(),
         window,
-        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells.
+        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells; and
+        // the boxes whose records can't be read, which macOS's and Windows' learner tells (Linux's reads its boxes from
+        // their cgroups).
         unread: Vec::new(),
         awaits: Vec::new(),
         ranked: Vec::new(),
+        unrecorded: Vec::new(),
     })
 }
 

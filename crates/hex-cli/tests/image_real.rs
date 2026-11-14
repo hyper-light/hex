@@ -59,7 +59,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Allocation, Bounds, BoxId, BoxSpec, Class, ClassSpec, Program, Runtime, ShardsImage,
+    Allocation, Bounds, BoxId, BoxSpec, Class, ClassSpec, LifecycleCause, Program, Refusal,
+    Runtime, ShardsImage,
 };
 use hex_client::Client;
 
@@ -257,7 +258,18 @@ fn release(client: &Client, fixture: &ImageBoxes, node: u32) -> Result<(), Strin
     client
         .create(fixture.spec(id.clone(), Bounds::default()))
         .map_err(|e| format!("create: {e}"))?;
-    client.start(&id).map_err(|e| format!("start: {e}"))?;
+    // A start past its boot's W* is answered Pending, the boot going on (the 11-13 ruling), and followed through
+    // `started` to its answer, as the image cases follow theirs (ROOT, 2026-11-14).
+    match client.start(&id) {
+        Ok(()) => {}
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        }) => {
+            client.started(&id).map_err(|e| format!("started: {e}"))?;
+        }
+        Err(e) => return Err(format!("start: {e}")),
+    }
     let run: Vec<Listed> = descendants(node)
         .into_iter()
         .filter(|p| !idle.contains(p))
