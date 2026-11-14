@@ -311,7 +311,7 @@ fn enrolled(ca: &SimCa, name: &str) -> hex_quic::tls::Credentials {
 /// expect every flow to have carried the secret whole, and no block freed meanwhile, the node's, hex-quic's or its
 /// client's, to have held it.
 #[test]
-#[ignore = "awaits hyper-raft: hyper-quic's stream send buffer keeps each frame until it is acked, and hyper-transport's receive pool keeps the decrypted chunk; both must be wiped for sensitive lanes (asked of hyper-raft's owner; unignored at the re-vendor that carries it)"]
+#[ignore = "awaits Hex's seal (ROOT, 2026-11-14): hyper-quic's stream send buffer keeps each frame until it is acked, and hyper-transport's receive pool keeps the decrypted chunk; sealed before hex-quic's lanes, a message that carries a secret leaves them ciphertext alone"]
 fn e6_no_block_freed_holds_a_secret_the_node_carried_over_quic() {
     let secret = secret();
     let dir = scratch();

@@ -212,10 +212,10 @@ are its caller's (`hex_client::Core::with_lessors`).
   frame its driver holds back. The wire's writer wipes what it held of a message that fails, and reserves the
   message's room before the value goes in, so no copy is left as it grows. `crates/hex-node/tests/wipes.rs` holds it:
   every block its test binary frees is read for the secret, on this OS's socket and over QUIC. What hyper-raft holds
-  below hex-quic isn't wiped yet: hyper-quic's stream send buffer keeps each frame until it is acked, and
-  hyper-transport's receive pool keeps the decrypted chunk. Both must be wiped for sensitive lanes, which is asked of
-  hyper-raft's owner, and the test's QUIC leg is ignored until the re-vendor that carries it. The kernel's buffers are
-  not Hex's to wipe.
+  below hex-quic isn't wiped: hyper-quic's stream send buffer keeps each frame until it is acked, and
+  hyper-transport's receive pool keeps the decrypted chunk. Not built yet: Hex sealing each message that carries a
+  secret before it reaches hex-quic's lanes, so those buffers hold ciphertext alone (ROOT, 2026-11-14); the test's QUIC
+  leg is ignored until it lands. The kernel's buffers are not Hex's to wipe.
 - **Waits.** Every ask waits for its answer while its connection stands (decision 9): the answer, or the connection's
   end, ends it, however long that takes, and no ask is bounded by a time of its own. From `with_lessors` on, the client
   reads its connection with a thread of its own (the event form's loop), so the node's asks are read whatever its calls
@@ -276,7 +276,7 @@ answered outside too. Hex passes each through, adding none:
   `RefreshAsk` (`0x8016`) and `SignInRevoked` (`0x8017`, not answered), answered `Request::Captured` (`0x001c`) and
   `Request::Refreshed` (`0x001d`); appended, the wire's `IDENTITY` moving. A capture's ask, and the captured and
   refreshed answers, carry secrets (`wire::carries_secret`): every copy Hex makes of them is wiped as a lease's is
-  (C7), on the node and its client alike, and what hyper-raft holds below hex-quic waits on its owner as C7 says.
+  (C7), on the node and its client alike, and what hyper-raft holds below hex-quic waits on the seal C7 names.
   A create granting a sign-in on a connection that sent no `Lessors` is refused `Unconfigured` (default deny).
 
 Not built: an inspect's report of a box's sign-ins (its record holds them); kiln's broker answering captures and
