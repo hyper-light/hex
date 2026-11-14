@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
@@ -1611,7 +1611,15 @@ impl<O: Os> Shared<O> {
                 && now >= within
             {
                 // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on.
-                self.reads.ran_out(within);
+                self.reads.ran_out(
+                    within,
+                    now,
+                    &[
+                        Piece::Kind("the client of connection "),
+                        Piece::Number(conn.token),
+                        Piece::Kind(", reading its waiting answers"),
+                    ],
+                );
                 bound = None;
             }
             out = match bound {
@@ -2817,7 +2825,13 @@ impl<O: Os> Shared<O> {
             if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
                 // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
                 // lives alone.
-                crate::emptying::EMPTYING.ran_out(window);
+                crate::emptying::EMPTYING.ran_out(
+                    window,
+                    killed.elapsed(),
+                    &[Piece::Kind(
+                        "the programs a stopping server's closes ended, by their own events",
+                    )],
+                );
                 past = true;
                 left = None;
             }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{Allocation, Exit, HostUse, NodeRun, NodeVmPhase, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{NodeVmRecord, RECORD_VERSION};
 use shards_api::image::{
     BootStop, ControlAsk, ControlAt, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Keep,
@@ -110,7 +110,16 @@ impl ImageClass {
         let bound = waits.boot.deadline();
         let mut told = slot.told_within(bound)?;
         if let (Told::NotYet, Some(bound)) = (&told, bound) {
-            waits.boot.ran_out(bound);
+            let run = run_name(&vm.run);
+            waits.boot.ran_out(
+                bound,
+                bound,
+                &[
+                    Piece::Kind("the boot of node VM "),
+                    Piece::Name(&run),
+                    Piece::Kind(", by its boot's thread"),
+                ],
+            );
             told = slot.told_within(None)?;
         }
         if !matches!(told, Told::Came) {
@@ -192,7 +201,16 @@ impl ImageClass {
         let bound = waits.stop.deadline();
         if !slot.came_within(bound)? {
             if let Some(bound) = bound {
-                waits.stop.ran_out(bound);
+                let name = run_name(&run);
+                waits.stop.ran_out(
+                    bound,
+                    bound,
+                    &[
+                        Piece::Kind("the stop of node VM "),
+                        Piece::Name(&name),
+                        Piece::Kind(", by its stop's thread"),
+                    ],
+                );
             }
             if !matches!(slot.told_within(None)?, Told::Came) {
                 return Err(Refusal::Broken(format!(
@@ -363,6 +381,8 @@ impl ImageClass {
             gpu_devices: Vec::new(),
             // No sign-in grant (Shards' D242 step 8): a node VM signs in to nothing.
             sign_ins: Vec::new(),
+            // No upstream root (Shards' D242, image channel v26): it grants no credential to fill in.
+            upstream_roots: Vec::new(),
         })
     }
 }
@@ -415,7 +435,13 @@ pub(in crate::guest) fn follow_ready(
     if let Some(said) = wait_to(guest, &mut seen, window.saturating_sub(began.elapsed()))? {
         return Ok(said);
     }
-    ready.ran_out(window);
+    ready.ran_out(
+        window,
+        began.elapsed(),
+        &[Piece::Kind(
+            "the node VM's run, by its READY and its VM process's CPU time",
+        )],
+    );
     let mut last = progress(guest, window)?;
     // Ends at READY, the run's end, or a whole window with its progress standing: the run's progress is its bound.
     loop {

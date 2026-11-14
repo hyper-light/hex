@@ -86,6 +86,7 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     report.check().unwrap();
     let mut node = NodeSpec::new(

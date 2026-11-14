@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hex_api::{LearnedEnd, NodeRun, NodeVmPhase, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::NodeVmRecord;
 
 use super::{Store, TURNS, scoped_paths};
@@ -229,9 +229,9 @@ fn own(file: &File) -> Result<(), Refusal> {
 }
 
 /// Takes `file`'s lock once its owner ends, as decision 9 waits: within W* ([`OWNER_END`]) the lock is the answer;
-/// past it the run-out is told, and the wait follows the owner by its life, its thread's blocked lock answering only as
-/// the owner ends. Refused where that thread ends with no answer.
-fn follow_owner(file: File) -> Result<File, Refusal> {
+/// past it the run-out is told, naming run `run`'s owner, and the wait follows the owner by its life, its thread's
+/// blocked lock answering only as the owner ends. Refused where that thread ends with no answer.
+fn follow_owner(file: File, run: &NodeRun) -> Result<File, Refusal> {
     let began = Instant::now();
     let (said, answer) = hex_wait::mpsc::sync_channel(1)
         .map_err(|e| Refusal::os("making a node VM owner's follow", e))?;
@@ -244,7 +244,16 @@ fn follow_owner(file: File) -> Result<File, Refusal> {
     let got = match OWNER_END.deadline() {
         Some(bound) => match answer.recv_timeout(bound) {
             Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => {
-                OWNER_END.ran_out(bound);
+                let run = name(run).unwrap_or_default();
+                OWNER_END.ran_out(
+                    bound,
+                    began.elapsed(),
+                    &[
+                        Piece::Kind("the owner of node VM "),
+                        Piece::Name(&run),
+                        Piece::Kind(", a node process, by its lock"),
+                    ],
+                );
                 answer
                     .recv()
                     .map_err(hex_wait::mpsc::RecvTimeoutError::from)
@@ -521,13 +530,14 @@ impl Store {
 
     /// Follows run `run`'s owner, a live node process, to its end on a thread of its own, its row booked meanwhile, then
     /// lets its row go. Where the follow is refused, the row stays booked until the node's next start, and why is said
-    /// on `hex.guest`, the node VM being the node's guest, as the event `node_vm_unfollowed`.
+    /// on `hex.guest`, the node VM being the node's guest, as the event `node_vm_unfollowed`, its `why` a JSON string
+    /// (`hex_api::event`).
     fn follow(&self, run: NodeRun, file: File) -> Result<(), Refusal> {
         let store = self.clone();
         std::thread::Builder::new()
             .name("hex-node-vm-owner".to_owned())
             .spawn(move || {
-                let ended = follow_owner(file).and_then(|file| {
+                let ended = follow_owner(file, &run).and_then(|file| {
                     let row = store.node_vm(&run)?;
                     let let_go = row.map_or(Ok(()), |row| store.let_go(&row));
                     drop(file);
@@ -537,8 +547,9 @@ impl Store {
                     use std::io::Write as _;
                     let _ = std::io::stderr().lock().write_all(
                         format!(
-                            "hex.guest event=node_vm_unfollowed run={} why=\"{why}\"\n",
-                            name(&run).unwrap_or_default()
+                            "hex.guest event=node_vm_unfollowed run={} why={}\n",
+                            name(&run).unwrap_or_default(),
+                            hex_api::event::json_string(&why.to_string())
                         )
                         .as_bytes(),
                     );
