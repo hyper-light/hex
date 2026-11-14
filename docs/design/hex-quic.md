@@ -441,14 +441,21 @@ sealed before hex-quic's lanes take it, so those buffers hold it as ciphertext a
   nonce the message carries, in whatever order messages come: their order and replay are the connection's TLS's (QUIC's
   packet protection, RFC 9001 §5). The seal keeps a secret out of buffers Hex can't wipe; it is no second channel
   security.
+- The limit: a key seals no more than AES-GCM's limit in RFC 8446 §5.5, 2^24.5 full records of 2^14 bytes, for a margin
+  of about 2^-57 of authenticated-encryption security, from Luykx and Paterson's AEBounds analysis: 2^34.5 AES blocks,
+  derived, never chosen. Each seal is charged its body's blocks and one more for its tag, atomically, and one that would
+  pass the limit is refused `Spent`, typed, as a spent nonce is. A connection whose key is spent carries no more secrets:
+  its client dials again, and the new connection's TLS session gives fresh keys.
 - Where: the node seals as its QUIC listener frames an answer (`hex-node` `quic.rs`, `send`) and opens as it deframes a
   request; a client over QUIC seals before it frames (`Transport::seal`) and opens as it deframes, its keys its link's
   (`guest::Link::sealing`, `hex_quic::link` asking `Endpoint::keys`). A copy in the clear is wiped as C7 says. The wire's
   `IDENTITY` moves, so a peer of the wire before the seal is refused at its hello.
 
-Sources: RFC 8446 §7.5 (exporters) and §5.3 (the per-record nonce); RFC 5705 §4 (an exporter's label); NIST SP 800-38D
-§5.2.1.1 and §5.2.1.2 (GCM's IV and tag lengths) and §8 (an IV never repeated under one key); RFC 9001 §5 (QUIC's packet
-protection); FIPS 197 §5 (AES-256's key).
+Sources: RFC 8446 §7.5 (exporters), §5.3 (the per-record nonce) and §5.5 (AES-GCM's limit on one key); A. Luykx and
+K. G. Paterson, "Limits on Authenticated Encryption Use in TLS" (2017), the AEBounds analysis §5.5 rests on; RFC 5705 §4
+(an exporter's label); NIST SP 800-38D §5.2.1.1 and §5.2.1.2 (GCM's IV and tag lengths), §7.1 (the blocks GCM runs AES
+on) and §8 (an IV never repeated under one key); RFC 9001 §5 (QUIC's packet protection); FIPS 197 §5 (AES-256's key,
+AES's block).
 
 **Alternatives.**
 - Wiping in hyper-raft, hyper-quic's send buffer as a frame is acknowledged and hyper-transport's pool as a chunk is
@@ -464,6 +471,6 @@ protection); FIPS 197 §5 (AES-256's key).
 **Falsified by** a block freed holding a secret the node carried over QUIC (`crates/hex-node/tests/wipes.rs`,
 `e6_no_block_freed_holds_a_secret_the_node_carried_over_quic`); a connection's two ends deriving keys that don't open each
 other's seals, or an end opening its own, or another connection's (HEX-QUIC-32, `seal::tests`); a nonce taken twice by
-seals made at once, or after its count is spent (`seal::tests`); a node taking a secret unsealed, or a sealed message
-whose kind carries none (HEX-QUIC-33; `wire::tests`' `q13_` tests); a seal opened though its header, nonce, body or tag
-changed (`wire::tests`, `seal::tests`).
+seals made at once, or after its count is spent, or a key sealing past AES-GCM's limit (`seal::tests`); a node taking a
+secret unsealed, or a sealed message whose kind carries none (HEX-QUIC-33; `wire::tests`' `q13_` tests); a seal opened
+though its header, nonce, body or tag changed (`wire::tests`, `seal::tests`).

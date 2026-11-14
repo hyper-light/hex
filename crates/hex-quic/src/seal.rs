@@ -5,7 +5,9 @@
 //! AES-256-GCM, a key each way, each the connection's TLS exporter's (RFC 8446 §7.5) under Hex's own label and its
 //! way's context: both ends derive each way's key alike, the two ways differ, and every key is its connection's alone.
 //! A way's nonce is a 96-bit counter, RFC 8446 §5.3's construction (a 64-bit sequence number padded to the left with
-//! zeros), taken atomically, never twice, and refused before it would wrap. A receiver opens with the nonce the message
+//! zeros), taken atomically, never twice, and refused before it would wrap. A key seals no more than AES-GCM's limit in
+//! RFC 8446 §5.5, refused past it as a spent nonce is: a connection whose key is spent carries no more secrets, and its
+//! client dials again, the new connection's TLS session giving fresh keys. A receiver opens with the nonce the message
 //! carries, in whatever order messages come: their order and replay are the connection's TLS's to hold. The seal is no
 //! second channel security, the connection's TLS being that: it keeps a secret out of buffers Hex can't wipe.
 
@@ -26,6 +28,13 @@ const FROM_DIALER: &[u8] = b"from the dialer";
 const FROM_ACCEPTOR: &[u8] = b"from the acceptor";
 /// A way's key: AES-256's 256 bits (FIPS 197 §5).
 const KEY_BYTES: usize = 32;
+/// AES's block: 128 bits (FIPS 197 §5), what a key's limit counts.
+const BLOCK_BYTES: usize = 16;
+/// The AES blocks one key seals at most: AES-GCM's limit in RFC 8446 §5.5, "up to 2^24.5 full-size records (about 24
+/// million) ... while keeping a safety margin of approximately 2^-57 for Authenticated Encryption (AE) security", which
+/// rests on Luykx and Paterson's AEBounds analysis ("Limits on Authenticated Encryption Use in TLS", 2017). A full record
+/// is 2^14 bytes, 2^10 blocks, so 2^34.5 blocks: its floor, √(2^69).
+const LIMIT: u128 = (1u128 << 69).isqrt();
 
 /// Which side of its connection an end is: the one that dialed, its TLS client, or the one that accepted, its server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +43,13 @@ pub(crate) enum Side {
     Acceptor,
 }
 
-/// One connection's seal, as one end holds it: the key it seals under, the key its peer seals under, and the next nonce
-/// it seals with.
+/// One connection's seal, as one end holds it: the key it seals under, the key its peer seals under, the next nonce it
+/// seals with, and the AES blocks it has sealed, to [`LIMIT`].
 pub struct Keys {
     sending: LessSafeKey,
     receiving: LessSafeKey,
     next: AtomicU64,
+    sealed: AtomicU64,
 }
 
 impl Keys {
@@ -57,7 +67,15 @@ impl Keys {
             sending: key(&mut export, mine)?,
             receiving: key(&mut export, theirs)?,
             next: AtomicU64::new(0),
+            sealed: AtomicU64::new(0),
         })
+    }
+
+    /// Keys that have sealed `blocks` AES blocks already: a test's of a key near its limit.
+    #[cfg(test)]
+    pub(crate) fn having_sealed(mut self, blocks: u64) -> Self {
+        self.sealed = AtomicU64::new(blocks);
+        self
     }
 
     /// Keys whose next nonce is `next`: a test's of a way near its last.
@@ -65,6 +83,26 @@ impl Keys {
     pub(crate) fn at(mut self, next: u64) -> Self {
         self.next = AtomicU64::new(next);
         self
+    }
+
+    /// Charges a seal of `body` to its key's [`LIMIT`], atomically, so seals made at once never pass it together: the AES
+    /// blocks GCM runs for it, its body's and one more for its tag (NIST SP 800-38D §7.1: GCTR over the body from J0's
+    /// successor, and J0 itself for the tag). Refused, with nothing charged, where they would pass the limit.
+    fn charge(&self, body: &[u8]) -> Result<(), SealFault> {
+        let blocks = body
+            .len()
+            .div_ceil(BLOCK_BYTES)
+            .checked_add(1)
+            .and_then(|blocks| u64::try_from(blocks).ok())
+            .ok_or(SealFault::Spent)?;
+        self.sealed
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |sealed| {
+                sealed
+                    .checked_add(blocks)
+                    .filter(|total| u128::from(*total) <= LIMIT)
+            })
+            .map(drop)
+            .map_err(|_| SealFault::Spent)
     }
 
     /// The next nonce this end seals with, taken atomically, so no two seals take one however many seal at once: its
@@ -107,6 +145,7 @@ impl wire::Seal for Keys {
         body: &[u8],
         sealed: &mut [u8],
     ) -> Result<([u8; NONCE_BYTES], [u8; TAG_BYTES]), SealFault> {
+        self.charge(body)?;
         let nonce = self.nonce()?;
         let mut tag = [0u8; TAG_BYTES];
         self.sending
