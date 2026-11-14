@@ -81,6 +81,7 @@ impl Runtime for GuestNode {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         }))
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

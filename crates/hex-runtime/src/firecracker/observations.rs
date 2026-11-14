@@ -322,6 +322,7 @@ mod tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
         capacity

@@ -1038,11 +1038,22 @@ impl Node {
     }
 
     fn info(&self, record: &BoxRecord, adopted: bool) -> Result<BoxInfo, Refusal> {
+        self.info_by(record, adopted, |backend, id| backend.inspect(id))
+    }
+
+    /// [`Node::info`], a VM box's answer its backend's `answer`: its inspect, or its start followed to its end
+    /// (`Runtime::started`, the review's B-6), held to its record as an inspect is.
+    fn info_by(
+        &self,
+        record: &BoxRecord,
+        adopted: bool,
+        answer: impl FnOnce(&dyn Runtime, &BoxId) -> Result<BoxInfo, Refusal>,
+    ) -> Result<BoxInfo, Refusal> {
         let id = &record.spec.id;
         if let Some(backend) = self.backend(record.spec.backend_class()?).map_err(|_| {
             backends::uncertain(id, "this node has no backend for its record's class")
         })? {
-            let mut info = backend.inspect(id)?;
+            let mut info = answer(backend, id)?;
             if info.class != record.spec.class.class()
                 || info.allocation != record.spec.allocation
                 || info.route != record.spec.route
@@ -2161,6 +2172,16 @@ impl Runtime for Node {
         self.info(&record, false)
     }
 
+    /// A VM box's backend answers it, held to its record as its inspect is (the review's B-6): an image VM's start
+    /// followed to its end, never the trait's inspect at once. Any other box's start answers only once it runs, so it is
+    /// answered as its inspect is.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let record = self
+            .record(id)?
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        self.info_by(&record, false, |backend, id| backend.started(id))
+    }
+
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         if let Some(backend) = self.backend_record(id)? {
             return backend.member(id, member);
@@ -2296,6 +2317,15 @@ impl Runtime for Node {
             }
         }
         Ok(out)
+    }
+
+    /// A VM box's backend deletes it and answers its VM's final use (the review's B-6), never the trait's plain delete
+    /// answering none, read as a run that never started; any other box runs no VM process of its own, so none.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.delete_with_host_use(id);
+        }
+        self.delete(id).map(|()| None)
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {

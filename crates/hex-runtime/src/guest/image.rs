@@ -805,8 +805,13 @@ impl Proc for MemberProc {
         }
         let exit = match self.guest.wait_member(&self.name, timeout) {
             Ok(None) => return Ok(None),
-            Ok(Some(MemberEnd::Exited(status))) => {
-                i32::try_from(status).map_or(Exit::Unknown, Exit::Code)
+            Ok(Some(MemberEnd::Exited(code))) => {
+                i32::try_from(code).map_or(Exit::Unknown, Exit::Code)
+            }
+            // Killed by a signal, its Linux number (image channel v27): its own end, never folded into the code
+            // `docker run` reports for it (128 plus it), which an exit can be too.
+            Ok(Some(MemberEnd::Signaled(signal))) => {
+                i32::try_from(signal).map_or(Exit::Unknown, Exit::Signal)
             }
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
@@ -1338,6 +1343,9 @@ impl ImageClass {
             // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
             // spec grants them, run-wide as Shards keeps them; their lessor is its run's, as its credentials' is.
             sign_ins: super::leases::sign_ins(image)?,
+            // No upstream root of its own (Shards' D242, image channel v26): its run's injector trusts its host's roots
+            // alone.
+            upstream_roots: Vec::new(),
         })
     }
 
@@ -1453,10 +1461,12 @@ impl ImageClass {
             Settled::Booting => Ok(State::Booting),
             Settled::Stopping(slot, stop) => Ok(State::Stopping(slot, stop)),
             // How its microVM started kept in its record (D253), whichever call took its boot's answer: this one, or
-            // its start, which settles it next.
+            // its start, which settles it next. Its run then read as any running VM's is (the review's B-3): one that
+            // ended as it started (D249: its command never started) is seen ended by whichever call took the answer, as
+            // by its start, never Running.
             Settled::Started(guest) => {
                 self.keep_started(record, guest.as_ref())?;
-                Ok(State::Running(guest))
+                self.settle_running(image, id, guest)
             }
             Settled::Running(guest) => {
                 self.keep_started(record, guest.as_ref())?;
@@ -1859,8 +1869,11 @@ impl ImageClass {
     }
 
     /// Deletes image box `record` as [`ImageClass::delete_image`] does, answering its VM's final use of its host (goal
-    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none where its
-    /// run never started or that read failed (kiln charges nothing then), never a use made up.
+    /// 54's change 3): its last read as it runs, just before its delete's stop, its window the whole run; none only
+    /// where its run never started (docs/design/shards-image-class.md §3: kiln charges nothing then), never a use made
+    /// up. A run that started has its use or is refused, typed, the box left as it was (the review's B-5): the read's
+    /// own refusal where it is refused, and `NotRunning` where its run ended before its delete, Shards' stats answering
+    /// only a running run.
     pub(super) fn delete_image_used(&self, record: BoxRecord) -> Result<Option<HostUse>, Refusal> {
         self.delete_run(record, true)
     }
@@ -2000,8 +2013,28 @@ impl ImageClass {
             state => state,
         };
         match state {
-            State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
+            // Its run failed, as it started or since (D249), its end reached or recorded (the review's B-3).
+            State::Stopping(_, Stop::Ended(End { why: Some(why), .. }))
+            | State::Ended(End { why: Some(why), .. }) => Err(Refusal::Failed { id, why }),
             _ => self.inspect_image(record_now(self, &id)?),
+        }
+    }
+
+    /// Box `id`'s VM's final use of its host, in its run's state `state` (the review's B-5): a running one's read as it
+    /// runs, its refusal the delete's; none where its run never started; and `NotRunning` where its run, which started,
+    /// had ended or was being stopped before the delete, Shards' stats answering only a running run, so no use is left
+    /// to read and none is made up.
+    fn final_use(&self, id: &BoxId, state: &State) -> Result<Option<HostUse>, Refusal> {
+        match state {
+            State::Running(_) => self.host_use_image(record_now(self, id)?).map(Some),
+            State::Stopping(..) | State::Ended(_) if ran(&record_now(self, id)?) => {
+                Err(ended_first(id.try_clone()?))
+            }
+            State::Created
+            | State::Booting
+            | State::Stopping(..)
+            | State::Ended(_)
+            | State::Held => Ok(None),
         }
     }
 
@@ -2012,27 +2045,48 @@ impl ImageClass {
     fn delete_run(&self, record: BoxRecord, used: bool) -> Result<Option<HostUse>, Refusal> {
         let id = record.spec.id.try_clone()?;
         let mut state = self.settle(&record)?;
+        // Its final use, where asked, read before any effect of the delete, so that a run that started answers its use
+        // or refuses with the box as it was (the review's B-5); a boot under way has no run to read yet.
         let mut last = None;
+        if used && !matches!(state, State::Booting) {
+            last = self.final_use(&id, &state)?;
+        }
         match state {
             State::Held => return Err(held()),
             State::Booting | State::Running(_) | State::Stopping(..) => {
-                // The delete's intent, durable before its waits.
-                devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                // The delete's intent, durable before its waits, and the phase it was in.
+                let before = devices::with_transaction(self.image_books()?, &id, &[], |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+                    let before = current.phase;
                     current.phase = Phase::Deleting;
-                    t.put(&current)
+                    t.put(&current)?;
+                    Ok(before)
                 })?;
                 if matches!(state, State::Booting) {
                     // Its boot stopped mid-boot (D231's `BootStop`: its run host killed), then followed to its end,
                     // `Ended(Stopped)`; a boot that answered first is a run, stopped below.
                     self.image()?.runs.stop_boot(&id)?;
                     state = self.follow_boot(&id, Follower::Delete)?;
+                    // A boot whose answer came before its stop could end it is a run that started: its final use, where
+                    // asked, as one up at the delete has it; where it has none, the intent is taken back and the delete
+                    // refused, the box as it was, its run left as its boot left it.
+                    if used {
+                        match self.final_use(&id, &state) {
+                            Ok(read) => last = read,
+                            Err(why) => {
+                                devices::with_transaction(self.image_books()?, &id, &[], |t| {
+                                    let mut current =
+                                        t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+                                    current.phase = before;
+                                    t.put(&current)
+                                })?;
+                                return Err(why);
+                            }
+                        }
+                    }
                 }
                 match state {
                     State::Running(_) => {
-                        if used {
-                            last = self.host_use_image(record_now(self, &id)?).ok();
-                        }
                         self.stop_image(&id, state, Past::Follow)?;
                     }
                     State::Stopping(..) => {
@@ -2247,6 +2301,21 @@ impl hex_api::Runtime for ImageClass {
 }
 
 /// `id`'s record as it is now.
+/// Whether box `record`'s run started: its record keeps how its microVM started (D253) once a call took its boot's answer,
+/// which no boot refused or stopped before its run gives.
+fn ran(record: &BoxRecord) -> bool {
+    record.started_from.is_some()
+}
+
+/// A delete with its host use of box `id`, whose run started and had ended, or was being stopped, before it: Shards'
+/// stats answer only a running run, so no use is left to read (the review's B-5), and none is made up.
+fn ended_first(id: BoxId) -> Refusal {
+    Refusal::NotRunning(
+        id,
+        "read its final use of its host: its run had ended, or was being stopped, before its delete",
+    )
+}
+
 fn record_now(class: &ImageClass, id: &BoxId) -> Result<BoxRecord, Refusal> {
     class
         .image_record(id)?

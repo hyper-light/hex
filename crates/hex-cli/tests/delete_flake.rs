@@ -44,66 +44,20 @@ const TEST: &str = "a_leaderless_thread_group_is_killed_on_delete";
 static EMPTIED: Patience = Patience::measuring("test.hex_cli.delete_flake.emptied");
 
 /// The box's kill as the party its emptying follows: live while it can still empty the box, some thread of its subtree
-/// on its way out ([`on_its_way_out`]) or none left; ended once every thread left sleeps with no kill pending and isn't
-/// exiting, which nothing will end: the kill missed it.
+/// on its way out, gone, or running, which may be its exit's start ([`hex_testkit::cgroup::thread`]), or none left;
+/// ended once every thread left sleeps with no kill pending and isn't exiting, which nothing will end: the kill missed
+/// it.
 fn the_kill(root: &Path) -> Party {
-    let mut queue = vec![root.to_path_buf()];
-    let mut missed = 0usize;
-    while let Some(dir) = queue.pop() {
-        let threads = std::fs::read_to_string(dir.join("cgroup.threads")).unwrap_or_default();
-        for tid in threads.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
-            if on_its_way_out(tid) {
-                return Party::Live;
-            }
-            missed += 1;
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    queue.push(e.path());
-                }
-            }
-        }
-    }
-    if missed == 0 {
+    let threads = hex_testkit::cgroup::threads(root);
+    if threads.is_empty()
+        || threads
+            .iter()
+            .any(|tid| hex_testkit::cgroup::thread(*tid) != hex_testkit::cgroup::Thread::Sleeping)
+    {
         Party::Live
     } else {
         Party::Ended
     }
-}
-
-/// Whether thread `tid` is on its way out, or may be (proc(5)): gone; a zombie or dead; exiting (`PF_EXITING` in its
-/// `stat` flags, include/linux/sched.h); running, which may be its exit's start; or a SIGKILL (signal 9) pending for it
-/// or its thread group (its `status`'s `SigPnd` and `ShdPnd` masks).
-fn on_its_way_out(tid: u32) -> bool {
-    const PF_EXITING: u64 = 0x4;
-    const SIGKILL: u64 = 1 << (9 - 1);
-    let (Ok(stat), Ok(status)) = (
-        std::fs::read_to_string(format!("/proc/{tid}/stat")),
-        std::fs::read_to_string(format!("/proc/{tid}/status")),
-    ) else {
-        return true;
-    };
-    // After the command's closing parenthesis: the state (field 3) first, the flags (field 9) the seventh.
-    let fields: Vec<&str> = stat
-        .rsplit_once(')')
-        .map(|(_, rest)| rest.split_whitespace().collect())
-        .unwrap_or_default();
-    let state = fields.first().copied().unwrap_or("");
-    let flags = fields
-        .get(6)
-        .and_then(|f| f.parse::<u64>().ok())
-        .unwrap_or(0);
-    let pending = |name: &str| {
-        status
-            .lines()
-            .find_map(|l| l.strip_prefix(name))
-            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
-            .unwrap_or(0)
-    };
-    matches!(state, "R" | "Z" | "X" | "x")
-        || flags & PF_EXITING != 0
-        || (pending("SigPnd:") | pending("ShdPnd:")) & SIGKILL != 0
 }
 
 #[test]

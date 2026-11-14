@@ -81,10 +81,11 @@ fn go(args: &[String]) -> Result<u8, Refusal> {
         }
     };
     let mut watched = proc::PidfdProc::of_child(child.id())?;
-    // Wait without a real deadline: the program runs as long as it needs; the caller ends it by
-    // signal (which reaches the boxed child). wait_for polls the pidfd; a long slice loops rarely.
+    // Followed to its end by its pidfd (`Duration::MAX`: until it), with no deadline: the program runs as long as it
+    // needs, and its caller ends it by signal (which reaches the boxed child). It was an hour's slice, picked
+    // (decision 9; ROOT, 2026-11-14).
     let exit = loop {
-        if let Some(e) = watched.wait_for(std::time::Duration::from_secs(3600))? {
+        if let Some(e) = watched.wait_for(Duration::MAX)? {
             break e;
         }
     };

@@ -2029,6 +2029,7 @@ impl Runtime for WinRuntime {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         native_route_offer(&mut report, class, initialized)?;
         report.check()?;
@@ -2431,6 +2432,7 @@ mod tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
         let route = report
@@ -2466,6 +2468,7 @@ mod tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
         report.check().unwrap();
@@ -2527,6 +2530,7 @@ mod tests {
             unavailable: Vec::new(),
             learned: None,
             node_vms: Vec::new(),
+            unlearned: None,
         };
         native_route_offer(&mut unavailable, Class::Oci, false).unwrap();
         let (process, _) =
@@ -3631,7 +3635,13 @@ mod tests {
         let rt = device_runtime(scratch.path());
         let record = vm_record("relaunched");
         let native = hex_core::record::NativeRecord::Box(&record);
-        let bounds = hex_api::Bounds::default();
+        // A VM's job is prepared with its allocation's CPU and memory, as managed::host_bounds gives them.
+        let allocation = record.spec.allocation.unwrap();
+        let bounds = hex_api::Bounds {
+            cpu_max_milli: Some(u32::try_from(allocation.resources.cpu_milli).unwrap()),
+            memory_max: Some(allocation.resources.mem_bytes),
+            ..hex_api::Bounds::default()
+        };
         let stale =
             JobBox::prepare_vm(native, bounds.clone(), rt.processors, None, &rt.holding).unwrap();
         let newer = JobBox::prepare_vm(native, bounds, rt.processors, None, &rt.holding).unwrap();
