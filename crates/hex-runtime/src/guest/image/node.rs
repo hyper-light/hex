@@ -57,6 +57,10 @@ pub struct NodeBooted {
 /// `guest.hosted.ready`, W*: the slowest READY of a node VM this process has seen, none before the first (decision 9).
 static READY: Patience = Patience::measuring("guest.hosted.ready");
 
+/// The command shards-init runs: Hex's own init, `argv[0]` `/init` as the kernel names an initramfs's first process,
+/// so that `hex` runs as init under either host (hex-cli's `runs_as_init`).
+const INIT: &str = "/init";
+
 const BOOTING: &str = "booting the node VM under shards-init";
 const WAITING: &str = "waiting for the node VM under shards-init to say it is ready";
 
@@ -356,9 +360,8 @@ impl ImageClass {
         Ok(exit)
     }
 
-    /// The image boot that runs Hex's own init under the nesting grant, as the hosted boot's
-    /// ([`crate::guest::hosted::HostedConfig::spec`]), with its run's agent-control endpoint (§5):
-    /// - **command**: `/init` alone, Hex's own init;
+    /// The image boot that runs Hex's own init under the nesting grant, with its run's agent-control endpoint (§5):
+    /// - **command**: [`INIT`] alone, Hex's own init;
     /// - **no ready-by**: Hex's init would end the boot at one, and a node's learned bound is where its wait tells the
     ///   census a run-out, never where a boot ends (decision 9);
     /// - **no member, no published port, no grant past the VM, no credential** (default deny);
@@ -374,7 +377,7 @@ impl ImageClass {
             image: vm.image.clone(),
             vcpus: size.vcpus,
             memory_mib: size.memory_mib,
-            command: Some(vec![crate::guest::hosted::INIT.to_owned()]),
+            command: Some(vec![INIT.to_owned()]),
             members: Vec::new(),
             publish: Vec::new(),
             egress: Narrowing {
@@ -602,3 +605,6 @@ pub(in crate::guest) fn refused(op: &'static str, why: ImageRefusal) -> Refusal 
         },
     }
 }
+
+#[cfg(test)]
+mod tests;

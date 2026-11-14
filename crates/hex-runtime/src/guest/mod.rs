@@ -12,7 +12,6 @@ mod family;
 pub mod gpu;
 mod gpu_pool;
 pub mod held;
-pub mod hosted;
 mod image;
 mod leases;
 mod managed;
@@ -222,7 +221,7 @@ impl GuestConfig {
     /// whatever words the kernel passes it (HEX-GUEST-12); its command line the serial console, a panic
     /// resetting the guest so the host sees it end, and `hex.shares=` naming each share's mode in tag
     /// order, none when there are none (HEX-GUEST-11). The guest is reached on the channel's three
-    /// ports alone. An image's boot has none: it boots through Shards' image boot ([`hosted`]).
+    /// ports alone. An image's boot has none: it boots through Shards' image boot ([`ImageClass::boot_node`]).
     pub fn spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
         let (kernel, initrd) = self.direct()?;
         Ok(shards_api::GuestSpec {
