@@ -75,7 +75,7 @@ owner, 2026-11-14): the names below are stable. What each follows, and what is w
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
 | `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
-| `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink | the socket | none | owed |
+| `netcheck.answers`, `netcheck.settles` | the kernel's rtnetlink, the namespace the check holds | the socket's end or failure | none: a local site | liveness alone past W*, the run-out told (the review's C-9) |
 | `hex.image.boot`, `.stats`, `.stop` | the boot or stop thread, D231's run host | the run host's process | none | owed |
 | `hex.image.delete_boot` | the boot of the box a delete ends (kiln's choice (b), ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the delete ("the boot it ends is still under way") | none: D231's boot shows none | liveness alone past W* |
 | `hex.image.started` | the boot of the box a `started` call asks (kiln's HexVms adapter, ROOT 2026-11-13) | the boot's thread: its answer, or its end with none, which alone refuses the call ("the boot it follows is still under way") | none: D231's boot shows none | liveness alone past W* |
@@ -195,9 +195,11 @@ Production, a W* that still ends something:
    `seeds.hang`'s W*, a bound learned from another wait, past it the park failed and its init was killed. Done: the
    wait learns its own W* (`createpool::PARKS`, `parked.park`) and past it follows the init by its life (its socket and
    pidfd) to its word or its end, the run-out told.
-4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`): a namespace whose IPv6 address is
-   still tentative at the settle's W*, or a dump read past the answers' W*, is thrown away, counted, and another read.
-   Owed: past W* each follows the namespace (the kernel's rtnetlink, its notices) to its settle or answer.
+4. **`netcheck.settles`, `netcheck.answers`** (hex-runtime `linux::oci::netcheck`), done 2026-11-14 (the review's C-9,
+   ROOT's ruling of that day): a namespace whose IPv6 address was still tentative at the settle's W*, or a dump read
+   past the answers' W*, was thrown away, counted, and another read. Now past W* each is told once and follows the
+   namespace (the kernel's rtnetlink, its notices) to its settle or answer, refused only where its socket fails or
+   ends.
 5. **`hex.image.stats`** (hex-runtime `guest::image`): goal 12's.
 6. **`guest.hosted.ready`** (hex-runtime `guest::hosted::follow_ready`): past W* a node VM's boot is refused where a
    whole W* window shows no CPU time of its VM's process: a VM's boot, the one place a stall of measured progress is
@@ -217,9 +219,11 @@ Tests, waiting on a time rather than on their party:
    (6042219c, its waits following the relay), the process class's (df13d537: `DELETE_PATIENCE` in
    `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations), and
    `EMPTY_PATIENCE` in `box_run_cli.rs` and the bystander's 10 s in hex-runtime's `linux::oci::run` tests (each
-   following its party: the run's cgroup's threads, the bystander's life). Left: `PATIENCE` 60 s
+   following its party: the run's cgroup's threads, the bystander's life), and `macos_process_box.rs`'s measurement
+   windows (`SAMPLE_GUARD`, each sample now followed to its end; the CPU rate's 2 s, now one scheduling round) with
+   its end-seen check (the review's E-5: `Status::late_ends`, a count, 0 over its runs). Left: `PATIENCE` 60 s
    (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`, `windows_node_recovery.rs`;
-   `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s
+   `macos_pool_restart.rs` after goal 14's fix there), `RERUN_BOUND` 300 s
    (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD` (`windows_oci_box.rs`, a seeded test wait), and inline
    durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
    (`charge_fleet.rs`,

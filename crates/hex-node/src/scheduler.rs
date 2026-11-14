@@ -193,7 +193,8 @@ impl Lane {
         })
     }
 
-    /// Says every hint owed to the holders; a failure is logged, the holders' next hello telling them the view.
+    /// Hands every hint owed to its holder's link, whose own writer says it (CV7), never waiting for a holder; a failure
+    /// is logged, the holders' next hello telling them the view.
     fn hint(&self) {
         if let Err(why) = self.server.hint() {
             (self.log)(&hint_failed_line(&why));

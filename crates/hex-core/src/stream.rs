@@ -200,6 +200,17 @@ impl Deframer {
     }
 }
 
+/// A frame cut short where its stream ends may be a message carrying a lease's value or a sign-in's tokens, which it
+/// can't yet tell: what came of it is wiped as the reader goes (docs/design/credential-grants.md C7, C8; the review's
+/// E-6). A whole message is its taker's, who wipes it as its kind says.
+impl Drop for Deframer {
+    fn drop(&mut self) {
+        if let Some((_, body)) = self.body.as_mut() {
+            hex_api::lease::wipe(body);
+        }
+    }
+}
+
 /// One of a program's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stdio {
