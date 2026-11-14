@@ -93,8 +93,9 @@ impl Hold {
 
     /// Lets the hold go as its process's end would, though its store's clones live on (T-T7.1.2: a test's crash in this
     /// process, `Node::crash`): a store opened after over the directory takes it, and no write of this store's is taken
-    /// after ([`Hold::ended`]), as a process that ended writes nothing. A test control of debug builds alone.
-    #[cfg(all(debug_assertions, feature = "test-controls"))]
+    /// after ([`Hold::ended`]), as a process that ended writes nothing. A test control of debug builds alone, on Linux,
+    /// where `Node` is.
+    #[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
     pub(super) fn end(&self) {
         self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
         self.let_go();

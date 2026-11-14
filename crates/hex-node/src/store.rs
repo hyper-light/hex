@@ -375,8 +375,8 @@ impl Store {
 
     /// Lets the store's hold of its directory go as its process's end would (T-T7.1.2: a test's crash in this process,
     /// [`crate::Node::crash`]): a store opened after over the directory takes it, and this store, every clone of it,
-    /// writes nothing more ([`Store::still_held`]). A test control of debug builds alone.
-    #[cfg(all(debug_assertions, feature = "test-controls"))]
+    /// writes nothing more ([`Store::still_held`]). A test control of debug builds alone, on Linux, where `Node` is.
+    #[cfg(all(debug_assertions, feature = "test-controls", target_os = "linux"))]
     pub(crate) fn end_as_a_crash(&self) {
         self._hold.end();
     }

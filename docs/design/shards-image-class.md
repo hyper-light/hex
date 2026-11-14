@@ -153,7 +153,10 @@ Sources, read at the revisions named:
   are the box's own output on the node's disk, so they are charged to it, and no number is picked. Past that bound the
   file is cut back to the tail Shards keeps for quoting, and its run host's words go on after it, through Shards'
   bounded `keep_diagnostics(to, bound)` (`9d8a05f6a`); a box admitted with no allocation has no disk to bound its file
-  by, and it has none. A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
+  by, and it has none. A box admitted with less disk than that tail (an image or node VM whose root is in its RAM is
+  admitted with none) holds the tail alone, Shards' own bound, its longest report of a VM's end, which Shards' refusal
+  of a shorter bound names (the KVM suite at 27cdafe0c found such boxes refused; owed: the tail counted in the class's
+  per-VM cost). A failed run's `BoxInfo.ended` carries its words, then the file's last bytes, as many as Shards
   quotes of a VM's end (`shards_abi::bounds::console_said` over the kernel's console records, as the dedicated guest
   reads them). The node Store keeps the file's name, the run's
   words and how its microVM started through the VM adapters' lifecycle writes (`Store::put_lifecycle`), and the

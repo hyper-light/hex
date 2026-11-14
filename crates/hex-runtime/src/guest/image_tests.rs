@@ -338,6 +338,9 @@ struct ModelRun {
     diagnostics: Mutex<Vec<std::fs::File>>,
     /// The bound each of those files was told to be held within, in order (the review's B-9).
     diagnostics_bounds: Mutex<Vec<u64>>,
+    /// The tail its run host keeps to quote its end, as Shards' session keeps it: a bound short of it is refused
+    /// `DiagnosticsBound`, as Shards refuses it; none, any bound taken.
+    diagnostics_tail: Mutex<Option<u64>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -586,6 +589,11 @@ impl ImageGuest for ModelGuest {
         Ok(())
     }
     fn keep_diagnostics(&self, to: std::fs::File, bound: u64) -> Result<(), ImageRefusal> {
+        if let Some(tail) = *self.run.diagnostics_tail.lock().unwrap()
+            && bound < tail
+        {
+            return Err(ImageRefusal::DiagnosticsBound { bound, tail });
+        }
         self.run.diagnostics.lock().unwrap().push(to);
         self.run.diagnostics_bounds.lock().unwrap().push(bound);
         Ok(())
@@ -1524,6 +1532,27 @@ fn b9_an_image_vms_diagnostics_are_held_within_the_disk_its_box_was_admitted_wit
         *images.run.diagnostics_bounds.lock().unwrap(),
         [allocation().resources.disk_bytes]
     );
+}
+
+/// The review's B-9, its follow-up (the KVM suite at 27cdafe0c: HEX-IMG-1..5 and the node under shards-init refused, "its
+/// admitted disk, 0 bytes, is short of the 12413 bytes of its run host's diagnostics Shards keeps to quote a run's
+/// end"): a box admitted with less disk than the tail Shards keeps to quote its end, as an image or node VM whose root is
+/// in its RAM admits none, still starts, its diagnostics held within that tail, Shards' own bound. Do start an image VM
+/// whose run host keeps a tail one byte past the disk its box was admitted with. Expect it started, and its diagnostics
+/// kept once, within that tail.
+#[test]
+fn b9_a_box_admitted_with_less_disk_than_shards_keeps_holds_that_tail() {
+    let images = ModelImages::new();
+    let tail = allocation().resources.disk_bytes + 1;
+    *images.run.diagnostics_tail.lock().unwrap() = Some(tail);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-diagnostics-tail", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    assert_eq!(*images.run.diagnostics_bounds.lock().unwrap(), [tail]);
+    assert_eq!(images.run.diagnostics.lock().unwrap().len(), 1);
 }
 
 /// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one
