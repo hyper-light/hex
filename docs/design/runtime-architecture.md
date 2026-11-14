@@ -2521,11 +2521,9 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
   `bench/native/guest/records.tsv`, not a constant measured on a bench host. The census and records.tsv are the
-  evidence the rule is held to and its falsifier's data, cited here. One place still breaks it, owed until Shards'
-  GPU report takes no deadline: a GPU create's budget takes records.tsv's `boot_ready`
-  (`hex_client::guest::shards::recorded_boot`, through `hex_runtime::guest::managed::gpu_create`), as Shards binds a
-  VM process's GPU report to a finite create deadline (`PreparedBoot::with_gpu_report`). Every other managed create
-  and attach follows its guest (the review's C-9, 2026-11-14): its budget has no deadline (`managed::Budget::following`),
+  evidence the rule is held to and its falsifier's data, cited here. Every managed create and attach follows its guest
+  (the review's C-9, 2026-11-14), a GPU create's too since Shards takes a VM process's GPU report with no clock
+  (`Until::Released`, Shards b4a018090; (c2)): its budget has no deadline (`managed::Budget::following`),
   and its native launch, first relay dial and join each wait within their own W* and past it follow their party. So
   does the guest's own boot: within W*, the slowest boot its node has seen, past it told and followed by its VM's life
   through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34). So do the macOS managed

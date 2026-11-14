@@ -446,8 +446,8 @@ fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
     })
 }
 
-// This host's class, as the records name it, and its slowest boot to ready on record: a GPU create's budget alone
-// (`managed::gpu_create`, owed until Shards' GPU report takes no deadline; the review's C-9).
+// This host's class, as the records name it, and its slowest boot to ready on record: hex-cli's measuring tools' bound
+// alone, owed until their waits follow (the review's C-9; no production wait reads it since (c2)).
 pub use hex_client::guest::shards::{CLASS, recorded_boot};
 
 /// The managed plan of guest `spec` booted with `binary` on `socket`: the native plan where `images` declare its images

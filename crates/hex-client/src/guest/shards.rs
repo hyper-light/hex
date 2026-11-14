@@ -17,9 +17,10 @@ use hex_core::patience::{Patience, Piece};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
-/// The slowest recorded value of each guest wait, by host class (bench/native/guest/records.tsv): the build's one read
-/// of it, for a GPU create's budget alone (`hex_runtime::guest`'s `gpu_create`), owed until Shards' GPU report takes no
-/// deadline (the review's C-9). A class with no row for a measure seeds from the slowest row of any class
+/// The slowest recorded value of each guest wait, by host class (bench/native/guest/records.tsv): read by no production
+/// wait since a GPU create's budget followed its guest (the review's C-9, (c2)), its last reader hex-cli's measuring
+/// tools (the guest_cost and macos_cpu_response examples), owed until their waits follow. A class with no row for a
+/// measure seeds from the slowest row of any class
 /// ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code change.
 pub const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
 
@@ -81,7 +82,8 @@ fn recorded(measure: &str) -> Result<Duration, Refusal> {
 }
 
 /// The slowest boot to ready on record for this host's class, or with none, the slowest of any class
-/// (bench/native/guest/boot-ready/RECORD.md, its rows in records.tsv): a GPU create's budget alone, owed ([`RECORDS`]).
+/// (bench/native/guest/boot-ready/RECORD.md, its rows in records.tsv): the measuring tools' bound alone, owed
+/// ([`RECORDS`]).
 pub fn recorded_boot() -> Result<Duration, Refusal> {
     recorded("boot_ready")
 }

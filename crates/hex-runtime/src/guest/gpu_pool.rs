@@ -424,10 +424,9 @@ impl GuestRuntime {
 
     pub(super) fn initialize_gpu_pool(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
         grant.check()?;
-        // This one finite absolute budget is captured before grant persistence,
-        // native effects, report observation, guest workload or publication: a GPU create's (its
-        // report needs one), the record's until Shards' report takes none (the review's C-9, owed).
-        let budget = managed::gpu_create()?;
+        // This one budget is captured before grant persistence, native effects, report observation, guest workload or
+        // publication, and follows its guest: Shards takes the report with no clock (the review's C-9, (c2)).
+        let budget = managed::Budget::following();
         let definition = self.gpu_definition_for(grant.key)?;
         if grant.devices != definition.devices
             || grant.allocation != self.configured_allocation()?
@@ -587,7 +586,7 @@ impl GuestRuntime {
                 let plan = plan
                     .with_gpu_report(
                         *receipt.original.scope().bytes(),
-                        shards_api::Until::At(managed::gpu_deadline(budget)?),
+                        managed::gpu_until(budget),
                     )
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
                 pool::write(&definition.path, &receipt)?;

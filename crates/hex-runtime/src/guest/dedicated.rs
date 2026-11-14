@@ -872,7 +872,7 @@ mod tests {
             });
             let books: Arc<dyn crate::devices::Books> = owner.clone();
             runtime.bind_books(Arc::downgrade(&books)).unwrap();
-            let budget = managed::gpu_create().unwrap();
+            let budget = managed::Budget::following();
             let result = runtime.create_selected(spec.clone(), owner.as_ref(), budget);
             let allowed = current == Some(9u64.to_le_bytes());
             assert_eq!(
@@ -1862,10 +1862,7 @@ impl GuestRuntime {
                 "its selected receipt has no scope",
             )?)?;
             plan = plan
-                .with_gpu_report(
-                    *scope.bytes(),
-                    shards_api::Until::At(managed::gpu_deadline(budget)?),
-                )
+                .with_gpu_report(*scope.bytes(), managed::gpu_until(budget))
                 .map_err(|why| refusal("preparing selected renderer report", &why))?;
         }
         budget.remaining()?;

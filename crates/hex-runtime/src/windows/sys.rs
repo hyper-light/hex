@@ -337,16 +337,20 @@ fn pair_timeout(left: std::time::Duration) -> io::Result<i32> {
 /// stream entirely from the native wait. No data is consumed, physical socket
 /// mode/timeout changed, handle duplicated or asynchronous I/O left pending. HUP/ERR is read-ready
 /// so the same caller observes its actual EOF/error; neither is a whole-scope termination fact.
+/// `patience` None waits with no deadline, as its caller's budget follows its guest (the review's C-9, (c2)): until an
+/// endpoint is ready, the native wait's finite width at a time; one past what an instant holds is refused.
 pub fn readable_pair(
     sockets: [Option<BorrowedSocket<'_>>; 2],
-    patience: std::time::Duration,
+    patience: Option<std::time::Duration>,
 ) -> io::Result<[bool; 2]> {
-    if patience == std::time::Duration::MAX {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let deadline = std::time::Instant::now()
-        .checked_add(patience)
-        .ok_or(io::ErrorKind::InvalidInput)?;
+    let deadline = match patience {
+        None => None,
+        Some(patience) => Some(
+            std::time::Instant::now()
+                .checked_add(patience)
+                .ok_or(io::ErrorKind::InvalidInput)?,
+        ),
+    };
     let mut descriptors = [WSAPOLLFD {
         fd: INVALID_SOCKET,
         events: POLLRDNORM,
@@ -378,7 +382,9 @@ pub fn readable_pair(
     let native_count = u32::try_from(count).map_err(|_| io::ErrorKind::InvalidInput)?;
     let mut initial = true;
     loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let left = deadline.map_or(std::time::Duration::MAX, |deadline| {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        });
         if !initial && left.is_zero() {
             return Ok([false; 2]);
         }
@@ -1937,7 +1943,7 @@ mod observer_socket_tests {
         assert_eq!(
             readable_pair(
                 [Some(stdout.as_socket()), Some(stderr.as_socket())],
-                Duration::ZERO
+                Some(Duration::ZERO)
             )
             .unwrap(),
             [false, false]
@@ -1945,24 +1951,22 @@ mod observer_socket_tests {
         assert!(
             readable_pair(
                 [Some(stdout.as_socket()), Some(stdout.as_socket())],
-                Duration::ZERO
+                Some(Duration::ZERO)
             )
             .is_err()
         );
         assert!(
             readable_pair(
                 [Some(stdout.as_socket()), Some(stderr.as_socket())],
-                Duration::MAX
+                Some(Duration::MAX)
             )
             .is_err()
         );
         stderr_peer.write_all(b"R").unwrap();
+        // A wait with no deadline (its caller's budget follows its guest: the review's C-9, (c2)) returns as an endpoint
+        // is ready.
         assert_eq!(
-            readable_pair(
-                [Some(stdout.as_socket()), Some(stderr.as_socket())],
-                Duration::from_secs(10)
-            )
-            .unwrap(),
+            readable_pair([Some(stdout.as_socket()), Some(stderr.as_socket())], None).unwrap(),
             [false, true]
         );
         let mut byte = [0u8; 1];
@@ -1971,7 +1975,7 @@ mod observer_socket_tests {
         assert_eq!(
             readable_pair(
                 [Some(stdout.as_socket()), Some(stderr.as_socket())],
-                Duration::ZERO
+                Some(Duration::ZERO)
             )
             .unwrap(),
             [false, false]
@@ -1979,24 +1983,28 @@ mod observer_socket_tests {
         stdout_peer.shutdown(std::net::Shutdown::Write).unwrap();
         let ready = readable_pair(
             [Some(stdout.as_socket()), Some(stderr.as_socket())],
-            Duration::from_secs(10),
+            Some(Duration::from_secs(10)),
         )
         .unwrap();
         assert_eq!(ready, [true, false]);
         assert_eq!(stdout.read(&mut byte).unwrap(), 0);
         assert_eq!(
-            readable_pair([None, Some(stderr.as_socket())], Duration::ZERO).unwrap(),
+            readable_pair([None, Some(stderr.as_socket())], Some(Duration::ZERO)).unwrap(),
             [false, false],
             "completed stdout HUP must be unwatched"
         );
         stderr_peer.write_all(b"S").unwrap();
         assert_eq!(
-            readable_pair([None, Some(stderr.as_socket())], Duration::from_secs(10)).unwrap(),
+            readable_pair(
+                [None, Some(stderr.as_socket())],
+                Some(Duration::from_secs(10))
+            )
+            .unwrap(),
             [false, true]
         );
         stderr.read_exact(&mut byte).unwrap();
         assert_eq!(byte, *b"S");
-        assert!(readable_pair([None, None], Duration::ZERO).is_err());
+        assert!(readable_pair([None, None], Some(Duration::ZERO)).is_err());
     }
 
     /// AC-T7.4.1 (the guest-cost producer's readers): do: commit 64 pages of read/write memory as Shards' WHP guest RAM

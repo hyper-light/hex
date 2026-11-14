@@ -253,13 +253,9 @@ impl GuestRuntime {
 
     pub(super) fn create_recorded(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         self.check_allocation(&spec)?;
-        // A create with devices has a GPU report, which Shards binds to a finite deadline: the record's, owed until its
-        // report takes none. Every other create follows its guest (the review's C-9).
-        let budget = if spec.devices.is_empty() {
-            managed::Budget::following()
-        } else {
-            managed::gpu_create()?
-        };
+        // Every create follows its guest, one with devices too: Shards takes its GPU report with no clock (the review's
+        // C-9, (c2)).
+        let budget = managed::Budget::following();
         let books = self.books.get().ok_or_else(|| {
             Refusal::Broken("a dedicated guest needs the native record authority".into())
         })?;

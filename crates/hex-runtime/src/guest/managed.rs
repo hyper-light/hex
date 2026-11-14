@@ -8,9 +8,9 @@ use crate::devices::{ManagedLaunch, Transaction};
 use hex_core::patience::{Patience, Piece};
 
 /// One create/attach attempt's budget (decision 9; the review's C-9). It follows its guest: no deadline of its own, each
-/// wait in it (native launch, first relay dial, join) waiting within its own W* and past it following its party. A GPU
-/// create's alone is finite ([`gpu_create`]); its native launch, report and first relay dial spend its remainder rather
-/// than restart it.
+/// wait in it (native launch, GPU report, first relay dial, join) waiting within its own W* and past it following its
+/// party. Since a GPU create's followed too (C-9, (c2)) no create's is finite: its finite form is a test's alone, owed
+/// its removal with the waits that read it.
 #[derive(Clone, Copy)]
 pub(super) struct Budget {
     deadline: Option<Instant>,
@@ -20,24 +20,6 @@ impl Budget {
     /// A budget that follows its guest, with no deadline of its own.
     pub fn following() -> Self {
         Self { deadline: None }
-    }
-
-    /// A finite budget, `patience` from now.
-    pub fn new(patience: Duration) -> Result<Self, Refusal> {
-        if patience.is_zero() {
-            return Err(Refusal::Invalid {
-                what: "managed guest budget",
-                why: "the measured boot bound must be finite and positive".into(),
-            });
-        }
-        Ok(Self {
-            deadline: Some(Instant::now().checked_add(patience).ok_or_else(|| {
-                Refusal::Invalid {
-                    what: "managed guest budget",
-                    why: "the measured boot bound exceeds a finite native deadline".into(),
-                }
-            })?),
-        })
     }
 
     /// What is left of it: none for one that follows; refused once a finite one is spent.
@@ -66,32 +48,12 @@ impl Budget {
     }
 }
 
-/// A GPU create's budget: the one place a record still bounds a managed create, owed until Shards' GPU report takes no
-/// deadline (the review's C-9; ROOT's ask of Shards, 2026-11-14). Shards binds a VM process's GPU report to a finite
-/// absolute create deadline (`PreparedBoot::with_gpu_report`), so a create with devices spends the slowest boot to ready
-/// on record for its host class (bench/native/guest/records.tsv's `boot_ready`, [`super::recorded_boot`]), the build's
-/// one read of the record. Every other managed create follows its guest ([`Budget::following`]).
-pub(super) fn gpu_create() -> Result<Budget, Refusal> {
-    Budget::new(super::recorded_boot()?)
-}
-
-/// `budget`'s deadline, which a GPU create's report and observer need ([`gpu_create`]): refused by type for one that
-/// follows.
-pub(super) fn gpu_deadline(budget: Budget) -> Result<Instant, Refusal> {
-    budget.deadline().ok_or_else(follows)
-}
-
-/// What is left of `budget`, as [`gpu_deadline`] needs it: refused once spent, and by type for one that follows.
-pub(super) fn gpu_remaining(budget: Budget) -> Result<Duration, Refusal> {
-    budget.remaining()?.ok_or_else(follows)
-}
-
-fn follows() -> Refusal {
-    Refusal::Invalid {
-        what: "a GPU create's budget",
-        why: "Shards binds its GPU report to a finite create deadline, and this budget follows its guest"
-            .into(),
-    }
+/// How Shards waits for a GPU create's report (`PreparedBoot::with_gpu_report`): by `budget`'s deadline where it has one,
+/// else until the report comes or its VM process ends (`Until::Released`).
+pub(super) fn gpu_until(budget: Budget) -> shards_api::Until {
+    budget
+        .deadline()
+        .map_or(shards_api::Until::Released, shards_api::Until::At)
 }
 
 struct Launcher<'a> {
@@ -747,8 +709,6 @@ mod tests {
     /// AC-T7.4.1: no stage restarts a finite create budget after scope publication.
     #[test]
     fn managed_budget_is_one_absolute_finite_deadline() {
-        assert!(Budget::new(Duration::ZERO).is_err());
-        assert!(Budget::new(Duration::MAX).is_err());
         let start = Instant::now();
         let deadline = start.checked_add(Duration::from_secs(1)).unwrap();
         let budget = Budget {
@@ -767,26 +727,17 @@ mod tests {
     }
 
     /// The review's C-9, (c2) (decision 9; Shards b4a018090's `Until::Released`): a GPU create's budget follows its
-    /// guest as every managed create's does, no deadline and none left, its report taken with no clock. Do take a GPU
-    /// create's budget. Expect it to follow, as a following budget does.
+    /// guest as every managed create's does, no deadline and none left, its report taken with no clock. Do take the one
+    /// budget a create can take (`Budget::following`, its only constructor since (c2)). Expect it to follow and its GPU
+    /// report's wait to be `Until::Released`; a finite one's (a test's alone) waits by its deadline.
     #[test]
     fn c9_c2_a_gpu_creates_budget_follows_its_guest() {
-        let gpu = gpu_create().unwrap();
+        let gpu = Budget::following();
         assert_eq!(gpu.deadline(), None, "a GPU create's budget has a deadline");
         assert_eq!(gpu.remaining().unwrap(), None);
-    }
-
-    /// The review's C-9 (decision 9): a managed create's budget that follows its guest has no deadline and none left,
-    /// spent never; a GPU create's is finite, the record's, until Shards' GPU report takes none (owed).
-    #[test]
-    fn c9_a_following_budget_has_no_deadline_and_a_gpu_creates_has_one() {
-        let following = Budget::following();
-        assert_eq!(following.deadline(), None);
-        assert_eq!(following.remaining().unwrap(), None);
-        assert!(gpu_deadline(following).is_err());
-        let gpu = gpu_create().unwrap();
-        let left = gpu.remaining().unwrap().unwrap();
-        assert!(left <= crate::guest::recorded_boot().unwrap(), "{left:?}");
-        assert_eq!(gpu_deadline(gpu).ok(), gpu.deadline());
+        assert_eq!(gpu_until(gpu), shards_api::Until::Released);
+        let at = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
+        let finite = Budget { deadline: Some(at) };
+        assert_eq!(gpu_until(finite), shards_api::Until::At(at));
     }
 }

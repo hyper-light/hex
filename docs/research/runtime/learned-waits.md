@@ -130,9 +130,10 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    (`ShardsLink::dial_following`); the guest's own boot reads no record (`GuestRuntime::boot_bound`, none before its
    first); and a managed create's or attach's budget follows its guest (`managed::Budget::following`, its deadline an
    `Option<Instant>`), its native launch taking none (`Transaction::launch_managed`'s `Option<Duration>`; on Linux the
-   held child's gate then waits with no clock, ended by its peer's byte or EOF, Ada's approval of 2026-11-14). Owed: a
-   GPU create's budget keeps the record (`managed::gpu_create`) until Shards' GPU report takes no deadline, ROOT's ask;
-   and hex-cli's measurement tools' own waits (guest_cost's stop,
+   held child's gate then waits with no clock, ended by its peer's byte or EOF, Ada's approval of 2026-11-14). A GPU
+   create's budget follows too ((c2), 2026-11-14): Shards takes its GPU report with no clock (`Until::Released`, Shards
+   b4a018090; `managed::gpu_until`), so no production wait reads the record. Owed: hex-cli's measurement tools' own
+   waits (guest_cost's stop,
    place removal, end, window boot and census; macos_cpu_response's top arm): the producer's waits follow their
    parties.
 2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
@@ -223,7 +224,7 @@ Production, a W* that still ends something:
    judged ("Life alone at the node's local sites"), to become Shards' Part B once vendored.
 7. **The guest's first boot** ("Owed", 1), done 2026-11-14 (the review's C-9): the guest's own boot within W*, the
    slowest boot its node has seen, past it told and followed, never booted again; managed creates and attaches follow
-   their guests. A GPU create's budget owed until Shards' GPU report takes no deadline.
+   their guests, a GPU create's too ((c2): Shards' GPU report with no clock, `Until::Released`).
 
 Production, holding the rule: `node.listing` (run-out told, the listing goes on), `node.turns` and `store.turns`
 (the holder followed to its let-go), `client.answer.*` (only a caller's deadline fails a call), `recorded.lifecycle`
