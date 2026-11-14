@@ -369,7 +369,7 @@ fn a10_a_linux_fleets_budget_is_what_is_free_its_page_cache_counted_once() {
         shards,
         &[],
         |reads| measured(machine(), CapacityResources::default(), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     assert_eq!(
@@ -397,7 +397,7 @@ fn a10_a_linux_keepers_word_comes_off_the_fleets_budget() {
         shards,
         &[],
         |reads| measured(machine(), res(0, 4 * GIB), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     assert_eq!(
@@ -429,7 +429,7 @@ fn a10_a_linux_nodes_own_boxes_are_never_counted_twice() {
                 shards,
                 &[],
                 |reads| measured(machine(), CapacityResources::default(), reads),
-                Instant::now(),
+                Instant::now,
             )
             .unwrap();
             io.file(&fleet().join("vm-1"), "memory.high")
@@ -459,7 +459,7 @@ fn a10_a_linux_window_reads_what_is_free_after_its_vms_and_its_boxes() {
         shards,
         &[],
         |reads| measured(machine(), CapacityResources::default(), reads),
-        Instant::now(),
+        Instant::now,
     )
     .unwrap();
     let reads = io.reads.borrow().clone();
@@ -1585,17 +1585,16 @@ fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
     io.set(vms[0].2.dir(), 0, GIB);
     io.guest
         .borrow_mut()
-        .insert("vm-1".to_owned(), ManagedGuestTime::PerVcpu(vec![0; 16]));
+        .insert("vm-1".to_owned(), sampled(vec![0; 16]));
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
     let start = Instant::now();
     learner
         .window(&io, vms.clone(), shards, &[], machine(), start)
         .unwrap();
     io.set(vms[0].2.dir(), 120_000, GIB);
-    io.guest.borrow_mut().insert(
-        "vm-1".to_owned(),
-        ManagedGuestTime::PerVcpu(vec![6_250_000; 16]),
-    );
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), sampled(vec![6_250_000; 16]));
     learner
         .window(&io, vms, shards, &[], machine(), start + WINDOW)
         .unwrap();
@@ -1805,4 +1804,14 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         Vec::<&str>::new(),
         "asked while the lock its capacity answers take was held"
     );
+}
+
+/// A managed VM's guest time `ns` by vCPU as its VM process answers its use (D260), read now.
+fn sampled(ns: Vec<u64>) -> ManagedGuestTime {
+    let at = Instant::now();
+    ManagedGuestTime::PerVcpu {
+        ns,
+        asked: at,
+        answered: at,
+    }
 }

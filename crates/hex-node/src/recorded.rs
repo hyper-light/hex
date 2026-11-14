@@ -2703,7 +2703,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             &sorted.learned,
             unreadable,
             |held| charges::measured(&io, machine, &sorted.booked, held, reserved),
-            std::time::Instant::now(),
+            std::time::Instant::now,
         );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
