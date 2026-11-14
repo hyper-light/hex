@@ -587,20 +587,20 @@ fn carry(socket: &mut Socket) {
 #[cfg(unix)]
 struct Counted {
     lanes: Lanes,
-    before: Arc<std::sync::Mutex<Option<u64>>>,
+    before: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 #[cfg(unix)]
 impl Link for Counted {
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
-        let mut socket = self
-            .lanes
-            .sockets
-            .connect(named(port)?)
-            .map_err(|fault| refused(port, fault, self.lanes.lanes))?;
+        let mut socket = self.lanes.connect(port, None)?;
         carry(&mut socket);
         *self.before.lock().unwrap() = Some(open_descriptors());
         own_duplex(bridge(socket).map_err(|e| Refusal::os("bridging a counted lane", e))?)
+    }
+
+    fn lends_identity(&self) -> bool {
+        false
     }
 }
 
@@ -632,19 +632,16 @@ fn a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts() {
         _dir,
     } = Run::new(dir, admission(4));
 
-    let mut socket = link
-        .sockets
-        .connect(named(stream::STDIO_PORT).unwrap())
-        .unwrap();
+    let mut socket = link.connect(stream::STDIO_PORT, None).unwrap();
     carry(&mut socket);
     let before = open_descriptors();
     let lane = bridge(socket).unwrap();
     let a_lane = open_descriptors() - before;
 
-    let before = Arc::new(std::sync::Mutex::new(None));
+    let before = std::sync::Arc::new(std::sync::Mutex::new(None));
     let counted = Counted {
         lanes: link,
-        before: Arc::clone(&before),
+        before: std::sync::Arc::clone(&before),
     };
     let control =
         crate::guest::Stream::<crate::guest::Guest>::dial(crate::guest::own_link(counted).unwrap())
