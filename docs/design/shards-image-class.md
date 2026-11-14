@@ -286,8 +286,8 @@ census its run-out, never where a boot ends, and the answer, when a later call t
 stats ask is given `Duration::MAX` too and followed by its run's life alone, its W* where the census is told a run-out.
 D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
 past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's
-follows it to its end (§3). The waits census (`hex_node::census`) measures every wait, unarmed
-(`hex_core::patience::measures_all`). `crates/hex-cli/tests/image_record.rs` times the three on a host class (a harness
+follows it to its end (§3). The waits census (`hex_node::census`) records each wait's answers and run-outs with every
+wait armed, as anywhere: it disarms none (decision 9). `crates/hex-cli/tests/image_record.rs` times the three on a host class (a harness
 image booted, its stats read and stopped n times through D231 as this class does, each series' first boot an
 upgrade's, a fresh cache): evidence of decision 9's rule that the census keeps, never a seed.
 `crates/hex-cli/tests/image_real.rs` runs the class's cases (`IMAGE_CASES`) through a real `hex node` in the census,

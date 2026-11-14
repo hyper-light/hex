@@ -17,7 +17,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 pub use hex_core::patience::Party;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 /// A wait's fact that didn't come: its party ended without it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub fn until(
             wait.answered(waiting.began.elapsed());
             return Ok(looks);
         }
-        if waiting.look(wait, party()).is_err() {
+        if waiting.look(wait, what, party()).is_err() {
             if fact() {
                 wait.answered(waiting.began.elapsed());
                 return Ok(looks.saturating_add(1));
@@ -86,7 +86,7 @@ pub fn within<T>(
             wait.answered(waiting.began.elapsed());
             return Ok(answer);
         }
-        match waiting.look(wait, party()) {
+        match waiting.look(wait, what, party()) {
             Ok(next) => by = next,
             Err(Ended) => {
                 // The answer may have come as its party ended: one more look, with no time left.
@@ -130,14 +130,23 @@ impl Waiting {
     }
 
     /// The party as looked at now: when to look next at the latest ([`Waiting::slice`]), or its end. Past W* its
-    /// run-out is told, once.
-    fn look(&mut self, wait: &Patience, party: Party) -> Result<Option<Instant>, Ended> {
+    /// run-out is told, once, naming `what` it waits for.
+    fn look(
+        &mut self,
+        wait: &Patience,
+        what: &str,
+        party: Party,
+    ) -> Result<Option<Instant>, Ended> {
         if !self.past
             && let Some(bound) = self.bound
             && self.began.elapsed() >= bound
         {
-            // No sample (Karn's point), but the census is told, and the wait goes on.
-            wait.ran_out(bound);
+            // No sample (Karn's point), but the run-out is told, and the wait goes on.
+            wait.ran_out(
+                bound,
+                self.began.elapsed(),
+                &[Piece::Kind("the party of "), Piece::Name(what)],
+            );
             self.past = true;
         }
         match party {

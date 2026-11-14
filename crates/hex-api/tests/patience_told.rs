@@ -6,7 +6,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use hex_api::patience::Patience;
+use hex_api::patience::{Patience, Piece};
 
 /// Set in the child this test starts of itself: there it runs the wait out.
 const CHILD: &str = "HEX_TEST_PATIENCE_TOLD_CHILD";
@@ -21,7 +21,7 @@ fn a_run_out_is_told_once_on_the_processs_log_with_no_census() {
     if std::env::var_os(CHILD).is_some() {
         let p = Patience::measuring("told.test");
         p.answered(answer);
-        p.ran_out(waited);
+        p.ran_out(answer, waited, &[Piece::Kind("the test's stand-in")]);
         return;
     }
     let out = Command::new(std::env::current_exe().unwrap())

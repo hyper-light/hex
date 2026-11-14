@@ -19,7 +19,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use hex_api::{BoxId, DeviceId, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::{OwnerKey, OwnerRef};
 use hex_wait::{Condvar, Mutex};
 
@@ -342,8 +342,25 @@ impl Turns {
                         // The hold outlasted the slowest seen: no sample (Karn's point), but the census is told, and
                         // the holder is followed to its let-go, the uncensored answer the patience then rises to
                         // (decision 9: a live party is waited for; its hold's progress, to refuse a stall, is owed).
-                        if let Some(after) = patience {
-                            held.patience.ran_out(after);
+                        if let Some(bound) = patience {
+                            let pool: String;
+                            let (kind, name) = match id {
+                                OwnerRef::Box(id) => ("box ", id.as_str()),
+                                OwnerRef::Pool(key) => {
+                                    pool = key.iter().map(|byte| format!("{byte:02x}")).collect();
+                                    ("pool ", pool.as_str())
+                                }
+                            };
+                            held.patience.ran_out(
+                                bound,
+                                since.elapsed(),
+                                &[
+                                    Piece::Kind("the holder of "),
+                                    Piece::Kind(kind),
+                                    Piece::Name(name),
+                                    Piece::Kind("'s turn"),
+                                ],
+                            );
                         }
                         following = Some(since);
                         continue;

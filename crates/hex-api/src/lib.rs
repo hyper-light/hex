@@ -27,6 +27,7 @@ mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
+pub mod event;
 mod grants;
 mod id;
 pub mod lease;

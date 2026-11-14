@@ -7,7 +7,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 /// Set in the child this test starts of itself: there it installs the census and runs a wait.
 const CHILD: &str = "HEX_TEST_CENSUS_CHILD";
@@ -28,14 +28,17 @@ fn the_census_records_every_wait_and_disarms_none() {
             Some(answer),
             "the census disarmed a learned wait"
         );
-        p.ran_out(waited);
+        p.ran_out(answer, waited, &[Piece::Kind("the test's stand-in")]);
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("census");
     let written = [
-        hex_core::patience::census_line("census.armed", hex_core::patience::Sample::Answered(answer)),
-        hex_core::patience::census_line("census.armed", hex_core::patience::Sample::RanOut(waited)),
+        hex_core::patience::census_line(
+            "census.armed",
+            hex_core::patience::Sample::Answered(answer),
+        ),
+        hex_core::patience::census_line("census.armed", hex_core::patience::Sample::RanOut(answer)),
     ];
     let out = Command::new(std::env::current_exe().unwrap())
         .args([

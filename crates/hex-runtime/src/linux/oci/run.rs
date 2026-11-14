@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::mount::OpenTreeFlags;
@@ -1871,7 +1871,7 @@ impl Runtime {
         // running (CLAUDE.md §3); the FIFO stays, and the init's end says stopped. The init runs its
         // startContainer hooks before it writes, so the start waits for them too: past the slowest take
         // seen the init is followed by its life to its byte or its end, never refused at a time ([`STARTS`]).
-        match take_start(&fifo, &init, &STARTS)? {
+        match take_start(&fifo, &init, &STARTS, id)? {
             Took::Byte => {}
             Took::End => return Err(stopped()),
         }
@@ -2019,9 +2019,18 @@ impl Runtime {
             sys::kill(state.pid, 9, true)?;
             // Followed past the slowest exit seen by its life, to its exit ([`EXITS`]).
             if let Some(pidfd) = pidfd {
-                followed(&EXITS, killed, |slice| {
-                    Ok(came(wait_exited(&pidfd, slice)?))
-                })?;
+                followed(
+                    &EXITS,
+                    killed,
+                    &[
+                        Piece::Kind("the init of container "),
+                        Piece::Name(id),
+                        Piece::Kind(", pid "),
+                        Piece::Pid(i64::from(state.pid)),
+                        Piece::Kind(", by its pidfd"),
+                    ],
+                    |slice| Ok(came(wait_exited(&pidfd, slice)?)),
+                )?;
             }
         }
         // poststop hooks run after the container is stopped, before its directory is removed.
@@ -2057,12 +2066,13 @@ static EMPTIES: Patience = Patience::measuring("oci.delete.emptying");
 static SHIMS: Patience = Patience::measuring("oci.shim.exit");
 
 /// Waits for `fact`, given each slice of the wait as a time (`Duration::MAX`: until its party gives it), from `began`, as
-/// decision 9 waits on `wait`: within W* the fact; past W* its run-out told once and the fact followed by its party's
-/// life; with no W* (before its first answer, and from a run-out to the next) followed from the start. The fact, however
-/// late, is the sample W* rises to.
+/// decision 9 waits on `wait`: within W* the fact; past W* its run-out told once, naming `party`, and the fact followed
+/// by its party's life; with no W* (before its first answer, and from a run-out to the next) followed from the start.
+/// The fact, however late, is the sample W* rises to.
 fn followed<T>(
     wait: &Patience,
     began: Instant,
+    party: &[Piece<'_>],
     mut fact: impl FnMut(Duration) -> Result<Option<T>, OciError>,
 ) -> Result<T, OciError> {
     if let Some(window) = wait.deadline() {
@@ -2070,7 +2080,7 @@ fn followed<T>(
             wait.answered(began.elapsed());
             return Ok(answer);
         }
-        wait.ran_out(window);
+        wait.ran_out(window, began.elapsed(), party);
     }
     loop {
         if let Some(answer) = fact(Duration::MAX)? {
@@ -2086,11 +2096,18 @@ fn came(came: bool) -> Option<()> {
 }
 
 /// A start's take of its init's byte on the exec FIFO `fifo`, its init's pidfd `init`, waited for on `wait`
-/// ([`STARTS`]): the byte, or the init's end without it.
-fn take_start(fifo: &OwnedFd, init: &OwnedFd, wait: &Patience) -> Result<Took, OciError> {
-    followed(wait, Instant::now(), |slice| {
-        wait_for_byte(fifo, init, slice)
-    })
+/// ([`STARTS`]): the byte, or the init's end without it. `id` names the container.
+fn take_start(fifo: &OwnedFd, init: &OwnedFd, wait: &Patience, id: &str) -> Result<Took, OciError> {
+    followed(
+        wait,
+        Instant::now(),
+        &[
+            Piece::Kind("the init of container "),
+            Piece::Name(id),
+            Piece::Kind(", by its pidfd and exec FIFO"),
+        ],
+        |slice| wait_for_byte(fifo, init, slice),
+    )
 }
 
 /// Ends the shim once the container is forked and ready: it exits by itself (init.rs), followed by its life to its exit
@@ -2103,7 +2120,16 @@ fn end_shim(shim: &mut std::process::Child) -> Result<(), OciError> {
         .ok_or_else(|| OciError::Broken("the shim's pid".to_owned()))?;
     let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty())
         .map_err(|e| OciError::os("pidfd_open of the shim", e))?;
-    followed(&SHIMS, ready, |slice| Ok(came(wait_exited(&pidfd, slice)?)))?;
+    followed(
+        &SHIMS,
+        ready,
+        &[
+            Piece::Kind("the shim, pid "),
+            Piece::Pid(i64::from(shim.id())),
+            Piece::Kind(", by its pidfd"),
+        ],
+        |slice| Ok(came(wait_exited(&pidfd, slice)?)),
+    )?;
     shim.wait()
         .map_err(|e| OciError::os("reaping the shim", e))?;
     Ok(())
@@ -2491,9 +2517,16 @@ fn end_cgroup(cg: &BoxCgroup) -> Result<(), OciError> {
     }
     let killed = Instant::now();
     cg.kill().map_err(from_refusal)?;
-    followed(&EMPTIES, killed, |slice| {
-        Ok(came(cg.wait_empty(slice).map_err(from_refusal)?))
-    })?;
+    followed(
+        &EMPTIES,
+        killed,
+        &[
+            Piece::Kind("container cgroup "),
+            Piece::Path(cg.dir()),
+            Piece::Kind(", by its cgroup.events"),
+        ],
+        |slice| Ok(came(cg.wait_empty(slice).map_err(from_refusal)?)),
+    )?;
     cg.remove().map_err(from_refusal)
 }
 
@@ -3152,7 +3185,7 @@ mod tests {
             let wait = Patience::measuring("test.hex_runtime.oci_start");
             wait.answered(Duration::from_nanos(1));
             let took = std::thread::scope(|scope| {
-                let taking = scope.spawn(|| take_start(&start, &pidfd, &wait));
+                let taking = scope.spawn(|| take_start(&start, &pidfd, &wait, "the test's"));
                 hex_testkit::waits::follow::until(
                     &START_RAN_OUT,
                     "the start's run-out past its W*",
@@ -3197,14 +3230,19 @@ mod tests {
         let wait = Patience::measuring("test.hex_runtime.oci_followed");
         wait.answered(Duration::from_nanos(1));
         let mut looks = Vec::new();
-        let got = followed(&wait, Instant::now(), |slice| {
-            looks.push((slice == Duration::MAX, wait.deadline().is_none()));
-            Ok(if slice == Duration::MAX {
-                Some(7)
-            } else {
-                None
-            })
-        });
+        let got = followed(
+            &wait,
+            Instant::now(),
+            &[Piece::Kind("the test's fact")],
+            |slice| {
+                looks.push((slice == Duration::MAX, wait.deadline().is_none()));
+                Ok(if slice == Duration::MAX {
+                    Some(7)
+                } else {
+                    None
+                })
+            },
+        );
         assert_eq!(got.unwrap(), 7);
         assert_eq!(looks, [(false, false), (true, true)]);
         assert!(
