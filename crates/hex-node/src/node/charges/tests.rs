@@ -1592,10 +1592,9 @@ fn w14_d260_on_linux_a_managed_vm_is_read_split_its_vmms_own_apart() {
         .window(&io, vms.clone(), shards, &[], machine(), start)
         .unwrap();
     io.set(vms[0].2.dir(), 120_000, GIB);
-    io.guest.borrow_mut().insert(
-        "vm-1".to_owned(),
-        sampled(vec![6_250_000; 16]),
-    );
+    io.guest
+        .borrow_mut()
+        .insert("vm-1".to_owned(), sampled(vec![6_250_000; 16]));
     learner
         .window(&io, vms, shards, &[], machine(), start + WINDOW)
         .unwrap();

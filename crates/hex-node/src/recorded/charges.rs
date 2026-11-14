@@ -770,7 +770,11 @@ pub(crate) fn timed<T>(
 /// A counter read as `before` and `after`, each its value and the instant it was read at, taken at `at` (the review's
 /// A-11): `before`'s and what it ran up to the reads' span's share before `at`, as a counter moves on between two reads
 /// close together, `at` held within that span; the later read where the span is none. With the instant it holds at.
-pub(crate) fn between(before: (u64, Instant), after: (u64, Instant), at: Instant) -> (u64, Instant) {
+pub(crate) fn between(
+    before: (u64, Instant),
+    after: (u64, Instant),
+    at: Instant,
+) -> (u64, Instant) {
     let (from, to) = (before.1, after.1.max(before.1));
     let at = at.max(from).min(to);
     let span = to.saturating_duration_since(from).as_nanos();
@@ -2487,9 +2491,7 @@ pub(crate) fn window(
         .and_then(|asks| ask(io, asks, &clock))
         .and_then(|answers| Ok((budget(held(&answers)?)?, answers)));
     let learned = match read {
-        Ok((budget, answers)) => learner
-            .take()?
-            .learn(running, unreadable, answers, budget),
+        Ok((budget, answers)) => learner.take()?.learn(running, unreadable, answers, budget),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, running, acts));
@@ -2621,11 +2623,9 @@ fn ask<'h>(
     for ask in asks {
         answers.push(Answer {
             holder: ask.holder,
-            read: io
-                .rate_period(ask.holder)
-                .and_then(|period| {
-                    Read::of(io, ask.holder, ask.first, clock).map(|read| (period, read))
-                }),
+            read: io.rate_period(ask.holder).and_then(|period| {
+                Read::of(io, ask.holder, ask.first, clock).map(|read| (period, read))
+            }),
             least: io.least(ask.holder),
         });
     }

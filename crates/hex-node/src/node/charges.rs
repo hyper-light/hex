@@ -539,11 +539,7 @@ impl Learner {
     /// Learns a window's `reads`, each at its own reads' instants (C1 to C5, C7; under its lock, A-2; the review's A-11),
     /// within the fleet's `budget`: the placement's writes and its last resort's decision, which it then acts on outside
     /// its lock ([`act`]).
-    fn learn(
-        &mut self,
-        reads: Reads,
-        budget: CapacityResources,
-    ) -> Result<Acts, Refusal> {
+    fn learn(&mut self, reads: Reads, budget: CapacityResources) -> Result<Acts, Refusal> {
         let present: BTreeSet<Scope> = reads.vms.iter().map(|answer| answer.scope).collect();
         let gone: Vec<Scope> = self
             .vms
