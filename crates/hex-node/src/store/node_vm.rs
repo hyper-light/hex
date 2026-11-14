@@ -613,7 +613,7 @@ impl Store {
                 Some((run, Stray::Temporary)) => Some(run),
                 Some((run, Stray::Lock)) => {
                     let (_, row) = scoped_paths(&directory, &name(&run)?)?;
-                    (!path_exists(&row)?).then_some(run)
+                    if path_exists(&row)? { None } else { Some(run) }
                 }
                 None => None,
             };
