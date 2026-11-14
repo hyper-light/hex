@@ -98,10 +98,7 @@ fn a_call_is_sliced_at_w_star_and_past_it_waits_for_its_own_answer() {
             if slices.len() == 2 {
                 return Some("answered");
             }
-            let at = by.unwrap();
-            while Instant::now() < at {
-                std::thread::yield_now();
-            }
+            hex_wait::rest_until(by.unwrap()).unwrap();
             None
         },
     );
@@ -120,9 +117,6 @@ fn a_call_is_sliced_at_w_star_and_past_it_waits_for_its_own_answer() {
 #[test]
 fn a_thread_reads_live_while_it_sleeps_and_ended_once_gone() {
     use std::sync::mpsc;
-    /// Longest this test waits for the joined thread to read ended: a bound, so a reading that never comes fails the
-    /// test instead of hanging it.
-    const PATIENCE: Duration = Duration::from_secs(30);
     let (named, name) = mpsc::sync_channel(1);
     let (wake, woken) = mpsc::sync_channel::<()>(1);
     let sleeper = std::thread::spawn(move || {
@@ -133,13 +127,72 @@ fn a_thread_reads_live_while_it_sleeps_and_ended_once_gone() {
     assert_eq!(thread.party(), Party::Live);
     wake.send(()).unwrap();
     sleeper.join().unwrap();
-    let joined = Instant::now();
-    while thread.party() != Party::Ended {
-        assert!(
-            joined.elapsed() < PATIENCE,
-            "{thread:?} still reads {:?} after its join",
-            thread.party()
-        );
-        std::thread::yield_now();
+    // Its task's exit, after its join, is the kernel's to finish: the fact always comes, its party this test, which
+    // reads it while it runs (a task that never exits leaves the test for libtest to name).
+    let wait = Patience::measuring("test.testkit.follow.joined_thread_gone");
+    until(
+        &wait,
+        "the joined thread read as ended",
+        || Party::Live,
+        || thread.party() == Party::Ended,
+    )
+    .unwrap();
+}
+
+/// ROOT's ask of 2026-11-14 (the review's C-5): what a look-based wait ([`until`]) costs in CPU while its fact is far
+/// off, beside an event-based one ([`whole`] on a channel) for the same span. A measurement, not a verdict: run alone,
+/// under `/usr/bin/time`, with `HEX_TESTKIT_MEASURE=<until|event>` and `HEX_TESTKIT_MEASURE_SPAN_MS=<the span>`, the
+/// span the measurement's own input (none is picked here: unset, it measures nothing). The fact comes once a thread's
+/// receive of the span ends; the process's CPU over the wall time is the wait's cost.
+#[test]
+#[ignore = "a measurement, run alone under /usr/bin/time (its docs)"]
+fn measure_the_cpu_of_a_wait_for_a_far_off_fact() {
+    let (Some(form), Some(span)) = (
+        std::env::var_os("HEX_TESTKIT_MEASURE"),
+        std::env::var("HEX_TESTKIT_MEASURE_SPAN_MS")
+            .ok()
+            .and_then(|ms| ms.parse::<u64>().ok()),
+    ) else {
+        return;
+    };
+    let span = Duration::from_millis(span);
+    let made = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (keep, held) = std::sync::mpsc::channel::<()>();
+    let (told, tell) = std::sync::mpsc::channel::<()>();
+    let maker = {
+        let made = std::sync::Arc::clone(&made);
+        std::thread::spawn(move || {
+            let _ = held.recv_timeout(span);
+            made.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = told.send(());
+        })
+    };
+    let began = Instant::now();
+    let wait = Patience::measuring("test.testkit.measure");
+    if form == "until" {
+        until(
+            &wait,
+            "a far-off fact",
+            || {
+                if maker.is_finished() {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
+            || made.load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .unwrap();
+    } else {
+        whole(&wait, "a far-off fact", || tell.recv()).unwrap();
     }
+    let wall = began.elapsed();
+    drop(keep);
+    maker.join().unwrap();
+    eprintln!(
+        "MEASURE form={} span_ms={} wall_ns={}",
+        form.to_string_lossy(),
+        span.as_millis(),
+        wall.as_nanos()
+    );
 }
