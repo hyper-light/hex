@@ -1114,7 +1114,14 @@ impl Learner {
     /// Its window as its capacity answers tell it (C1; ROOT, 2026-11-13): the longest period of the caps it holds, and
     /// the VM whose platform cap's cycle sets it, where one does; none while it holds none.
     fn told_window(&self) -> Result<Option<LearnedWindow>, Refusal> {
-        Ok(None)
+        self.longest_by()
+            .map(|(span, by)| {
+                Ok(LearnedWindow {
+                    window_ns: nanos(span),
+                    slowed_by: by.map(LearnedHolder::try_clone).transpose()?,
+                })
+            })
+            .transpose()
     }
 
     /// One window (C1 to C5, C7) read at `now`: the VMs it learns `running` now (their records, [`sort`]), within the
@@ -1304,9 +1311,9 @@ impl Learner {
         let vms = &self.vms;
         let rates = self
             .node
-            .rates(budget.cpu_milli, &used, |_| {
-                let _ = vms;
-                u64::from(hex_api::MIN_CPU_MILLI)
+            .rates(budget.cpu_milli, &used, |lifetime| {
+                vms.get(&lifetime.scope)
+                    .map_or(GOVERNOR_LEAST.get(), |vm| vm.least)
             })
             .map_err(refused)?;
         for (lifetime, rate) in rates {
@@ -1333,7 +1340,10 @@ impl Learner {
                 .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
             let held = io.set_rate(*record, Cap { share: rate, own })?;
             // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1; ROOT, 2026-11-13).
-            vm.cycle = None;
+            vm.cycle = match held {
+                hex_api::RateHeld::Platform(_) => io.cap_cycle(rate)?,
+                _ => None,
+            };
             vm.held = Some(held);
             vm.rate = rate;
             vm.told = told;
