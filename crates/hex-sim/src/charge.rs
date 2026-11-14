@@ -446,6 +446,16 @@ pub enum Resort<K> {
     Within(Pressure),
 }
 
+/// What holds a VM its shell couldn't move from what it last set (A-7; ROOT, 2026-11-14: the budget is the contract):
+/// the CPU cap ([`Node::rates`]) and the memory budget ([`Node::budgets`]) it runs under as last set, where its shell
+/// holds it at one. The node counts it there and shares the rest among the others, so the caps and budgets hold the
+/// fleet's whether or not its next setting takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Held {
+    pub cpu_milli: Option<u64>,
+    pub mem_bytes: Option<u64>,
+}
+
 /// The bounds that hold the rule on Linux (C4, C5): the fleet's parent's, and each of its VMs'. A weight means a
 /// share only among its cgroup's siblings, so the fleet's VMs sit alone under its parent, and the parent carries
 /// the fleet among the parent's own siblings.
@@ -503,6 +513,9 @@ pub struct Node<K> {
     budget: [u64; 3],
     bounds: Bounds,
     vms: BTreeMap<K, Vm>,
+    /// The VMs its shell couldn't move from what it last set, each at what holds it (A-7, [`Node::set_held`]): each of
+    /// its VMs at most.
+    held: BTreeMap<K, Held>,
     classes: BTreeMap<ClassKey, Record>,
     clock: u64,
     /// The fastest growth of what its VMs hold on its record (C5), as the bytes one window grew by and that window's
@@ -527,6 +540,7 @@ impl<K: Ord + Copy> Node<K> {
             budget: dims(budget),
             bounds,
             vms: BTreeMap::new(),
+            held: BTreeMap::new(),
             classes: BTreeMap::new(),
             clock: 0,
             growth: None,
@@ -538,6 +552,25 @@ impl<K: Ord + Copy> Node<K> {
     /// admitted until they fit.
     pub fn set_budget(&mut self, budget: Amounts) {
         self.budget = dims(budget);
+    }
+
+    /// The VMs its shell couldn't move from what it last set (A-7; ROOT, 2026-11-14), each window's afresh: each is
+    /// counted at what holds it ([`Held`]) in [`Node::rates`] and [`Node::budgets`], and the rest share what it leaves.
+    /// Only the VMs it tracks are kept.
+    pub fn set_held(&mut self, mut held: BTreeMap<K, Held>) {
+        let vms = &self.vms;
+        held.retain(|id, _| vms.contains_key(id));
+        self.held = held;
+    }
+
+    /// The CPU cap `id` is held at, where its shell holds it at one ([`Node::set_held`]).
+    fn held_cpu(&self, id: &K) -> Option<u64> {
+        self.held.get(id).and_then(|held| held.cpu_milli)
+    }
+
+    /// The memory budget `id` is held at, where its shell holds it at one ([`Node::set_held`]).
+    fn held_mem(&self, id: &K) -> Option<u64> {
+        self.held.get(id).and_then(|held| held.mem_bytes)
     }
 
     /// The window the node reads over from now (C1: a learner's window is the longest period of the caps it holds, an
@@ -938,7 +971,8 @@ impl<K: Ord + Copy> Node<K> {
     /// last window. `used` says what each used against the cap it ran under: one that used its whole cap, or has run no
     /// window yet, may ask its ceiling. So every VM keeps at least its booking, the caps sum to at most `capacity`
     /// where the bookings fit it (C3; bookings past it stay, as C3 keeps them), and each cap is at most its ceiling and
-    /// at least `least` of it, the least rate the actuator holding it takes (its governor's, its platform's cap's).
+    /// at least `least` of it, the least rate the actuator holding it takes (its governor's, its platform's cap's). A
+    /// VM held at its last cap ([`Node::set_held`], A-7) keeps it, counted there, and the rest share what it leaves.
     pub fn rates(
         &self,
         capacity: u64,
@@ -953,7 +987,14 @@ impl<K: Ord + Copy> Node<K> {
                 bound: self.vms.len(),
             })?;
         let mut booked = 0u64;
+        let mut kept = 0u64;
         for (id, vm) in &self.vms {
+            if let Some(cap) = self.held_cpu(id) {
+                kept = kept
+                    .checked_add(cap)
+                    .ok_or(ChargeError::Overflow("a fleet's held CPU caps"))?;
+                continue;
+            }
             let [ceiling, _, _] = ceiling_of(&self.classes, &vm.class);
             let [booking, _, _] = vm.booking;
             let asked = match used.get(id) {
@@ -965,12 +1006,22 @@ impl<K: Ord + Copy> Node<K> {
                 .ok_or(ChargeError::Overflow("a fleet's CPU bookings"))?;
             entries.push((booking.max(1), asked.min(ceiling).saturating_sub(booking)));
         }
-        let extra = shares(capacity.saturating_sub(booked), &entries)?;
+        let mut extra = shares(
+            capacity.saturating_sub(kept).saturating_sub(booked),
+            &entries,
+        )?
+        .into_iter();
         self.vms
             .iter()
-            .zip(extra)
-            .map(|((id, vm), extra)| {
+            .map(|(id, vm)| {
+                if let Some(cap) = self.held_cpu(id) {
+                    return Ok((*id, cap));
+                }
                 let [booking, _, _] = vm.booking;
+                let extra = extra.next().ok_or(ChargeError::Invalid {
+                    what: "a window's rates",
+                    why: "a VM with no share",
+                })?;
                 let cap = booking
                     .checked_add(extra)
                     .ok_or(ChargeError::Overflow("a VM's CPU cap"))?;
@@ -1041,20 +1092,29 @@ impl<K: Ord + Copy> Node<K> {
     }
 
     /// Each VM's memory budget and room (C5): its booking and a share of the slack in proportion to its booking,
-    /// the remainder a byte each to the first VMs, so the budgets sum to the fleet's budget.
+    /// the remainder a byte each to the first VMs, so the budgets sum to the fleet's budget. A VM held at its last
+    /// budget ([`Node::set_held`], A-7) keeps it, counted there, and the rest share what it leaves.
     pub fn budgets(&self) -> Result<Vec<(K, Budget)>, ChargeError> {
         let [_, budget, _] = self.budget;
-        let booked = self
-            .vms
-            .values()
-            .try_fold(0u64, |total, vm| {
-                let [_, mem, _] = vm.booking;
-                total.checked_add(mem)
-            })
-            .ok_or(ChargeError::Overflow("a node's memory bookings"))?;
-        let slack = budget.saturating_sub(booked);
-        let count = u64::try_from(self.vms.len())
-            .map_err(|_| ChargeError::Overflow("a node's VM count"))?;
+        let mut booked = 0u64;
+        let mut kept = 0u64;
+        let mut count = 0u64;
+        for (id, vm) in &self.vms {
+            if let Some(bytes) = self.held_mem(id) {
+                kept = kept
+                    .checked_add(bytes)
+                    .ok_or(ChargeError::Overflow("a node's held memory budgets"))?;
+                continue;
+            }
+            let [_, mem, _] = vm.booking;
+            booked = booked
+                .checked_add(mem)
+                .ok_or(ChargeError::Overflow("a node's memory bookings"))?;
+            count = count
+                .checked_add(1)
+                .ok_or(ChargeError::Overflow("a node's VM count"))?;
+        }
+        let slack = budget.saturating_sub(kept).saturating_sub(booked);
         let share = |mem: u64| -> Result<u64, ChargeError> {
             let parts = if booked == 0 {
                 Some(slack.checked_div(count).unwrap_or(0))
@@ -1068,7 +1128,10 @@ impl<K: Ord + Copy> Node<K> {
         };
         let mut given = 0u64;
         let mut out = Vec::new();
-        for vm in self.vms.values() {
+        for (id, vm) in &self.vms {
+            if self.held_mem(id).is_some() {
+                continue;
+            }
             let [_, mem, _] = vm.booking;
             given = given
                 .checked_add(share(mem)?)
@@ -1076,13 +1139,17 @@ impl<K: Ord + Copy> Node<K> {
         }
         let mut left = slack.saturating_sub(given);
         for (id, vm) in &self.vms {
-            let [_, mem, _] = vm.booking;
-            let extra = u64::from(left > 0);
-            left = left.saturating_sub(extra);
-            let bytes = mem
-                .checked_add(share(mem)?)
-                .and_then(|b| b.checked_add(extra))
-                .ok_or(ChargeError::Overflow("a VM's memory budget"))?;
+            let bytes = match self.held_mem(id) {
+                Some(bytes) => bytes,
+                None => {
+                    let [_, mem, _] = vm.booking;
+                    let extra = u64::from(left > 0);
+                    left = left.saturating_sub(extra);
+                    mem.checked_add(share(mem)?)
+                        .and_then(|b| b.checked_add(extra))
+                        .ok_or(ChargeError::Overflow("a VM's memory budget"))?
+                }
+            };
             let [_, held, _] = vm.holding();
             let room = i64::try_from(bytes)
                 .ok()
@@ -1216,6 +1283,7 @@ impl<K: Ord + Copy> Node<K> {
 
     /// The VM ended or was deleted: its booking frees; its class keeps what it learned.
     pub fn end(&mut self, id: &K) -> Result<(), ChargeError> {
+        self.held.remove(id);
         self.vms.remove(id).map(drop).ok_or(ChargeError::Unknown)
     }
 

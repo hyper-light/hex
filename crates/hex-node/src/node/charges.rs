@@ -183,6 +183,12 @@ struct Vm {
     /// The CPU cap its cgroup holds it at, in milli-CPU (`cpu.max`), as last written: a window that reaches it is no
     /// sample of its VMM's own CPU (C1).
     cap: Option<u64>,
+    /// The memory its cgroup holds it at, as last written: its create's `memory.max`, then its placement's
+    /// `memory.high` (C5).
+    budget: Option<u64>,
+    /// Why its last window couldn't write its cgroup (A-7; ROOT, 2026-11-14): while it couldn't, it is held at what was
+    /// last written, counted at `budget`, and written again each window its placement moves.
+    unwritten: Option<Refusal>,
 }
 
 /// The node's learner (module docs).
@@ -641,6 +647,8 @@ impl Learner {
                         .filter(|write| write.file != "memory.swap.max")
                         .collect(),
                     cap: created.cpu_max_milli.map(u64::from),
+                    budget: created.memory_max,
+                    unwritten: None,
                 },
             );
             self.last.met(class, scope, intent)?;
@@ -674,6 +682,23 @@ impl Learner {
                 .saturating_sub(unread.disk_bytes)
                 .saturating_sub(booked.disk_bytes),
         });
+        // A VM whose cgroup its last window couldn't write is held at what was last written (A-7; ROOT, 2026-11-14,
+        // ruling (ii)): counted at the memory its cgroup holds it at, the others' budgets shared from what it leaves,
+        // as every OS's learner counts a VM held at its last cap. Its CPU is counted already: its `cpu.max` is its
+        // ceiling, never a share, and the fleet's `cpu.max` holds every VM's CPU, its own too.
+        let held = self
+            .vms
+            .values()
+            .filter(|vm| vm.unwritten.is_some())
+            .map(|vm| {
+                let held = charge::Held {
+                    cpu_milli: None,
+                    mem_bytes: vm.budget,
+                };
+                (vm.lifetime, held)
+            })
+            .collect();
+        self.node.set_held(held);
         self.node.settle().map_err(refused)?;
         self.placing(natives, &scale, reads.fleets)
     }
@@ -699,6 +724,8 @@ impl Learner {
             if rewrite.writes.is_empty() {
                 vm.written = rewrite.written;
                 vm.cap = cap;
+                vm.budget = bounds.memory_high;
+                vm.unwritten = None;
                 continue;
             }
             vms.try_reserve(1).map_err(|_| Refusal::Exhausted {
@@ -710,6 +737,7 @@ impl Learner {
                 cgroup: vm.cgroup.clone(),
                 rewrite,
                 cap,
+                budget: bounds.memory_high,
             });
         }
         let fleet = rewrite(&placed.fleet, &self.fleet.1)?;
@@ -785,13 +813,21 @@ impl Learner {
         outcome
     }
 
-    /// Keeps what each cgroup holds once a window's acts wrote it, and what its last resort did, to the first act that
-    /// failed, whose refusal is the window's; then what each Shards guest's room awaits (C7).
+    /// Keeps what each cgroup holds once a window's acts wrote it, each VM whose cgroup couldn't be written held at
+    /// what was last written, and why (A-7), and what its last resort did, to the first act not one VM's that failed,
+    /// whose refusal is the window's; then what each Shards guest's room awaits (C7).
     fn keep(&mut self, acted: Acted) -> Result<(), Refusal> {
-        for (scope, written, cap) in acted.vms {
+        for written in acted.vms {
+            if let Some(vm) = self.vms.get_mut(&written.scope) {
+                vm.written = written.written;
+                vm.cap = written.cap;
+                vm.budget = written.budget;
+                vm.unwritten = None;
+            }
+        }
+        for (scope, why) in acted.unwritten {
             if let Some(vm) = self.vms.get_mut(&scope) {
-                vm.written = written;
-                vm.cap = cap;
+                vm.unwritten = Some(why);
             }
         }
         if let Some(written) = acted.fleet {
@@ -912,6 +948,25 @@ impl Learner {
                 });
             }
         }
+        // Each VM of the class whose cgroup its window couldn't write, held at what was last written, and why (A-7).
+        for vm in self.vms.values() {
+            let Some(why) = vm.unwritten.as_ref().filter(|_| vm.class == class) else {
+                continue;
+            };
+            learned
+                .unacted
+                .try_reserve(1)
+                .map_err(|_| Refusal::Exhausted {
+                    what: "learned unacted VMs",
+                    bound: MAX_LEARNED_HOLDINGS,
+                })?;
+            learned.unacted.push(hex_api::LearnedUnacted {
+                id: vm.id.try_clone()?,
+                why: format!(
+                    "its cgroup couldn't be written: {why}; held at what was last written"
+                ),
+            });
+        }
         Ok(Some(learned))
     }
 
@@ -975,12 +1030,22 @@ struct Reads {
     fleets: Result<Fleets, Refusal>,
 }
 
-/// A VM's cgroup the placement rewrites (C4, C5), and the CPU cap it holds the VM at once its writes are made.
+/// A VM's cgroup the placement rewrites (C4, C5), and the CPU cap and memory it holds the VM at once its writes are
+/// made.
 struct Placing {
     scope: Scope,
     cgroup: BoxCgroup,
     rewrite: Rewrite,
     cap: Option<u64>,
+    budget: Option<u64>,
+}
+
+/// A VM's cgroup a window wrote (C4, C5): what it holds now, and the CPU cap and memory it holds the VM at.
+struct Written {
+    scope: Scope,
+    written: Vec<Write>,
+    cap: Option<u64>,
+    budget: Option<u64>,
 }
 
 /// What a window acts on once its learner has learned (C4, C5), outside its lock (A-2), in order: each VM's cgroup the
@@ -996,11 +1061,13 @@ struct Acts {
     target: Option<(Scope, BoxCgroup)>,
 }
 
-/// What a window's acts did, in order, to the first that failed: what each cgroup holds once its writes were made, with
-/// a VM's cap, and its last resort carried out, where the acts reached it.
+/// What a window's acts did, in order, to the first act not one VM's that failed: what each cgroup holds once its
+/// writes were made, with a VM's cap and memory, each VM whose cgroup couldn't be written and why (A-7), and its last
+/// resort carried out, where the acts reached it.
 #[derive(Default)]
 struct Acted {
-    vms: Vec<(Scope, Vec<Write>, Option<u64>)>,
+    vms: Vec<Written>,
+    unwritten: Vec<(Scope, Refusal)>,
     fleet: Option<Vec<Write>>,
     parent: Option<Vec<Write>>,
     resort: Option<Carried>,
@@ -1140,13 +1207,21 @@ fn natives(
     Ok(out)
 }
 
-/// Acts on what a window's learner decided (C4, C5; outside its lock, A-2), in order, to the first act that fails, which
-/// is kept as the window's: each VM's cgroup rewritten, the fleet's, then `.vm`'s; each process and OCI box and `.oci`
-/// weighed; then the last resort's decision carried out.
+/// Acts on what a window's learner decided (C4, C5; outside its lock, A-2), in order: each VM's cgroup rewritten, the
+/// fleet's, then `.vm`'s; each process and OCI box and `.oci` weighed; then the last resort's decision carried out.
+/// Each VM's cgroup is its own (A-7; ROOT, 2026-11-14): one that can't be written is kept, and the acts go on; the
+/// first act not one VM's that fails is kept as the window's.
 fn act(io: &impl Cgroups, acts: Acts) -> Result<Acted, Refusal> {
     let mut acted = Acted::default();
     acted
         .vms
+        .try_reserve_exact(acts.vms.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's cgroup writes",
+            bound: acts.vms.len(),
+        })?;
+    acted
+        .unwritten
         .try_reserve_exact(acts.vms.len())
         .map_err(|_| Refusal::Exhausted {
             what: "a window's cgroup writes",
@@ -1161,10 +1236,15 @@ fn act(io: &impl Cgroups, acts: Acts) -> Result<Acted, Refusal> {
 /// Makes the placement's writes and the last resort's end of `acts`, keeping in `acted` what each did.
 fn place(io: &impl Cgroups, acts: Acts, acted: &mut Acted) -> Result<(), Refusal> {
     for placing in acts.vms {
-        make(io, &placing.cgroup, &placing.rewrite)?;
-        acted
-            .vms
-            .push((placing.scope, placing.rewrite.written, placing.cap));
+        match make(io, &placing.cgroup, &placing.rewrite) {
+            Ok(()) => acted.vms.push(Written {
+                scope: placing.scope,
+                written: placing.rewrite.written,
+                cap: placing.cap,
+                budget: placing.budget,
+            }),
+            Err(why) => acted.unwritten.push((placing.scope, why)),
+        }
     }
     if let Some((cgroup, rewrite)) = acts.fleet {
         make(io, &cgroup, &rewrite)?;
