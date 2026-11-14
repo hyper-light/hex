@@ -81,14 +81,18 @@ fn a_lane_its_owner_reads_faster_than_it_carries_holds_back_its_credit_and_keeps
 
     use hex_core::lanes::{DATA_BOUND, Kind};
 
-    use super::{WAITING, hold_back};
+    use super::{WAITING, control_frame, hold_back};
 
     let frame = u64::try_from(DATA_BOUND).unwrap();
     let reads = WAITING + 2;
     let mut waiting = VecDeque::new();
     for read in 0..reads {
         assert_eq!(
-            hold_back(&mut waiting, Kind::Credit, frame.to_be_bytes().to_vec()),
+            hold_back(
+                &mut waiting,
+                Kind::Credit,
+                control_frame(Kind::Credit, frame.to_be_bytes().to_vec())
+            ),
             Ok(()),
             "the Credit of read {read} refused: its peer would be refused Busy and the connection closed"
         );
@@ -97,7 +101,7 @@ fn a_lane_its_owner_reads_faster_than_it_carries_holds_back_its_credit_and_keeps
         .iter()
         .map(|(kind, payload)| {
             assert_eq!(*kind, Kind::Credit);
-            u64::from_be_bytes(payload.as_slice().try_into().unwrap())
+            u64::from_be_bytes(payload.bytes().try_into().unwrap())
         })
         .sum();
     assert_eq!(granted, frame * u64::try_from(reads).unwrap());
@@ -113,7 +117,7 @@ fn a_held_back_credit_takes_in_its_own_connections_grants_alone() {
 
     use hex_core::lanes::Kind;
 
-    use super::hold_back;
+    use super::{control_frame, hold_back};
 
     let credit = |bytes: u64| bytes.to_be_bytes().to_vec();
     let mut waiting = VecDeque::new();
@@ -125,10 +129,13 @@ fn a_held_back_credit_takes_in_its_own_connections_grants_alone() {
         (Kind::Accept, 9u64.to_be_bytes().to_vec()),
         (Kind::Credit, credit(5)),
     ] {
-        hold_back(&mut waiting, kind, payload).unwrap();
+        hold_back(&mut waiting, kind, control_frame(kind, payload)).unwrap();
     }
     assert_eq!(
-        Vec::from(waiting),
+        waiting
+            .iter()
+            .map(|(kind, payload)| (*kind, payload.bytes().to_vec()))
+            .collect::<Vec<_>>(),
         vec![
             (Kind::Credit, credit(7)),
             (Kind::End, Vec::new()),

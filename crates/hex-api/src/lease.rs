@@ -73,6 +73,103 @@ pub fn wipe_in_place(bytes: &mut [u8]) {
     zeroize::Zeroize::zeroize(bytes);
 }
 
+/// A copy a transport makes of bytes on their way (a socket's framed message, what is left of it to send, a
+/// connection's queued frame): when they may carry a lease's value or a sign-in's tokens, wiped, their whole
+/// allocation, as they drop, by whichever way they go, so no copy outlives its use unwiped (docs/design/credential-
+/// grants.md C7, C8; the review's E-6). Never printed.
+#[derive(Default)]
+pub struct Wiped {
+    bytes: Vec<u8>,
+    secret: bool,
+}
+
+impl Wiped {
+    /// `bytes`, wiped as they drop where `secret`: a copy of a message that carries a value or tokens
+    /// (`hex_core::wire::carries_secret`), or of what a connection that carries such messages holds.
+    pub fn new(bytes: Vec<u8>, secret: bool) -> Self {
+        Self { bytes, secret }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Whether it is wiped as it drops.
+    pub fn secret(&self) -> bool {
+        self.secret
+    }
+
+    /// Its bytes from `at` on, in a buffer of their own, wiped as it drops as this one is: what a socket hasn't taken
+    /// yet.
+    pub fn rest(&self, at: usize) -> Self {
+        Self::new(
+            self.bytes.get(at..).unwrap_or_default().to_vec(),
+            self.secret,
+        )
+    }
+
+    /// Its first `n` bytes let go, as a socket took them: the rest moved to the front, and the bytes that leaves behind
+    /// it wiped.
+    pub fn take_front(&mut self, n: usize) {
+        self.bytes.drain(..n.min(self.bytes.len()));
+        if self.secret {
+            zeroize::Zeroize::zeroize(self.bytes.spare_capacity_mut());
+        }
+    }
+
+    /// Its first `n` bytes, what a read put there, wiped in place and kept: a buffer read into again once what it read
+    /// is framed.
+    pub fn wipe_read(&mut self, n: usize) {
+        let n = n.min(self.bytes.len());
+        if self.secret
+            && let Some(read) = self.bytes.get_mut(..n)
+        {
+            wipe_in_place(read);
+        }
+    }
+
+    /// Its bytes let go, wiped first: empty from here.
+    pub fn clear(&mut self) {
+        if self.secret {
+            wipe(&mut self.bytes);
+        }
+        self.bytes.clear();
+    }
+
+    /// Its bytes handed on whole, with nothing left here to wipe: to a write the kernel holds them for until its
+    /// completion gives them back, where they are a `Wiped` again.
+    pub fn lend(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Drop for Wiped {
+    fn drop(&mut self) {
+        if self.secret {
+            wipe(&mut self.bytes);
+        }
+    }
+}
+
+impl std::fmt::Debug for Wiped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Wiped({} bytes{})",
+            self.bytes.len(),
+            if self.secret { ", secret" } else { "" }
+        )
+    }
+}
+
 /// A credential's value leased to a run: the lessor's name for the lease, by which the run gives it back
 /// ([`Lessor::release`]), never its value; the value; and how long it lives from now, none where it lives until its
 /// run ends.
