@@ -524,6 +524,10 @@ struct ModelImages {
     /// Where the next boots' runs' relays listen, as the test sets it: a run whose boot asks an endpoint then binds a
     /// real one ([`serve_lanes`]); none, and its endpoint is the model's address alone.
     serve: Mutex<Option<std::path::PathBuf>>,
+    /// Where the model's run host serves its members' own lanes on Shards' real agent-control endpoint (D238, D252):
+    /// the members it says ended, and where each signal its host takes is told ([`serve_members`]); none, and it
+    /// serves none.
+    steered: Mutex<Option<(Vec<u32>, Taken)>>,
 }
 
 impl ModelImages {
@@ -545,6 +549,7 @@ impl ModelImages {
             stopped: AtomicUsize::new(0),
             answered: AtomicUsize::new(0),
             serve: Mutex::new(None),
+            steered: Mutex::new(None),
         })
     }
 
@@ -748,10 +753,15 @@ impl Images for ModelImages {
             outside: Mutex::new(outside),
             rate_period: *self.period.lock().unwrap(),
             started_from: *self.started_from.lock().unwrap(),
-            control: match (spec.control.as_ref(), self.serve.lock().unwrap().clone()) {
-                (None, _) => None,
-                (Some(_), None) => Some(model_control()),
-                (Some(ask), Some(dir)) => Some(serve_lanes(ask, dir)),
+            control: match (
+                spec.control.as_ref(),
+                self.serve.lock().unwrap().clone(),
+                self.steered.lock().unwrap().clone(),
+            ) {
+                (None, ..) => None,
+                (Some(ask), _, Some((ended, taken))) => Some(serve_members(ask, ended, taken)),
+                (Some(ask), Some(dir), None) => Some(serve_lanes(ask, dir)),
+                (Some(_), None, None) => Some(model_control()),
             },
             nesting: spec.nesting,
         }))
@@ -988,9 +998,20 @@ fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
     };
     assert_eq!(member.member, MemberName::harness("probe"));
     assert!(member.stdin && !member.terminal);
+    // Each asks its run's agent-control endpoint of its own runtime's key alone, no socket lane (goal 2's item 2).
+    for boot in [&first, &second] {
+        assert!(
+            boot.control
+                .as_ref()
+                .is_some_and(|ask| ask.sockets.is_none()),
+            "{:?}",
+            boot.control
+        );
+    }
     let mut alike = second.clone();
     alike.members.clone_from(&first.members);
     alike.ready_by = first.ready_by;
+    alike.control.clone_from(&first.control);
     assert_eq!(alike, first);
 }
 
@@ -1036,15 +1057,16 @@ fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
     }
 }
 
-/// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's MCP bridge reaches its run's controller over the
-/// run's agent-control endpoint alone, which this node asks none of for an image VM's run. Do create a VM driving a
-/// harness that asks no bridge and an agent that asks one. Expect the create refused as Invalid by the agent's field
-/// (`members[1].mcp`), as Shards' own spec check refuses it, before any record; and nothing booted.
+/// Joint plan step 12, Shards' D254 (AC-T7.4.1): a member's MCP bridge reaches its run's controller over the run's
+/// agent-control endpoint alone, which every image VM's run asks of this class's key (goal 2's item 2), so a member
+/// asking one is asked of its run as its spec names it; its connections are `Runtime::mcp`'s (item 3). Do create and
+/// start a VM driving a harness that asks no bridge and an agent that asks one. Expect both made and booted, the boot
+/// asking the endpoint and the agent's bridge alone.
 #[test]
-fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_field() {
+fn w12_a_member_asking_an_mcp_bridge_is_asked_of_its_run_with_its_endpoint() {
     use hex_api::{ImageMember, Member, MemberKind};
     let images = ModelImages::new();
-    let (runtime, owner) = model_runtime(&images, waits());
+    let (runtime, _owner) = model_runtime(&images, waits());
     let mut boxed = spec("image-mcp", None);
     if let ClassSpec::ShardsImage(image) = &mut boxed.class {
         image.members = vec![
@@ -1061,17 +1083,19 @@ fn w12_a_member_asking_an_mcp_bridge_of_a_run_with_no_control_is_refused_by_its_
             },
         ];
     }
-    let id = boxed.id.clone();
-    let created = runtime.create(boxed);
-    assert!(
-        matches!(
-            &created,
-            Err(Refusal::Invalid { what: "shards image", why }) if why.contains("members[1].mcp")
-        ),
-        "{created:?}"
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(asked.control.is_some());
+    assert_eq!(
+        asked
+            .members
+            .iter()
+            .map(|member| (member.member.name.as_str(), member.mcp))
+            .collect::<Vec<_>>(),
+        vec![("claude", false), ("helper", true)]
     );
-    assert!(record(&owner, &id).is_none());
-    assert!(images.asked.lock().unwrap().is_empty());
+    runtime.delete(&id).unwrap();
 }
 
 /// Joint plan step 12, Shards' D254 (AC-T7.4.1), red first: a member's ask for an MCP bridge rides its boot's member as
@@ -1345,28 +1369,127 @@ fn a_command_that_exits_at_once_has_started() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
-/// Joint plan step 12, steps 11's boundary: do exec a member's program and send TERM to a running VM.
-/// Expect: Awaits(MemberExec) and Awaits(MemberSignal), no stop, and the VM still Running.
+/// What a model image runs, by index: a harness and an agent that each run a program, and files that run none.
+fn three_members() -> Vec<MemberInfo> {
+    let member = |index, kind, name: &str, runs| MemberInfo {
+        index,
+        kind,
+        name: name.to_owned(),
+        runs,
+    };
+    vec![
+        member(0, shards_api::image::MemberKind::Harness, "claude", true),
+        member(1, shards_api::image::MemberKind::Agent, "helper", true),
+        member(2, shards_api::image::MemberKind::Agent, "notes", false),
+    ]
+}
+
+/// Goal 2's item 2 (D238, D252; ROOT, 2026-11-14: a signal reaches every process in the box, a VM's its members'):
+/// a signal but KILL to a running VM rides each live member's own lane on its run's agent-control endpoint, which the
+/// run asks of this class's key alone, its controller dialed as the signal goes; a member that has ended is skipped,
+/// and one that runs no program is none a signal reaches. A member's exec still awaits the endpoint's exec. Do: a run
+/// whose endpoint is Shards' own on loopback, its members a harness, an agent that has ended and files; exec in it,
+/// then send it TERM. Expect: Awaits(MemberExec); TERM taken, the harness's lane alone steered with 15, the box
+/// Running, no stop; the run's spec asking the endpoint of one key and no socket lane.
 #[test]
-fn member_exec_and_signals_await_the_agent_control_endpoint() {
+fn item2_term_reaches_every_live_member_and_the_vm_runs_on() {
     let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((vec![1], Arc::clone(&taken)));
     let (runtime, _owner) = model_runtime(&images, waits());
     let id = runtime.create(spec("image-members", None)).unwrap().id;
     runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        matches!(&asked.control, Some(ask) if ask.sockets.is_none()),
+        "{:?}",
+        asked.control
+    );
     assert!(matches!(
         runtime.exec(&id, hex_api::Program::of(&["true"]), hex_api::Stdio::null()),
         Err(Refusal::Awaits {
             needs: Upstream::MemberExec
         })
     ));
-    assert_eq!(
-        runtime.signal(&id, Signal::TERM),
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal
-        })
-    );
+    assert_eq!(runtime.signal(&id, Signal::TERM), Ok(()));
+    assert_eq!(*taken.lock().unwrap(), vec![(0, 15)]);
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+}
+
+/// Goal 2's item 2 (ROOT, 2026-11-14): a signal but KILL to a running VM none of whose members a signal reaches (each
+/// runs no program, or has ended) is refused NotRunning, "signal: its run has no member a signal reaches", which says
+/// that nothing in the run can take it, not that the VM ended: it runs on. Do: one run whose members are files alone,
+/// another whose one member has ended; send each TERM. Expect: each refused so, no signal taken, each Running.
+#[test]
+fn item2_term_to_a_run_with_no_member_a_signal_reaches_is_refused_not_running() {
+    for (name, members, ended) in [
+        (
+            "image-files-alone",
+            vec![three_members().swap_remove(2)],
+            vec![],
+        ),
+        (
+            "image-members-ended",
+            vec![three_members().swap_remove(0)],
+            vec![0],
+        ),
+    ] {
+        let images = ModelImages::new();
+        *images.members.lock().unwrap() = members;
+        let taken = Taken::default();
+        *images.steered.lock().unwrap() = Some((ended, Arc::clone(&taken)));
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let id = runtime.create(spec(name, None)).unwrap().id;
+        runtime.start(&id).unwrap();
+        assert_eq!(
+            runtime.signal(&id, Signal::TERM),
+            Err(Refusal::NotRunning(
+                id.clone(),
+                "signal: its run has no member a signal reaches"
+            )),
+            "{name}"
+        );
+        assert!(taken.lock().unwrap().is_empty(), "{name}");
+        assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    }
+}
+
+/// Goal 2's item 2 (D238; Shards' #72): a member's own kill rides its own lane on its run's agent-control endpoint,
+/// dialed as it goes, and the member ends killed, Signal(9), never a code. Do: take a harness its caller drives, of a run
+/// whose endpoint is Shards' own on loopback; kill it, its end then told as its run host tells it. Expect: the kill
+/// taken, its lane steered with 9, and its end Signal(9).
+#[test]
+fn item2_a_members_kill_rides_its_lane_and_it_ends_killed() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = vec![three_members().swap_remove(0)];
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((Vec::new(), Arc::clone(&taken)));
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let mut boxed = spec("image-member-killed", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember::new(claude.clone()));
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.member(&id, &claude).unwrap();
+    assert_eq!(proc.kill(), Ok(()));
+    assert_eq!(*taken.lock().unwrap(), vec![(0, 9)]);
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("claude".to_owned(), MemberEnd::Signaled(9));
+    assert_eq!(
+        proc.wait_for(Duration::ZERO).unwrap(),
+        Some(Exit::Signal(9))
+    );
 }
 
 /// Joint plan step 17, AC-T7.4.1: do create an image VM whose spec names a harness its caller drives, with a
@@ -1374,7 +1497,7 @@ fn member_exec_and_signals_await_the_agent_control_endpoint() {
 /// NotRunning; the boot asks Shards for that member's stdin with its variable and directory and no terminal; the
 /// caller's ends of its three streams, given once; what the caller writes read by the member in order, and its
 /// end of input at the caller's close; what the member writes on stdout and stderr read whole by the caller; no
-/// end until the member's, then its status; its own kill awaiting the agent-control endpoint; a second take
+/// end until the member's, then its status; its kill, its member having ended, answered at once; a second take
 /// refused, as Shards refuses one; a member the spec doesn't name refused.
 #[test]
 fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
@@ -1454,12 +1577,8 @@ fn a_member_its_caller_drives_gives_its_streams_once_and_its_end() {
         .unwrap()
         .insert("claude".to_owned(), MemberEnd::Exited(3));
     assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(Exit::Code(3)));
-    assert_eq!(
-        proc.kill(),
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal
-        })
-    );
+    // Its member has ended: its kill has nothing to end, and rides no lane.
+    assert_eq!(proc.kill(), Ok(()));
     assert!(
         runtime.member(&id, &claude).is_err(),
         "its streams were taken"
@@ -3514,6 +3633,60 @@ fn w39_a_node_vm_whose_boot_is_refused_ends_its_record_in_shards_words() {
         (NodeVmPhase::Ended, Some(Exit::Unknown))
     );
     assert!(runtime.images.host_use_node(vm.run).is_err());
+}
+
+/// Each signal the model's member host took, with its member's index, in order.
+type Taken = Arc<Mutex<Vec<(u32, u32)>>>;
+
+/// A run's real agent-control endpoint (D238, D252) on loopback, Shards' own, its microVM's key the model's, taking
+/// `ask`'s controller alone and admitting its members' lanes; its host serves each lane as a run host serves a member's:
+/// a member in `ended` said ended, `Exited(0)`; any other running, the signal it is steered with taken, told to `taken`
+/// with its member's index, and the member then killed by it, `Signaled(n)`, as a command that keeps no handler is. A
+/// model run's endpoint and host live while the test does.
+fn serve_members(
+    ask: &shards_api::image::ControlAsk,
+    ended: Vec<u32>,
+    taken: Taken,
+) -> shards_api::image::ControlAt {
+    use shards_api::control::exec;
+    let vm = shards_api::control::Identity::generate().unwrap();
+    let (endpoint, served) = shards_remote::control::Endpoint::bind(
+        &vm,
+        ask.controller,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        shards_remote::control::Streams {
+            outputs: &[],
+            inputs: &[],
+            execs: Some(shards_api::control::exec_admissions()),
+            sockets: None,
+        },
+    )
+    .unwrap();
+    let address = endpoint.address;
+    std::thread::spawn(move || endpoint.run());
+    let lanes = served.members.unwrap();
+    let revoke = served.revoke;
+    std::thread::spawn(move || {
+        // Held for the endpoint's life: let go, it would end every lane.
+        let _revoke = revoke;
+        for lane in lanes {
+            let member = lane.ask.member;
+            if ended.contains(&member) {
+                lane.replies.tell(exec::Reply::Exited(0));
+                continue;
+            }
+            lane.replies.tell(exec::Reply::Running);
+            if let Ok(exec::Steer::Signal(signal)) = lane.steer.recv() {
+                taken.lock().unwrap().push((member, signal));
+                lane.replies.tell(exec::Reply::Steered(Ok(())));
+                lane.replies.tell(exec::Reply::Signaled(signal));
+            }
+        }
+    });
+    shards_api::image::ControlAt {
+        address,
+        vm: vm.fingerprint(),
+    }
 }
 
 /// A run's real agent-control endpoint (D252) on loopback, its microVM's key the model's own, taking `ask`'s controller
