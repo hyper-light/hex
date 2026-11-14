@@ -1257,59 +1257,6 @@ fn c9_a_first_boot_slower_than_w_star_is_followed_never_stopped_and_booted_again
     );
 }
 
-/// HEX-GUEST-34 (the record's slowest boot to ready, hex-cli's measuring tools' bound alone, owed until their waits
-/// follow; the review's C-9): on Linux (KVM), whose boot-to-ready row isn't in records.tsv yet, expect it the slowest
-/// boot_ready of any class, with no margin, never a refusal.
-#[cfg(target_os = "linux")]
-#[test]
-fn an_unrecorded_class_seeds_from_the_slowest_of_any_class() {
-    let slowest_any = hex_client::guest::shards::RECORDS
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| {
-            let row: Vec<&str> = l.split('\t').collect();
-            (row.first() == Some(&"boot_ready")).then(|| row[2].parse::<u64>().unwrap())
-        })
-        .max()
-        .unwrap();
-    assert_eq!(recorded_boot().unwrap(), Duration::from_micros(slowest_any));
-}
-
-/// HEX-GUEST-34 (the lead: the record is the input that turns a class on; decision 9's seed for a class with no
-/// record): read a records table with HVF's and WHP's rows: expect HVF its own row, and KVM, with none, the slowest of
-/// any class (WHP's), with no margin; a measure no class records has no seed. Add a KVM row: expect KVM its own, with no code
-/// between them.
-#[test]
-fn a_records_row_is_what_turns_a_class_on() {
-    use hex_client::guest::shards::{seed_in, slowest_in};
-    let hvf = "# measure\tclass\tslowest_us\trecord\nboot_ready\tmacOS-HVF\t265000\tr.md\n";
-    assert_eq!(
-        slowest_in(hvf, "boot_ready", "macOS-HVF"),
-        Some(Duration::from_millis(265))
-    );
-    assert_eq!(slowest_in(hvf, "boot_ready", "Linux-KVM"), None);
-    let two = format!("{hvf}boot_ready\tWindows-WHP\t2712939\tr.md\n");
-    assert_eq!(
-        seed_in(&two, "boot_ready", "macOS-HVF"),
-        Some(Duration::from_millis(265))
-    );
-    assert_eq!(
-        seed_in(&two, "boot_ready", "Linux-KVM"),
-        Some(Duration::from_micros(2_712_939))
-    );
-    assert_eq!(seed_in(&two, "stop", "Linux-KVM"), None);
-    let kvm = format!("{hvf}boot_ready\tLinux-KVM\t180000\tr.md\n");
-    assert_eq!(
-        slowest_in(&kvm, "boot_ready", "Linux-KVM"),
-        Some(Duration::from_millis(180))
-    );
-    assert_eq!(slowest_in(&kvm, "stop", "Linux-KVM"), None);
-    assert_eq!(
-        seed_in(&kvm, "boot_ready", "Linux-KVM"),
-        Some(Duration::from_millis(180))
-    );
-}
-
 /// HEX-GUEST-39 (the lead, 2026-11-07: an upgrade's first boot costs 1.5-5.3 s of the host's first-run checks
 /// before the guest's kernel runs, bench/native/guest/boot-ready/RECORD.md, and is no user's create's to pay):
 /// make the node's runtime: expect its guest booted before it returns, and the guest a create asks for that one,

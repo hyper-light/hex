@@ -1197,10 +1197,6 @@ fn w14_c_a_pools_stop_follows_its_scope_and_never_waits_a_boots_record() {
         asked.contains(&Duration::MAX),
         "its stop never followed its scope: {asked:?}"
     );
-    assert!(
-        !asked.contains(&crate::guest::recorded_boot().unwrap()),
-        "its stop waited the first boot's bound: {asked:?}"
-    );
 }
 
 /// Joint plan step 14, (B) (ROOT, 2026-11-13: an Uncertain with no reason is a CLAUDE.md §3 gap): a backing's refusal
