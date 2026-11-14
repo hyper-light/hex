@@ -729,6 +729,11 @@ pub trait Transport: Send + Sync + 'static {
     /// `take`, a message cut across reads kept in `reading` for the next. Whether anything came; the connection's end,
     /// or a message `take` refuses, is the error, saying why.
     fn recv(&self, reading: &mut Self::Reading, take: &mut Take<'_>) -> Result<bool, Refusal>;
+    /// A message as its connection carries it, before it is framed: one that carries a secret sealed where the
+    /// connection seals them (a node over QUIC, docs/design/hex-quic.md Q13), any other as it is.
+    fn seal(&self, message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        Ok(message)
+    }
     /// The bytes a message goes as: itself where the transport keeps messages whole, framed where it is a stream.
     fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
         Ok(message)
@@ -1298,6 +1303,7 @@ impl<T: Transport> Shared<T> {
     fn owe(&self, exec: u64, request: &Request) -> Result<(), Refusal> {
         let word = wire::request(exec, request, wire::MAX_MESSAGE)
             .map_err(Refusal::from)
+            .and_then(|message| self.transport.seal(message))
             .and_then(T::frame)?;
         let mut owed = self.owed.lock().map_err(poisoned)?;
         if owed.words.len() >= owed.bound {
@@ -1317,6 +1323,7 @@ impl<T: Transport> Shared<T> {
     pub(crate) fn owe_word(&self, id: u64, request: &Request) -> Result<(), Refusal> {
         let word = wire::request(id, request, wire::MAX_MESSAGE)
             .map_err(Refusal::from)
+            .and_then(|message| self.transport.seal(message))
             .and_then(T::frame)?;
         {
             let mut owed = self.owed.lock().map_err(poisoned)?;
@@ -1890,6 +1897,7 @@ impl<T: Transport> Conn<T> {
         let mut caller = Caller::new(shared, program)?;
         let bytes = wire::request(caller.id, request, bound)
             .map_err(Refusal::from)
+            .and_then(|message| shared.transport.seal(message))
             .and_then(T::frame)?;
         // Legacy transports retain their existing setup path. An explicit cap requires an adapter
         // that consumes the caller's deadline, the call's, before any request is sent.
@@ -1953,6 +1961,7 @@ impl<T: Transport> Conn<T> {
                     shared.state()?.given.insert(caller.id, given);
                     let bytes = wire::request(caller.id, &Request::StreamsReady, bound)
                         .map_err(Refusal::from)
+                        .and_then(|message| shared.transport.seal(message))
                         .and_then(T::frame)?;
                     if let Err(why) = caller.send(&bytes, NONE, deadline, patience) {
                         pending = caller.wait(Some(Instant::now()));
@@ -2030,7 +2039,7 @@ impl<T: Transport> Conn<T> {
         if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
             return;
         }
-        let Ok(framed) = T::frame(bytes.to_vec()) else {
+        let Ok(framed) = shared.transport.seal(bytes.to_vec()).and_then(T::frame) else {
             return;
         };
         let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
@@ -2370,6 +2379,7 @@ impl<T: Transport> Core<T> {
         };
         deferred.bytes = wire::request(id, request, self.limits.message_bytes)
             .map_err(Refusal::from)
+            .and_then(|message| self.conn.shared.transport.seal(message))
             .and_then(T::frame)?;
         Ok(deferred)
     }
