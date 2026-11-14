@@ -3999,6 +3999,9 @@ mod shared_outer_original_tests;
 #[cfg(test)]
 mod answers_tests;
 
+#[cfg(test)]
+mod image_turn_tests;
+
 #[cfg(all(test, target_os = "macos"))]
 mod macos_unsubmitted_tests {
     use super::*;
