@@ -176,9 +176,10 @@ fn role(role: &str, dir: &Path) -> std::process::Command {
 ///   ends the VM into the row and writes it Ended, letting its lock go, then ends;
 /// - `locking owner`, a node between its first write's lock and its row: it takes node VM 6's lock with no row, says
 ///   so, and ends when its stdin ends;
-/// - `holding owner`, the same, then starts a child of its own that outlives it, which on Unix holds a descriptor of
-///   its lock file's open file description, as a child forked without an exec would; then reads its row back, as a
-///   node does, says so, and ends when its stdin ends;
+/// - `holding owner`, the same, then starts a child of its own that outlives it, which holds its lock file as its
+///   stdin: on Unix a descriptor of its open file description, as a child forked without an exec would, and on Windows
+///   a handle of its file object, as a child that inherited it would (the review's C-13); then reads its row back, as
+///   a node does, says so, and ends when its stdin ends;
 /// - `child`: the owner's child, which goes once its test's directory holds `done`, or no longer is, saying so
 ///   (`bye`).
 #[test]
@@ -252,12 +253,7 @@ fn node_vm_role() {
         return;
     }
     let mut child = role_child(&dir);
-    #[cfg(unix)]
-    if let Some(lock) = store.node_vm_lock(&row.run) {
-        child.stdin(lock);
-    }
-    #[cfg(not(unix))]
-    child.stdin(std::process::Stdio::null());
+    child.stdin(store.node_vm_lock(&row.run).unwrap());
     #[expect(
         clippy::zombie_processes,
         reason = "it outlives this process, as the case asks: it is never waited for here"
@@ -335,9 +331,10 @@ fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
 }
 
 /// Joint plan step 39 (ROOT, 2026-11-13: a row whose run still lives is followed; the lock is its owner's alone, never
-/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it (on Unix
-/// sharing its lock file's open file description, as a child forked without an exec would), and reads its row back;
-/// start another node while it runs; then end the first. Expect the row followed, its receipt still Booting while its
+/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it holding its
+/// lock file (on Unix sharing its open file description, as a child forked without an exec would, and on Windows its
+/// file object, as a child that inherited it would: the review's C-13), and reads its row back; start another node
+/// while it runs; then end the first. Expect the row followed, its receipt still Booting while its
 /// owner runs, its lock outliving the owner's reads of its row; then, the owner ended and its child still running, the
 /// row let go with its lock file and its diagnostics.
 #[test]
