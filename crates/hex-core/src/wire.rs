@@ -3814,6 +3814,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
+                LifecycleCause::NodeVmEnded => 4,
             });
             // Appended after its cause (joint plan step 12): its reason in the refusing site's words, absent a byte 0.
             w.option_with(why.as_deref(), |w, why| w.string(why))
@@ -3831,6 +3832,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Uncertain => 1,
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
+                LifecycleCause::NodeVmEnded => 4,
             });
             // Appended after its cause (joint plan step 14): its reason in the refusing site's words, absent a byte 0.
             w.option_with(why.as_deref(), |w, why| w.string(why))
@@ -3960,6 +3962,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
                 3 => LifecycleCause::Retired,
+                4 => LifecycleCause::NodeVmEnded,
                 t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
             },
             why: r.option(|r| r.string("lifecycle refusal reason"))?,
@@ -3971,6 +3974,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 1 => LifecycleCause::Uncertain,
                 2 => LifecycleCause::Busy,
                 3 => LifecycleCause::Retired,
+                4 => LifecycleCause::NodeVmEnded,
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
             why: r.option(|r| r.string("backing refusal reason"))?,

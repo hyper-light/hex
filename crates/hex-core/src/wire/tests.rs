@@ -1686,6 +1686,7 @@ fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
             Some("its record names another native scope".to_owned()),
         ),
         (LifecycleCause::Busy, None),
+        (LifecycleCause::NodeVmEnded, None),
     ] {
         let worded = why.is_some();
         let refused = Answer::Refused(Refusal::Lifecycle {
@@ -1701,9 +1702,9 @@ fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
         if worded {
             continue;
         }
-        // 3 is Retired (joint plan step 14); the next tag is unknown. The cause is the byte before its reason's
-        // option, a 0 where it gives none (joint plan step 12).
-        for tag in [4, u8::MAX] {
+        // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); the next tag is unknown. The
+        // cause is the byte before its reason's option, a 0 where it gives none (joint plan step 12).
+        for tag in [5, u8::MAX] {
             let mut invalid = bytes.clone();
             let at = invalid.len() - 2;
             invalid[at] = tag;
@@ -3456,9 +3457,10 @@ fn route_wire_hostile_route_and_backing_tags_are_redacted() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // 3 is Retired (joint plan step 14); 4 is no cause. The cause is the byte before its reason's option tag.
+    // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); 5 is no cause. The cause is the byte
+    // before its reason's option tag.
     let cause = bytes.len() - 2;
-    bytes[cause] = 4;
+    bytes[cause] = 5;
     let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
     assert!(matches!(
         fault,
@@ -4252,9 +4254,9 @@ fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
         ));
     }
     assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
-    // 3 is Retired (joint plan step 14); the next cause is unknown. The cause is the byte before its reason's option
-    // tag, an entry's last (joint plan step 14, (B)).
-    for cause in [4, u8::MAX] {
+    // 3 is Retired (joint plan step 14), 4 NodeVmEnded (joint plan step 39, A-6); the next cause is unknown. The
+    // cause is the byte before its reason's option tag, an entry's last (joint plan step 14, (B)).
+    for cause in [5, u8::MAX] {
         let mut raw = bytes.clone();
         raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 2] = cause;
         assert!(matches!(

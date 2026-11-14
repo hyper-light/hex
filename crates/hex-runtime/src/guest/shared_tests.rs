@@ -646,6 +646,40 @@ fn w14_a_census_backing_is_retired_at_start_and_its_box_says_why() {
     restarted.delete(&id).unwrap();
 }
 
+/// A-6 (ROOT's audit, 2026-11-13: an oci box its node VM's last-resort end ended vanished from its node's list): an oci
+/// box its node retired with its node VM is listed from its record, as its inspect answers it, until its owner's
+/// delete. Do keep, in a guest runtime's books, an oci box retired for NodeVmEnded; list the runtime's boxes, inspect
+/// the box, then delete it and list again. Expect it listed, ended, its end unknown and its `ended` the cause's words,
+/// as its inspect says; then gone.
+#[test]
+fn a6_an_oci_box_retired_with_its_node_vm_is_listed_from_its_record() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let spec = super::super::tests::oci(
+        hex_api::Rootfs::Dir(dir.path().join("rootfs.tar")),
+        Vec::new(),
+    );
+    let id = spec.id.clone();
+    let mut record = BoxRecord::new(spec, hex_core::record::Phase::Ready, Vec::new());
+    record.retire_for(LifecycleCause::NodeVmEnded);
+    Transaction::put(owner.as_ref(), &record).unwrap();
+    let inspected = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        inspected.ended,
+        Some(LifecycleCause::NodeVmEnded.to_string())
+    );
+    assert_eq!(inspected.exit, Some(hex_api::Exit::Unknown));
+    let listed: Vec<hex_api::BoxInfo> = runtime
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|info| info.id == id)
+        .collect();
+    assert_eq!(listed, [inspected]);
+    runtime.delete(&id).unwrap();
+    assert!(runtime.list().unwrap().iter().all(|info| info.id != id));
+}
+
 /// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13: no legacy receipt runs on with a census number as its bound): a
 /// node's start retires every VM box and backing it recorded under its profile's census cost, before any exact check.
 /// Do record, under a cost whose census measured both overheads, a Shards VM box and a shared backing holding an OCI

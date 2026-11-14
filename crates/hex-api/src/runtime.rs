@@ -2691,6 +2691,11 @@ pub enum LifecycleCause {
     /// delete. Appended (wire append-only).
     #[error("its backing's identity changed with decision 9's census-free cost")]
     Retired,
+    /// Its node VM, the guest that ran it, was ended by its node's last resort, and with it every oci box it ran (joint
+    /// plan step 39; ROOT, 2026-11-13, A-6): the box keeps its record, ready, its end and why, until its owner's delete.
+    /// Appended (wire append-only).
+    #[error("its node VM was ended by its node's last resort, and every oci box it ran with it")]
+    NodeVmEnded,
 }
 
 /// Why a CONNECT handshake failed: the phase it failed in and what it saw.

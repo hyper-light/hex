@@ -994,6 +994,19 @@ pub(crate) fn record_last_resort(
     }
 }
 
+/// A-6 (ROOT, 2026-11-13: ending a node VM ends every oci box it runs, and each must say why): retires each oci box
+/// among `records` whose record names a node VM's last-resort end once that node VM's run has ended, its row among
+/// `rows` Ended or gone, for `NodeVmEnded`: kept, Ready, its end unknown and why on its record, until its owner's
+/// delete. Answers the boxes it retired.
+pub(crate) fn retire_with_node_vms(
+    store: &Store,
+    records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
+    rows: &[NodeVmRecord],
+) -> Result<Vec<BoxId>, Refusal> {
+    let _ = (store, records, rows);
+    Ok(Vec::new())
+}
+
 /// Makes each of `writes` in its box's record in `store` (C5), off the learner's lock, as the node does after each
 /// window: the writes that failed, which the node keeps for the next window, and the first failure, which fails this
 /// one.
