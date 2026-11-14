@@ -504,6 +504,55 @@ pub fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// The managed plan of guest `spec` booted with `binary` on `socket`, its guest told `left`, what remains of its boot's
+/// deadline ([`tell_ready`]): the native plan where `images` declare its images (its cost evidence's), else Shards' own
+/// plan with the runtime folders `paths`. A node's guests prepare theirs here, and so does the guest-cost producer
+/// (crates/hex-cli/examples/guest_cost), so it measures what a node runs (AC-T7.4.1).
+pub fn managed_plan(
+    spec: &shards_api::GuestSpec,
+    binary: &std::path::Path,
+    socket: &std::path::Path,
+    paths: &shards_api::RuntimePaths,
+    images: Option<shards_api::NativeImages>,
+    left: Duration,
+) -> Result<shards_api::PreparedBoot, Refusal> {
+    let mut spec = spec.clone();
+    tell_ready(&mut spec.cmdline, left)?;
+    let spec = &spec;
+    let plan = if let Some(images) = images {
+        shards_api::prepare_native_boot(
+            spec,
+            binary,
+            socket,
+            shards_api::NativeBoot {
+                paths,
+                images,
+                console_kept: shards_api::recorded_console_bytes_at(&spec.kernel, paths),
+            },
+        )
+    } else {
+        shards_api::prepare_boot(
+            spec,
+            binary,
+            socket,
+            shards_api::recorded_console_bytes(&spec.kernel),
+        )
+        .and_then(|plan| plan.with_runtime_paths(paths))
+    };
+    plan.map_err(|why| refusal("preparing admitted Shards scope", &why))
+}
+
+/// A managed guest booted from `plan` through `transaction`'s native owner within `patience`: the one managed launch a
+/// node's guests take ([`managed::boot`]), public so the guest-cost producer boots its guests as a node does
+/// (AC-T7.4.1).
+pub fn boot_managed(
+    transaction: &dyn crate::devices::Transaction,
+    plan: shards_api::PreparedBoot,
+    patience: Duration,
+) -> Result<shards_api::ManagedGuest, Refusal> {
+    managed::boot(transaction, plan, managed::Budget::new(patience)?)
+}
+
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
 const BOOTS: usize = 2;
