@@ -327,4 +327,52 @@ mod tests {
         assert_eq!((stdout.end, stderr.end), (End::Eof, End::Eof));
         assert!(streams.stdout.is_none() && streams.stderr.is_none());
     }
+
+    /// The review's C-9, (c2) (decision 9): a GPU create's observer drain whose budget follows its guest waits with no
+    /// timeout, as its output comes and ends, on every OS. Do: write to two stream pairs and close their writers, then
+    /// drain them with a budget that follows. Expect both streams' bytes and both EOFs, with no refusal.
+    #[test]
+    fn c9_c2_a_following_drain_waits_for_its_output_with_no_timeout() {
+        use std::io::Write as _;
+        let (out, mut out_writer) = stream_pair();
+        let (err, mut err_writer) = stream_pair();
+        out_writer.write_all(b"out").unwrap();
+        err_writer.write_all(b"err").unwrap();
+        drop((out_writer, err_writer));
+        let mut streams = Streams::new(hex_api::Given {
+            stdin: None,
+            stdout: Some(out),
+            stderr: Some(err),
+        })
+        .unwrap();
+        let mut stdout = Captured::new(3).unwrap();
+        let mut stderr = Captured::new(3).unwrap();
+        streams
+            .drain(&mut stdout, &mut stderr, Budget::following())
+            .unwrap();
+        assert_eq!(stdout.bytes().unwrap(), b"out");
+        assert_eq!(stderr.bytes().unwrap(), b"err");
+        assert_eq!((stdout.end, stderr.end), (End::Eof, End::Eof));
+        assert!(streams.stdout.is_none() && streams.stderr.is_none());
+    }
+
+    /// A connected stream pair: its reader's end as a guest observer's output is given, and its writer.
+    #[cfg(unix)]
+    fn stream_pair() -> (hex_api::End, std::os::unix::net::UnixStream) {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        (std::os::fd::OwnedFd::from(reader), writer)
+    }
+
+    /// A connected loopback socket pair: its reader's end as a guest observer's output is given (a relay socket), and its
+    /// writer.
+    #[cfg(windows)]
+    fn stream_pair() -> (hex_api::End, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let writer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        (
+            hex_api::End::Socket(std::os::windows::io::OwnedSocket::from(reader)),
+            writer,
+        )
+    }
 }
