@@ -1778,6 +1778,10 @@ impl Learner {
                     receipt,
                 )
                 .map_err(refused)?;
+            // What it holds as it is met is its baseline, never a window's growth (ROOT, 2026-11-13).
+            self.node
+                .baseline(&lifetime, read.memory_bytes)
+                .map_err(refused)?;
             // Its first split, from its first reading holding its guest time: over its life so far (D260).
             let own = read.own_over_life();
             let (guest_ns, own) = match read.guest_ns {
