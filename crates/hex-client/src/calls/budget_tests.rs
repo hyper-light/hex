@@ -395,15 +395,17 @@ fn default_none_preserves_the_unarmed_wait() {
     ));
 }
 
-struct Calibrated<const LONG: bool>(Stalled);
+/// A transport whose answers' learned waits are its own, the long one's or the short one's, each measuring (decision 9;
+/// Ada's rule of 2026-11-13: no record seeds them): it answers a call as it is asked where it is given an answer
+/// ([`BootstrapProbe`]), else never.
+struct Calibrated<const LONG: bool>(BootstrapProbe);
 impl<const LONG: bool> Transport for Calibrated<LONG> {
     type Reading = ();
     fn answers() -> &'static [Patience; KINDS] {
         static LONG_WAIT: [Patience; KINDS] =
-            [const { Patience::seeded("test.client_budget.long", LONG_CAP) }; KINDS];
+            [const { Patience::measuring("test.client_budget.long") }; KINDS];
         static SHORT: [Patience; KINDS] =
-            [const { Patience::seeded("test.client_budget.short", Duration::from_millis(1)) };
-                KINDS];
+            [const { Patience::measuring("test.client_budget.short") }; KINDS];
         if LONG { &LONG_WAIT } else { &SHORT }
     }
     fn reply_budget(&self) -> Option<Duration> {
@@ -422,6 +424,68 @@ impl<const LONG: bool> Transport for Calibrated<LONG> {
     fn shutdown(&self) {
         self.0.shutdown();
     }
+}
+
+/// A [`Calibrated`] transport giving each call `budget`, answering one with `reply` where given, and its first send's
+/// notice.
+fn calibrated<const LONG: bool>(
+    reply: Option<Answer>,
+    budget: Option<Duration>,
+) -> (Calibrated<LONG>, mpsc::Receiver<()>) {
+    let (io, sent) = stalled(None);
+    (
+        Calibrated(BootstrapProbe {
+            io: Offers::unobserved(io),
+            reply: Mutex::new(reply),
+            budget,
+        }),
+        sent,
+    )
+}
+
+/// The short learned wait's W* for `request`'s kind (each kind learns its own, [`kind_of`]): where it has none, its cold
+/// start, handled and told (decision 9: no record seeds it): `request` answered with `reply` as it is asked is its first
+/// answer, the sample its W* starts from.
+fn short_learned(request: &Request, reply: Answer) -> Duration {
+    let learned = || kind_of(Calibrated::<false>::answers(), request).and_then(Patience::deadline);
+    if let Some(wait) = learned() {
+        eprintln!(
+            "client_budget_learned wait=short request={request:?} cold_start=false w_star={wait:?}"
+        );
+        return wait;
+    }
+    let (transport, _) = calibrated::<false>(Some(reply), None);
+    let taught = configured(transport).conn.call_before(
+        wire::MAX_MESSAGE,
+        request,
+        |_, _| Ok(NONE),
+        None,
+        None,
+    );
+    assert!(taught.is_ok(), "{taught:?}");
+    let wait = learned().expect("an answered call teaches its kind's learned wait");
+    eprintln!(
+        "client_budget_learned wait=short request={request:?} cold_start=true w_star={wait:?}"
+    );
+    wait
+}
+
+/// The hello a stand-in agent answers, of this build.
+fn agents_hello() -> Answer {
+    Answer::Hello(wire::Hello {
+        build: wire::build(),
+        classes: vec![Class::Oci],
+        limits: Limits {
+            connections: 1,
+            message_bytes: wire::MAX_MESSAGE,
+            in_flight: 4,
+            programs: 4,
+        },
+        budgets: wire::Budgets {
+            in_flight: 4,
+            programs: 4,
+        },
+    })
 }
 
 fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusal {
@@ -443,11 +507,12 @@ fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusa
     result.unwrap().unwrap_err()
 }
 
-/// Do exhaust a caller's bound in actual Core calls, its learned wait ending once after it and
-/// once before it; expect each refused as the caller's expiry, the learned wait before it a
-/// run-out told to the census and never the call's end (AC-T7.4.1), after it nothing told. The
-/// census runs in a fresh exact-test child so it never competes with the existing
-/// refusal-census unit's OnceLock.
+/// Do exhaust a caller's bound in actual Core calls, once with no learned wait under it (the long
+/// one's cold start: nothing answered yet) and once with one learned from an answered list, ending
+/// before it; expect each refused as the caller's expiry, the learned wait before it a run-out told
+/// to the census and never the call's end (AC-T7.4.1), and the caller's expiry teaching no learned
+/// wait anything. The census runs in a fresh exact-test child so it never competes with the
+/// existing refusal-census unit's OnceLock.
 #[test]
 fn timeout_cause_and_learning_keep_caller_authority_separate() {
     const CHILD: &str = "HEX_CLIENT_BUDGET_CENSUS_CHILD";
@@ -481,8 +546,16 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
         }
     }
     assert!(hex_core::patience::census(sink));
-    let (transport, request) = stalled(Some(CAP));
-    let caller = timed_call(Calibrated::<true>(transport), request);
+    let unlearned = || {
+        Calibrated::<true>::answers()
+            .iter()
+            .all(|wait| wait.deadline().is_none())
+    };
+    // The long wait's cold start: it has seen no answer, so the caller's cap alone bounds the call.
+    assert!(unlearned());
+    eprintln!("client_budget_learned wait=long cold_start=true");
+    let (transport, request) = calibrated::<true>(None, Some(CAP));
+    let caller = timed_call(transport, request);
     assert!(
         matches!(caller, Refusal::Os { why, .. } if why.contains("caller") && !why.contains(LEARNED))
     );
@@ -491,12 +564,22 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
         0,
         "caller expiry cannot calibrate a learned bound"
     );
-    let (transport, request) = stalled(Some(CAP));
-    let learned = timed_call(Calibrated::<false>(transport), request);
+    assert!(unlearned(), "a caller's expiry taught the long wait");
+    // The short wait's cold start, handled and told: its first answer, the census's first sample.
+    short_learned(
+        &Request::Call(Call::List),
+        Answer::Boxes {
+            infos: Vec::new(),
+            more: false,
+        },
+    );
+    assert_eq!(SAMPLES.load(Ordering::SeqCst), 1);
+    let (transport, request) = calibrated::<false>(None, Some(CAP));
+    let learned = timed_call(transport, request);
     assert!(
         matches!(learned, Refusal::Os { why, .. } if why.contains("caller") && !why.contains(LEARNED))
     );
-    assert_eq!(SAMPLES.load(Ordering::SeqCst), 1);
+    assert_eq!(SAMPLES.load(Ordering::SeqCst), 2);
     assert_eq!(RUN_OUT.load(Ordering::SeqCst), 1);
 }
 
@@ -545,9 +628,10 @@ fn in_late_census_child(name: &str) -> bool {
     false
 }
 
-/// A stand-in agent busy past its record, as the guest's node was initializing its GPU: it answers a hello only once
-/// the hello's learned wait, its record of 1 ms, has run out ([`LATE_DUE`], set by [`late_census`] where it is
-/// installed). `CALLER` names its waits apart.
+/// A stand-in agent busy past what it has answered in before, as the guest's node was initializing its GPU: it answers a
+/// hello only once [`LATE_DUE`] is set, by the test for a first hello (the learned wait's cold start, its first answer)
+/// and then by [`late_census`], where it is installed, as the hello's learned wait, the slowest answer seen (decision 9;
+/// no record seeds it), runs out. `CALLER` names its waits apart.
 struct LateHello<const CALLER: bool> {
     io: UdpSocket,
     asked: Mutex<Option<u64>>,
@@ -567,12 +651,10 @@ fn late_hello<const CALLER: bool>() -> LateHello<CALLER> {
 impl<const CALLER: bool> Transport for LateHello<CALLER> {
     type Reading = ();
     fn answers() -> &'static [Patience; KINDS] {
-        static UNDER_CALLER: [Patience; KINDS] = [const {
-            Patience::seeded("test.client_budget.late.caller", Duration::from_millis(1))
-        }; KINDS];
+        static UNDER_CALLER: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_budget.late.caller") }; KINDS];
         static ALONE: [Patience; KINDS] =
-            [const { Patience::seeded("test.client_budget.late.alone", Duration::from_millis(1)) };
-                KINDS];
+            [const { Patience::measuring("test.client_budget.late.alone") }; KINDS];
         if CALLER { &UNDER_CALLER } else { &ALONE }
     }
     fn reading(&self) {}
@@ -631,12 +713,37 @@ impl<const CALLER: bool> Transport for LateHello<CALLER> {
 /// A caller's deadline no answer here comes near: the late answer is there to read as the learned wait runs out.
 const LATE_CAP: Duration = Duration::from_secs(30);
 
+/// The hello's learned wait's cold start, handled and told: it has seen no answer, so the agent answers a first hello
+/// as it is asked ([`LATE_DUE`] set), its time the sample the wait starts from; `cap` is that hello's caller's deadline,
+/// none for none. Returns the hello's client, kept so its connection stays, and the wait's W*: that first answer.
+fn taught_hello<const CALLER: bool>(
+    shared: &SharedOwner<LateHello<CALLER>>,
+    cap: Option<ReplyDeadline>,
+    name: &'static str,
+) -> (Core<LateHello<CALLER>>, Duration) {
+    LATE_DUE.store(true, Ordering::SeqCst);
+    // Its answer is there to read: the agent's connection woken, as a run-out wakes it.
+    LATE_WAKE.get().unwrap().send(&[1]).unwrap();
+    let client = Core::hello_before(triomphe::Arc::clone(shared), cap).unwrap();
+    LATE_DUE.store(false, Ordering::SeqCst);
+    let answered = LATE_ANSWERED.lock().unwrap().clone();
+    let [(taught, first)] = answered.as_slice() else {
+        panic!("one first answer told: {answered:?}");
+    };
+    assert_eq!(*taught, name);
+    eprintln!(
+        "client_late_answer cold_start=true wait={name} taught_by=a_first_hello w_star={first:?}"
+    );
+    (client, *first)
+}
+
 /// AC-T7.4.1 (original): on 00aad a Firecracker guest with the AMD GPU passed through booted, and its relay's hello to
 /// its own node, busy with the GPU's initialization, was refused, "none came in 2.354074ms, twice the slowest answer to
 /// a call of its kind", while the boot had most of its 60 s left: the guest panicked. A learned bound is calibration,
 /// not the caller's authority. Do: say hello under a caller's absolute deadline to an agent that answers only once the
-/// hello's learned wait (its 1 ms record, decision 9) has run out. Expect: the hello answered; its run-out told to the census
-/// once, at the learned bound; its answer told too, later than that bound.
+/// hello's learned wait (the slowest answer it has seen: a first hello's, its cold start; decision 9) has run out.
+/// Expect: the hello answered; its run-out told to the census once, at the learned bound; its answer told too, later
+/// than that bound.
 #[test]
 fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded() {
     if !in_late_census_child(
@@ -644,8 +751,10 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
     ) {
         return;
     }
+    const NAME: &str = "test.client_budget.late.caller";
     let shared = Shared::try_new(late_hello::<true>()).unwrap();
     let cap = ReplyDeadline::caller_before(Instant::now().checked_add(LATE_CAP).unwrap()).unwrap();
+    let (_taught, bound) = taught_hello(&shared, Some(cap), NAME);
     let result = Core::hello_before(shared, Some(cap)).map(drop);
     let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
     let answered = LATE_ANSWERED.lock().unwrap().clone();
@@ -656,10 +765,9 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
         result.is_ok(),
         "a slow answer inside its caller's deadline was refused: {result:?}"
     );
-    let bound = Duration::from_millis(1);
-    assert_eq!(ran_out, [("test.client_budget.late.caller", bound)]);
+    assert_eq!(ran_out, [(NAME, bound)]);
     assert!(
-        matches!(answered.as_slice(), [("test.client_budget.late.caller", took)] if *took > bound),
+        matches!(answered.as_slice(), [(NAME, first), (NAME, took)] if *first == bound && *took > bound),
         "{answered:?}"
     );
 }
@@ -667,9 +775,9 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
 /// AC-T7.4.1, decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it):
 /// a call with no caller's deadline was refused at its kind's learned wait, "none came in 1ms, the slowest answer to a
 /// call of its kind", so a fresh process's second call was refused whenever it was slower than its first. Do: say hello
-/// with no caller deadline to an agent that answers only once the hello's learned wait (1 ms) has run out. Expect: the
-/// hello answered, the call following its agent past W*; its run-out told to the census once, at the learned bound; its
-/// answer told too, later than that bound.
+/// with no caller deadline to an agent that answers only once the hello's learned wait (a first hello's answer, its cold
+/// start) has run out. Expect: the hello answered, the call following its agent past W*; its run-out told to the census
+/// once, at the learned bound; its answer told too, later than that bound.
 #[test]
 fn original_with_no_callers_deadline_a_call_follows_its_agent_past_the_learned_wait() {
     if !in_late_census_child(
@@ -677,7 +785,9 @@ fn original_with_no_callers_deadline_a_call_follows_its_agent_past_the_learned_w
     ) {
         return;
     }
+    const NAME: &str = "test.client_budget.late.alone";
     let shared = Shared::try_new(late_hello::<false>()).unwrap();
+    let (_taught, bound) = taught_hello(&shared, None, NAME);
     let result = Core::hello_before(shared, None).map(drop);
     let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
     let answered = LATE_ANSWERED.lock().unwrap().clone();
@@ -688,10 +798,9 @@ fn original_with_no_callers_deadline_a_call_follows_its_agent_past_the_learned_w
         result.is_ok(),
         "a call with no caller's deadline was refused at its learned wait: {result:?}"
     );
-    let bound = Duration::from_millis(1);
-    assert_eq!(ran_out, [("test.client_budget.late.alone", bound)]);
+    assert_eq!(ran_out, [(NAME, bound)]);
     assert!(
-        matches!(answered.as_slice(), [("test.client_budget.late.alone", took)] if *took > bound),
+        matches!(answered.as_slice(), [(NAME, first), (NAME, took)] if *first == bound && *took > bound),
         "{answered:?}"
     );
 }
@@ -2188,6 +2297,8 @@ fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
 struct BootstrapProbe {
     io: Offers,
     reply: Mutex<Option<Answer>>,
+    /// The caller's budget it gives each call, where it gives one.
+    budget: Option<Duration>,
 }
 
 impl Transport for BootstrapProbe {
@@ -2199,6 +2310,9 @@ impl Transport for BootstrapProbe {
         &WAITS
     }
 
+    fn reply_budget(&self) -> Option<Duration> {
+        self.budget
+    }
     fn reading(&self) {}
     fn handle(&self) -> Handle<'_> {
         self.io.handle()
@@ -2225,6 +2339,7 @@ fn bootstrap_probe(reply: Option<Answer>) -> (Core<BootstrapProbe>, mpsc::Receiv
         configured(BootstrapProbe {
             io: Offers::unobserved(io),
             reply: Mutex::new(reply),
+            budget: None,
         }),
         sent,
     )
@@ -2909,12 +3024,14 @@ fn selected_callers_setup_expiry_prevents_send() {
     /// The hello's return, its selected setup authority consumed before any send.
     static RETURNED: Patience =
         Patience::measuring("test.hex_client.budget.selected_setup_returned");
-    let (transport, writes) = stalled(None);
-    let client = Arc::new(configured(Calibrated::<false>(transport)));
-    let control = Arc::clone(&client);
     let hello = Request::Hello {
         build: wire::build(),
     };
+    // Its existing private smaller learned wait, the hello's: taught where it has none (its cold start, told).
+    short_learned(&hello, agents_hello());
+    let (transport, writes) = calibrated::<false>(None, None);
+    let client = Arc::new(configured(transport));
+    let control = Arc::clone(&client);
     let (selected, selection) = mpsc::sync_channel(1);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
@@ -3475,9 +3592,6 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
 
 /// A call that gave up waiting: its late answers have no taker.
 const GAVE_UP: u64 = u64::MAX;
-/// Messages for others before the fuse ends the connection, the only way a poll that keeps reading
-/// comes back: far more than these tests' polls and calls read (one each).
-const FUSE: usize = 1_000;
 
 /// Answers for others that keep coming: each read hands on one message, as one `SOCK_SEQPACKET` read
 /// does, and leaves another ready.
@@ -3491,6 +3605,11 @@ struct Chatter {
     chatting: AtomicBool,
     /// Turns taken: each waits on the connection through its handle once.
     turns: AtomicUsize,
+    /// Whether the turn under way has read: a turn reads once, the claim these tests make.
+    read_in_turn: AtomicBool,
+    /// The fuse: a turn's second read while answers for others keep coming, a poll that keeps reading, ends the
+    /// connection, the only way such a poll comes back. Its basis is that claim, never a count.
+    blown: AtomicBool,
     /// Messages for others handed on.
     others: AtomicUsize,
     sent: Mutex<Vec<(u64, Request)>>,
@@ -3503,6 +3622,8 @@ impl Chatter {
             next: Mutex::new(VecDeque::new()),
             chatting: AtomicBool::new(false),
             turns: AtomicUsize::new(0),
+            read_in_turn: AtomicBool::new(false),
+            blown: AtomicBool::new(false),
             others: AtomicUsize::new(0),
             sent: Mutex::new(Vec::new()),
         }
@@ -3547,19 +3668,21 @@ impl Transport for Chatter {
     fn reading(&self) {}
     fn handle(&self) -> Handle<'_> {
         self.turns.fetch_add(1, Ordering::SeqCst);
+        self.read_in_turn.store(false, Ordering::SeqCst);
         self.socket.handle()
     }
     fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
         self.socket.drain();
+        if self.read_in_turn.swap(true, Ordering::SeqCst) && self.chatting.load(Ordering::SeqCst) {
+            self.blown.store(true, Ordering::SeqCst);
+            return Err(Refusal::Broken(
+                "the fuse: a turn read again while answers for others kept coming".into(),
+            ));
+        }
         let next = self.next.lock().unwrap().pop_front();
         let message = match next {
             Some(message) => message,
             None if self.chatting.load(Ordering::SeqCst) => {
-                if self.others.load(Ordering::SeqCst) >= FUSE {
-                    return Err(Refusal::Broken(
-                        "the fuse: a poll kept reading answers for others".into(),
-                    ));
-                }
                 self.others.fetch_add(1, Ordering::SeqCst);
                 wire::answer(GAVE_UP, &Answer::Done, wire::MAX_MESSAGE).unwrap()
             }
@@ -3628,7 +3751,8 @@ fn a_poll_reads_once_while_answers_for_others_keep_coming() {
     let handed_on = !state.reading && state.waiting.is_empty() && state.closed.is_none();
     drop(state);
     eprintln!(
-        "client_poll_bound phase=try_wait polled={polled:?} zero={zero:?} ended={ended:?} again={again:?} others={others} fuse={FUSE} handed_on={handed_on}"
+        "client_poll_bound phase=try_wait polled={polled:?} zero={zero:?} ended={ended:?} again={again:?} others={others} fuse_blown={} handed_on={handed_on}",
+        chatter.blown.load(Ordering::SeqCst)
     );
     assert_eq!(
         polled,
@@ -3638,7 +3762,10 @@ fn a_poll_reads_once_while_answers_for_others_keep_coming() {
     assert_eq!(zero, (Ok(None), 1, 1));
     assert_eq!(ended, (Ok(Some(Exit::Code(7))), 1, 0));
     assert_eq!(again, (Ok(Some(Exit::Code(7))), 0, 0));
-    assert!(others < FUSE, "answers for others were still coming");
+    assert!(
+        !chatter.blown.load(Ordering::SeqCst),
+        "a turn read on: the fuse ended the connection"
+    );
     assert!(handed_on, "each poll handed the reader's turn on");
 }
 
@@ -3663,7 +3790,8 @@ fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
         .collect();
     let others = chatter.others.load(Ordering::SeqCst);
     eprintln!(
-        "client_poll_bound phase=kill killed={killed:?} kills={kills:?} exec={exec} others={others} fuse={FUSE}"
+        "client_poll_bound phase=kill killed={killed:?} kills={kills:?} exec={exec} others={others} fuse_blown={}",
+        chatter.blown.load(Ordering::SeqCst)
     );
     assert_eq!(
         killed,
@@ -3671,30 +3799,37 @@ fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
         "kill's check for an end must take one turn and read once, then one turn for its answer"
     );
     assert_eq!(kills, [exec]);
-    assert!(others < FUSE, "answers for others were still coming");
+    assert!(
+        !chatter.blown.load(Ordering::SeqCst),
+        "a turn read on: the fuse ended the connection"
+    );
 }
 
-/// AC-T7.4.1: do `wait_for` a microsecond on a remote program while answers for others keep coming;
-/// expect `Ok(None)` once its time is spent, each turn reading once, never reading on until the fuse
-/// ends the connection. Then with its end next: expect a spent wait to take that end from its read.
+/// AC-T7.4.1: do `wait_for` the least positive wait, a nanosecond, Duration's own unit, on a remote
+/// program while answers for others keep coming; expect `Ok(None)` once its time is spent, each turn
+/// reading once, never reading on until the fuse ends the connection. Then with its end next: expect a
+/// spent wait to take that end from its read.
 #[test]
 fn a_timed_wait_ends_at_its_deadline_while_answers_for_others_keep_coming() {
     let client = configured(Chatter::new());
     let (mut proc, exec) = chatting_program(&client);
     let chatter = &client.conn.shared.transport;
     chatter.chat();
-    let wait = Duration::from_micros(1);
+    let wait = Duration::from_nanos(1);
     let waited = chatter.counted(|| proc.wait_for(wait));
     chatter.queue(exec, &Answer::Exited(Exit::Code(3)));
     let ended = proc.wait_for(wait);
-    eprintln!("client_wait_bound phase=wait_for waited={waited:?} ended={ended:?} fuse={FUSE}");
+    eprintln!(
+        "client_wait_bound phase=wait_for waited={waited:?} ended={ended:?} fuse_blown={}",
+        chatter.blown.load(Ordering::SeqCst)
+    );
     assert_eq!(
         waited.0,
         Ok(None),
         "a timed wait came back with its time spent"
     );
     assert!(
-        waited.2 < FUSE,
+        !chatter.blown.load(Ordering::SeqCst),
         "it read on until the fuse ended the connection"
     );
     assert_eq!(waited.1, waited.2, "each turn read once");
@@ -3790,7 +3925,8 @@ fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
         })
         .collect();
     eprintln!(
-        "client_wait_bound phase=setup_kill ran={ran:?} run={run:?} kills={kills:?} fuse={FUSE}"
+        "client_wait_bound phase=setup_kill ran={ran:?} run={run:?} kills={kills:?} fuse_blown={}",
+        chatter.blown.load(Ordering::SeqCst)
     );
     assert!(
         matches!(&ran.0, Err(Refusal::Broken(why)) if why.contains("stdout")),
