@@ -277,7 +277,10 @@ fn scaled(milli: u64, part: i128, whole: i128) -> u64 {
     if part <= 0 || whole <= 0 {
         return 0;
     }
-    u64::try_from(u128::from(milli) * u128::try_from(part).unwrap() / u128::try_from(whole).unwrap()).unwrap()
+    u64::try_from(
+        u128::from(milli) * u128::try_from(part).unwrap() / u128::try_from(whole).unwrap(),
+    )
+    .unwrap()
 }
 
 /// The guest's player, given its spinners' number, its trace's most MiB, then `millis threads mib` triples (module
@@ -377,7 +380,12 @@ fn merged(steps: &[Step]) -> Vec<Step> {
 /// its most MiB, refused, naming `trace`, where it passes the guest's exec bound: Linux's least `ARG_MAX`, whatever its
 /// stack limit (`hex_api::sim::SIM_EXEC_LIMIT`).
 fn player(trace: &str, steps: &[Step], vcpus: u64) -> Vec<String> {
-    let most = steps.iter().map(|s| s.threads).max().unwrap_or(0).min(vcpus);
+    let most = steps
+        .iter()
+        .map(|s| s.threads)
+        .max()
+        .unwrap_or(0)
+        .min(vcpus);
     let peak = steps.iter().map(|s| s.mib).max().unwrap_or(0);
     let mut args = vec![
         "/bin/sh".to_owned(),
@@ -530,7 +538,9 @@ impl Kind {
         let class = match self {
             Self::Image => ClassSpec::ShardsImage(Box::new(ShardsImage {
                 command: Some(args.to_vec()),
-                ..ShardsImage::new(image.expect("the image VMs' image, put in the node's Shards home"))
+                ..ShardsImage::new(
+                    image.expect("the image VMs' image, put in the node's Shards home"),
+                )
             })),
             Self::Shards => ClassSpec::Shards(oci()),
             Self::Firecracker => ClassSpec::Firecracker(oci()),
@@ -933,7 +943,10 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
         .unwrap();
     let begun = Instant::now();
     // The riser's trace, the longest: the run's length, which its warm-up must fit.
-    let longest = traces.iter().max_by_key(|(_, steps)| length(steps)).unwrap();
+    let longest = traces
+        .iter()
+        .max_by_key(|(_, steps)| length(steps))
+        .unwrap();
     let run = length(&longest.1);
     let warm_up = |window: Duration| {
         let rises_after = window * u32::try_from(SEEDABLE).unwrap();
@@ -1004,7 +1017,8 @@ fn the_learned_charge_holds_density_and_fairness_on_this_host() {
                     // The riser: its trace until its charge has warmed, then every vCPU and the most any trace holds.
                     let mut kept = Vec::new();
                     let mut spent = 0u64;
-                    let after = warm_up(window.expect("the learner's window, told before the riser"));
+                    let after =
+                        warm_up(window.expect("the learner's window, told before the riser"));
                     rises_after = Some(after);
                     let rise = u64::try_from(after.as_millis()).unwrap();
                     for step in &steps {
