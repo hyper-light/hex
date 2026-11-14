@@ -1474,6 +1474,12 @@ impl WinRuntime {
         managed::stop(self, record)
     }
 
+    /// Joint plan step 14 (C4 on Windows; ROOT, 2026-11-13): the least share a managed VM's job holds it at, its hard
+    /// cap's least unit on this machine (`hex_core::job::least_milli`).
+    pub fn managed_least(&self) -> u64 {
+        hex_core::job::least_milli(self.processors)
+    }
+
     /// Joint plan step 14 (D260): how long the process created at `started` has run, a managed VM's VM process by its
     /// record's `init` ([`process_life`]).
     pub fn managed_life(&self, started: u64) -> Result<std::time::Duration, Refusal> {

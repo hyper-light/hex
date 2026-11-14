@@ -22,13 +22,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use hex_api::conformance::{Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Signal, Stdio};
 use hex_core::patience::Patience;
 use hex_node::Node;
+use hex_testkit::waits::follow::{self, Party};
 use hex_testkit::waits::until;
 
 struct BinFixture {
@@ -161,7 +161,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
     use std::io::Read;
     use std::os::fd::{AsFd, OwnedFd};
 
-    use hex_api::{Exit, Proc};
+    use hex_api::Exit;
     use hex_runtime::linux::sys::{Cloned, Spawn, clone_into_cgroup};
 
     let root = hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-clone"), Vec::new())
@@ -195,10 +195,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
     match clone_into_cgroup(dir.as_fd(), spawn).expect("clone3 into the box") {
         Cloned::Started { pid, pidfd } => {
             let mut p = hex_runtime::linux::proc::PidfdProc::of_clone(pid, pidfd);
-            assert_eq!(
-                p.wait_for(Duration::from_secs(10)).unwrap(),
-                Some(Exit::Code(0))
-            );
+            assert_eq!(hex_api::conformance::end_of(&mut p), Ok(Exit::Code(0)));
             let mut seen = String::new();
             out.read_to_string(&mut seen).unwrap();
             let rel = cg.dir().strip_prefix("/sys/fs/cgroup").unwrap();
@@ -227,10 +224,22 @@ fn exercise_clone_into_cgroup(own: &Path) {
             );
             // The lead's ruling of 2026-11-11 (AC-T7.4.1): the locked-memory limit given a spawn is the one its program
             // starts under, as a VMM that pins its guest's RAM for DMA has its soft limit raised to its hard one
-            // (hex-runtime's firecracker vfio): here half this process's soft limit, in whole KiB, so it can't be the
-            // one the program would inherit.
+            // (hex-runtime's firecracker vfio): here half the limit this process's programs lock under, in whole KiB, so it
+            // can't be the one the program would inherit: its soft RLIMIT_MEMLOCK, or where that is unlimited what the
+            // box's cgroups let a program lock ([`lockable`]); with neither finite there is no limit to halve, said.
             let memlock = rustix::process::getrlimit(rustix::process::Resource::Memlock);
-            let soft = memlock.current.unwrap_or(64 << 20) / 2 / 1024 * 1024;
+            let Some(limit) = memlock.current.or_else(|| lockable(cg.dir())) else {
+                hex_testkit::skip(
+                    "process_boxes_hold_the_contract_and_recover",
+                    "a finite locked-memory limit",
+                    "RLIMIT_MEMLOCK is unlimited and every cgroup from the box up has memory.max max",
+                )
+                .expect("recording the skip");
+                cg.remove().unwrap();
+                std::fs::remove_dir(root.dir()).unwrap();
+                return;
+            };
+            let soft = limit / 2 / 1024 * 1024;
             let (mut out, w) = std::io::pipe().unwrap();
             let limited = Spawn::new(
                 vec![c("/bin/sh")],
@@ -251,10 +260,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
                 panic!("clone3 served the first program, so it serves this one")
             };
             let mut p = hex_runtime::linux::proc::PidfdProc::of_clone(pid, pidfd);
-            assert_eq!(
-                p.wait_for(Duration::from_secs(10)).unwrap(),
-                Some(Exit::Code(0))
-            );
+            assert_eq!(hex_api::conformance::end_of(&mut p), Ok(Exit::Code(0)));
             let mut seen = String::new();
             out.read_to_string(&mut seen).unwrap();
             assert_eq!(
@@ -308,14 +314,21 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
     let mut proc = node
         .exec(&live, fx.wait(), Stdio::null())
         .expect("exec wait");
-    wait_until(
+    // Followed by its program's life (decision 9): a program that ended leaves the box never to run.
+    follow::until(
+        &RUNS,
+        "the live box running",
+        || match proc.try_wait() {
+            Ok(None) => Party::Live,
+            Ok(Some(_)) | Err(_) => Party::Ended,
+        },
         || {
             node.inspect(&live)
                 .map(|i| i.state == hex_api::BoxState::Running)
                 .unwrap_or(false)
         },
-        "live box runs",
-    );
+    )
+    .expect("the live box runs");
 
     // A leftover cgroup with no record (a crash after the cgroup was made, before the record).
     std::fs::create_dir_all(box_root.join("orphan")).expect("orphan cgroup");
@@ -399,10 +412,14 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
         "the running run's box wasn't taken back: {summary:?}"
     );
     running.kill().expect("end the run's program");
-    wait_until(
-        || restarted.inspect(&ran_live) == Err(hex_api::Refusal::NoSuchBox(ran_live.clone())),
+    // Its party is the restarted node, whose supervision removes the box and which lives while this test holds it: the
+    // wait follows the fact alone, its run-out past W* told (decision 9).
+    until(
+        &REMOVED,
         "the taken-back run's box removed once its program ended",
-    );
+        || restarted.inspect(&ran_live) == Err(hex_api::Refusal::NoSuchBox(ran_live.clone())),
+    )
+    .expect("the taken-back run's box removed");
     assert!(
         !box_root.join("ran-live").exists(),
         "the taken-back run's cgroup leaked"
@@ -454,6 +471,9 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
 /// A claimer's stop at the hold on the runs' removals, and a delete's wait on that removal or its answer beside it:
 /// facts no recorded operation makes, each waited for measuring (`hex_testkit::waits`).
 static STOPPED: Patience = Patience::measuring("test.hex_cli.process_box.removal_stopped");
+/// A live box shown running once its program runs, and a taken-back run's box removed once its program ended: the same.
+static RUNS: Patience = Patience::measuring("test.hex_cli.process_box.live_runs");
+static REMOVED: Patience = Patience::measuring("test.hex_cli.process_box.taken_back_removed");
 static BESIDE: Patience = Patience::measuring("test.hex_cli.process_box.delete_beside_removal");
 
 /// Runtime goal 7 (decision 7), AC-T7.4.1: a delete of a run's box that its program's end is removing answers as that
@@ -570,17 +590,16 @@ fn exercise_a_signal_beside_a_runs_removal(own: &Path, cache: &Path, exe: &str) 
     );
 }
 
-fn orphan_id() -> BoxId {
-    BoxId::new("orphan").unwrap()
+/// What a program in the box at `dir` can lock at most where its soft RLIMIT_MEMLOCK is unlimited: the tightest
+/// `memory.max` of the box's cgroup and every cgroup above it; none where each is `max`.
+fn lockable(dir: &Path) -> Option<u64> {
+    dir.ancestors()
+        .take_while(|d| d.starts_with("/sys/fs/cgroup"))
+        .filter_map(|d| std::fs::read_to_string(d.join("memory.max")).ok())
+        .filter_map(|text| text.trim().parse::<u64>().ok())
+        .min()
 }
 
-fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if cond() {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("timed out waiting for: {what}");
+fn orphan_id() -> BoxId {
+    BoxId::new("orphan").unwrap()
 }
