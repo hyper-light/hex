@@ -1665,7 +1665,7 @@ impl Runtime for GuestRuntime {
                 }
             }
         }
-        let images = self.images.image_infos()?;
+        let images = self.images.image_infos(image::Unread::Unlisted)?;
         // Each oci box its node retired with its node VM (A-6), from its record, as its inspect answers it.
         let retired = self.retired_infos()?;
         boxes
