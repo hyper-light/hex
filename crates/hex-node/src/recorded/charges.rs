@@ -1897,15 +1897,16 @@ impl Learner {
             let intent = record.intent().map(LearnedEnd::try_clone).transpose()?;
             self.last.met(class, scope, intent)?;
         }
-        // A box whose record its node can't read is counted at its machine (the review's dropped records; ROOT,
-        // 2026-11-14): its class, caps and receipt are its record's alone, so nothing bounds it lower, as an unknown
-        // band ranks a node VM above every box ([`node_band`]). While one is, the fleet has no budget past the bookings
-        // it reads, each VM held at its booking (C3), and every VM class's answer names the box ([`Learner::learned`]).
-        // Interim: once A-10 (goal 4) makes the fleet's budget what is measured free, what such a box holds is outside
-        // that budget already, and this count gives way to it.
+        // A box whose record its node can't read (the review's dropped records; ROOT, 2026-11-14): what it takes of
+        // memory and disk is missing from what the machine reads free already, so it is counted at its use there
+        // ([`measured`], A-10); its CPU, which no measure of what is free holds, at its machine: its class, caps and
+        // receipt are its record's alone, so nothing bounds it lower, as an unknown band ranks a node VM above every box
+        // ([`node_band`]). While one is, the fleet has no CPU past the bookings it reads, each VM held at its CPU booking
+        // (C3), and every VM class's answer names the box ([`Learner::learned`]).
         if !unreadable.is_empty() {
-            unread = unread
-                .checked_add(self.machine)
+            unread.cpu_milli = unread
+                .cpu_milli
+                .checked_add(self.machine.cpu_milli)
                 .ok_or_else(|| Refusal::Invalid {
                     what: "a microVM's learned charge",
                     why: "the unread VMs' receipts and the machine overflow".into(),
@@ -2420,28 +2421,45 @@ fn held(answers: &[Answer<'_>]) -> Result<u64, Refusal> {
         })
 }
 
-/// The fleet's budget a window measures (C4, C7; the review's A-10), its VMs holding `held` as just read: the
-/// `machine`'s, less what each holder it doesn't learn books (`booked`).
+/// The fleet's budget a window measures (C4, C7; the review's A-10), its VMs holding `held` as just read: every CPU of
+/// the `machine` less what each holder it doesn't learn books (`booked`); and the memory and disk the machine has free,
+/// read last ([`Managed::free`]), with what its VMs hold, less what each holder it doesn't learn may still grow into, its
+/// booking past what it takes ([`Managed::taken`]). What a holder takes is missing from what is free already, so only
+/// that headroom comes off, never its booking beside its use (ROOT, 2026-11-14), and one past its booking takes the
+/// excess from the fleet; one whose use can't be read takes off its whole booking, nothing reading it lower. No disk use
+/// is read, so a booking's disk comes off whole. The budget is so never more than what is free and what its VMs hold.
 pub(crate) fn measured(
     io: &impl Managed,
     machine: CapacityResources,
     booked: &[(Holder<'_>, CapacityResources)],
     held: u64,
 ) -> Result<CapacityResources, Refusal> {
-    let _ = (io, held);
-    let booking = booked
-        .iter()
-        .try_fold(CapacityResources::default(), |sum, (_, booking)| {
-            sum.checked_add(*booking)
-        })
+    let overflow = || Refusal::Invalid {
+        what: "a node's boxes' bookings",
+        why: "they overflow".into(),
+    };
+    let mut off = CapacityResources::default();
+    for (holder, booking) in booked {
+        let taken = io.taken(*holder).unwrap_or(0);
+        let headroom = CapacityResources {
+            cpu_milli: booking.cpu_milli,
+            mem_bytes: booking.mem_bytes.saturating_sub(taken),
+            disk_bytes: booking.disk_bytes,
+        };
+        off = off.checked_add(headroom).ok_or_else(overflow)?;
+    }
+    let free = io.free()?;
+    let memory = free
+        .mem_bytes
+        .checked_add(held)
         .ok_or_else(|| Refusal::Invalid {
-            what: "a node's boxes' bookings",
-            why: "they overflow".into(),
+            what: "a fleet's budget",
+            why: "what is free and what its VMs hold overflow".into(),
         })?;
     Ok(CapacityResources {
-        cpu_milli: machine.cpu_milli.saturating_sub(booking.cpu_milli),
-        mem_bytes: machine.mem_bytes.saturating_sub(booking.mem_bytes),
-        disk_bytes: machine.disk_bytes,
+        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
+        mem_bytes: memory.saturating_sub(off.mem_bytes),
+        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
     })
 }
 

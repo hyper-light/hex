@@ -2927,14 +2927,14 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
 
 /// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): a record its node can't read names a box it may still
 /// run, whose class, caps and receipt only that record says, so nothing bounds the box below its machine. Its window
-/// counts it there, leaving the fleet only the bookings it reads, and every VM class's answer names it and why, never
-/// dropping it. Interim, pinned here: once A-10 (goal 4) sources the fleet's budget from what is measured free, what such
-/// a box holds is outside that budget already, and this count gives way to it. Do keep, on a node whose platform holds
-/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM of 16 vCPUs booked at 2 CPUs
-/// whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
-/// image VM, run another window and answer the Shards class. Expect the first VM capped at the 8 CPUs the process box
-/// leaves; then the second held at its 2-CPU booking though it asks its ceiling, as the box whose record can't be read
-/// may hold all the rest; and the answer naming that box among the unrecorded, with its record's words and its count.
+/// counts its CPU there, leaving the fleet only the CPU bookings it reads (what it takes of memory and disk is missing
+/// from what the machine reads free already, A-10), and every VM class's answer names it and why, never dropping it. Do
+/// keep, on a node whose platform holds no window, a process box capped at all but 8 CPUs of the machine and a Shards
+/// image VM of 16 vCPUs booked at 2 CPUs whose run says 70 ms, and run a window; then end that VM, make the process box's
+/// record unreadable, keep a second such image VM, run another window and answer the Shards class. Expect the first VM
+/// capped at the 8 CPUs the process box leaves; then the second held at its 2-CPU booking though it asks its ceiling, as
+/// the box whose record can't be read may hold all the rest of the CPU; and the answer naming that box among the
+/// unrecorded, with its record's words and its count.
 #[test]
 fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_told() {
     let dir = tempfile::tempdir().unwrap();

@@ -1133,9 +1133,56 @@ fn window(
     learner.take()?.acted(acted)
 }
 
-/// What the node's boxes book (C4), each at its caps.
-fn booked(natives: &[Native]) -> Result<CapacityResources, Refusal> {
-    natives
+/// The fleet's budget a window measures (C4, C7; the review's A-10), from what it read (`reads`): every CPU of the
+/// `machine` less what the node's boxes book; and the memory and disk the machine has free, read last, with what its VMs
+/// take of it, less what each box may still grow into, its booking past what it takes. What a box takes is missing from
+/// what is free already, so only that headroom comes off, never its booking beside its use (ROOT, 2026-11-14), and one
+/// past its booking takes the excess from the fleet. A VM's and a box's reclaimable file pages, which `MemAvailable`
+/// counts free already, are counted there alone: a VM gives back its memory less them, a box takes its use less them;
+/// one whose file pages can't be read gives back nothing, or takes off its whole booking. A VM whose read failed gives
+/// back nothing, its receipt counted whole instead ([`Learner::learn`]). The budget is so never more than what is free and
+/// what its VMs take.
+fn measured(machine: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
+    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
+    let free = reads.free.as_ref().map_err(Clone::clone)?;
+    let overflow = || Refusal::Invalid {
+        what: "a fleet's budget",
+        why: "what is free, what its VMs take and what its boxes book overflow".into(),
+    };
+    let mut held = 0u64;
+    for answer in &reads.vms {
+        if let (Ok((_, usage)), Some(file)) = (&answer.read, answer.file) {
+            held = held
+                .checked_add(usage.memory_bytes.saturating_sub(file))
+                .ok_or_else(overflow)?;
+        }
+    }
+    let mut off = CapacityResources::default();
+    for native in natives {
+        let headroom = CapacityResources {
+            cpu_milli: native.booked.cpu_milli,
+            mem_bytes: native
+                .booked
+                .mem_bytes
+                .saturating_sub(native.taken.unwrap_or(0)),
+            disk_bytes: native.booked.disk_bytes,
+        };
+        off = off.checked_add(headroom).ok_or_else(overflow)?;
+    }
+    let memory = free.mem_bytes.checked_add(held).ok_or_else(overflow)?;
+    Ok(CapacityResources {
+        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
+        mem_bytes: memory.saturating_sub(off.mem_bytes),
+        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
+    })
+}
+
+/// A window's fleet budget as a test gives it, `budget`, less what the node's boxes book, each at its caps, none below
+/// nothing.
+#[cfg(test)]
+fn given(budget: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
+    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
+    let booked = natives
         .iter()
         .try_fold(CapacityResources::default(), |sum, native| {
             sum.checked_add(native.booked)
@@ -1143,30 +1190,12 @@ fn booked(natives: &[Native]) -> Result<CapacityResources, Refusal> {
         .ok_or_else(|| Refusal::Invalid {
             what: "a node's boxes' bookings",
             why: "they overflow".into(),
-        })
-}
-
-/// `a` less `b` in each dimension, none below nothing.
-fn less(a: CapacityResources, b: CapacityResources) -> CapacityResources {
-    CapacityResources {
-        cpu_milli: a.cpu_milli.saturating_sub(b.cpu_milli),
-        mem_bytes: a.mem_bytes.saturating_sub(b.mem_bytes),
-        disk_bytes: a.disk_bytes.saturating_sub(b.disk_bytes),
-    }
-}
-
-/// The fleet's budget a window measures (C4, C7; the review's A-10), from what it read (`reads`): the `machine`'s, less
-/// what the node's boxes book.
-fn measured(machine: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
-    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
-    Ok(less(machine, booked(natives)?))
-}
-
-/// A window's fleet budget as a test gives it, `budget`, less what the node's boxes book.
-#[cfg(test)]
-fn given(budget: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
-    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
-    Ok(less(budget, booked(natives)?))
+        })?;
+    Ok(CapacityResources {
+        cpu_milli: budget.cpu_milli.saturating_sub(booked.cpu_milli),
+        mem_bytes: budget.mem_bytes.saturating_sub(booked.mem_bytes),
+        disk_bytes: budget.disk_bytes.saturating_sub(booked.disk_bytes),
+    })
 }
 
 /// Asks each VM of `asks` its guest time and its cgroup its use, and its record from `record` where its learner meets
