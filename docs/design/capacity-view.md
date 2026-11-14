@@ -470,7 +470,10 @@ window, which would under-count Hex here.
   against the node's view over its record files, restarted from them (`hex-node`,
   `placement::view::tests`); and the node's own admission and a holder's reserve checking one view
   through the placement `Driver`.
-- hex-sim (`hex_sim::capacity`): one machine of sixteen CPUs and 64 GiB, Hex's own boxes and kiln's
+- hex-sim (`hex_sim::capacity`): one machine, the recorded fleet's smallest host where Hex's own boxes and kiln's runs
+  share a room (fedora: 32 threads, 62.5 GiB; read from H10's fleet trace by a test), its keeper's bounds derived (each
+  runner's reservations the most of the generator's smallest charge the room holds, a name the longest its runners
+  say), Hex's own boxes and kiln's
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
   what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose

@@ -3,6 +3,10 @@
 //! No period, sampler, admission row or device ownership is introduced here.
 use std::time::{Duration, Instant};
 
+/// The least rate, in thousandths of a CPU, the managed CPU control holds a scope at (joint plan step 14, C4; ROOT,
+/// 2026-11-13): its rate's unit, every rate of one up taken ([`Budget::new`] refuses none but none).
+pub(super) const LEAST_RATE: u64 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Failure {
     Envelope,
@@ -334,6 +338,18 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Joint plan step 14 (C4; ROOT, 2026-11-13; AC-T7.4.1): the control's least rate is its unit, a thousandth of a CPU.
+    /// Do make a control's budget at its least rate and at none. Expect the least taken and none refused.
+    #[test]
+    fn w14_the_controls_least_rate_is_its_unit() {
+        let response = Duration::from_millis(1);
+        assert!(Budget::new(LEAST_RATE, 4_000, response).is_ok());
+        assert_eq!(
+            Budget::new(LEAST_RATE - 1, 4_000, response).err(),
+            Some(Failure::Envelope)
+        );
+    }
 
     /// AC-T7.4.1: actual helper startup cannot run free before the first VMM pulse. A sibling uses
     /// its measured pre-prepare baseline rather than charging an unrelated historical lifetime.

@@ -303,20 +303,26 @@ enum Kind {
     Sample,
 }
 
-/// The machine's room: sixteen CPUs and 64 GiB, the shape of the recorded day's larger hosts (H10).
+/// The machine's room: the recorded fleet's (H10's `bench/sched/huawei-r5-day30.fleet.trace`, from kiln's runner facts
+/// of 2026-11-05) smallest by memory of the hosts where Hex's own boxes and kiln's runs share one room, those that run
+/// Hex's `oci` class: fedora's 32 hardware threads and 62.5 GiB, no GPU, where the two contend for the least room
+/// (`the_machine_is_the_recorded_fleets_smallest_shared_host` reads it from the trace).
 pub const ROOM: Amounts = Amounts {
-    cpu_milli: 16_000,
-    mem_bytes: 64 << 30,
+    cpu_milli: 32_000,
+    mem_bytes: 67_128_643_584,
     disk_bytes: 0,
     gpus: 0,
 };
 
-/// The most reservations one runner holds: every run of the smallest charge the generator asks, a
-/// quarter CPU, fits the room's sixteen CPUs 64 times.
-pub const RESERVATIONS: usize = 64;
+/// The steps of the charges the runners and Hex ask ([`World::charge`]): a quarter CPU, and 256 MiB. A test generator's
+/// parameters.
+const CHARGE_CPU: u64 = 250;
+const CHARGE_MEM: u64 = 256 << 20;
 
-/// A runner's name, at most this many bytes.
-const NAME_BYTES: usize = 32;
+/// The most reservations one runner holds: its runs each of the smallest charge the generator asks, as many as the room
+/// holds in the dimension that holds fewest, the room's 32 CPUs (128 against memory's 250)
+/// (`a_runners_reservation_bound_is_the_smallest_charges_that_fill_the_room`).
+pub const RESERVATIONS: usize = 128;
 
 /// One machine under the nemesis (module docs).
 #[derive(Debug)]
@@ -374,16 +380,18 @@ fn held(map: &BTreeMap<ReservationId, Amounts>) -> Vec<Held> {
 impl World {
     pub fn new(seed: u64, runners: usize, mutant: Option<Mutant>) -> Result<Self, Violation> {
         let mut rng = Rng::new(seed);
+        let names: Vec<String> = (0..runners).map(|n| format!("kiln-runner-{n}")).collect();
+        // The keeper's bound on a holder's name (CV8): the longest its runners say in their hellos.
+        let name_bytes = names.iter().map(String::len).max().unwrap_or(0);
         let budget = Budget {
             holders: runners,
             reservations: RESERVATIONS,
-            name_bytes: NAME_BYTES,
+            name_bytes,
         };
         let mut disk = Disk::default();
         let keeper = Keeper::boot(budget, &mut disk).map_err(stopped)?;
         let mut all = Vec::new();
-        for n in 0..runners {
-            let name = format!("kiln-runner-{n}");
+        for name in names {
             let survive = rng.chance(500);
             let holder = Holder::start(name.clone(), 1, RESERVATIONS, &[]).map_err(stopped)?;
             all.push(Runner {
@@ -437,8 +445,8 @@ impl World {
     /// A charge as the runners and Hex ask: a quarter CPU to four, 256 MiB to 8 GiB.
     fn charge(&mut self) -> Amounts {
         Amounts {
-            cpu_milli: self.rng.range(1, 16).saturating_mul(250),
-            mem_bytes: self.rng.range(1, 32).saturating_mul(256 << 20),
+            cpu_milli: self.rng.range(1, 16).saturating_mul(CHARGE_CPU),
+            mem_bytes: self.rng.range(1, 32).saturating_mul(CHARGE_MEM),
             ..Amounts::ZERO
         }
     }

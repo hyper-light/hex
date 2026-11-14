@@ -270,13 +270,15 @@ pub trait Recover: Runtime {
         Err(record.uncertain("its node has no native owner to read its usage"))
     }
 
-    /// Joint plan step 14 (C1): the window the charge learner reads and caps this owner's managed VMs over, derived from
-    /// how the platform holds a VM's CPU rate; refused, typed, naming what is missing where nothing derives it.
-    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+    /// Joint plan step 14 (C1; ROOT, 2026-11-13): the cycle this owner's cap holds a managed VM at `rate` over, derived
+    /// from how the platform holds a VM's CPU rate, which the charge learner's window takes for each VM that cap holds;
+    /// none at a rate it never holds a VM below. Refused, typed, naming what is missing where nothing derives it.
+    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+        let _ = rate;
         Err(Refusal::Platform {
-            what: "the charge learner's window",
+            what: "a managed VM's cap's cycle",
             platform: std::env::consts::OS,
-            why: "this native owner holds no managed VM's CPU rate to learn and cap over a window"
+            why: "this native owner holds no managed VM's CPU rate over a cycle it derives"
                 .to_owned(),
         })
     }
@@ -332,6 +334,13 @@ pub trait Recover: Runtime {
         Err(no_node_vm(run, "stop"))
     }
 
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), as an image VM's
+    /// guest is told it. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        let _ = room;
+        Err(no_node_vm(run, "room"))
+    }
+
     /// Joint plan step 14 (D255): asks the governor of managed VM `record` to hold its vCPUs to `rate` milli-CPU, through
     /// the guest this owner boots it in (`GuestRuntime::managed_rate`). An owner that boots no managed guest has no
     /// governor to ask: its platform's cap is to hold the VM, told why.
@@ -382,6 +391,13 @@ pub trait Recover: Runtime {
             platform: std::env::consts::OS,
             why: "this native owner holds no managed VM".to_owned(),
         })
+    }
+
+    /// Joint plan step 14 (C4; ROOT, 2026-11-13): the least share this owner holds a managed VM at, its actuator's least
+    /// unit: macOS's CPU control's, Windows' job's; an owner with no cap of its own holds none below its VM's governor's
+    /// ([`charges::GOVERNOR_LEAST`]).
+    fn managed_least(&self) -> u64 {
+        charges::GOVERNOR_LEAST.get()
     }
 
     /// Joint plan step 14 (C4): caps the managed VM's CPU at `rate` milli-CPU, its share as the charge learner
@@ -2320,6 +2336,21 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         }
     }
 
+    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+        self.runtime.cap_cycle(rate)
+    }
+
+    /// An image VM's governor's least, a node VM's as an image VM's (its run's governor); a managed VM's its platform's
+    /// cap's, which holds its share.
+    fn least(&self, holder: charges::Holder<'_>) -> u64 {
+        match holder {
+            charges::Holder::Box(record) if !charges::running_image(record) => {
+                self.runtime.managed_least()
+            }
+            charges::Holder::Box(_) | charges::Holder::Node { .. } => charges::GOVERNOR_LEAST.get(),
+        }
+    }
+
     fn host_use(&self, holder: charges::Holder<'_>) -> Result<hex_api::HostUse, Refusal> {
         match holder {
             charges::Holder::Box(record) => self.runtime.host_use(&record.spec.id),
@@ -2390,11 +2421,8 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
             charges::Holder::Box(record) => {
                 self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
             }
-            // Its guest isn't told its room here yet: the learner tells an image box's alone (D188).
-            charges::Holder::Node { .. } => Err(Refusal::Invalid {
-                what: "a node VM's room",
-                why: "the charge learner tells an image box's guest its room alone".to_owned(),
-            }),
+            // Its guest told its room through its run, as an image VM's is (D188).
+            charges::Holder::Node { row, .. } => self.runtime.node_vm_room(row.run, room),
         }
     }
 
@@ -2421,16 +2449,18 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
 
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's VMs, a thread that runs a window each
-    /// time its window passes, until the node is gone, and says its platform's window for managed VMs and what of the
-    /// rule it can't hold, typed: a managed VM's memory budget, or, where the platform derives no window
-    /// (`Recover::charge_window`), why its managed VMs are booked whole. Its window is the longest of the periods its
-    /// caps hold over, re-read each window: the platform's for managed VMs and each image VM's its run's own
-    /// (`Recover::image_rate_period`); with neither, it waits for a box to begin (`charges::wait`).
+    /// time its window passes, until the node is gone, and says its window and what of the rule it can't hold, typed: a
+    /// managed VM's memory budget, or, where the platform's cap derives no cycle (`Recover::cap_cycle`), why its managed
+    /// VMs are learned over their governors' periods alone. Its window is the longest period of the caps it holds,
+    /// re-read each window: each image VM's its run's own (`Recover::image_rate_period`), each governed managed VM's its
+    /// governor's, and each VM its platform's cap holds that cap's cycle at its share; with none, it waits for a box to
+    /// begin (`charges::wait`).
     pub fn start_charges(
         self: &Arc<Self>,
     ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
-        let managed = self.runtime.charge_window();
-        let mut learner = charges::Learner::new(managed.as_ref().ok().copied(), self.machine()?)?;
+        // Whether its platform's cap derives a cycle at all, asked at its least.
+        let managed = self.runtime.cap_cycle(self.runtime.managed_least());
+        let mut learner = charges::Learner::new(managed.is_ok(), self.machine()?)?;
         // What its node's recovery read back from the node VM rows it let go (joint plan step 39, place 1).
         learner.carry_ended(std::mem::take(
             &mut *self
@@ -2534,6 +2564,20 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 return learner.next_window();
             }
         };
+        // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
+        if let Err(why) = charges::booting(&rows).and_then(|booking| {
+            sorted.whole = sorted
+                .whole
+                .checked_add(booking)
+                .ok_or_else(|| Refusal::Invalid {
+                    what: "a node's boxes' bookings",
+                    why: "they overflow".into(),
+                })?;
+            Ok(())
+        }) {
+            learner.failed(why);
+            return learner.next_window();
+        }
         // Each node VM that runs, learned as an image VM is, over its run's period (joint plan step 39, place 3).
         let nodes = charges::nodes(&rows, band).and_then(|nodes| {
             sorted
@@ -3104,12 +3148,16 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::managed_life(self, started(record)?)
     }
 
+    fn managed_least(&self) -> u64 {
+        hex_runtime::macos::MacRuntime::managed_least(self)
+    }
+
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::stop_managed(self, record)
     }
 
-    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
-        hex_runtime::macos::MacRuntime::charge_window(self)
+    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+        hex_runtime::macos::MacRuntime::cap_cycle(self, rate)
     }
 
     fn launch_managed(
@@ -3218,19 +3266,23 @@ impl Recover for hex_runtime::windows::WinRuntime {
         hex_runtime::windows::WinRuntime::managed_life(self, started(record)?)
     }
 
+    fn managed_least(&self) -> u64 {
+        hex_runtime::windows::WinRuntime::managed_least(self)
+    }
+
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         hex_runtime::windows::WinRuntime::stop_managed(self, record)
     }
 
-    /// A job's hard cap holds per scheduling interval, whose length Windows doesn't document
-    /// (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so no window derives from it until it is measured.
-    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+    /// A managed VM here is held by its governor over its governor's period (D255; every managed VM is booted
+    /// `--host-managed`), the job's hard cap only its ceiling, so no job's cycle is a window: a VM whose process takes no
+    /// rate is booked whole, told (ROOT, 2026-11-13).
+    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+        let _ = rate;
         Err(Refusal::Platform {
-            what: "the charge learner's window",
+            what: "a managed VM's cap's cycle",
             platform: "windows",
-            why: "a job's CPU hard cap holds per scheduling interval, whose length Windows doesn't document \
-                  (JOBOBJECT_CPU_RATE_CONTROL_INFORMATION): the window waits on its measurement on the host"
-                .to_owned(),
+            why: "a managed VM is held by its governor's period; a VM with no governor is booked whole".to_owned(),
         })
     }
 
@@ -3437,6 +3489,10 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().managed_life(record)
     }
 
+    fn managed_least(&self) -> u64 {
+        self.host().managed_least()
+    }
+
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         self.host().set_managed_rate(record, rate)
     }
@@ -3445,8 +3501,8 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().stop_managed(record)
     }
 
-    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
-        self.host().charge_window()
+    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+        self.host().cap_cycle(rate)
     }
 
     /// Joint plan step 14 (C1): an image VM's rate period is its run's, which its guest runtime reads (D247).
@@ -3476,6 +3532,11 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// Joint plan step 39 (place 3): its node VM's run stopped, its end kept in its row.
     fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
         self.guest().stop_node_vm(run)
+    }
+
+    /// Joint plan step 39: its node VM's guest told its room through its run (D188).
+    fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.guest().node_vm_room(run, room)
     }
 
     fn launch_managed(

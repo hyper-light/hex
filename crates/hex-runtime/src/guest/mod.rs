@@ -1675,6 +1675,12 @@ impl GuestRuntime {
         self.images.stop_node(run).map(|_| ())
     }
 
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), its node's charge
+    /// learner's word, as an image box's guest is told.
+    pub fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.images.room_node(run, Some(room)).map(|_| ())
+    }
+
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
     /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
     /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.

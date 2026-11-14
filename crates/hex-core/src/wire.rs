@@ -49,11 +49,12 @@ use hex_api::{
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
     LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
-    LearnedRate, LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
-    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
-    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
-    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
-    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
+    LearnedRate, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
+    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase,
+    NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published,
+    RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
+    check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -2404,13 +2405,19 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
             w.option(dim, Writer::u64);
         }
     }
-    // Last (D255): what holds each managed VM's rate, after the ceilings.
+    // Then (D255): what holds each managed VM's rate, after the ceilings.
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.rates.len(), LEARNED_RATE_MIN_BYTES)?;
     for rate in &learned.rates {
         put_learned_rate(w, rate)?;
     }
-    Ok(())
+    // Last (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
+    w.reserve_fixed(1)?;
+    w.option_with(learned.window.as_ref(), |w, window| {
+        w.reserve_fixed(size_of::<u64>().saturating_add(1))?;
+        w.u64(window.window_ns);
+        w.option_with(window.slowed_by.as_ref(), put_holder)
+    })
 }
 
 /// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
@@ -2640,6 +2647,12 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         "learned rates",
         learned_rate,
     )?;
+    let window = r.option(|r| {
+        Ok(LearnedWindow {
+            window_ns: r.u64()?,
+            slowed_by: r.option(holder)?,
+        })
+    })?;
     Ok(Learned {
         priors,
         used,
@@ -2647,6 +2660,7 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         ended,
         ceilings,
         rates,
+        window,
     })
 }
 
