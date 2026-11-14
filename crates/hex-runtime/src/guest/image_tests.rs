@@ -33,6 +33,8 @@ struct Owner {
     /// box on meanwhile.
     deleting: Mutex<Hold>,
     deleting_moved: Condvar,
+    /// Whether it refuses node VMs' Ready rows, as the test sets it: as a Store whose disk is full refuses a write.
+    refuse_ready: AtomicBool,
 }
 
 /// Where the owner's hold of a Deleting write stands ([`Owner::hold_deleting`]).
@@ -54,6 +56,7 @@ impl Owner {
             state: tempfile::tempdir().unwrap(),
             deleting: Mutex::default(),
             deleting_moved: Condvar::new(),
+            refuse_ready: AtomicBool::new(false),
         }
     }
 
@@ -246,6 +249,12 @@ impl Books for Owner {
     }
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         record.check()?;
+        if record.phase == NodeVmPhase::Ready && self.refuse_ready.load(Ordering::SeqCst) {
+            return Err(Refusal::Os {
+                op: "writing a node VM's row",
+                why: "no space left on the device, as the test asked".to_owned(),
+            });
+        }
         self.node_vms
             .lock()
             .unwrap()
@@ -4338,5 +4347,81 @@ fn b6_with_guest_passes_started_and_delete_with_host_use_to_its_guest() {
         matches!(&started, Err(Refusal::Failed { why, .. }) if why == NEVER_STARTED),
         "{:?}",
         started.map(|info| info.state)
+    );
+}
+
+/// C-2 (Hex audit, 2026-11-14; joint plan step 39; AC-T7.4.1): a node VM whose boot fails once its run has started has
+/// that run stopped, so none runs held by no one, its row unwritten, beside the one the node's next boot starts. Do:
+/// boot a node VM whose Ready row the record owner refuses, as a full disk would. Expect: the boot refused in the owner's
+/// words; its run stopped once, its end `Stopped`; no run of it held here; its row Ended with its stop's exit.
+#[test]
+fn c2_a_node_vm_whose_ready_row_is_refused_has_its_run_stopped_and_its_row_ended() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    owner.refuse_ready.store(true, Ordering::SeqCst);
+    let vm = node_vm();
+    let refused = runtime.images.boot_node(&vm).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("no space left on the device")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        images.run.stops.load(Ordering::SeqCst),
+        1,
+        "its run wasn't stopped"
+    );
+    assert_eq!(*images.run.end.lock().unwrap(), Some(RunEnd::Stopped));
+    assert!(
+        !runtime.images.node_runs(vm.run).unwrap(),
+        "its run is still held"
+    );
+    let row = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (row.phase, row.exit),
+        (
+            NodeVmPhase::Ended,
+            Some(Exit::Signal(Signal::KILL.number()))
+        )
+    );
+}
+
+/// C-2, before its boot: a node VM whose run this process can't hold, its runs at their bound (`MAX_BOXES`, the most VMs
+/// a node holds), is refused with its row Ended, never left Booting and booked for as long as its node runs. Do: fill
+/// this process's runs with ended ones, then boot a node VM. Expect: the boot refused Full at that bound, no boot asked,
+/// its row Ended, its exit unknown.
+#[test]
+fn c2_a_node_vm_whose_run_cant_be_held_is_refused_with_its_row_ended() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let runs = &runtime.images.image().unwrap().runs;
+    let vm = node_vm();
+    for n in 0..crate::MAX_BOXES {
+        let mut run = [0xff; 16];
+        run[..8].copy_from_slice(&u64::try_from(n).unwrap().to_le_bytes());
+        assert_ne!(NodeRun::from_bytes(run), vm.run);
+        runs.insert(NodeRun::from_bytes(run), Run::Ended(End::unknown(None)))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.images.boot_node(&vm),
+        Err(Refusal::Full(crate::MAX_BOXES))
+    );
+    assert!(images.asked.lock().unwrap().is_empty(), "a boot was asked");
+    let row = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .get(&vm.run)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (row.phase, row.exit),
+        (NodeVmPhase::Ended, Some(Exit::Unknown))
     );
 }
