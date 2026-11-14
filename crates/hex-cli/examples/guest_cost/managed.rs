@@ -13,8 +13,9 @@
 //! kernel accounting (`WinRuntime::managed_usage`: the job's CPU time and committed peak), so its VMM's own CPU, the
 //! whole less its vCPUs', is never less than none; a job that counts less CPU than its VM process says it used is
 //! refused, told. Its guest RAM's part of its job's commit is its committed region of that size, which Shards' WHP
-//! `reserve_ram` commits whole from the start (`hex_runtime::windows::sys::region`). It is ready when its agent
-//! answers, and its own report is read from its agent's `oci` capacity, as every OS's.
+//! `reserve_ram` commits whole from the start (`hex_runtime::windows::sys::region`) in the job member that maps it
+//! (Shards' confined VM process, a child of the VM process its launch names: `WinRuntime::managed_members`). It is
+//! ready when its agent answers, and its own report is read from its agent's `oci` capacity, as every OS's.
 
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -88,6 +89,12 @@ impl Scope {
     /// A copy of the record as it is now, as a node's store reads one back.
     fn snapshot(&self) -> Result<PoolRecord, Refusal> {
         PoolRecord::decode(&self.lock()?.encode()?)
+    }
+
+    /// The ids of the processes live in its job now (`WinRuntime::managed_members`).
+    fn members(&self) -> Result<Vec<u32>, Refusal> {
+        let record = self.snapshot()?;
+        self.runtime.managed_members(NativeRecord::Pool(&record))
     }
 
     /// The backing moves to `phase`, as a node's records move it (draining before its VM stops).
@@ -390,9 +397,6 @@ impl Managed {
     ) -> Result<(VmmCpu, VmmHolds), String> {
         let identity = shards_api::Guest::identity(vm.as_ref())
             .map_err(|e| format!("naming the guest's VM process: {e}"))?;
-        let process = sys::open_for_reading(identity.pid)
-            .map_err(|e| format!("opening the guest's VM process: {e}"))?
-            .ok_or("the guest's VM process is gone")?;
         let socket = identity
             .vsock
             .parent()
@@ -406,7 +410,6 @@ impl Managed {
             },
             VmmHolds {
                 scope: Arc::clone(scope),
-                process,
                 ram: super::guest::ram(&self.config)?,
                 guest: None,
                 folders: vec![self.cache.clone(), self.home.clone(), socket],
@@ -463,7 +466,7 @@ impl Driver for Managed {
     fn sources(&self) -> Lines {
         vec![
             ("cpu".to_owned(), "as its node reads it (D260): each vCPU's guest time from its VM process's answer, read first (ManagedGuest::host_use: WHP's run-time counter, TotalRuntime100ns less HypervisorRuntime100ns), none before its VM process says it (its socket not yet listening, its microVM not yet started: its guest has run nothing) and said at every reading from its first on, then its job's CPU time (WinRuntime::managed_usage: the job's kernel and user time, its VM process's and every process it starts), so its VMM's own, the whole less its vCPUs', is never less than none; a job counting less than its VM process says it used (HostUse::cpu_ns) refused, told".to_owned()),
-            ("memory".to_owned(), "as its node reads it: its job's committed peak (WinRuntime::managed_usage: PeakJobMemoryUsed, at most its bound), less its guest RAM's commit, the committed private read/write region of exactly its RAM (VirtualQueryEx), which Shards' WHP reserve_ram commits whole from the start".to_owned()),
+            ("memory".to_owned(), "as its node reads it: its job's committed peak (WinRuntime::managed_usage: PeakJobMemoryUsed, at most its bound), less its guest RAM's commit, the committed private read/write region of exactly its RAM (VirtualQueryEx) in the job member that maps it (Shards' confined VM process; WinRuntime::managed_members), which Shards' WHP reserve_ram commits whole from the start".to_owned()),
             ("disk".to_owned(), format!(
                 "the allocated bytes (FileStandardInfo's AllocationSize, a file linked twice once, by its volume and index) of every path under SHARDS_CACHE {}, SHARDS_HOME {} and the guest's socket folder",
                 self.cache.display(),
@@ -687,30 +690,69 @@ impl Probe for VmmCpu {
 /// process's committed region of that size), and its folders.
 pub struct VmmHolds {
     scope: Arc<Scope>,
-    process: Handle,
     ram: u64,
-    guest: Option<(u64, u64)>,
+    /// The job member that maps its guest's RAM, once found, and that RAM's range in it.
+    guest: Option<Mapped>,
     folders: Vec<PathBuf>,
 }
 
+/// A process that maps a guest's RAM, and that RAM's range in it.
+type Mapped = (Handle, (u64, u64));
+
+/// `process`'s address space region by region (`VirtualQueryEx`), each with whether it is committed private read/write
+/// memory, as its guest RAM is.
+fn entries(process: &Handle) -> Result<Vec<(u64, u64, bool)>, String> {
+    let mut entries = Vec::new();
+    let mut at = 0u64;
+    while let Some(region) =
+        sys::region(process, at).map_err(|e| format!("reading a VM process's memory map: {e}"))?
+    {
+        let end = region
+            .base
+            .checked_add(region.size)
+            .filter(|end| *end > at)
+            .ok_or("a VM process's memory map doesn't advance")?;
+        entries.push((region.base, end, region.private_rw));
+        at = end;
+    }
+    Ok(entries)
+}
+
 impl VmmHolds {
-    /// The VM process's address space region by region (`VirtualQueryEx`), each with whether it is committed private
-    /// read/write memory, as its guest RAM is.
-    fn entries(&self) -> Result<Vec<(u64, u64, bool)>, String> {
-        let mut entries = Vec::new();
-        let mut at = 0u64;
-        while let Some(region) = sys::region(&self.process, at)
-            .map_err(|e| format!("reading the VM process's memory map: {e}"))?
+    /// Its guest's RAM: the one region of exactly its size in the maps of its job's members
+    /// (`WinRuntime::managed_members`), which Shards' confined VM process maps (its `reserve_ram`), not the VM process
+    /// the launch names; none while no member maps it yet, and refused where two do, as none is then told apart.
+    fn find(&self) -> Result<Option<Mapped>, String> {
+        let mut found = None;
+        for pid in self
+            .scope
+            .members()
+            .map_err(|e| format!("listing the guest's job: {e}"))?
         {
-            let end = region
-                .base
-                .checked_add(region.size)
-                .filter(|end| *end > at)
-                .ok_or("the VM process's memory map doesn't advance")?;
-            entries.push((region.base, end, region.private_rw));
-            at = end;
+            // Gone since its job listed it: no map to read.
+            let Some(process) = sys::open_for_reading(pid)
+                .map_err(|e| format!("opening process {pid} of the guest's job: {e}"))?
+            else {
+                continue;
+            };
+            if let Some(range) = guest_range(&entries(&process)?, self.ram)? {
+                if found.is_some() {
+                    return Err(format!(
+                        "two processes of the guest's job map a region of its RAM's size ({} bytes): none is told apart",
+                        self.ram
+                    ));
+                }
+                found = Some((pid, process, range));
+            }
         }
-        Ok(entries)
+        // Which member it read, told: the match is by the region's size alone.
+        Ok(found.map(|(pid, process, range)| {
+            eprintln!(
+                "guest_cost: the guest's RAM, {} bytes at {range:x?}, is mapped by process {pid} of its job",
+                self.ram
+            );
+            (process, range)
+        }))
     }
 }
 
@@ -723,24 +765,30 @@ impl Probe for VmmHolds {
             .managed_usage()
             .map_err(|e| format!("reading the guest's job: {e}"))?;
         if self.guest.is_none() {
-            self.guest = guest_range(&self.entries()?, self.ram)?;
+            self.guest = self.find()?;
         }
         Ok(Holding {
             footprint: usage.memory_bytes,
             file_pages: None,
             peak_footprint: Some(usage.memory_peak_bytes),
-            guest_memory: self.guest.map(|(start, end)| end.saturating_sub(start)),
+            guest_memory: self
+                .guest
+                .as_ref()
+                .map(|(_, (start, end))| end.saturating_sub(*start)),
             files: walk(&self.folders)?,
         })
     }
 
-    /// The map read whole again: the guest's RAM is still the one region found, so no reading took another for it.
+    /// The map of the member it was found in read whole again: the guest's RAM is still the one region found, so no
+    /// reading took another for it.
     fn verify(&mut self) -> Result<(), String> {
-        let now = guest_range(&self.entries()?, self.ram)?;
-        if now != self.guest {
+        let Some((process, range)) = &self.guest else {
+            return Ok(());
+        };
+        let now = guest_range(&entries(process)?, self.ram)?;
+        if now != Some(*range) {
             return Err(format!(
-                "the guest's RAM was read at {:x?} and is now at {now:x?}",
-                self.guest
+                "the guest's RAM was read at {range:x?} and is now at {now:x?}"
             ));
         }
         Ok(())
