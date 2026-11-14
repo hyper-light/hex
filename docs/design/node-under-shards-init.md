@@ -8,15 +8,27 @@ Hex's own PID 1 kept"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live ap
 - the host's boot of it to READY (§6; hex-runtime `guest::hosted`; `b29e0bc3`), and Hex's PID-1 path booting again
   (`9590d4d4`).
 
-Merged on Hex's main: Shards' step 11 lane to a socket of the run's own command and the run's own agent-control
-endpoint (D251, D252), vendored since `c8b4ce6b`; a guest's boot as one form, `Boot::Kernel` or `Boot::Image`, and the
-Link's lanes (`a8f6bfe4`); and the node's descriptors fitted on every OS with each hosted VM's lanes (`f2e6d8a2`,
-`885738a1`). Built: a node VM as a holder of the node's ledger in hex-sim (`9505cc1d`). In progress, the node VM's
-entry: E1, its record kind and `NodeRun`; E2, `ImageClass::boot_node`; E3, `Boot::Image` in the guest runtime; E4,
-§5 to §9 here. Until E3 lands, the node refuses that form by type (§5, `Awaits(NestedChannel)`). READY through
-shards-init against the direct boot: on Linux KVM at `8aa7c028`, n=23, p50 152.4 ms against 134.3 ms; on macOS HVF at
-`cf535152`, about 165 ms against 103 ms. Owed, ROOT's with Shards ROOT (§9): the conformance suite through shards-init
-on HVF and WHP, the host VMM's memory both ways, and every WHP run.
+Merged on Hex's main, the form whole; its real-VM runs are ROOT's (§9):
+- **Its channel** (§5): Shards' step 11, a lane to a socket of the run's own command and the run's own agent-control
+  endpoint (D251, D252), vendored since `c8b4ce6b`; a guest's boot as one form, `Boot::Kernel` or `Boot::Image`, and
+  the Link's lanes (`a8f6bfe4`); the node's descriptors fitted on every OS with each hosted VM's lanes among them
+  (`f2e6d8a2`, `885738a1`); a lane its socket cuts short, read to its cut on Linux and macOS (`ce3ab706`); the image
+  form's tests on Windows, through the lane ends Shards' run host makes there (`5cc5efbc`).
+- **The node VM's entry** (§4, §5a): E1, its run (`NodeRun`), a holder of the node's ledger (`74f3f3ca`, `4a478b8c`);
+  E2, its record (`NodeVmRecord`) in rows of its own, its boot, stop and host use through the image class's runs
+  (`1639cdb1`, `605c2e89`); E3, `Boot::Image` in the guest runtime, its receipt on the oci answer, booked by the
+  scheduler (`28c57ba8`); its rows its owner's while its owner's lock holds (`421e6946`); init's children started
+  without shards-init's words (`14cca959`); E4, this record as built.
+- **Its charge and its place** (§5a): a holder of its node's charge learner (`45582d0a`, `4f791dec`); its
+  last-resort end kept in its row across its node's restart (`fe3d5198`); its guest told its room (`6a8c6da8`); its
+  boot charged, and one Ready a node (`2846e94f`); its oci boxes counted once, under a class of its own (`1ad96650`);
+  what its learner couldn't read, and its boxes' end, told (`08800bcd`); its boxes placed in its guest's room and
+  charged once (`3eb841a2`).
+
+READY through shards-init against the direct boot: on Linux KVM at `8aa7c028`, n=23, p50 152.4 ms against 134.3 ms;
+on macOS HVF at `cf535152`, about 165 ms against 103 ms. Owed (§9): the conformance suite's test through a `hex node`
+in this form, next; then, ROOT's with Shards ROOT, its runs on HVF and WHP, the host VMM's memory both ways, and every
+WHP run.
 
 The person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work with basically anything non-Shards.
 We are to have init work *with* that." So Hex's PID-1 path (§8) is permanent, and this step adds a second host for the
@@ -29,7 +41,7 @@ Sources, read at the revisions named:
   - D231, an image booted for an orchestrator;
   - D238, agent control: step 10's decision, at the host, and step 11's endpoint;
   - D240 and D241 (the room), D188, D215 (the direct boot), and D233.
-- Shards' code at `66113379`, the revision Hex vendors:
+- Shards' code at `66113379`, the revision Hex vendored when this was decided:
   - `crates/init/src/run.rs`:
     - the run's root, "The image on virtio-pmem becomes the root filesystem under a tmpfs overlay";
     - `WORKLOAD_CGROUP` and its `LEAF`, `init`;
@@ -46,6 +58,13 @@ Sources, read at the revisions named:
   - `docs/design/shards-guest.md` (§3, §3a, §4, §4a) and `shards-image-class.md`;
   - `runtime-architecture.md` decision 9, under the person's rule of 2026-11-13: "we do not tolerate arbitrary
     constants. learned and data-derived values. Period. Account for cold starts well in any such approach."
+- As built (§4 to §9), Hex at main `3eb841a2`, which vendors Shards `16451e19f` (since `59f7890f`):
+  - hex-runtime `guest::image::node` (the node VM's boot, stop, room and waits), `guest::GuestRuntime::boot_image`
+    and `add_node_vm_offers`, and `guest::hosted` (`node_hosted_real`'s boot);
+  - hex-client `guest::lanes` (the channel) and hex-core `record::node_vm`;
+  - hex-node `store::node_vm` (the rows and their owners), `recorded::charges` (the learner) and `placement`, and
+    hex-sim `index::routes` (the scheduler's hold);
+  - Shards `docs/design/architecture.md` at `16451e19f`: D234, D238, D251, D252 and D253's status lines.
 - External:
   - pid_namespaces(7): "If the "init" process of a PID namespace terminates, the kernel terminates all of the
     processes in the namespace via a SIGKILL signal";
@@ -143,15 +162,21 @@ Why not something else:
 - **How it boots.** Through shards-api's image boot (D231):
   - `image`: `<name>@sha256:<digest>`, pinned, as the image class pins (`shards-image-class.md` §1). A tag that moved
     between create and boot would boot another image.
-  - `vcpus` and `memory_mib`: the node VM's, as the direct boot's (`HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`).
+  - `vcpus` and `memory_mib`: its admitted allocation's, its receipt (§5a): the configured VM (`HEX_GUEST_CPUS`,
+    `HEX_GUEST_MEMORY_MIB`) under the guest's cost profile, whose floor and ceiling are that VM. A size Shards would
+    boot as another (`shards_api::envelope`) is refused.
   - `command`: `["/init"]`.
   - `nesting`: true.
-  - `ready_by`: the boot's learned bound, or none while it follows (§6).
+  - `ready_by`: none. Hex's init would end the boot at a deadline, and a node's learned bound is where its wait tells
+    a run-out, never where a boot ends (§6; decision 9).
   - `shares`: the node's shares at `/run/hex/shares/<i>`, as the direct boot gives them.
   - `publish`: none.
   - `egress`: every image grant dropped, so default deny holds.
+  - `control`: the run's own agent-control endpoint (D252), taking the node's key alone, with lanes to the relay's
+    sockets (D251; §5).
+  - `gpu_devices`: none, so a node VM under shards-init is CPU-only (§5).
   - `binary`: `SHARDS_BIN`.
-  - `env`: `SHARDS_HOME`, whose store holds the image.
+  - `env`: the node's own Shards paths, `SHARDS_HOME` (whose store holds the image) and `SHARDS_CACHE`.
 - **Which form.** `HEX_GUEST_IMAGE` names the image. It and `HEX_GUEST_KERNEL` with `HEX_GUEST_INITRD` are two forms
   of the node's guest, and a node uses one. Both set is refused by name. The direct boot stays the default.
 
@@ -159,55 +184,135 @@ Why not something else:
 
 The host reaches its guest's node through `hex_client::guest::Link::dial(port)`, a byte stream to one of the relay's
 four listeners: control, stdio, files and stamps (`shards-guest.md` §3a). Under shards-init these are AF_UNIX stream
-sockets in the workload's `/run/hex/channel`: `control.sock`, `stdio.sock`, `files.sock` and `stamps.sock`, the
-relay's `--unix` form, which exists today. So Hex needs two things of step 11:
-- **A socket lane.** The controller opens a lane naming one of a nested workload's sockets. The endpoint carries it to
-  the microVM over vsock (D238's arm h), and shards-init's relay connects to that socket. The bytes arrive exact both
-  ways, with a half-close carried as Shards' vsock carries one (D12), and a lane to a socket nothing listens on is
+sockets in the workload's `/run/hex/channel`: `control.sock`, `stdio.sock`, `files.sock` and `stamps.sock`
+(`hex_core::stream::socket_name`), the relay's `--unix` form. Hex needed two things of step 11, and Shards built both
+(vendored since `c8b4ce6b`; their real-VM runs owed, §7):
+- **A socket lane** (D251). The controller opens a lane naming one of a nested workload's sockets. The endpoint carries
+  it to the microVM over vsock (D238's arm h), and shards-init's relay connects to that socket. The bytes arrive exact
+  both ways, with a half-close carried as Shards' vsock carries one (D12), and a lane to a socket nothing listens on is
   refused, typed. It is OpenSSH's `direct-streamlocal@openssh.com` (PROTOCOL §2.4) in the endpoint's own terms.
-- **An endpoint for an orchestrator's run.** Today only a daemon's run with `shards.control=true` binds one
-  (`daemon/managed.rs`, `bind_agent`); D231's run host binds none.
+- **An endpoint for an orchestrator's run** (D252). Its run host binds one for that run alone, its key the run's own,
+  and takes the one controller key its run names.
 
-The alternatives:
+As built (`a8f6bfe4`, `f2e6d8a2`, `28c57ba8`):
+- **The ask.** The node VM's spec asks its run's endpoint (`ControlAsk`, §4): its controller the SHA-256 of the node's
+  own key, made once by its guest runtime from the OS's random numbers; its socket grant `/run/hex/channel`
+  (`hex_client::guest::lanes::DIR`), at most the lanes the node fitted to its descriptors with this VM counted among
+  its hosted ones (hex-node's `serve::fit`), each lane's bytes in flight a guest frame each way
+  (`hex_core::stream::MAX_FRAME`), the most one control message is.
+- **The connection.** `hex_client::guest::lanes::Lanes::dial` connects to the endpoint the boot answered
+  (`ControlAt`), pinning the microVM's key (D252), for socket lanes alone, and waits for both ends' word on the
+  connection's TLS (§6).
+- **The lanes.** Each port is a lane to the socket it names, bridged to a local socket pair (`guest::bridge`), so the
+  client's event loop waits on an OS handle as it does on vsock's. A lane carries a half-close each way, and its reset
+  or its connection's end is told after its bytes; a lane its socket cuts short is read to its cut, on Linux and macOS
+  (`ce3ab706`). On Windows the lane's ends are the plain pipe pair Shards' run host makes there (`5cc5efbc`).
+- **The greeting.** The guest runtime dials the relay's control socket through a lane and greets its node
+  (`Client::connect`), whose control connection then joins the node's loop as a direct boot's does. A node VM whose
+  node won't greet it, or whose connection can't join, is stopped, and its boot refused in its words.
+
+The alternatives, declined:
 - **An exec lane per connection** (D238's exec lanes, design (B)). Each control, stdio and staging connection would
   start a guest process to bridge its stdio to the socket, as `kubectl port-forward` once bridged through `socat`.
-  Every box's exec would pay for three such processes. It is the fallback should Shards not add a socket lane.
-- **A published port into the workload** (D231 publishes to the run's own command). It exists today, but it is the
-  network path step 10 measured and declined for control (D238: decided at the host), and the plan names step 11.
+  Every box's exec would pay for three such processes. It was the fallback, had Shards not added a socket lane.
+- **A published port into the workload** (D231 publishes to the run's own command). It is the network path step 10
+  measured and declined for control (D238: decided at the host), and the plan names step 11.
 - **vsock granted to the workload.** D234 refuses it (f27).
 
-Until Shards gives the lane, the node refuses its shards-init form by type before it boots anything:
-`Refusal::Awaits(Upstream::NestedChannel)`, naming step 11's lane. The image class refuses its missing run host the
-same way (`shards-image-class.md` §1). No success is stubbed. A node VM asked a GPU under shards-init waits on D234's
-`gpus=` too.
+No call awaits `Upstream::NestedChannel` now; its tag stays, the node's wire being append-only. A node VM asked a GPU
+under shards-init (`HEX_GUEST_GPU=true` beside `HEX_GUEST_IMAGE`) is refused `Awaits(NestedRuntime)` before anything
+boots. D234's `gpus=` is vendored (`ImageSpec::gpu_devices`, since `c8b4ce6b`), so what that refusal waits on now is
+Hex's own: the node VM's spec asks no GPU (§7).
+
+## 5a. The node VM: its record, its charge and its place
+
+A node VM is its node's own and never a box: no box call reads it. It is booked, charged and placed as an image VM is,
+through the image class's and the learner's own code (ROOT, 2026-11-13: one code path, not a third). Its oci boxes run
+in its guest, the node there unchanged.
+- **Its record** (`hex_core::record::NodeVmRecord`; `605c2e89`): its run (`NodeRun`, minted by the node's store), its
+  image, its admitted allocation, its phase (Booting, Ready, Ended), its diagnostics' file, its end, its last-resort end
+  and its start place. It is kept in the store's rows of its own (`.node-vms`), apart from box and pool rows: Booting
+  before any effect, Ready once its init says it is, and Ended with its end.
+- **Its owner** (`421e6946`). A run's row is its owner's while its owner's lock holds, one lock a run
+  (`.node-vms/<run>.lock`): fcntl(2)'s F_SETLK on Unix, which fork(2) doesn't hand on, and LockFileEx on Windows, on a
+  handle no child inherits. The basis is D231's: no microVM outlives its owner. At a node's start
+  (`Store::settle_node_vms`), an Ended row is let go, a row whose lock the start can take is let go (its owner, or the
+  host's boot, ended), and a row whose owner still runs is followed to that owner's end, then let go; its recovery
+  summary tells each. A node holds one node VM Ready at a time (`2846e94f`): its oci class has one guest a node, which
+  serves every oci box of the node.
+- **Its receipt** (`28c57ba8`): its admitted allocation, the configured VM under the guest's cost profile (§4), as the
+  direct boot's guest is charged, so no node VM runs uncharged. The oci answer carries each node VM's receipt, last
+  (`Capacity::node_vms`: its run, its booking, its phase, and its guest's envelope since `3eb841a2`). The scheduler
+  books the Booting and Ready ones in its node's ledger before any admission (`Driver::book_nodes`), lets go of what has
+  Ended or gone, and refuses a run named twice.
+- **Its charge** (macOS and Windows; `45582d0a`, `4f791dec`, `6a8c6da8`, `2846e94f`, `1ad96650`, `08800bcd`). A Ready
+  node VM is a holder of its node's charge learner (`Holder::Node`), learned under a class of its own (`ClassKey::node`)
+  from its run's host use (`ImageClass::host_use_node`) over its run's own rate period, capped through its run's rate
+  (`rate_node`, D247) and told held as an image VM is (D260), and its guest told its room through its run (D188,
+  `room_node`). A booting node VM's booking comes off the fleet's budget until it is Ready and learned. Its oci boxes
+  are its, counted once: none is charged natively beside it. Its band is what ending it ends, the highest of its live
+  oci boxes' bands; an unreadable record ranks it above every box, and the answer says so (`Learned::ranked`), as it
+  names each VM its window couldn't read (`unread`), each room a guest awaits (`awaits`) and why a window failed
+  (`Capacity::unlearned`).
+- **Its last resort** (`fe3d5198`, `08800bcd`). The learner's intent to end it is written into its row and into each
+  oci box it runs, before the end. Its end survives its node's restart and joins the learner's ends at the next start;
+  where none is on record, the start says so, a cold start told. Once its run has ended, its oci boxes are retired for
+  `LifecycleCause::NodeVmEnded`: kept, ended and their why on record until their owners delete them, each window and
+  at start before recovery plans.
+- **Its place** (`3eb841a2`). The oci answer offers one route for its boxes, `Execution::NodeVm`: a Linux image of the
+  host's architecture with no GPU, charged nothing at the host, since its node VM's receipt pays the host envelope
+  once. That route's room is the Ready node VM's guest envelope (`NodeVmReceipt::guest`, hex-sim's
+  `RuntimeRoutes::node_vm_room`), which the scheduler holds those boxes to (`holds_inner`); with no node VM Ready, it
+  admits none. A host box gets only the room past its node VM, as admission takes the node VM's booking off the node's
+  own budget (`admission_spec`). On macOS the image form answers its oci class on the host's plane, and its process
+  class keeps its native route there; on Windows the route joins the host's native ones. A box its guest refuses for
+  room after the host's pool admitted it is told with both numbers: the pool's room, what the pool books with that box,
+  and the guest's own free room and words. Placement rows written before `Execution::NodeVm` read back as they were
+  written.
 
 ## 6. Waits
 
 The person's rule, 2026-11-13, applies to every wait: no record seeds, no chosen multiples. A cold start follows its
-party while that party lives, and after it the bound is the slowest answer seen. The host's waits below are
-`guest::hosted::Hosted::boot`'s. A node makes them once its channel is given (§5); until then `node_hosted_real` makes
-them. Inside the VM, init's own waits are those of its PID-1 path, held to the deadline its host told it.
+party while that party lives, and after it the bound is the slowest answer seen (decision 9). The host's waits below are
+the node VM's, in hex-runtime's `guest::image::node` (`605c2e89`); `node_hosted_real`'s boot
+(`guest::hosted::Hosted::boot`) follows READY as it does (`follow_ready`). Each run-out past a W* is told once on the
+process's log (`hex.wait event=ran_out`), naming its wait, its W*, how long and its party (`7a524d20`). Inside the VM,
+init waits for its node's and its relay's ready lines by each child's life, with no deadline, as its run carries none
+(§4).
+- **The boot** (`hex.image.boot`): the image boot runs on a thread of its own, as a box's does, its own patience
+  `Duration::MAX`, until the run starts or its run host ends. Within the boot's W*, the image class's, which its boxes'
+  boots share, its answer; past it, the run-out told and the boot followed by its thread's life. It is never answered
+  Pending, as a box's start can be: the node waits for its own VM.
 - **`guest.hosted.ready`**: the node VM's READY, through `ImageGuest::wait_ready`, on time or late.
   - At its cold start it follows the run, with no deadline: the run's end refuses it (`ImageRefusal::Ended`).
-  - After that it is bounded by the slowest READY this node has seen (`hex_core::patience::Patience::measuring`).
-  - A run-out is no sample (Karn's point), and the next wait follows again.
-  - The same bound is the run's `ready_by`, so Hex's init holds its node and relay to it inside the VM.
-- **`Images::boot`'s own patience**: `Duration::MAX`, until the run starts or its host ends. The run host's life is
-  that wait's liveness.
-- **Stop**: `ImageGuest::stop` returns once the run's end is told. Shards' stop takes no patience.
+  - After that it is bounded by the slowest READY of a node VM this process has seen
+    (`hex_core::patience::Patience::measuring`). A run-out is no sample (Karn's point).
+  - Past that bound the wait goes on a W* window at a time while the run progresses: its progress is its VM process's
+    CPU time as its host counts it (D241, `stats(Run)`). It is refused, stalled, only where a whole window shows
+    none, and a window with no reading judges no stall, the run then followed by its life alone. A VM's boot is the
+    one place decision 9 judges a stall.
+  - The run's end, its host's end or a refusal of Shards' ends it at any time, typed.
+- **The channel** (`Lanes::dial`): both ends' word on the connection's TLS, followed by the connection: its
+  handshake's end, the endpoint's refusal or the connection's end answers it.
+- **The room** (`room_node`): its guest's answer, waited for while its run lives; the run's end refuses it.
+- **Stop** (`hex.image.stop`): D231's stop is never refused, and its thread answers once the run host has gone. Past
+  the stop's W*, the run-out told, the stop is followed by its thread's life.
+- **A row whose owner still runs** (`store.node_vm_owner`): its owner's lock, on a thread of its own, to that owner's
+  end. Past its W*, the run-out told, it follows the owner by its life. A follow that fails is said as
+  `hex.guest event=node_vm_unfollowed`, its why a JSON string.
 
 No record seeds any of them. The waits census keeps their answers as evidence.
 
 ## 7. What the shards-init form gains, and where each part stands
 
-| Part | Where | On Shards main `7a4ef5c0` |
+| Part | Where | At Shards `16451e19f`, which Hex vendors (`59f7890f`) |
 |---|---|---|
-| The nesting grant: the subtree, CAP_SYS_ADMIN and CAP_NET_ADMIN, the filter with `pivot_root`, the deadline, READY | D234 | built, and in Hex's vendored shards-api (`66113379`). Its real-VM green is owed (Shards ROOT). `gpus=` is not built |
-| The agent-control endpoint | D238, step 11 | building. Built: its connection, the microVM's pinned key, members' stdio lanes, the daemon's endpoint per run, and exec lanes' endpoint side. Not built: a lane to a workload's socket, an endpoint for D231's run host, the exec's host and the controller's exec handle |
-| Templates and warm pools | D25, D26 | the daemon's runs have them; D231 owes them for an orchestrator's run |
-| D188's room and give-back | D241 through D231 | built |
-| Metrics | STATS by scope, D231 | built |
-| Default-deny networks | D231's narrowing, D236 | built |
+| The nesting grant: the subtree, CAP_SYS_ADMIN and CAP_NET_ADMIN, the filter with `pivot_root`, the deadline, READY | D234 | built. Its real-VM test, red on Shards CI's KVM x86_64 for two defects of its own, is fixed; its green and other runs are owed (Shards ROOT). `gpus=` is built (`ImageSpec::gpu_devices`); a node VM asks none yet, which is Hex's to do (§5) |
+| The agent-control endpoint | D238, step 11 | the node's channel built: a lane to a workload's socket (D251) and an orchestrator's run's own endpoint (D252), each with its real-VM runs owed. Built beside them, and none of this form's: members' stdio, state, signal and log lanes, and exec lanes |
+| Templates and warm pools | D25, D26, D253 | built for an orchestrator's run, their real-VM runs owed: a run's microVM restored from its image's template where one is saved, and saved where none is, as the daemon's are; warm hosts kept by the orchestrator's own pools (`ImagePools`), which Hex's image class doesn't take yet |
+| D188's room and give-back | D241 through D231 | built, its real-VM validation owed. A node VM's guest is told its room through its run (§5a) |
+| Metrics | STATS by scope, D231 | built: a node VM's host use, and its boot's progress (§5a, §6) |
+| Default-deny networks | D231's narrowing, D236 | built, its real-VM validation owed. A node VM's spec drops every grant (§4) |
 
 ## 8. What Hex keeps: everything
 
@@ -215,21 +320,31 @@ The PID-1 path stays as it is:
 - the init and the relay;
 - the guest image (`scripts/guest/build.sh`, `image.sh`, `initramfs.py`);
 - the vsock ports and the staging;
-- `GuestConfig`'s kernel and initrd.
+- the guest's kernel and initrd, now `GuestConfig`'s `Boot::Kernel` beside `Boot::Image` (`a8f6bfe4`).
 
 It boots on every hypervisor Hex uses (Shards' direct boot, Firecracker), and it stays the default form. The change to
-init adds the `Manager` host beside it. Its tests and ROOT's real-VM runs of it still pass on their own, which is the
-acceptance's second half.
+init adds the `Manager` host beside it (`7f4bda5b`). That change's first form broke the PID-1 path's boot, as its init
+found itself through `/proc/self/exe` before mounting `/proc` (`219a8844`), and `9590d4d4` mended it. The PID-1
+path's tests, and ROOT's real-VM runs of it, pass on their own, which is the acceptance's second half (§9).
 
 ## 9. Acceptance, and what ROOT runs
 
-- Hex's oci class passes its conformance suite through shards-init on macOS (HVF) and Windows (WHP) with Hex's PID 1
-  intact, once step 11's lane is given. Hex's PID-1 path still passes on its own.
-- ROOT measures start latency and memory per node VM in both forms. Start latency is boot to READY, then to the first
-  create. Memory is STATS' `memory_bytes` and the host's VM process.
-- `crates/hex-cli/tests/node_hosted_real.rs` (`--ignored`, ROOT's) boots the node image through shards-init to READY,
-  reads `stats(Run)` and stops it, n times, with n, p50, p90, p99 and max. Until step 11, that is the form's measurable
-  part.
+- **The suite through shards-init.** Hex's oci class passes its conformance suite through shards-init on macOS (HVF)
+  and Windows (WHP) with Hex's PID 1 intact: a `hex node` whose guest is its image (`HEX_GUEST_IMAGE`), every case
+  through the node's socket. The channel it needs is built (§5). Its test is owed next (goal 6's item 4); its runs are
+  ROOT's.
+- **The PID-1 path on its own.** `crates/hex-cli/tests/guest_real.rs` (HEX-GUEST-19: the suite in process, and through
+  a macOS node's socket), in the direct boot's form (`HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`), on a real VM (ROOT's).
+- **Both forms measured.** ROOT measures start latency and memory per node VM in both forms. Start latency is boot to
+  READY, then to the first create. Memory is STATS' `memory_bytes` and the host's VM process. Under shards-init, the
+  first run of an image at its shape saves its template and later ones restore it (D253), so the two are told apart by
+  how each started (`ImageGuest::started_from`).
+  - `crates/hex-cli/tests/node_hosted_real.rs` (`--ignored`, ROOT's) boots the node image through shards-init to READY,
+    reads `stats(Run)` and stops it, n times, with n, p50, p90, p99 and max.
+  - `crates/hex-cli/tests/guest_boot_record.rs` is the direct boot's counterpart.
+- **On every OS, with no VM.** The image form's w39 cases in hex-runtime's `guest::image` and `guest` tests (its read,
+  boot, lanes, greeting, record, rate, room and stop, through a run host of the test's) run in each OS's `cargo test`,
+  Windows' through the lane ends its run host makes there (`5cc5efbc`). Their native Windows run is ROOT's.
 
 ## 10. What would falsify it
 
