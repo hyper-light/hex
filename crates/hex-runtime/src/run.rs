@@ -16,7 +16,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Given, Proc, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_wait::{Condvar, Mutex, MutexGuard};
 
 /// A wait for a run's setup to make its box whole and watch its program, as a delete or the run's end waits on it
@@ -127,7 +127,15 @@ impl Claim {
     /// Takes the box's removal, for the one caller that does, once the box is made: its making waited out as decision 9
     /// waits ([`MADE`]).
     fn take(self: &Arc<Self>, id: &BoxId) -> Result<Taken, Refusal> {
-        let state = self.wait(&MADE, id, |state| matches!(state, Claiming::Making))?;
+        let state = self.wait(
+            &MADE,
+            id,
+            |state| matches!(state, Claiming::Making),
+            &[
+                Piece::Kind("the setup making run box "),
+                Piece::Name(id.as_str()),
+            ],
+        )?;
         self.taken(state, id)
     }
 
@@ -156,7 +164,17 @@ impl Claim {
 
     /// The word of the claimer removing the box, waited for as decision 9 waits ([`SAID`]).
     fn said(&self, id: &BoxId) -> Result<Said, Refusal> {
-        match &*self.wait(&SAID, id, |state| matches!(state, Claiming::Claimed))? {
+        let claimer = [
+            Piece::Kind("the claimer removing run box "),
+            Piece::Name(id.as_str()),
+            Piece::Kind(", its word"),
+        ];
+        match &*self.wait(
+            &SAID,
+            id,
+            |state| matches!(state, Claiming::Claimed),
+            &claimer,
+        )? {
             Claiming::Said(said) => Ok(said.clone()),
             Claiming::Making | Claiming::Open | Claiming::Claimed => Err(Refusal::Broken(format!(
                 "run box {id}'s claimer was waited for and said nothing"
@@ -165,13 +183,14 @@ impl Claim {
     }
 
     /// Waits while `busy` holds of the claim, as decision 9 waits on `patience`: within W*; past it, its run-out told
-    /// once and the claim's holder followed to its move, which comes on every path. The move, however late, is the
-    /// sample W* rises to.
+    /// once, naming the claim's `holder`, which it follows to its move, which comes on every path. The move, however
+    /// late, is the sample W* rises to.
     fn wait(
         &self,
         patience: &Patience,
         id: &BoxId,
         busy: fn(&Claiming) -> bool,
+        holder: &[Piece<'_>],
     ) -> Result<MutexGuard<'_, Claiming>, Refusal> {
         let asked = Instant::now();
         let mut state = self.state()?;
@@ -187,7 +206,7 @@ impl Claim {
                 .map_err(|why| claim_wait_refused(why, id))?;
             state = within;
             if busy(&state) {
-                patience.ran_out(window);
+                patience.ran_out(window, asked.elapsed(), holder);
             }
         }
         let state = self
