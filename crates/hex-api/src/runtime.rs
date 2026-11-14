@@ -77,7 +77,12 @@ pub trait Runtime: Send + Sync {
     /// refuses the run as [`Refusal::Platform`], naming its platform.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
 
-    /// Sends `signal` to every process in the box.
+    /// Sends `signal` to every process in the box. A Shards image VM's processes are its run's members (goal 2's item
+    /// 2): KILL stops the whole VM; any other signal goes to each member of its run that runs, on the member's own lane
+    /// of the run's agent-control endpoint, the VM running on and a member that has ended skipped. Where no member of
+    /// its run can take one (each runs no program, or has ended), it is refused
+    /// `NotRunning(id, "signal: its run has no member a signal reaches")`: nothing in the run takes a signal, which says
+    /// nothing of whether the VM runs.
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal>;
 
     /// The box as it is now.
@@ -283,6 +288,10 @@ pub enum Execution {
     ShardsShared,
     ShardsDedicated,
     Firecracker,
+    /// An oci box in its node's node VM, the guest under shards-init that runs the node's oci class (joint plan step 39;
+    /// ROOT, 2026-11-13, V2): its node VM's receipt, booked beside it, pays the host envelope once, as a shared backing's
+    /// grant does, and its room is that node VM's guest. Appended (wire append-only).
+    NodeVm,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -318,7 +327,7 @@ pub struct RouteKey {
 impl RouteKey {
     pub fn backend_class(self) -> crate::Class {
         match self.execution {
-            Execution::Native => self.class,
+            Execution::Native | Execution::NodeVm => self.class,
             Execution::ShardsShared | Execution::ShardsDedicated => crate::Class::Shards,
             Execution::Firecracker => crate::Class::Firecracker,
         }
@@ -333,6 +342,10 @@ impl RouteKey {
             }
             (crate::Class::Oci, Execution::ShardsDedicated) => {
                 self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::Required
+            }
+            // V2: an oci box of a Linux image in its node's node VM, which passes no device through.
+            (crate::Class::Oci, Execution::NodeVm) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::None
             }
             (crate::Class::Shards, Execution::ShardsDedicated)
             | (crate::Class::Firecracker, Execution::Firecracker) => {
@@ -390,6 +403,10 @@ pub struct NodeVmReceipt {
     pub run: NodeRun,
     pub booking: CapacityResources,
     pub phase: NodeVmPhase,
+    /// What its guest is admitted at ([`Allocation::guest`]; V2): the room its node's `NodeVm` routes admit within
+    /// while it is Ready, as a shared backing's guest is its routes'. Added after its phase (append-only).
+    #[serde(default)]
+    pub guest: CapacityResources,
 }
 
 /// Pool configuration identity and the Store-generated native incarnation; neither PID nor path
@@ -689,7 +706,8 @@ impl RouteOffer {
     pub fn check(self) -> Result<(), Refusal> {
         self.key.check()?;
         match (self.key.execution, self.cost, self.backing) {
-            (Execution::Native, None, None) | (Execution::ShardsShared, None, Some(_)) => Ok(()),
+            (Execution::Native | Execution::NodeVm, None, None)
+            | (Execution::ShardsShared, None, Some(_)) => Ok(()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(cost), _) => cost.check(),
             _ => Err(invalid_route(
                 "route charge differs from its actual execution topology",
@@ -795,6 +813,9 @@ impl RouteReceipt {
             (Execution::ShardsShared, None) if self.backing.is_some() => {
                 Ok(CapacityResources::default())
             }
+            // V2: its node VM's receipt, booked beside it, pays the host envelope once; its room is that node VM's
+            // guest's, which the scheduler holds it to.
+            (Execution::NodeVm, None) if self.backing.is_none() => Ok(CapacityResources::default()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
                 allocation.check(workload)?;
                 Ok(allocation.booking())
@@ -813,9 +834,11 @@ impl RouteReceipt {
             ));
         }
         match (self.key.execution, self.backing) {
-            (Execution::Native, Some(_)) | (Execution::ShardsShared, None) => Err(invalid_route(
-                "committed route has an invalid backing relationship",
-            )),
+            (Execution::Native | Execution::NodeVm, Some(_)) | (Execution::ShardsShared, None) => {
+                Err(invalid_route(
+                    "committed route has an invalid backing relationship",
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -3157,6 +3180,80 @@ mod route_tests {
             arch: ImageArch::Arm64,
         }
     }
+    /// V2 (ROOT, 2026-11-13: a node VM's oci boxes were counted at its host beside its receipt): an oci box in its node's
+    /// node VM is routed `NodeVm`, charged nothing at its host, the node VM's receipt paying the host envelope once, as a
+    /// shared backing's grant does. Do check route keys naming NodeVm, offers naming it, receipts committing to it, and
+    /// charge a box's workload through one; then name it in JSON. Expect a key for an oci box of a Linux image with no
+    /// GPU accepted and any other refused; an offer with no cost and no backing accepted and one with either refused; a
+    /// receipt with no backing accepted and one with a backing refused; its backend class the oci class's own; its charge
+    /// nothing, and an allocation refused; and its name "node-vm".
+    #[test]
+    fn v2_a_node_vms_route_is_charged_nothing_at_its_host() {
+        let linux = key(ImageOs::Linux, Execution::NodeVm, GpuEligibility::None);
+        assert!(linux.check().is_ok(), "{:?}", linux.check());
+        for bad in [
+            key(ImageOs::Windows, Execution::NodeVm, GpuEligibility::None),
+            key(ImageOs::Linux, Execution::NodeVm, GpuEligibility::Required),
+            RouteKey {
+                class: crate::Class::Process,
+                ..linux
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        let offer = RouteOffer {
+            key: linux,
+            cost: None,
+            backing: None,
+        };
+        assert!(offer.check().is_ok(), "{:?}", offer.check());
+        let backing = BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        };
+        for bad in [
+            RouteOffer {
+                cost: Some(cost()),
+                ..offer
+            },
+            RouteOffer {
+                backing: Some(backing),
+                ..offer
+            },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        let receipt = RouteReceipt {
+            key: linux,
+            backing: None,
+        };
+        assert!(receipt.check(crate::Class::Oci, false).is_ok());
+        assert!(
+            RouteReceipt {
+                backing: Some(backing),
+                ..receipt
+            }
+            .check(crate::Class::Oci, false)
+            .is_err()
+        );
+        assert_eq!(linux.backend_class(), crate::Class::Oci);
+        let workload = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        assert_eq!(
+            receipt.charged(workload, None),
+            Ok(CapacityResources::default())
+        );
+        let allocation = cost().allocate(CapacityResources::default()).unwrap();
+        assert!(receipt.charged(workload, Some(allocation)).is_err());
+        assert_eq!(
+            serde_json::to_value(Execution::NodeVm).unwrap(),
+            serde_json::json!("node-vm")
+        );
+    }
+
     fn key(os: ImageOs, execution: Execution, gpu: GpuEligibility) -> RouteKey {
         RouteKey {
             class: crate::Class::Oci,
