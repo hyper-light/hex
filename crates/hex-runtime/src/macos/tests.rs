@@ -1350,15 +1350,15 @@ fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
 static EMPTYING_FOLLOWED: hex_core::patience::Patience =
     hex_core::patience::Patience::measuring("test.hex_runtime.emptying_followed");
 
+/// How a test ends a box's killed group: the box's delete, or a recovery's end of its group `(pgid, leader's start)`.
+type EndGroup = fn(&MacRuntime, &BoxId, (i32, u64)) -> Result<(), Refusal>;
+
 /// The review's E-12 (decision 9), AC-T7.4.1: a killed box's group that empties late is followed to its emptying, never
 /// refused at a bound. Do: make rootless box `name` and start a program in it until it is ended; hold its group's
 /// emptying, as a group whose last member's teardown runs long reads; end the group from another thread (`end`); once
 /// that end follows the group past W* (stopped at the hold) or answers, let the hold go. Expect: the end hadn't answered
 /// while the group read as not yet empty, then answers Ok; the program ends Signal(9).
-fn a_late_emptying_is_followed_to_its_end(
-    name: &str,
-    end: fn(&MacRuntime, &BoxId, (i32, u64)) -> Result<(), Refusal>,
-) {
+fn a_late_emptying_is_followed_to_its_end(name: &str, end: EndGroup) {
     let rt = rootless();
     let id = BoxId::new(name).unwrap();
     rt.create(run_spec(&id)).expect("make the box");
