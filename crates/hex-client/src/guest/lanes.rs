@@ -29,6 +29,16 @@ use crate::Cut;
 /// directory the run grants its controller lanes to.
 pub const DIR: &str = "/run/hex/channel";
 
+/// The descriptors a lane holds on this node's side while it lives, as [`Link::dial`] hands it over ([`bridge`]): its
+/// local socket pair's two ends, the owner's and the copiers', the copiers' end cloned so each of its two copiers holds
+/// one. `hex-node`'s descriptor fit counts each lane by it (`serve::fit::hosted_descriptors`); the tests count the real
+/// ones (the review's D-6).
+pub const FDS_A_LANE: u64 = 3;
+
+/// The descriptors a control connection holds on this node's side through a lane, as the client's `Stream` keeps it:
+/// a lane's, and its two clones of the owner's end, its reading and its ending handles. The tests count the real ones.
+pub const FDS_A_CONTROL_LANE: u64 = FDS_A_LANE.saturating_add(2);
+
 /// The controller's connection to a node VM's endpoint and the lanes it opens on it to the node's relay.
 pub struct Lanes {
     sockets: Sockets,
