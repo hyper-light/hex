@@ -34,8 +34,9 @@ use hex_api::{
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::control::{
-    Controller, Execs, Fault, Hangup, Identity, Member as MemberLane, MemberControl, Subscriptions,
-    Unsteered, exec_admissions,
+    Controller, ExecControl, Execs, Fault, Got, Hangup, Identity, Input, McpConnection,
+    Member as MemberLane, MemberControl, Output, Subscriptions, Unstarted, Unsteered,
+    exec_admissions,
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
@@ -122,6 +123,9 @@ struct Control {
 struct LaneWaits {
     lane: Patience,
     signal: Patience,
+    /// A member's harness's next connection to its MCP bridge (D254), from its ask until the harness connects, which may
+    /// be never: past W* the wait follows the run's connection, however long that is ([`Steering::mcp`]).
+    mcp: Patience,
 }
 
 /// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
@@ -142,6 +146,7 @@ impl Control {
             waits: LaneWaits {
                 lane: Patience::measuring("hex.image.member"),
                 signal: Patience::measuring("hex.image.signal"),
+                mcp: Patience::measuring("hex.image.mcp"),
             },
         }
     }
@@ -259,6 +264,45 @@ impl Steering {
                 }
             }
         }
+    }
+
+    /// Member `index`'s harness's next connection to its MCP bridge (D254), on a lane of its own (goal 2's item 3): its
+    /// ask goes once, and its answer is waited for as decision 9 has it ([`followed`], `waits.mcp`), within its W*, past
+    /// it on by the run's connection's life, however long the harness takes to connect. Refused, typed, as
+    /// `Runtime::mcp` says ([`mcp_refused`]).
+    fn mcp(&self, waits: &LaneWaits, id: &BoxId, index: u32) -> Result<McpConnection, Refusal> {
+        let party = [
+            Piece::Kind("the agent-control connection of box "),
+            Piece::Name(id.as_str()),
+            Piece::Kind(", the MCP bridge of its member "),
+            Piece::Number(u64::from(index)),
+        ];
+        let mut asked = self
+            .execs
+            .mcp(index)
+            .map_err(|fault| mcp_refused(id, index, fault))?;
+        followed(&waits.mcp, &party, |patience| asked.wait(patience))?
+            .map_err(|fault| mcp_refused(id, index, fault))
+    }
+}
+
+/// Why an MCP connection of box `id`'s member `index` wasn't taken, or ended before its end was told, as `Runtime::mcp`
+/// says it (ROOT's mapping, 2026-11-14): the run's member takes none (Shards' `Unstarted::Refused`: its run asked it no
+/// bridge, or it ended), the run's connection ended, or what else Shards said, in its words.
+fn mcp_refused(id: &BoxId, index: u32, fault: Fault) -> Refusal {
+    let not_running = |why| match id.try_clone() {
+        Ok(id) => Refusal::NotRunning(id, why),
+        Err(refused) => refused,
+    };
+    match fault {
+        Fault::Unstarted(Unstarted::Refused) => {
+            not_running("mcp: its member takes no MCP connection")
+        }
+        Fault::Lost(_) => not_running("mcp: its run ended"),
+        fault => Refusal::Os {
+            op: "waiting for a member's MCP connection",
+            why: format!("box {id}'s member {index}: {fault}"),
+        },
     }
 }
 
@@ -1061,6 +1105,232 @@ impl Proc for MemberProc {
                 signal_number(Signal::KILL)?,
             )
             .map(drop)
+    }
+
+    fn streams(&mut self) -> Result<Given, Refusal> {
+        Ok(self.given.take().unwrap_or_default())
+    }
+}
+
+/// The errno an MCP connection is aborted with as its kill: Linux's ECONNRESET (include/uapi/asm-generic/errno.h, 104),
+/// what a reset connection reads in the guest, whose kernel is Linux's.
+const ECONNRESET: std::num::NonZeroU16 = match std::num::NonZeroU16::new(104) {
+    Some(errno) => errno,
+    None => std::num::NonZeroU16::MIN,
+};
+
+/// A member's MCP connection (D254) as its caller's program (goal 2's item 3, `Runtime::mcp`): no process of this host;
+/// the caller's ends of a pipe each way, given once ([`Proc::streams`]), and no stderr; its end the connection's
+/// ([`ExecControl::wait`]), told once the harness's output has finished.
+///
+/// Two threads of its own pump it, one each way, each lasting as long as the connection does: Shards' MCP lane gives no
+/// read or write that doesn't wait (9f5b1f754's `try_read` is its socket lanes' alone; ROOT's ask of g121 for `Output`
+/// and `Input`, 2026-11-14), so the cost of a connection is two threads, as a stream's copy is one (the review's D-10).
+/// What the harness sends goes to the caller's stdout record by record (a caller that lets its stdout go has the rest
+/// read and let go, the connection ending as its stdin does); what the caller writes goes to the harness as it comes, its
+/// end the harness's (`Input::end`). Its kill aborts what the harness is sent (ECONNRESET), the reset Shards gives an MCP
+/// lane at this pin, which has no hangup of its own (ROOT's ask of g121, 2026-11-14): a kill made while a record waits for
+/// the harness to take it goes once it is taken, or the run ends.
+struct McpProc {
+    /// What the caller's bytes go to the harness through, until its input ends: taken by its pump as the caller's end
+    /// of input ends it, or by its kill.
+    to: Arc<Mutex<Option<Input>>>,
+    /// Its end as its output pump tells it.
+    end: McpEnd,
+    /// Its kill was sent: its end reads `Signal(9)`.
+    killed: Arc<AtomicBool>,
+    given: Option<Given>,
+    ended: Option<Result<Exit, Refusal>>,
+}
+
+/// An MCP connection's end, as its output's pump tells it: its exit, or why none came.
+type McpEnd = Arc<Slot<Result<Exit, Refusal>>>;
+
+impl McpProc {
+    /// Box `id`'s member `index`'s connection `connection`, its two pumps started; refused, the connection aborted, where
+    /// either can't start.
+    fn start(id: &BoxId, index: u32, connection: McpConnection) -> Result<Self, Refusal> {
+        let McpConnection { from, to, end } = connection;
+        let to = Arc::new(Mutex::new(Some(to)));
+        let made = Self::pumps(id, index, from, end, &to);
+        if made.is_err()
+            && let Some(mut taken) = to.lock().ok().and_then(|mut to| to.take())
+        {
+            // A connection no one pumps is reset at once, so its harness isn't left waiting on it.
+            let _ = taken.abort(ECONNRESET);
+        }
+        let (given, end, killed) = made?;
+        Ok(Self {
+            to,
+            end,
+            killed,
+            given: Some(given),
+            ended: None,
+        })
+    }
+
+    /// The caller's ends of the connection's two pipes, its end's slot and its kill's mark, each pump on a thread of its
+    /// own.
+    fn pumps(
+        id: &BoxId,
+        index: u32,
+        from: Output,
+        end: ExecControl,
+        to: &Arc<Mutex<Option<Input>>>,
+    ) -> Result<(Given, McpEnd, Arc<AtomicBool>), Refusal> {
+        let pipe = |what: &'static str| std::io::pipe().map_err(|why| Refusal::os(what, why));
+        let (sent_r, sent_w) = pipe("making the pipe an MCP connection's harness is sent by")?;
+        let (heard_r, heard_w) = pipe("making the pipe an MCP connection's harness is heard by")?;
+        let slot = Arc::new(Slot::new());
+        let killed = Arc::new(AtomicBool::new(false));
+        let party = Party(Arc::clone(&slot));
+        let (owner, told) = (id.try_clone()?, Arc::clone(&killed));
+        std::thread::Builder::new()
+            .name("hex-image-mcp-out".to_owned())
+            .spawn(move || pump_out(&owner, index, from, end, heard_w, party, &told))
+            .map_err(|why| Refusal::os("starting an MCP connection's output pump", why))?;
+        let input = Arc::clone(to);
+        std::thread::Builder::new()
+            .name("hex-image-mcp-in".to_owned())
+            .spawn(move || pump_in(sent_r, &input))
+            .map_err(|why| Refusal::os("starting an MCP connection's input pump", why))?;
+        let given = Given {
+            stdin: Some(sent_w.into()),
+            stdout: Some(heard_r.into()),
+            stderr: None,
+        };
+        Ok((given, slot, killed))
+    }
+}
+
+/// What the harness of an MCP connection sends, to the caller's stdout, record by record, then its end: the
+/// connection's status as Shards tells it once its output has finished, `Signal(9)` where it was killed, or why none came
+/// ([`mcp_refused`]), told to `party`'s slot.
+fn pump_out(
+    id: &BoxId,
+    index: u32,
+    mut from: Output,
+    mut end: ExecControl,
+    mut caller: std::io::PipeWriter,
+    party: Party<Result<Exit, Refusal>>,
+    killed: &AtomicBool,
+) {
+    use std::io::Write as _;
+    let mut heard = true;
+    let finished = loop {
+        match from.next_record() {
+            Ok(Got::Record { bytes, .. }) => {
+                // A caller that let its stdout go hears no more: the rest is read and let go, so the harness is never
+                // held by an output no one takes.
+                if heard && caller.write_all(&bytes).is_err() {
+                    heard = false;
+                }
+            }
+            Ok(Got::Finished) => break Ok(()),
+            Err(fault) => break Err(fault),
+        }
+    };
+    drop(caller);
+    let told = finished.and_then(|()| end.wait());
+    let exit = match told {
+        _ if killed.load(Ordering::Acquire) => Ok(Exit::Signal(Signal::KILL.number())),
+        Ok(status) => Ok(Exit::Code(status)),
+        Err(fault) => Err(mcp_refused(id, index, fault)),
+    };
+    party.0.put(exit);
+}
+
+/// What the caller writes, to the harness of an MCP connection as it comes, a record of at most Shards' run chunk
+/// (`shards_abi::run::CHUNK`) at a time, under `to`'s lock, so a kill takes the connection between records; at the
+/// caller's end of input, the harness's (`Input::end`). Its lane's end, or a kill, ends it: the caller's later writes
+/// meet a closed pipe.
+fn pump_in(mut caller: std::io::PipeReader, to: &Mutex<Option<Input>>) {
+    use std::io::Read as _;
+    let mut buf = vec![0u8; shards_abi::run::CHUNK];
+    loop {
+        let read = match caller.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(why) if why.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let Ok(mut held) = to.lock() else {
+            return;
+        };
+        let Some(input) = held.as_mut() else {
+            return;
+        };
+        let mut rest = buf.get(..read).unwrap_or_default();
+        while !rest.is_empty() {
+            match input.write(rest) {
+                Ok(took) if took > 0 => rest = rest.get(took..).unwrap_or_default(),
+                // Its lane is over: the connection has ended or is ending, and takes no more.
+                Ok(_) | Err(_) => {
+                    *held = None;
+                    return;
+                }
+            }
+        }
+    }
+    let taken = to.lock().ok().and_then(|mut to| to.take());
+    if let Some(mut input) = taken {
+        // The harness's end of input; the connection's own end is told by its output's pump.
+        let _ = input.end();
+    }
+}
+
+impl Proc for McpProc {
+    /// An MCP connection is its guest's: no process of this host, and no pid is told.
+    fn pid(&self) -> u32 {
+        0
+    }
+
+    fn on_this_host(&self) -> bool {
+        false
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        self.wait_for(Duration::ZERO)
+    }
+
+    /// Its end, once its output's pump has told it, waited for at most `timeout` (a timeout past what the clock holds:
+    /// until it comes); refused where the pump ended with none told.
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        if let Some(ended) = &self.ended {
+            return ended.clone().map(Some);
+        }
+        let bound = Instant::now().checked_add(timeout).map(|_| timeout);
+        match self.end.told_within(bound)? {
+            Told::NotYet => Ok(None),
+            Told::Gone => Err(Refusal::Broken(
+                "an MCP connection's output pump ended with its end untold".to_owned(),
+            )),
+            Told::Came => {
+                let (ended, _) = self.end.take()?.ok_or_else(|| {
+                    Refusal::Broken("an MCP connection's end was taken twice".to_owned())
+                })?;
+                self.ended = Some(ended.clone());
+                ended.map(Some)
+            }
+        }
+    }
+
+    /// Aborts what the harness is sent (ECONNRESET), so its bridge's connection resets: its end then reads `Signal(9)`.
+    /// One that has ended, or whose input has ended already (its caller's close, which ends it as its harness closes),
+    /// has nothing more to send: answered at once.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.ended.is_some()
+            || !matches!(self.end.told_within(Some(Duration::ZERO))?, Told::NotYet)
+        {
+            return Ok(());
+        }
+        let taken = self.to.lock().map_err(poisoned)?.take();
+        if let Some(mut to) = taken {
+            self.killed.store(true, Ordering::Release);
+            // Its lane's answer: the abort taken, or the lane over already, the connection ended or ending either way.
+            let _ = to.abort(ECONNRESET);
+        }
+        Ok(())
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
@@ -2340,6 +2610,57 @@ impl ImageClass {
         }))
     }
 
+    /// Member `member`'s harness's next connection to its MCP bridge (D254) in image box `record` (goal 2's item 3,
+    /// `Runtime::mcp`), as a program ([`McpProc`]). Its spec's ask is checked before anything of its run: `Invalid` where it
+    /// asks the member no bridge; then, as `member` is, Pending while it boots, held, and `NotRunning(id, "mcp")` before its
+    /// start and once its stop has begun; `Invalid` for a member its run declares not; then the connection's own refusals
+    /// ([`Steering::mcp`]).
+    pub(super) fn mcp_image(
+        &self,
+        record: BoxRecord,
+        member: &Member,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let asked = match &record.spec.class {
+            ClassSpec::ShardsImage(image) => image
+                .members
+                .iter()
+                .any(|asked| &asked.member == member && asked.mcp),
+            _ => false,
+        };
+        if !asked {
+            return Err(Refusal::Invalid {
+                what: "mcp",
+                why: format!("box {id}'s spec asks no MCP bridge of {member}"),
+            });
+        }
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id, "mcp"));
+            }
+        };
+        let name = member_name(member);
+        let Some(index) = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+            .map(|declared| declared.index)
+        else {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s run declares no {member}"),
+            });
+        };
+        let control = &self.image()?.control;
+        let connection = control
+            .steering(&id, &guest)?
+            .mcp(&control.waits, &id, index)?;
+        Ok(Box::new(McpProc::start(&id, index, connection)?))
+    }
+
     /// Retires image VM `record`, its receipt its profile's under its census numbers (joint plan step 14): its run stopped
     /// as its delete stops it, its run forgotten, and the box kept retired (`BoxRecord::retire`). One held or still
     /// booting is refused, typed, as its delete is.
@@ -2685,6 +3006,10 @@ impl hex_api::Runtime for ImageClass {
 
     fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
         self.signal_member_image(self.called(id)?, member, signal)
+    }
+
+    fn mcp(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.mcp_image(self.called(id)?, member)
     }
 
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {

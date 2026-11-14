@@ -2199,6 +2199,23 @@ impl Runtime for Node {
         })
     }
 
+    /// A VM box's backend gives its member's next MCP connection (goal 2's item 3); any other box has none, refused as the
+    /// trait refuses it.
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.mcp(id, member);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "mcp",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+            ),
+        })
+    }
+
     /// A VM box's backend signals its member (goal 2's item 2); any other box has none, refused as the trait refuses it.
     fn signal_member(
         &self,
