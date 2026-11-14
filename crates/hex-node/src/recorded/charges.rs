@@ -2404,10 +2404,13 @@ pub(crate) fn learned(
         // What holds each VM's rate its learner tells (`Learner::learned`, D255); Linux's holds each by its cpu.max.
         rates: Vec::new(),
         window,
-        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells.
+        // What it couldn't read, what each guest's room awaits and what it ranks above every box, each learner tells; and
+        // the boxes whose records can't be read, which macOS's and Windows' learner tells (Linux's reads its boxes from
+        // their cgroups).
         unread: Vec::new(),
         awaits: Vec::new(),
         ranked: Vec::new(),
+        unrecorded: Vec::new(),
     })
 }
 

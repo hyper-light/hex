@@ -4776,6 +4776,7 @@ fn learned_capacity() -> Capacity {
         unread: Vec::new(),
         awaits: Vec::new(),
         ranked: Vec::new(),
+        unrecorded: Vec::new(),
     });
     capacity
 }
@@ -6188,6 +6189,106 @@ fn w39_what_a_learner_couldnt_read_awaits_and_ranks_is_held_to_a_nodes_boxes() {
         learned.unread.push(unread[next].clone());
     }
     assert!(answer(39, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
+}
+
+/// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): each box whose record its node can't read, and why,
+/// crosses the wire on a class's capacity answer, last, after the node VMs it ranks above every box. Do encode a learned
+/// capacity naming two such boxes and a node VM ranked, and read it back; then its JSON without the boxes. Expect it back
+/// exactly, and the JSON read as naming none.
+#[test]
+fn w14_dropped_the_boxes_whose_records_cant_be_read_cross_the_wire_last() {
+    let why = "its record can't be read: EOF while parsing a value; counted at its machine";
+    let mut capacity = learned_capacity();
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.ranked = vec![hex_api::LearnedRank {
+            run: hex_api::NodeRun::from_bytes([5; 16]),
+            why: "box torn-1's record can't be read: EOF while parsing a value".to_owned(),
+        }];
+        learned.unrecorded = ["torn-1", "torn-2"]
+            .map(|id| hex_api::LearnedUnrecorded {
+                id: LearnedHolder::Box(BoxId::new(id).unwrap()),
+                why: why.to_owned(),
+            })
+            .to_vec();
+    }
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let mut json = serde_json::to_value(&capacity).unwrap();
+    json["learned"]
+        .as_object_mut()
+        .unwrap()
+        .remove("unrecorded");
+    let older = serde_json::from_value::<Capacity>(json)
+        .unwrap()
+        .learned
+        .unwrap();
+    assert!(older.unrecorded.is_empty());
+}
+
+/// The review's dropped records (ROOT, 2026-11-14: as place 4's lists are, each box once): the boxes whose records a
+/// node can't read are held to a node's boxes, each named once, and fitted to one message after its ranked node VMs. Do
+/// check learned uses naming one past a node's boxes, and one box twice; then fit a capacity naming a node's boxes, and
+/// encode it. Expect the first refused, typed, naming its bound, and the second naming the repeat; the fitted capacity
+/// within one message, its list a prefix of what it named, the first cut, and refused with one more.
+#[test]
+fn w14_dropped_the_boxes_whose_records_cant_be_read_are_held_to_a_nodes_boxes_each_once() {
+    let told = |n: usize| hex_api::LearnedUnrecorded {
+        id: LearnedHolder::Box(BoxId::new(&format!("hex-place-a-1-0-{n}")).unwrap()),
+        why: "its record can't be read: EOF while parsing a value; counted at its machine"
+            .to_owned(),
+    };
+    let unrecorded: Vec<hex_api::LearnedUnrecorded> =
+        (0..=MAX_LEARNED_HOLDINGS).map(told).collect();
+    let learned = || learned_capacity().learned.unwrap();
+    let past = Learned {
+        unrecorded: unrecorded.clone(),
+        ..learned()
+    };
+    assert!(
+        matches!(past.check(), Err(Refusal::Exhausted { what, bound }) if what == "learned unrecorded boxes" && bound == MAX_LEARNED_HOLDINGS),
+        "{:?}",
+        past.check()
+    );
+    let twice = Learned {
+        unrecorded: vec![told(1), told(2), told(1)],
+        ..learned()
+    };
+    assert!(
+        matches!(twice.check(), Err(Refusal::Invalid { what, .. }) if what == "learned unrecorded boxes"),
+        "{:?}",
+        twice.check()
+    );
+    let mut capacity = learned_capacity();
+    capacity.learned = Some(Learned {
+        unrecorded: unrecorded[..MAX_LEARNED_HOLDINGS].to_vec(),
+        ..learned()
+    });
+    fit_learned(&mut capacity).unwrap();
+    let fitted = capacity.learned.as_ref().unwrap();
+    assert!(fitted.check().is_ok(), "{:?}", fitted.check());
+    assert!(
+        !fitted.unrecorded.is_empty() && fitted.unrecorded.len() < MAX_LEARNED_HOLDINGS,
+        "{} of a node's boxes",
+        fitted.unrecorded.len()
+    );
+    assert_eq!(fitted.unrecorded, unrecorded[..fitted.unrecorded.len()]);
+    let bytes = answer(
+        14,
+        &Answer::Capacity(Some(capacity.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let mut more = capacity;
+    if let Some(learned) = more.learned.as_mut() {
+        let next = learned.unrecorded.len();
+        learned.unrecorded.push(unrecorded[next].clone());
+    }
+    assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
 }
 
 /// A-3 (ROOT's audit, 2026-11-13: a failed window was told nowhere): why a node's learner learned nothing for a class

@@ -2471,6 +2471,111 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
     );
 }
 
+/// The review's dropped records (ROOT, 2026-11-14; AC-T7.4.1): a record its node can't read names a box it may still
+/// run, whose class, caps and receipt only that record says, so nothing bounds the box below its machine. Its window
+/// counts it there, leaving the fleet only the bookings it reads, and every VM class's answer names it and why, never
+/// dropping it. Interim, pinned here: once A-10 (goal 4) sources the fleet's budget from what is measured free, what such
+/// a box holds is outside that budget already, and this count gives way to it. Do keep, on a node whose platform holds
+/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM of 16 vCPUs booked at 2 CPUs
+/// whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
+/// image VM, run another window and answer the Shards class. Expect the first VM capped at the 8 CPUs the process box
+/// leaves; then the second held at its 2-CPU booking though it asks its ceiling, as the box whose record can't be read
+/// may hold all the rest; and the answer naming that box among the unrecorded, with its record's words and its count.
+#[test]
+fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_told() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    for name in ["img-1", "img-2"] {
+        images
+            .0
+            .periods
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), Duration::from_millis(70));
+    }
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let left = 8_000;
+    let capped = BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new("proc-1").unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(u32::try_from(machine.cpu_milli.saturating_sub(left)).unwrap()),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+            band: 0,
+        },
+        Phase::Ready,
+        Vec::new(),
+    );
+    store.put(&capped).unwrap();
+    let booking = res(2_000, 2 * GIB);
+    let booked = |name: &str, started: u64| {
+        let mut image = image_vm(name, started);
+        image.spec.allocation = image
+            .spec
+            .allocation
+            .map(|allocation| allocation.booked_at(booking));
+        image
+    };
+    store.put(&booked("img-1", 1)).unwrap();
+    node.start_charges().unwrap();
+    node.learn_window();
+    assert_eq!(
+        *images.0.box_rates.lock().unwrap(),
+        [("img-1".to_owned(), left)]
+    );
+    images.0.box_rates.lock().unwrap().clear();
+    store.remove(&BoxId::new("img-1").unwrap()).unwrap();
+    std::fs::write(store.runtime_place(&capped.spec.id), b"{\"version\":").unwrap();
+    let Some(Err(why)) = store.get(&capped.spec.id).unwrap() else {
+        panic!("the process box's record still reads");
+    };
+    store.put(&booked("img-2", 2)).unwrap();
+    node.learn_window();
+    let mut capacity = hex_api::Capacity {
+        own: Default::default(),
+        id: "shards".into(),
+        total: machine,
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+        node_vms: Vec::new(),
+        unlearned: None,
+    };
+    node.books
+        .attach_learned(hex_api::Class::Shards, &mut capacity, &store.all().unwrap())
+        .unwrap();
+    let told: Vec<(String, String)> = capacity
+        .learned
+        .iter()
+        .flat_map(|learned| &learned.unrecorded)
+        .map(|told| (holder_name(&told.id), told.why.clone()))
+        .collect();
+    assert_eq!(
+        (images.0.box_rates.lock().unwrap().clone(), told),
+        (
+            vec![("img-2".to_owned(), booking.cpu_milli)],
+            vec![(
+                "proc-1".to_owned(),
+                format!("its record can't be read: {why}; counted at its machine")
+            )]
+        )
+    );
+}
+
 /// A-5 (ROOT's audit, 2026-11-13: the oci boxes a node VM hosts were counted twice, at their caps as native boxes and
 /// again in the node VM's footprint, so the VMs learned beside them got less room and the last resort fired early): an
 /// oci box's memory is held by the guest that runs it, so its caps are native only where no node VM on record runs the
