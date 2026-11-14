@@ -128,11 +128,12 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    `RECORDS`, `recorded_boot`, `seed_in`, the "record one first" gate and `dial_bound` go, and records.tsv is evidence
    alone. Done (the review's C-9, 2026-11-14), with no slices: Shards' `connect_while_runs` follows the VM past W*
    (`ShardsLink::dial_following`); the guest's own boot reads no record (`GuestRuntime::boot_bound`, none before its
-   first); and a managed create's or attach's budget follows its guest (`managed::Budget::following`, its deadline an
-   `Option<Instant>`), its native launch taking none (`Transaction::launch_managed`'s `Option<Duration>`; on Linux the
-   held child's gate then waits with no clock, ended by its peer's byte or EOF, Ada's approval of 2026-11-14). A GPU
-   create's budget follows too ((c2), 2026-11-14): Shards takes its GPU report with no clock (`Until::Released`, Shards
-   b4a018090; `managed::gpu_until`), so no production wait reads the record. Owed: hex-cli's measurement tools' own
+   first); and a managed create or attach follows its guest, told no deadline: its native launch takes none
+   (`Transaction::launch_managed`'s `Option<Duration>`; on Linux the held child's gate then waits with no clock, ended
+   by its peer's byte or EOF, Ada's approval of 2026-11-14), and its first dial, hello and join take none. A GPU
+   create follows too ((c2), 2026-11-14): Shards takes its GPU report with no clock (`Until::Released`, Shards
+   b4a018090), so no production wait reads the record, and the create budget that once carried the record's deadline
+   (`managed::Budget`) is gone. Owed: hex-cli's measurement tools' own
    waits (guest_cost's stop,
    place removal, end, window boot and census; macos_cpu_response's top arm): the producer's waits follow their
    parties.
