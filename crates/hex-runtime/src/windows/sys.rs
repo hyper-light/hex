@@ -1353,12 +1353,13 @@ pub fn resident_private(process: &Handle, range: (u64, u64), page: u64) -> io::R
         K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
     };
     let (start, end) = range;
-    let span = end
+    let on_page = |at: u64| at.checked_rem(page) == Some(0);
+    let pages = end
         .checked_sub(start)
-        .filter(|_| page != 0 && start % page == 0 && end % page == 0)
+        .filter(|_| on_page(start) && on_page(end))
+        .and_then(|span| span.checked_div(page))
         .ok_or_else(|| io::Error::other("a range not on page boundaries"))?;
-    let pages =
-        usize::try_from(span / page).map_err(|_| io::Error::other("a page count past usize"))?;
+    let pages = usize::try_from(pages).map_err(|_| io::Error::other("a page count past usize"))?;
     let mut entries: Vec<PSAPI_WORKING_SET_EX_INFORMATION> = Vec::new();
     entries
         .try_reserve_exact(pages)
