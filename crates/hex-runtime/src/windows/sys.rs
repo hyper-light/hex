@@ -659,15 +659,22 @@ impl Job {
     /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
     /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
-        self.process_list()
-            .map(|list| u64::from(list.NumberOfAssignedProcesses))
+        self.process_list().map(|list| {
+            live(
+                list.NumberOfAssignedProcesses,
+                list.NumberOfProcessIdsInList,
+            )
+        })
     }
 
     /// An event to wait on for this same nested scope, or positive emptiness. A recycled snapshot
     /// PID is checked against the held job before its observation handle can be used.
     pub(crate) fn member(&self) -> io::Result<Member> {
         let list = self.process_list()?;
-        if list.NumberOfAssignedProcesses == 0 {
+        if empty(
+            list.NumberOfAssignedProcesses,
+            list.NumberOfProcessIdsInList,
+        ) {
             return Ok(Member::Empty);
         }
         let pid = list
@@ -726,6 +733,17 @@ impl Job {
 pub(crate) enum Member {
     Empty,
     Process(Handle),
+}
+
+/// A job's live members as one id-list read gives them, `assigned` its `NumberOfAssignedProcesses` and `listed` its
+/// `NumberOfProcessIdsInList` ([`Job::live_processes`]).
+fn live(assigned: u32, _listed: u32) -> u64 {
+    u64::from(assigned)
+}
+
+/// Whether one id-list read says the job holds no live member ([`Job::member`]).
+fn empty(assigned: u32, _listed: u32) -> bool {
+    assigned == 0
 }
 
 /// A job's resource accounting, read whole.
@@ -1524,6 +1542,27 @@ mod tests {
         let assigned = u32::from_ne_bytes(head[..4].try_into().unwrap());
         let listed = u32::from_ne_bytes(head[4..8].try_into().unwrap());
         (assigned, listed, buf[1..=listed as usize].to_vec())
+    }
+
+    /// HEX-WIN-1's lag (ROOT's native run of 2026-11-14 at 211292c80: 2 assigned, 1 listed in one read): Windows drops
+    /// an ended member from a job's id list before its assigned count, so the list is the live truth. Do read the
+    /// lagging counts as one read gives them. Expect: a read listing no member is empty and counts none live, whatever
+    /// its assigned count still holds; one listing any counts its assigned (each listed member live, the rest unlisted
+    /// only past the read's room); none of each, empty.
+    #[test]
+    fn a_job_listing_no_member_is_empty_though_its_assigned_count_lags() {
+        assert_eq!(
+            (live(2, 0), empty(2, 0)),
+            (0, true),
+            "lagging: ended members alone"
+        );
+        assert_eq!((live(1, 0), empty(1, 0)), (0, true));
+        assert_eq!(
+            (live(2, 1), empty(2, 1)),
+            (2, false),
+            "a live member listed"
+        );
+        assert_eq!((live(0, 0), empty(0, 0)), (0, true));
     }
 
     /// HEX-WIN-1 (native plan step 3): a member that has ended leaves the job's id list, which
