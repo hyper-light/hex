@@ -624,20 +624,16 @@ fn a_publish_reaching_the_runs_own_command_stops_it(
 
 /// The probe's arguments for three targets: a listener of this test's, a port nothing holds and a name RFC 6761 §6.4
 /// reserves as never resolving, the probe listening at the host's loopback on a port the OS picks.
-/// A port of the host's loopback this test holds bound and never listens on, so a connection to it is refused by the
-/// host's own stack for as long as the socket lives: no other socket (the probe's own listener among them) can take the
-/// port, and no connection can take it as its own source port and meet itself. A port bound and let go at once gave
-/// both a chance (goal 5's r878: the closed target answered connected).
-fn held_closed_port() -> socket2::Socket {
-    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
-    socket
-        .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
-        .unwrap();
-    socket
+/// The closed target's port: a listener of this test's, held while the probe binds its own listener (port 0) and let go
+/// (dropped) only just before the probe connects to its targets, so the probe's listener can't be given that port. A
+/// port let go at once could be (goal 5's r878 on Linux: the closed target answered connected). Held without listening
+/// it would do no better: macOS drops a connection to a port bound but not listening, so it times out, never refused.
+fn closed_port() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
-fn three_targets(open: &TcpListener, closed: &socket2::Socket) -> Vec<std::ffi::OsString> {
-    let closed = closed.local_addr().unwrap().as_socket().unwrap();
+fn three_targets(open: &TcpListener, closed: &TcpListener) -> Vec<std::ffi::OsString> {
+    let closed = closed.local_addr().unwrap();
     [
         "--address".to_owned(),
         "127.0.0.1".to_owned(),
@@ -662,12 +658,14 @@ fn three_targets(open: &TcpListener, closed: &socket2::Socket) -> Vec<std::ffi::
 #[test]
 fn the_probe_answers_each_connection_with_its_targets_outcomes() {
     let open = TcpListener::bind("127.0.0.1:0").unwrap();
-    let closed = held_closed_port();
+    let closed = closed_port();
     let told = probe::Told::read(&three_targets(&open, &closed)).unwrap();
     let started = probe::start(&told).unwrap();
     let [at] = started.at.as_slice() else {
         panic!("{:?}", started.at);
     };
+    // The probe's listener is bound: the closed target's port is let go now, before the probe connects to it.
+    drop(closed);
     let mut answer = String::new();
     TcpStream::connect(at)
         .unwrap()
@@ -752,8 +750,9 @@ fn a_members_hand_over_is_asked_again_while_its_box_settles() {
 #[test]
 fn the_probe_answers_each_line_on_its_stdin_with_its_targets_outcomes() {
     let open = TcpListener::bind("127.0.0.1:0").unwrap();
-    let closed = held_closed_port();
+    let closed = closed_port();
     let told = probe::Told::read(&three_targets(&open, &closed)).unwrap();
+    drop(closed);
     let mut out = Vec::new();
     probe::answer("\nagain\n".as_bytes(), &mut out, &told.targets).unwrap();
     let text = String::from_utf8(out).unwrap();
