@@ -16,6 +16,8 @@ pub mod hosted;
 mod image;
 mod leases;
 mod managed;
+#[cfg(target_os = "linux")]
+pub(crate) use managed::wait_stopped;
 pub use managed::{ManagedGuestTime, ManagedRate};
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
@@ -1722,6 +1724,12 @@ impl GuestRuntime {
     /// in its row; the guest it was is booted again at the next ask, its run ended.
     pub fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
         self.images.stop_node(run).map(|_| ())
+    }
+
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), its node's charge
+    /// learner's word, as an image box's guest is told.
+    pub fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.images.room_node(run, Some(room)).map(|_| ())
     }
 
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as

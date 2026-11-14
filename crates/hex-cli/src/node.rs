@@ -442,8 +442,8 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     let mut err = std::io::stderr().lock();
     match node.start_charges() {
         Ok((window, unheld)) => {
-            // Its window is longer while an image VM it holds has its rate held over a longer period, its run's own
-            // (docs/design/learned-charge.md C1).
+            // Its window is the longest period of the caps it holds, which its classes' capacity answers tell as it
+            // moves (docs/design/learned-charge.md C1).
             let _ = match window {
                 Some(window) => writeln!(
                     err,
@@ -452,8 +452,8 @@ fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
                 ),
                 None => writeln!(
                     err,
-                    "hex node: the charge learner's window is its image VMs' longest run rate period, its platform \
-                     having none"
+                    "hex node: the charge learner's window is the longest period of the caps it holds, told on its \
+                     classes' capacity answers; none while it holds none"
                 ),
             };
             for why in unheld {

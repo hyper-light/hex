@@ -202,29 +202,41 @@ pub(super) fn stop_scope(
             _ => Err(refusal("stopping managed Shards scope", &why)),
         };
     }
-    let wait = |patience| {
-        process
-            .wait_for(patience)
-            .map_err(|why| refusal("observing complete Shards scope termination", &why))
-    };
-    let observed = match STOP.deadline() {
-        Some(bound) => match wait(bound)? {
-            Some(end) => Some(end),
-            None => {
-                STOP.ran_out(bound);
-                wait(Duration::MAX)?
-            }
-        },
-        None => wait(Duration::MAX)?,
-    };
-    if let Some(end) = observed.filter(|end| end.scope == shards_api::TerminalScope::Released) {
-        STOP.answered(began.elapsed());
+    if let Some(end) = wait_stopped(&*process, began)
+        .map_err(|why| refusal("observing complete Shards scope termination", &why))?
+    {
         return Ok(end);
     }
     if let Err(why) = before {
         return Err(refusal("observing original managed native scope", &why));
     }
     Err(uncertain)
+}
+
+/// A stopped managed scope's end, waited for as its stop's own wait ([`STOP`]) from `began`, its stop sent: within the
+/// slowest stop seen; past it, and before the first, the run-out told and the scope followed by its own party
+/// (`ManagedProcess::wait_for(Duration::MAX)`) to its end, or refused once its observer fails. Its end seen released is
+/// the stop's answer; one seen unreleased, or none, is `None`, for its caller to refuse. Every stop of a managed scope
+/// waits this way, a Firecracker VM's and its observer's too (A-13: they waited the configured `stop_ms`).
+pub(crate) fn wait_stopped(
+    process: &dyn shards_api::ManagedProcess,
+    began: Instant,
+) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+    let observed = match STOP.deadline() {
+        Some(bound) => match process.wait_for(bound)? {
+            Some(end) => Some(end),
+            None => {
+                STOP.ran_out(bound);
+                process.wait_for(Duration::MAX)?
+            }
+        },
+        None => process.wait_for(Duration::MAX)?,
+    };
+    let released = observed.filter(|end| end.scope == shards_api::TerminalScope::Released);
+    if released.is_some() {
+        STOP.answered(began.elapsed());
+    }
+    Ok(released)
 }
 
 /// What holds a managed VM's CPU to the rate its node's learner set (joint plan step 14, D255).

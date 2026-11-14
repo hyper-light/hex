@@ -440,7 +440,8 @@ impl JobBox {
     }
 
     /// Joint plan step 14 (C4 on Windows): the VM job's CPU hard cap becomes `milli` thousandths of a CPU, its
-    /// water-filled share, at least the machine's least cap (one cycle per [`job::RATE_SCALE`] of it).
+    /// water-filled share, which its learner holds at least at the job's least ([`job::least_milli`]); a rate below
+    /// it is refused, typed ([`job::cap`]), never raised quietly.
     pub(super) fn set_cpu_cap(
         &self,
         milli: u64,
@@ -449,11 +450,7 @@ impl JobBox {
         if !self.is_vm() {
             return Err(self.uncertain("it isn't a VM's job box as its CPU cap is set"));
         }
-        let least = u64::from(processors.get())
-            .checked_mul(1000)
-            .map(|n| n.div_ceil(u64::from(job::RATE_SCALE)))
-            .ok_or_else(|| self.uncertain("its CPU cap's least rate overflowed"))?;
-        let milli = u32::try_from(milli.max(least)).map_err(|_| Refusal::Invalid {
+        let milli = u32::try_from(milli).map_err(|_| Refusal::Invalid {
             what: "a VM's CPU rate",
             why: "it passes a u32 of thousandths of a CPU".to_owned(),
         })?;
