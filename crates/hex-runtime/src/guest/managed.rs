@@ -400,49 +400,61 @@ pub(super) fn guest_time(
     }
 }
 
-/// Answers `ask`, box `id`'s VM's, a watcher telling `patience`'s run-out once `bound` passes with no answer while the
-/// ask goes on.
+/// Answers `ask`, box `id`'s VM's, its run-out told by the process's one watcher once `bound` passes with no answer
+/// while the ask goes on ([`super::run_out`]).
 fn told_past<T>(
     patience: &'static Patience,
     bound: Duration,
     id: &BoxId,
     ask: impl FnOnce() -> T,
 ) -> Result<T, Refusal> {
-    let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
-        hex_wait::Failed::Poisoned => {
-            Refusal::Broken("a managed VM ask's watch is poisoned".to_owned())
-        }
-        hex_wait::Failed::Os(why) => Refusal::os("making a managed VM ask's watch", why),
-    })?;
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("hex-managed-ask".to_owned())
-            .spawn_scoped(scope, move || {
-                if matches!(
-                    waiting.recv_timeout(bound),
-                    Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
-                ) {
-                    patience.ran_out(
-                        bound,
-                        bound,
-                        &[
-                            Piece::Kind("the managed VM process of box "),
-                            Piece::Name(id.as_str()),
-                            Piece::Kind(", its ask on its vsock socket"),
-                        ],
-                    );
-                }
-            })
-            .map_err(|why| Refusal::os("starting a managed VM ask's watcher", why))?;
-        let answer = ask();
-        drop(answered);
-        Ok(answer)
-    })
+    super::run_out::told_past(patience, bound, id, ask)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's threads whose names start with `prefix`, as Linux lists them (`/proc/self/task/*/comm`).
+    #[cfg(target_os = "linux")]
+    fn threads_named(prefix: &str) -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .filter(|comm| comm.trim_end().starts_with(prefix))
+            .count()
+    }
+
+    /// The review's "one run-out watcher" (goal 4's design, ROOT 2026-11-13; decision 9): a managed VM's asks in flight
+    /// at once share one thread that tells each one's run-out past its W*, where a thread of each ask's own was spawned
+    /// and joined, twice a window for each VM. Do: hold eight asks in flight at once, each armed with a W* far off.
+    /// Expect: at most one thread in this process watches them all, whatever other tests ask beside it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn f3_asks_in_flight_share_one_run_out_watcher() {
+        const ASKS: usize = 8;
+        let entered = std::sync::Barrier::new(ASKS + 1);
+        let release = std::sync::Barrier::new(ASKS + 1);
+        let id = BoxId::new("watched").unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..ASKS {
+                scope.spawn(|| {
+                    told_past(&RATE, Duration::from_secs(3_600), &id, || {
+                        entered.wait();
+                        release.wait();
+                    })
+                    .unwrap();
+                });
+            }
+            entered.wait();
+            let watchers = threads_named("hex-managed-ask") + threads_named("hex-run-out");
+            release.wait();
+            assert!(
+                watchers <= 1,
+                "{watchers} threads watch {ASKS} asks in flight"
+            );
+        });
+    }
     use hex_core::record::{BoxRecord, Phase, ProcId};
     #[cfg(unix)]
     use std::sync::Condvar;
