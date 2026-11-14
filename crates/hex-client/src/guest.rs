@@ -306,6 +306,8 @@ static QUIC_ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.quic.answer.links"),
     // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
     Patience::measuring("client.quic.answer.lessors"),
+    // MEASURING until a waits census records a keeper's word to its node (the review's A-10).
+    Patience::measuring("client.quic.answer.reserved"),
 ];
 
 static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
