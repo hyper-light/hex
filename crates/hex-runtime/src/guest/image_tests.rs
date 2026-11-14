@@ -1652,7 +1652,8 @@ fn usage_reads_the_runs_stats_and_each_vcpus_guest_time() {
 /// image VM's host use twice, then delete it answering its final use; delete it again; then delete a VM whose run ended
 /// on its own before its delete. Expect each read's window to run from its run's start and grow; the delete to answer the
 /// VM's final use, its window the whole run and no less than the last read's, its counters its run host's; the second
-/// delete refused NoSuchBox; and the delete of the ended run to answer none, nothing read at its end.
+/// delete refused NoSuchBox; and the delete of the ended run refused, typed (`NotRunning`), nothing read at its end and
+/// none answered, which would read as a run that never started (the review's B-5), the box kept until a plain delete.
 #[test]
 fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
     let vcpus = allocation().vm_size().unwrap().vcpus;
@@ -1686,7 +1687,11 @@ fn w12_a_vms_host_use_spans_its_window_and_its_delete_answers_its_final_use() {
     runtime.start(&id).unwrap();
     *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
     shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
-    assert_eq!(runtime.delete_with_host_use(&id).unwrap(), None);
+    assert!(matches!(
+        runtime.delete_with_host_use(&id),
+        Err(Refusal::NotRunning(named, _)) if named == id
+    ));
+    runtime.delete(&id).unwrap();
 }
 
 /// HVF's image_real at cf535152 (ROOT's r183: HEX-IMG-1, 6 and 7, each a bare Lifecycle Uncertain where NoSuchBox was
