@@ -208,13 +208,14 @@ Tests, waiting on a time rather than on their party:
    `absolute_connect_completes_and_evented_retains_the_same_link`: each failed only under load on adacachy2 (their
    runs 12 s against 2.5 s quiet), so each waits on a time, not on its party. Owed.
 9. **A fixed duration as a test's wait** (hex-cli's tests): `FIXTURE`'s 30 s in `guest_boot_deadline.rs` went
-   (6042219c, its waits following the relay), and the process class's (df13d537: `DELETE_PATIENCE` in
-   `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations). Left:
-   `EMPTY_PATIENCE` 10 s (`box_run_cli.rs`), `PATIENCE` 60 s (`macos_managed_helper.rs`, `macos_node_recovery.rs`,
-   `windows_node.rs`, `windows_node_recovery.rs`; `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD`
-   (`macos_process_box.rs`), `RERUN_BOUND` 300 s (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD`
-   (`windows_oci_box.rs`, a seeded test wait), the bystander's 10 s in hex-runtime's `linux::oci::run` tests, and
-   inline durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
+   (6042219c, its waits following the relay), the process class's (df13d537: `DELETE_PATIENCE` in
+   `delete_flake.rs`, `HANG_GUARD` in `macos_process_box.rs`, and `process_box.rs`'s inline durations), and
+   `EMPTY_PATIENCE` in `box_run_cli.rs` and the bystander's 10 s in hex-runtime's `linux::oci::run` tests (each
+   following its party: the run's cgroup's threads, the bystander's life). Left: `PATIENCE` 60 s
+   (`macos_managed_helper.rs`, `macos_node_recovery.rs`, `windows_node.rs`, `windows_node_recovery.rs`;
+   `macos_pool_restart.rs` after goal 14's fix there), `SAMPLE_GUARD` (`macos_process_box.rs`), `RERUN_BOUND` 300 s
+   (`oci_lsm.rs`, `oci_seccomp.rs`), `HCS_END_RECORD` (`windows_oci_box.rs`, a seeded test wait), and inline
+   durations in `completion_backends.rs`, `completion_managed_api.rs` and `oci_box.rs`; the real-VM tests
    (`charge_fleet.rs`,
    `guest_boot_record.rs`, `image_real.rs`, `image_record.rs`, `native_firecracker_smoke.rs`,
    `native_windows_hcs_compute.rs`, `node_hosted_real.rs`) after goal 12's batch, built and linted here, run by the

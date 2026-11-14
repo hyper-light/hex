@@ -3512,6 +3512,10 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         );
     }
 
+    /// The bystander's exec showing its arguments: a fact no recorded operation makes, waited for measuring
+    /// (`hex_testkit::waits`). It was a 10 s deadline, picked (ROOT, 2026-11-14).
+    static BYSTANDER: Patience = Patience::measuring("test.hex_runtime.oci_bystander_sleeps");
+
     /// A process another of the agent's threads starts while a create starts its shim (another create's
     /// shim, an exec'd program, a hook) inherits none of the create's descriptors: the shim's pipes stay
     /// close-on-exec in the agent (CVE-2024-21626's class: runc v1.5.2 `libcontainer/container_linux.go:341-349`).
@@ -3543,15 +3547,18 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             // Linux lets a vfork parent go before the exec closes what is close-on-exec (v6.19
             // `fs/exec.c:1156`, `:1194`, `kernel/fork.c:1488`), and sets the new program's arguments after
             // that (`fs/binfmt_elf.c:1296`): what it holds is read once it shows them.
+            // Followed by its life (decision 9: never a time's verdict): one that ends before it shows them fails.
             let cmdline = format!("/proc/{}/cmdline", bystander.id());
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !std::fs::read(&cmdline)?.starts_with(b"sleep\0") {
-                assert!(
-                    Instant::now() < deadline,
-                    "the bystander never became sleep"
-                );
-                std::thread::yield_now();
-            }
+            hex_testkit::waits::follow::until(
+                &BYSTANDER,
+                "the bystander's arguments, sleep's",
+                || match bystander.try_wait() {
+                    Ok(None) => hex_testkit::waits::follow::Party::Live,
+                    Ok(Some(_)) | Err(_) => hex_testkit::waits::follow::Party::Ended,
+                },
+                || std::fs::read(&cmdline).is_ok_and(|args| args.starts_with(b"sleep\0")),
+            )
+            .unwrap_or_else(|unmet| panic!("the bystander never became sleep: {unmet}"));
             for fd in std::fs::read_dir(format!("/proc/{}/fd", bystander.id()))? {
                 let fd = fd?;
                 let stdio = ["0", "1", "2"].contains(&fd.file_name().to_string_lossy().as_ref());
