@@ -1,18 +1,22 @@
-//! An append-only native-helper request carrying one same-host monotonic expiry. It preserves
-//! the original managed request bytes and parser rather than creating a second command grammar.
+//! An append-only native-helper request carrying one same-host monotonic expiry, or none where its
+//! client has no deadline of its own (the review's C-9: its helper's waits then follow its connection).
+//! It preserves the original managed request bytes and parser rather than creating a second command
+//! grammar.
 use super::*;
 
 const KIND: u16 = 0x0012;
+/// The same request with no expiry: its own kind, so a timed request's bytes keep their meaning.
+const FOLLOWING: u16 = 0x0016;
 const EXPIRY: usize = size_of::<u64>() + size_of::<u32>();
 pub const MAX_MESSAGE: usize = super::MAX_MESSAGE + HEADER_BYTES + EXPIRY + size_of::<u32>();
 
 pub fn encode(
     version: u16,
     id: u64,
-    expires: Duration,
+    expires: Option<Duration>,
     request: &Request,
 ) -> Result<Vec<u8>, Fault> {
-    if expires.is_zero() || expires == Duration::MAX {
+    if expires.is_some_and(|expires| expires.is_zero() || expires == Duration::MAX) {
         return Err(invalid("native request monotonic expiry"));
     }
     check_request(request)?;
@@ -22,9 +26,14 @@ pub fn encode(
     };
     put_request(&mut inner, version, id, request)?;
     encode_bounded(MAX_MESSAGE, |out| {
-        header(out, version, KIND, id)?;
-        u64(out, expires.as_secs())?;
-        u32(out, expires.subsec_nanos())?;
+        match expires {
+            Some(expires) => {
+                header(out, version, KIND, id)?;
+                u64(out, expires.as_secs())?;
+                u32(out, expires.subsec_nanos())?;
+            }
+            None => header(out, version, FOLLOWING, id)?,
+        }
         u32(
             out,
             u32::try_from(inner.bytes).map_err(|_| invalid("bounded native request bytes"))?,
@@ -33,7 +42,7 @@ pub fn encode(
     })
 }
 
-pub fn read(bytes: &[u8], fds: usize) -> Result<(u16, u64, Duration, Request), Fault> {
+pub fn read(bytes: &[u8], fds: usize) -> Result<(u16, u64, Option<Duration>, Request), Fault> {
     if bytes.len() > MAX_MESSAGE {
         return Err(Fault::Oversized {
             bytes: bytes.len(),
@@ -41,22 +50,28 @@ pub fn read(bytes: &[u8], fds: usize) -> Result<(u16, u64, Duration, Request), F
         });
     }
     let (mut input, version, kind, id) = super::super::header(bytes)?;
-    if kind != KIND {
-        return Err(Fault::Kind {
-            kind,
-            version,
-            expected: "a bounded native helper request",
-        });
-    }
-    let seconds = input.u64()?;
-    let nanos = input.u32()?;
-    if nanos >= 1_000_000_000 {
-        return Err(invalid("native expiry nanoseconds"));
-    }
-    let expires = Duration::new(seconds, nanos);
-    if expires.is_zero() || expires == Duration::MAX {
-        return Err(invalid("native request monotonic expiry"));
-    }
+    let expires = match kind {
+        KIND => {
+            let seconds = input.u64()?;
+            let nanos = input.u32()?;
+            if nanos >= 1_000_000_000 {
+                return Err(invalid("native expiry nanoseconds"));
+            }
+            let expires = Duration::new(seconds, nanos);
+            if expires.is_zero() || expires == Duration::MAX {
+                return Err(invalid("native request monotonic expiry"));
+            }
+            Some(expires)
+        }
+        FOLLOWING => None,
+        _ => {
+            return Err(Fault::Kind {
+                kind,
+                version,
+                expected: "a bounded native helper request",
+            });
+        }
+    };
     let body = input.bytes()?;
     let (inner_version, inner_id, request) = read_request(body, fds)?;
     if version != inner_version || id != inner_id {
@@ -95,8 +110,11 @@ mod tests {
     fn timed_native_request_keeps_expiry_and_exact_legacy_body() {
         let request = control();
         let expires = Duration::new(19, 23);
-        let bytes = encode(VERSION, 29, expires, &request).unwrap();
-        assert_eq!(read(&bytes, 0).unwrap(), (VERSION, 29, expires, request));
+        let bytes = encode(VERSION, 29, Some(expires), &request).unwrap();
+        assert_eq!(
+            read(&bytes, 0).unwrap(),
+            (VERSION, 29, Some(expires), request)
+        );
         let original = encode_request(VERSION, 29, &control()).unwrap();
         assert!(bytes.ends_with(&original));
         assert!(read(&original, 0).is_err());
@@ -105,8 +123,8 @@ mod tests {
         for size in 0..bytes.len() {
             assert!(read(&bytes[..size], 0).is_err());
         }
-        assert!(encode(VERSION, 29, Duration::ZERO, &control()).is_err());
-        assert!(encode(VERSION, 29, Duration::MAX, &control()).is_err());
+        assert!(encode(VERSION, 29, Some(Duration::ZERO), &control()).is_err());
+        assert!(encode(VERSION, 29, Some(Duration::MAX), &control()).is_err());
         let mut mismatched = bytes;
         mismatched[HEADER_BYTES + EXPIRY + size_of::<u32>() + 8
             ..HEADER_BYTES + EXPIRY + size_of::<u32>() + 16]

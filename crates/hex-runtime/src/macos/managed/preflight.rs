@@ -241,7 +241,6 @@ mod tests {
                 dir.join("hex"),
                 dir.join("helper.sock"),
                 dir.join("helper.receipt"),
-                std::time::Duration::from_secs(1),
             )
             .unwrap(),
         )

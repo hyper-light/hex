@@ -628,9 +628,9 @@ Hex's tests of the channel, each citing its ID:
   not ready is followed to its answer, never stopped and booted again; it is refused only at its end, its VM's stall
   as Shards judges it, or a refusal of its own, and a W* past any monotonic deadline is refused by type before
   anything boots (`hex_runtime::guest::GuestRuntime`). Its answer, however late, is the boot's sample, and W* rises to
-  it. No record bounds it, nor a managed create's or attach's, which follows its guest too: records.tsv is read now
-  only for a GPU create's budget, owed until Shards' GPU report takes no deadline, and the macOS managed helper's
-  control patience, owed next (the rest of C-9).
+  it. No record bounds it, nor a managed create's or attach's, which follows its guest too, nor the macOS managed
+  helper's asks (`managed.helper.rpc`): records.tsv is read now only for a GPU create's budget, owed until Shards' GPU
+  report takes no deadline (the rest of C-9).
 - HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
   learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
 - HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through

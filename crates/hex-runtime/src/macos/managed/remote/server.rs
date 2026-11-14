@@ -47,7 +47,8 @@ impl PendingReply {
             detail: text.into_bytes(),
         })
     }
-    fn send(&self, connection: BorrowedFd<'_>, until: Instant) -> Result<(), Refusal> {
+    /// Sends the rejection on `connection`, following it: its peer's read, or the connection's end.
+    fn send(&self, connection: BorrowedFd<'_>) -> Result<(), Refusal> {
         rustix::net::sockopt::set_socket_nosigpipe(connection, true)
             .map_err(|error| Refusal::os("protecting retained helper rejection", error))?;
         let bytes = protocol::rejected::encode(VERSION, 0, &self.detail()?)
@@ -57,7 +58,7 @@ impl PendingReply {
             &bytes,
             &[],
             protocol::rejected::MAX_MESSAGE,
-            Some(until),
+            None,
         )
         .map_err(frame::Failure::refusal)
     }
@@ -129,7 +130,7 @@ fn run_owned(
             &ready,
             &[],
             protocol::MAX_MESSAGE,
-            Some(helper.until(None)?),
+            None,
         )
         .map_err(frame::Failure::refusal)?;
         Ok(listener)
@@ -147,7 +148,7 @@ fn run_owned(
             ) {
                 failure.failed(error);
             }
-            if let Err(error) = failure.send(rustix::stdio::stdout(), helper.until(None)?) {
+            if let Err(error) = failure.send(rustix::stdio::stdout()) {
                 failure.failed(error);
             }
             return Err(failure.refusal());
@@ -169,7 +170,7 @@ fn run_owned(
         {
             failure.failed(error);
         }
-        if let Err(error) = failure.send(startup.as_fd(), helper.until(None)?) {
+        if let Err(error) = failure.send(startup.as_fd()) {
             failure.failed(error);
         }
         if publisher.published() {
@@ -202,7 +203,7 @@ fn run_owned(
             if !matches!(same, Ok(true)) {
                 continue;
             }
-            match failure.send(connection.as_fd(), helper.until(None)?) {
+            match failure.send(connection.as_fd()) {
                 Ok(()) => pending = None,
                 Err(error) => failure.failed(error),
             }
@@ -217,7 +218,7 @@ fn run_owned(
             Entry::Command,
         ) {
             let mut failure = PendingReply::new(error);
-            match failure.send(connection.as_fd(), helper.until(None)?) {
+            match failure.send(connection.as_fd()) {
                 Ok(()) => {}
                 Err(error) => {
                     failure.failed(error);
@@ -286,16 +287,13 @@ fn serve(
     };
     rustix::net::sockopt::set_socket_nosigpipe(connection, true)
         .map_err(|error| Refusal::os("protecting helper connection disconnect", error))?;
-    let until = helper.until(None)?;
-    let (bytes, descriptors) = match frame::receive(
-        connection.as_fd(),
-        protocol::timed::MAX_MESSAGE,
-        Some(until),
-    ) {
-        Ok(received) => received,
-        Err(frame::Failure::Closed) if command => return Ok(()),
-        Err(failure) => return Err(failure.refusal()),
-    };
+    // Its client's ask, read as its connection gives it: the ask, or the connection's end (the review's C-9).
+    let (bytes, descriptors) =
+        match frame::receive(connection.as_fd(), protocol::timed::MAX_MESSAGE, None) {
+            Ok(received) => received,
+            Err(frame::Failure::Closed) if command => return Ok(()),
+            Err(failure) => return Err(failure.refusal()),
+        };
     peer(connection, peer_id)?;
     if let Ok((version, id, wanted)) = protocol::census::read_request(&bytes, descriptors.len()) {
         if matches!(entry, Entry::FirstPrepare(_)) {
@@ -315,7 +313,7 @@ fn serve(
             &[],
             protocol::census::message_bound(crate::MAX_BOXES)
                 .map_err(|_| native_allocation(crate::MAX_BOXES))?,
-            Some(until),
+            None,
         )
         .map_err(frame::Failure::refusal);
     }
@@ -344,7 +342,7 @@ fn serve(
             &answer,
             &[],
             protocol::MAX_MESSAGE.max(protocol::rejected::MAX_MESSAGE),
-            Some(until),
+            None,
         )
         .map_err(frame::Failure::refusal);
     }
@@ -369,13 +367,14 @@ fn serve(
             &answer,
             &[],
             protocol::response::MAX_ANSWER,
-            Some(until),
+            None,
         )
         .map_err(frame::Failure::refusal);
     }
     let (version, id, expires, request) = protocol::timed::read(&bytes, descriptors.len())
         .map_err(|_| super::super::configuration("invalid bounded native request"))?;
-    let until = deadline(expires, helper.config.rpc_budget)?.min(until);
+    // Its work ends no later than its caller's deadline, where it carries one; with none it follows its connection.
+    let until = expires.map(deadline).transpose()?;
     if matches!(entry, Entry::FirstPrepare(_))
         && !matches!(&request, protocol::Request::Prepare { .. })
     {
@@ -407,7 +406,7 @@ fn serve(
                 &bytes,
                 &[],
                 protocol::rejected::MAX_MESSAGE,
-                Some(until),
+                until,
             ) {
                 Ok(()) => Ok(()),
                 Err(error) => {
@@ -447,7 +446,7 @@ fn serve(
         &bytes,
         borrowed,
         protocol::MAX_MESSAGE,
-        Some(until),
+        until,
     )
     .map_err(frame::Failure::refusal)
 }
@@ -574,9 +573,9 @@ fn dispatch(
     runtime: &MacRuntime,
     request: &protocol::Request,
     descriptors: Vec<OwnedFd>,
-    until: Instant,
+    until: Option<Instant>,
 ) -> Result<(protocol::Answer, Option<OwnedFd>), Refusal> {
-    if until <= Instant::now() {
+    if until.is_some_and(|until| until <= Instant::now()) {
         return Err(super::super::configuration(
             "native helper request expired before effects",
         ));

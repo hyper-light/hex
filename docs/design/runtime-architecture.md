@@ -2528,8 +2528,10 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   and attach follows its guest (the review's C-9, 2026-11-14): its budget has no deadline (`managed::Budget::following`),
   and its native launch, first relay dial and join each wait within their own W* and past it follow their party. So
   does the guest's own boot: within W*, the slowest boot its node has seen, past it told and followed by its VM's life
-  through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34). The macOS managed helper's
-  control patience still reads the record, owed next (the review's C-9 (c3)).
+  through Shards' `connect_while_runs`, before any following from its start (HEX-GUEST-34). So do the macOS managed
+  helper's asks: its config carries no control patience, an ask with no caller's deadline carries no expiry (its
+  request's own kind), and its answer waits within W*, the slowest seen, and past it follows the helper's connection
+  (`managed.helper.rpc`); the helper's own waits follow their client's connection (the review's C-9 (c3)).
   hex-api's conformance suite, compiled outside `#[cfg(test)]`, seeded
   `conformance::PATIENCE` and `ENDS` from per-class end records until 2026-11-13; it now follows each program to its
   end (`conformance::end_of`, `ENDS` measuring), and each differential reading the runtime's party. `Patience::seeded`,

@@ -6,10 +6,6 @@ use hex_core::record::{PoolRecord, RECORD_VERSION};
 use std::num::NonZeroU64;
 
 pub(super) fn helper(directory: &Path) -> Arc<Helper> {
-    helper_with(directory, Duration::from_secs(1))
-}
-/// The same helper, each request bounded by `rpc`.
-fn helper_with(directory: &Path, rpc: Duration) -> Arc<Helper> {
     // The helper's endpoint and receipt parents are private to its UID (0700).
     std::fs::set_permissions(
         directory,
@@ -21,7 +17,6 @@ fn helper_with(directory: &Path, rpc: Duration) -> Arc<Helper> {
             directory.join("hex"),
             directory.join("s"),
             directory.join("r"),
-            rpc,
         )
         .unwrap(),
         protocol::CpuControl {
@@ -279,7 +274,7 @@ pub(super) fn around_peer_read(fd: BorrowedFd<'_>, now: Read) {
 fn a_whole_reply_holds_wherever_the_helpers_close_lands_against_the_nodes_peer_reads() {
     for at in [Read::Before, Read::After] {
         let dir = tempfile::tempdir().unwrap();
-        let helper = helper_with(dir.path(), Duration::from_secs(60));
+        let helper = helper(dir.path());
         let pid = rustix::process::getpid().as_raw_nonzero().get();
         let own = ProcId {
             pid: u32::try_from(pid).unwrap(),
@@ -446,7 +441,6 @@ fn playing_helper(
             directory.path().join("hex"),
             directory.path().join("s"),
             directory.path().join("r"),
-            Duration::from_secs(60),
         )
         .unwrap(),
     )
