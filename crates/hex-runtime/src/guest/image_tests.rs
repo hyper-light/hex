@@ -12,6 +12,7 @@ use hex_api::{
     Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, NodeRun, NodeVmPhase, Runtime,
 };
 use hex_core::record::NodeVmRecord;
+use hex_testkit::waits::follow::{self, Party};
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
     Receiving, StartedFrom, VcpuTime,
@@ -836,17 +837,55 @@ static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reap
 /// alike.
 static HOST_GONE_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_host_gone_shown");
 
-/// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
+/// Waits on `wait`, its fact's own patience, for box `id` to show `state`, by the box's life in the runtime (the review's
+/// C-5): ended once the runtime has no such box. A look: the runtime tells no event as a box's state moves, its inspect
+/// read, which the party reads too rather than inspecting again (an inspect may take a boot's answer).
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
-    let mut last = None;
-    hex_testkit::waits::until(wait, &format!("{id} shown {state:?}"), || {
-        let info = runtime.inspect(id).unwrap();
-        let reached = info.state == state;
-        last = Some(info);
-        reached
-    })
+    let last = std::cell::RefCell::new(None);
+    let gone = std::cell::Cell::new(false);
+    follow::until(
+        wait,
+        &format!("{id} shown {state:?}"),
+        || {
+            if gone.get() {
+                Party::Ended
+            } else {
+                Party::Live
+            }
+        },
+        || match runtime.inspect(id) {
+            Ok(info) => {
+                let reached = info.state == state;
+                *last.borrow_mut() = Some(info);
+                reached
+            }
+            Err(Refusal::NoSuchBox(_)) => {
+                gone.set(true);
+                false
+            }
+            Err(why) => panic!("inspecting {id}: {why}"),
+        },
+    )
     .unwrap();
-    last.unwrap()
+    last.into_inner().unwrap()
+}
+
+/// A thread the test spawned, as the party of a wait on what it makes: ended once it has finished.
+fn spawned<T>(thread: &std::thread::ScopedJoinHandle<'_, T>) -> Party {
+    if thread.is_finished() {
+        Party::Ended
+    } else {
+        Party::Live
+    }
+}
+
+/// Box `id`, as the party of a wait on what the runtime's own threads make for it: live while its record is kept.
+fn kept(owner: &Owner, id: &BoxId) -> Party {
+    if record(owner, id).is_some() {
+        Party::Live
+    } else {
+        Party::Ended
+    }
 }
 
 /// Joint plan step 12: do create, then start, an image VM of two vCPUs and 256 MiB with no command.
@@ -2129,9 +2168,10 @@ fn w12_a_delete_over_a_boot_follows_it_and_answers_no_use_where_its_run_never_st
     let diagnostics = record(&owner, &id).unwrap().diagnostics.unwrap();
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
-        hex_testkit::waits::until(
+        follow::until(
             &DELETE_FOLLOWS_UNSTARTED,
             "the delete following the boot",
+            || spawned(&deleting),
             || {
                 deleting.is_finished()
                     || record(&owner, &id).is_some_and(|r| r.phase == Phase::Deleting)
@@ -2193,9 +2233,12 @@ fn w12_a_delete_over_a_boot_held_forever_stops_it_and_answers_no_use() {
     ));
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete_with_host_use(&id));
-        hex_testkit::waits::until(&DELETE_STOPS_BOOT, "the delete following the boot", || {
-            deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none()
-        })
+        follow::until(
+            &DELETE_STOPS_BOOT,
+            "the delete following the boot",
+            || spawned(&deleting),
+            || deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none(),
+        )
         .unwrap();
         images.poke();
         if images.stopped.load(Ordering::SeqCst) == 0 && !deleting.is_finished() {
@@ -2244,9 +2287,12 @@ fn w12_a_delete_of_a_box_whose_boot_answered_stops_its_run_and_answers_its_final
         })
     ));
     images.gate(Gate::Open);
-    hex_testkit::waits::until(&DELETE_FOLLOWS_STARTING, "the boot answered", || {
-        images.answered.load(Ordering::SeqCst) == 1
-    })
+    follow::until(
+        &DELETE_FOLLOWS_STARTING,
+        "the boot answered",
+        || kept(&owner, &id),
+        || images.answered.load(Ordering::SeqCst) == 1,
+    )
     .unwrap();
     let last = runtime.delete_with_host_use(&id).unwrap().unwrap();
     assert_eq!(images.stopped.load(Ordering::SeqCst), 0);
@@ -2281,9 +2327,12 @@ fn w12_a_delete_follows_its_stop_past_the_stops_w_star() {
     images.run.hold_stops(true);
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
-        hex_testkit::waits::until(&DELETE_FOLLOWS_STOP, "the delete's stop asked", || {
-            deleting.is_finished() || images.run.stops.load(Ordering::SeqCst) == 1
-        })
+        follow::until(
+            &DELETE_FOLLOWS_STOP,
+            "the delete's stop asked",
+            || spawned(&deleting),
+            || deleting.is_finished() || images.run.stops.load(Ordering::SeqCst) == 1,
+        )
         .unwrap();
         images.run.hold_stops(false);
         deleting.join().unwrap()
@@ -2330,18 +2379,20 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
     images.abandon.store(true, Ordering::SeqCst);
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
-        hex_testkit::waits::until(
+        follow::until(
             &DELETE_FOLLOWS_ABANDONED,
             "the delete following the boot",
+            || spawned(&deleting),
             || deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none(),
         )
         .unwrap();
         // The wake the test never opened, its stop come: the held boot looks again and stays held, the delete following.
         let looked = images.woken.load(Ordering::SeqCst);
         images.poke();
-        hex_testkit::waits::until(
+        follow::until(
             &DELETE_FOLLOWS_ABANDONED,
             "the held boot looking again",
+            || spawned(&deleting),
             || images.woken.load(Ordering::SeqCst) > looked,
         )
         .unwrap();
@@ -2386,9 +2437,12 @@ fn original_a_boot_past_its_learned_w_star_goes_on_to_its_run() {
             ..
         })
     ));
-    hex_testkit::waits::until(&ASKED, "the model's boot asked", || {
-        !images.patience.lock().unwrap().is_empty()
-    })
+    follow::until(
+        &ASKED,
+        "the model's boot asked",
+        || kept(&owner, &id),
+        || !images.patience.lock().unwrap().is_empty(),
+    )
     .unwrap();
     assert_eq!(
         *images.patience.lock().unwrap(),
@@ -3064,9 +3118,12 @@ fn started_over_a_held_boot(
 ) -> Result<BoxInfo, Refusal> {
     std::thread::scope(|scope| {
         let asking = scope.spawn(|| runtime.started(id));
-        hex_testkit::waits::until(wait, "started following the boot", || {
-            asking.is_finished() || image_waits(runtime).started.deadline().is_none()
-        })
+        follow::until(
+            wait,
+            "started following the boot",
+            || spawned(&asking),
+            || asking.is_finished() || image_waits(runtime).started.deadline().is_none(),
+        )
         .unwrap();
         images.gate(Gate::Open);
         asking.join().unwrap()
@@ -4472,7 +4529,7 @@ const NEVER_STARTED: &str =
 #[test]
 fn b3_started_over_a_run_that_failed_as_it_booted_answers_its_failure() {
     let images = ModelImages::new();
-    let (runtime, _owner) = model_runtime(&images, waits());
+    let (runtime, owner) = model_runtime(&images, waits());
     let first = runtime.create(spec("b3-first", None)).unwrap().id;
     runtime.start(&first).unwrap();
     runtime.delete(&first).unwrap();
@@ -4491,9 +4548,12 @@ fn b3_started_over_a_run_that_failed_as_it_booted_answers_its_failure() {
     ));
     *images.run.end.lock().unwrap() = Some(RunEnd::Failed(NEVER_STARTED.to_owned()));
     images.gate(Gate::Open);
-    hex_testkit::waits::until(&B3_HELD_BOOT_ANSWERED, "the held boot answered", || {
-        images.answered.load(Ordering::SeqCst) == 2
-    })
+    follow::until(
+        &B3_HELD_BOOT_ANSWERED,
+        "the held boot answered",
+        || kept(&owner, &id),
+        || images.answered.load(Ordering::SeqCst) == 2,
+    )
     .unwrap();
     let started = runtime.started(&id);
     assert!(

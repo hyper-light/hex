@@ -179,12 +179,18 @@ fn stop_and_delete(client: &Client, id: &BoxId) {
         Err(why) => panic!("{id}'s KILL: {why:?}"),
     }
     let mut ended = None;
-    hex_testkit::waits::until(&KILLED, &format!("{id} ended by its KILL"), || {
-        let shown = client.inspect(id).unwrap();
-        let reached = shown.state == BoxState::Empty;
-        ended = Some(shown);
-        reached
-    })
+    // A look: the node tells no event as a stop ends. Its party, the box, ends the wait in the fact itself.
+    hex_testkit::waits::follow::until(
+        &KILLED,
+        &format!("{id} ended by its KILL"),
+        || hex_testkit::waits::follow::Party::Live,
+        || {
+            let shown = client.inspect(id).unwrap();
+            let reached = shown.state == BoxState::Empty;
+            ended = Some(shown);
+            reached
+        },
+    )
     .unwrap();
     let ended = ended.unwrap();
     assert_eq!(
@@ -243,9 +249,12 @@ fn handed_over<P>(
     mut shown: impl FnMut() -> Result<(BoxState, Option<Exit>, Option<String>), Refusal>,
 ) -> Result<(P, u64), String> {
     let mut answer = None;
-    let asks = hex_testkit::waits::until(
+    // A look: the node tells no event as a member is handed over, asked again. Its party, the box, ends the wait in
+    // the fact itself (a box that ends first, or any other refusal).
+    let asks = hex_testkit::waits::follow::until(
         &MEMBER_HANDED_OVER,
         &format!("{id}'s member handed over"),
+        || hex_testkit::waits::follow::Party::Live,
         || {
             answer = Some(match ask() {
                 Err(Refusal::Lifecycle {
@@ -394,9 +403,11 @@ fn outcome_of(report: &Report, label: &str) -> Outcome {
 /// answering party while that lives); says the answer and how many looks it took.
 fn answered_at(client: &Client, id: &BoxId, at: SocketAddr) -> (String, u64) {
     let mut answer = String::new();
-    let looks = hex_testkit::waits::until(
+    // A look: each is one connection read to its end. Its party, the VM, ends the wait in the fact itself.
+    let looks = hex_testkit::waits::follow::until(
         &MEMBER_ANSWERED,
         &format!("the probe's answer at {at}"),
+        || hex_testkit::waits::follow::Party::Live,
         || {
             answer.clear();
             if TcpStream::connect(at)

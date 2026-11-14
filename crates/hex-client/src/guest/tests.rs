@@ -2691,7 +2691,7 @@ mod token_end {
 /// An output stream's own half (joint plan step 4: ROOT's decision of 2026-11-12, 1-2).
 mod output_end {
     use hex_core::patience::Patience;
-    use hex_testkit::waits::until;
+    use hex_testkit::waits::follow;
 
     use super::*;
 
@@ -2727,12 +2727,12 @@ mod output_end {
             send_answer(&mut conn, h.id, &Answer::Started { pid: 9 });
             check.recv().unwrap();
             for (which, s) in &mut named {
-                s.set_nonblocking(true).unwrap();
-                until(&ENDED, "an output connection's End after its name", || {
-                    matches!(s.read(&mut [0u8; 1]), Ok(0))
-                })
-                .unwrap();
-                s.set_nonblocking(false).unwrap();
+                // A read that ends on the connection's own event: the End after its name, or the client's close.
+                let ended =
+                    follow::whole(&ENDED, "an output connection's End after its name", || {
+                        s.read(&mut [0u8; 1])
+                    });
+                assert!(matches!(ended, Ok(0)), "{ended:?}");
                 s.write_all(format!("{which:?}\n").as_bytes()).unwrap();
             }
             drop(named);
