@@ -427,7 +427,8 @@ impl<V: CapacityView + Send + 'static> Server<V> {
                     continue;
                 }
                 // The answer, and the hints its change owes the other links, handed to the writers under the view's
-                // lock, in the order decided; then this link waits for its own answer to go before it reads on.
+                // lock, in the order decided, the others' even where this link's writer has ended; then this link
+                // waits for its own answer to go before it reads on.
                 let count = {
                     let Ok(mut view) = self.view.lock() else {
                         return Some(Why::Gone);
@@ -436,13 +437,14 @@ impl<V: CapacityView + Send + 'static> Server<V> {
                     let Ok(answer) = view.hear(id, msg) else {
                         return Some(Why::Gone);
                     };
-                    let Ok(count) = writer.answer(answer) else {
-                        return None;
-                    };
+                    let count = writer.answer(answer);
                     if self.owed(&mut view).is_err() {
                         return Some(Why::Gone);
                     }
                     count
+                };
+                let Ok(count) = count else {
+                    return None;
                 };
                 if writer.answered(count).is_err() {
                     return None;
