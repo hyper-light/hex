@@ -113,4 +113,24 @@ mod tests {
             .copy_from_slice(&31u64.to_le_bytes());
         assert!(read(&mismatched, 0).is_err());
     }
+
+    /// The review's C-9 (c3): a request whose client has no deadline carries no expiry, in its own kind, and reads back
+    /// with none, its body the same request's bytes; a timed request's bytes keep their kind and meaning.
+    #[test]
+    fn c9_a_request_with_no_deadline_carries_no_expiry_in_its_own_kind() {
+        let request = control();
+        let following = encode(VERSION, 31, None, &request).unwrap();
+        assert_eq!(read(&following, 0).unwrap(), (VERSION, 31, None, control()));
+        let original = encode_request(VERSION, 31, &control()).unwrap();
+        assert!(following.ends_with(&original));
+        assert_eq!(
+            following.len() + EXPIRY,
+            encode(VERSION, 31, Some(Duration::new(1, 0)), &control())
+                .unwrap()
+                .len()
+        );
+        for size in 0..following.len() {
+            assert!(read(&following[..size], 0).is_err());
+        }
+    }
 }
