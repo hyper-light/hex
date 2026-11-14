@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::demand::Learned;
+use hex_core::patience::Piece;
 use hex_core::seed::{Answer, Create, Failed, Fixed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked, first_readable};
@@ -399,7 +400,15 @@ impl CreatePool {
         let patience = CLAIMS.deadline();
         let past = || {
             if let Some(window) = patience {
-                CLAIMS.ran_out(window);
+                CLAIMS.ran_out(
+                    window,
+                    began.elapsed(),
+                    &[
+                        Piece::Kind("parked init pid "),
+                        Piece::Pid(i64::from(pid)),
+                        Piece::Kind(", by its sync pipe, claim socket and pidfd"),
+                    ],
+                );
             }
         };
         match claim_round(
@@ -479,7 +488,15 @@ impl Parker {
                 let patience = PARKS.deadline();
                 parked.wait_parked(patience, || {
                     if let Some(window) = patience {
-                        PARKS.ran_out(window);
+                        PARKS.ran_out(
+                            window,
+                            began.elapsed(),
+                            &[
+                                Piece::Kind("parked init pid "),
+                                Piece::Pid(i64::from(pid)),
+                                Piece::Kind(", by its socket and pidfd"),
+                            ],
+                        );
                     }
                 })?;
                 PARKS.answered(began.elapsed());

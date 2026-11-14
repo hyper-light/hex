@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 /// `lifecycle.exec`: a program's run to its end (18.262 ms: `oci_box`'s program run in the suites, of 272, above the
 /// debug arm's 18.003 ms of 10,000), here for a program a test runs as a child of its own (`std::process::Child`)
@@ -88,7 +88,7 @@ impl std::fmt::Display for Waited {
 /// bound, once, and the wait goes on (R03 for tests: a wait for a fact waits for the answer); the answer, however late,
 /// is the sample W* rises to. Never refused: its `Err` is no longer given (the fact's name is for [`follow`]'s waits,
 /// which do refuse, at their party's end or stall).
-pub fn until(wait: &Patience, _what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
+pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
     census();
     let began = Instant::now();
     let mut patience = wait.deadline();
@@ -102,8 +102,12 @@ pub fn until(wait: &Patience, _what: &str, mut fact: impl FnMut() -> bool) -> Re
         if let Some(after) = patience
             && began.elapsed() >= after
         {
-            // No sample (Karn's point), but the census is told the fact took longer than its bound; the wait goes on.
-            wait.ran_out(after);
+            // No sample (Karn's point), but the run-out is told; the wait goes on.
+            wait.ran_out(
+                after,
+                began.elapsed(),
+                &[Piece::Kind("the test's looks for "), Piece::Name(what)],
+            );
             patience = None;
         }
         std::thread::yield_now();
@@ -130,7 +134,11 @@ pub fn within<T>(wait: &Patience, call: impl FnOnce(Option<Instant>) -> T) -> T 
     if let Some(after) = patience
         && took >= after
     {
-        wait.ran_out(after);
+        wait.ran_out(
+            after,
+            took,
+            &[Piece::Kind("the test's call, given no deadline")],
+        );
     }
     wait.answered(took);
     got

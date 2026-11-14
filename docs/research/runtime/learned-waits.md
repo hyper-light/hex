@@ -57,8 +57,10 @@ it.
 
 ## The sites the API serves (2026-11-13)
 
-Each production wait is `Patience::measuring`; where it has no bound it follows its party. What each follows, and what
-is wired:
+Each production wait is `Patience::measuring`; where it has no bound it follows its party. Its name is the `wait=` of
+the line its run-out is told by on the process's log, `hex.wait event=ran_out wait=<name> w_star_ns=<W*>
+waited_ns=<how long> party=<a JSON string>`, integers in nanoseconds, which kiln counts by wait (ROOT and kiln's metrics
+owner, 2026-11-14): the names below are stable. What each follows, and what is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
@@ -69,6 +71,7 @@ is wired:
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W*, the run-out told as W* passes; on the supervising thread, which every box shares, within W* alone, a run's box past it followed on a thread of its own (the review's E-3) |
 | `node.run_said` (hex-node `supervise::run`) | the claimer removing a run's box | its word, which comes on every path, its drop saying it stopped where it unwound | none: a local site | liveness alone past W* (the review's E-3) |
+| `runtime.run_made`, `runtime.run_said` (hex-runtime `run`, macOS and Windows) | a run's setup making its box; the claimer removing it | the setup's move or the claimer's word, each coming on every path, a drop saying its holder stopped where it unwound | none: a local site | liveness alone past W* (the review's E-11) |
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
 | `guest.stage` | the guest's relay | the connection's end or reset, its timeouts let go past W* | none: a local site | liveness alone past W* |
 | `client.answer.*`, `client.guest.answer.*`, `client.quic.answer.*` | the node agent or guest relay | the connection's end or reset | the peer's CPU time or bytes | liveness; progress owed |
@@ -81,6 +84,9 @@ is wired:
 | `oci.delete.exit`, `oci.delete.emptying`, `oci.shim.exit` (hex-runtime `linux::oci::run`) | a killed init with no cgroup; a killed container's cgroup; a create's shim once its container is ready | the init's pidfd; the cgroup's `cgroup.events`; the shim's pidfd, which it exits by itself, never killed at a time | none: a local site | liveness alone past W* (the review's (c): each was 10 s) |
 | `boxrun.emptying` (hex-cli `box_run`) | a `hex box run` box whose strays it killed | its `cgroup.events` | none: a local site | liveness alone past W*, only after a kill that went (the review's (c): it was 10 s) |
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)); a Firecracker VM's and observer's stop too (`guest::wait_stopped`; A-13, 2026-11-14: they waited the configured `stop_ms`, so census retirement failed past it), an observer's under a caller's deadline to that deadline |
+| `client.guest.link.dial` (hex-client `guest::shards::ShardsLink::dial_following`) | the guest's VM, a dial to one of its ports with no caller's deadline | Shards' connector's look at its VM before each CONNECT and after | none | liveness alone past W*; each attempt still cut at the link's bound, a later answer discarded (the review's D-3, owed) |
+| `client.guest.offered.connect` (hex-client `guest::connect_following`, Windows) | a borrowed guest's stdio CONNECT, waiting for its OK, with no caller's deadline | Shards' borrowed CONNECT's own deadline passing, made again | none | liveness alone past W*; each attempt cut at the link's setup bound (the review's D-3, owed) |
+| `store.node_vm_owner` (hex-node `store::node_vm::follow_owner`) | a node VM row's owner, a node process | its lock, which a thread of its own takes as the owner ends | none: a local site | liveness alone past W*, the run-out told |
 | `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
 **What each local site's life is (2026-11-13).** Past W*, with the run-out told, each waits for its party's life

@@ -221,10 +221,9 @@ struct Lab {
 
 impl Lab {
     fn new() -> Self {
-        // A grant boots the pool's controller and dials its guest, which the client's learned bound on
-        // an answer doesn't cover: every client wait here measures, and each call carries this test's
-        // own bound instead (`capacity_before`, [`within`]).
-        hex_core::patience::measure_all();
+        // A grant boots the pool's controller and dials its guest: a client wait past its W* tells its run-out
+        // and follows its connection (decision 9), and each call carries this test's own bound
+        // (`capacity_before`, [`within`]).
         let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache");
         std::fs::create_dir_all(&cache).unwrap();
         let dir = tempfile::Builder::new()
