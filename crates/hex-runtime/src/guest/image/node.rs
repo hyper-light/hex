@@ -463,10 +463,19 @@ pub(super) fn ready_line(
 /// Writes event `line` to this process's stderr, the node's log, as the node VM store's lines go: a write that fails
 /// has no other place to say it.
 fn tell(line: &str) {
+    #[cfg(test)]
+    TOLD.with(|told| told.borrow_mut().push(line.to_owned()));
     use std::io::Write as _;
     let _ = std::io::stderr()
         .lock()
         .write_all(format!("{line}\n").as_bytes());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The lines this thread has told ([`tell`]), as its tests read them.
+    pub(in crate::guest) static TOLD: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A call about node VM `run` that isn't running here.
