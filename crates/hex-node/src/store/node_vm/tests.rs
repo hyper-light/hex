@@ -172,6 +172,8 @@ fn role(role: &str, dir: &Path) -> std::process::Command {
 
 /// These cases' other processes, run alone where `HEX_NODE_VM_ROLE` names one (an ordinary run passes at once):
 /// - `owner`, a node that runs node VM 7: it writes its row Booting, so it holds its lock, then ends;
+/// - `ending owner`, the same, its row then Ready, saying so; once its stdin says `end`, it puts why its last resort
+///   ends the VM into the row and writes it Ended, letting its lock go, then ends;
 /// - `holding owner`, the same, then starts a child of its own that outlives it, which on Unix holds a descriptor of
 ///   its lock file's open file description, as a child forked without an exec would; then reads its row back, as a
 ///   node does, says so, and ends when its stdin ends;
@@ -206,6 +208,33 @@ fn node_vm_role() {
     let row = diagnosed(&dir, 7, NodeVmPhase::Booting);
     store.put_node_vm(&row).unwrap();
     if role == "owner" {
+        return;
+    }
+    if role == "ending owner" {
+        let ready = NodeVmRecord {
+            phase: NodeVmPhase::Ready,
+            ..row.clone()
+        };
+        store.put_node_vm(&ready).unwrap();
+        let mut out = std::io::stdout().lock();
+        out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
+        out.flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        assert_eq!(line, "end\n");
+        store
+            .update_node_vm(&row.run, |row| {
+                row.last_resort = Some(end_of(&row.run));
+                true
+            })
+            .unwrap();
+        store
+            .put_node_vm(&NodeVmRecord {
+                phase: NodeVmPhase::Ended,
+                exit: Some(Exit::Signal(9)),
+                ..ready
+            })
+            .unwrap();
         return;
     }
     let mut child = role_child(&dir);
@@ -364,6 +393,55 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
         || dir.path().join("bye").exists(),
     )
     .unwrap();
+}
+
+/// The owner `role` names, started in `dir` and followed until it says it is ready: its stdin the test's to write.
+fn owner_ready(role_named: &str, dir: &Path) -> std::process::Child {
+    use std::io::BufRead;
+    let mut owner = role(role_named, dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = std::io::BufReader::new(owner.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            said.read_line(&mut line).unwrap(),
+            0,
+            "the owner ended unready"
+        );
+        if line.ends_with("HEX_NODE_VM_OWNER_READY\n") {
+            return owner;
+        }
+    }
+}
+
+/// The review's C-11 (AC-T7.4.1; joint plan step 39, place 1): a node's start lets a row go from what it reads under the
+/// row's lock, so an end its owner kept between the start's read of the rows and its taking of that lock is carried,
+/// never dropped. Do run a node that writes node VM 7's row Ready; start another, which reads the rows; then, before it
+/// takes the row's lock, have the first put why its last resort ends the VM into the row, write it Ended and end. Expect
+/// the row let go as Ended, its last-resort end read back, and the row gone.
+#[test]
+fn c11_a_row_its_owner_ended_after_the_starts_read_is_let_go_as_ended_its_end_carried() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let mut owner = owner_ready("ending owner", dir.path());
+    let mut ends = owner.stdin.take().unwrap();
+    SETTLE_READ.with(|then| {
+        *then.borrow_mut() = Some(Box::new(move || {
+            ends.write_all(b"end\n").unwrap();
+            drop(ends);
+            assert!(owner.wait().unwrap().success());
+        }));
+    });
+    let store = store_in(dir.path());
+    let settled = store.settle_node_vms().unwrap();
+    assert_eq!(
+        (settled.rows, settled.ends),
+        (vec![(run(7), NodeVmSettled::Ended)], vec![end_of(&run(7))])
+    );
+    assert_eq!(store.node_vm(&run(7)).unwrap(), None);
 }
 
 /// Joint plan step 39: do write node VM 7's row Ended, its end kept, then start a node. Expect the row let go, with its
