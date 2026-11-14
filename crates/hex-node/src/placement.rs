@@ -584,10 +584,16 @@ fn name(kind: &str, key: Key) -> String {
     format!("{kind}-{}-{}-{}", key.owner, key.epoch, key.seq)
 }
 
+/// What a driver's shell is told, once, as its core stops (the review's E-10): it ends its process, crash-only, and its
+/// next start recovers from the records (capacity-view.md CV11).
+pub type OnStop = Arc<dyn Fn(&Stop) + Send + Sync>;
+
 struct State {
     node: peer::Node,
     rows: Rows,
     stopped: Option<Stop>,
+    /// The shell's ear for the core's stop ([`Driver::on_stop`]).
+    on_stop: Option<OnStop>,
     admission: Option<Refusal>,
     /// The machine's capacity view, once opened (joint plan step 13).
     view: Option<view::View>,
@@ -808,6 +814,7 @@ impl Driver {
                 node,
                 rows,
                 stopped: None,
+                on_stop: None,
                 view: None,
                 facts: None,
                 admitted: None,
@@ -831,6 +838,20 @@ impl Driver {
 
     pub fn physical_id(&self, key: Key) -> Result<BoxId, Refusal> {
         physical_id(&self.namespace, key)
+    }
+
+    /// Tells `tell` as the core stops, once (the review's E-10), its shell's way to end its process crash-only; told at
+    /// once where the core has stopped already.
+    pub fn on_stop(&self, tell: OnStop) -> Result<(), Error> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Refusal::Broken("placement mutex poisoned".into()))?;
+        if let Some(why) = &state.stopped {
+            tell(why);
+        }
+        state.on_stop = Some(tell);
+        Ok(())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> {
@@ -1664,7 +1685,7 @@ impl Driver {
         let out = finish(&mut state, result, false)?;
         let (mut next, create) = collect(&mut state, out)?;
         if !create.is_empty() {
-            state.stopped = Some(bad("create recursively requested creation"));
+            stop(&mut state, bad("create recursively requested creation"));
             return Err(bad("unexpected nested creation").into());
         }
         if let Some(why) = refusal {
@@ -1933,12 +1954,23 @@ fn validate_backend(payload: &Payload, runtime: &Arc<dyn Runtime>) -> Result<(),
 }
 
 fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result<T, Error> {
-    result.map_err(|stop| {
-        if !(submit && matches!(stop, Stop::Full { .. })) {
-            state.stopped = Some(stop.clone());
+    result.map_err(|why| {
+        if !(submit && matches!(why, Stop::Full { .. })) {
+            stop(state, why.clone());
         }
-        Error::Core(stop)
+        Error::Core(why)
     })
+}
+
+/// The core stops, `why`: every operation refused from here, and its shell told, once, where it listens ([`OnStop`]).
+fn stop(state: &mut State, why: Stop) {
+    if state.stopped.is_some() {
+        return;
+    }
+    if let Some(tell) = &state.on_stop {
+        tell(&why);
+    }
+    state.stopped = Some(why);
 }
 
 /// The node's capacity view as its lane serves it (`hex_quic::capacity::Server`; joint plan step 13, CV9): this

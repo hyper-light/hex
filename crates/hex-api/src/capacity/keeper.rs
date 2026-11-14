@@ -9,7 +9,11 @@
 //! named `epoch` (its own epoch), `holder-<n>` (holder `n`'s epoch and name) and `res-<n>-<epoch>-<seq>`
 //! (a reservation's amounts), `n` a u32: at full width the grammar of the node's own records
 //! (`own-u32-u64-u64`), so the node's record files hold them. A name it didn't write is damage. A
-//! [`Stop`] means the keeper can't go on: its shell boots it again from its records.
+//! [`Stop`] means the keeper can't go on: its shell, `hex schedule serve`, ends its process, crash-only, exiting 1 and
+//! naming the stop, and its next start boots the keeper again from its records (`docs/design/capacity-view.md` CV11;
+//! the review's E-10). Nothing restarts that process yet: Hex's installers set up `hex node` alone, and kiln's fleet
+//! bench and the two-machine tests start the scheduler by hand, so running it under a supervisor that restarts it is its
+//! operator's to do until Hex installs one.
 
 use std::collections::BTreeMap;
 
