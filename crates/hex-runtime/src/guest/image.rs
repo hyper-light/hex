@@ -31,6 +31,10 @@ use hex_api::{
 };
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
+use shards_api::control::{
+    Controller, Execs, Fault, Hangup, Identity, Member as MemberLane, MemberControl, Subscriptions,
+    Unsteered, exec_admissions,
+};
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
     MemberEnd, MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
@@ -94,6 +98,134 @@ pub(super) struct ImageBoot {
     /// This process's runs ([`Runs`]).
     runs: Runs,
     session: OnceLock<Option<BootSession>>,
+    /// Its runs' agent-control ([`Control`]): the key their endpoints take, and each box's controller.
+    control: Arc<Control>,
+}
+
+/// The agent-control of this class's runs (D238, D252; goal 2's item 2): its own key, made once from the OS's random
+/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); and each box's controller, dialed as the first
+/// signal to one of its run's members goes, and kept for the run it was dialed for while that run is held, so later
+/// signals ride its one connection.
+#[derive(Default)]
+struct Control {
+    identity: Mutex<Option<Arc<Identity>>>,
+    dialed: Mutex<BTreeMap<BoxId, Arc<Steering>>>,
+}
+
+/// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
+/// its members' lanes, and its hangup, which ends its connection, and its driver with it, as its last holder lets it go.
+struct Steering {
+    /// The run it steers: one dialed for another run of the box, or for one gone, is dialed anew.
+    guest: Weak<dyn ImageGuest>,
+    execs: Execs,
+    _hangup: Hangup,
+}
+
+impl Control {
+    /// This class's control key, made once.
+    fn identity(&self) -> Result<Arc<Identity>, Refusal> {
+        let mut kept = self.identity.lock().map_err(poisoned)?;
+        if let Some(identity) = kept.as_ref() {
+            return Ok(Arc::clone(identity));
+        }
+        let identity = Arc::new(Identity::generate().map_err(|why| Refusal::Os {
+            op: "making the key the node controls its image VMs' runs by",
+            why: why.to_string(),
+        })?);
+        *kept = Some(Arc::clone(&identity));
+        Ok(identity)
+    }
+
+    /// What every run asks of its agent-control endpoint: this class's key alone, and no lane to its command's sockets.
+    fn ask(&self) -> Result<ControlAsk, Refusal> {
+        Ok(ControlAsk {
+            controller: self.identity()?.fingerprint(),
+            sockets: None,
+        })
+    }
+
+    /// Box `id`'s controller for its run `guest`, dialed now where it has none for that run; a run gone lets its own go.
+    /// The dial waits on nothing: its lanes open once it has connected, each lane's ask following the connection.
+    fn steering(&self, id: &BoxId, guest: &Arc<dyn ImageGuest>) -> Result<Arc<Steering>, Refusal> {
+        let mut dialed = self.dialed.lock().map_err(poisoned)?;
+        if let Some(steering) = dialed.get(id)
+            && steering
+                .guest
+                .upgrade()
+                .is_some_and(|held| Arc::ptr_eq(&held, guest))
+        {
+            return Ok(Arc::clone(steering));
+        }
+        dialed.retain(|_, steering| steering.guest.strong_count() > 0);
+        let at = guest.control().ok_or_else(|| {
+            Refusal::Broken(format!(
+                "box {id}'s run told no agent-control endpoint, which its spec asked of it"
+            ))
+        })?;
+        let identity = self.identity()?;
+        let (controller, connected) = Controller::dial(
+            &identity,
+            at.vm,
+            at.address,
+            Subscriptions {
+                outputs: &[],
+                inputs: &[],
+                execs: Some(exec_admissions()),
+                sockets: None,
+            },
+        )
+        .map_err(|why| Refusal::Os {
+            op: "dialing a Shards image VM's agent-control endpoint",
+            why: why.to_string(),
+        })?;
+        std::thread::Builder::new()
+            .name("hex-image-control".to_owned())
+            .spawn(move || controller.run())
+            .map_err(|why| Refusal::os("starting a Shards image VM's controller", why))?;
+        let execs = connected.execs.ok_or_else(|| {
+            Refusal::Broken("a controller dialed for its members' lanes was given none".to_owned())
+        })?;
+        let steering = Arc::new(Steering {
+            guest: Arc::downgrade(guest),
+            execs,
+            _hangup: connected.hangup,
+        });
+        dialed.insert(id.try_clone()?, Arc::clone(&steering));
+        Ok(steering)
+    }
+}
+
+impl Steering {
+    /// `signal` to member `index` of box `id`'s run, on the member's own lane (D238): `true` where it took it, `false`
+    /// where the member had ended, which takes none; a lane refused or lost refused in its words.
+    fn signal(&self, id: &BoxId, index: u32, signal: u32) -> Result<bool, Refusal> {
+        let refused = |fault: Fault| Refusal::Os {
+            op: "signalling a member of a Shards image VM",
+            why: format!("box {id}'s member {index}: {fault}"),
+        };
+        match self.execs.member(index).map_err(refused)? {
+            MemberLane::Ended(_) => Ok(false),
+            MemberLane::Running(MemberControl { mut steering, .. }) => {
+                match steering.signal(signal) {
+                    Ok(()) => Ok(true),
+                    Err(Fault::Unsteered(Unsteered::Ended)) => Ok(false),
+                    Err(fault) => Err(refused(fault)),
+                }
+            }
+        }
+    }
+}
+
+/// What a signal but KILL to an image VM whose run's members a signal reaches none of is refused with (ROOT,
+/// 2026-11-14): nothing in the run can take it, which says nothing of whether the VM runs.
+const NO_MEMBER: &str = "signal: its run has no member a signal reaches";
+
+/// A signal's Linux number as a member's lane carries it.
+fn signal_number(signal: Signal) -> Result<u32, Refusal> {
+    u32::try_from(signal.number()).map_err(|_| Refusal::Invalid {
+        what: "signal",
+        why: format!("{signal:?} has no number a member's lane carries"),
+    })
 }
 
 /// This process's runs: one for each box or node VM with a boot, run or stop of this process, at most
@@ -739,26 +871,6 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
     }
 }
 
-/// The agent-control endpoint (D238, D252) this node asks of an image VM's run: none yet, a member's program running
-/// through none here.
-const CONTROL: Option<ControlAsk> = None;
-
-/// Whether `image`'s members' MCP bridges (Shards' D254) can be asked of a run whose node asks it an agent-control
-/// endpoint or not (`control`): each bridge's connections reach the run's controller over that endpoint alone, so a
-/// member asking one of a run with none is refused by its field, as Shards' own spec check refuses it.
-fn bridges(image: &ShardsImage, control: bool) -> Result<(), Refusal> {
-    match image.members.iter().position(|m| m.mcp) {
-        Some(at) if !control => Err(Refusal::Invalid {
-            what: "shards image",
-            why: format!(
-                "members[{at}].mcp: a member's MCP bridge reaches its run's controller over the run's agent-control \
-                 endpoint alone (Shards' D254), which this node asks of no image VM's run"
-            ),
-        }),
-        _ => Ok(()),
-    }
-}
-
 /// A member as Shards' image boot names it.
 fn member_name(m: &Member) -> MemberName {
     match m.kind {
@@ -775,6 +887,10 @@ struct MemberProc {
     id: BoxId,
     guest: Arc<dyn ImageGuest>,
     name: MemberName,
+    /// Its declared index, by which its run's endpoint names its lane (D238); none for one its image declares not.
+    index: Option<u32>,
+    /// Its run's agent-control, its kill's.
+    control: Arc<Control>,
     given: Option<Given>,
     ended: Option<Exit>,
 }
@@ -819,10 +935,23 @@ impl Proc for MemberProc {
         Ok(Some(exit))
     }
 
+    /// KILL on its member's own lane, through its run's agent-control endpoint, dialed as the run's first signal goes
+    /// (D238; goal 2's item 2): its end then its member's, Signal(9). One that has ended, or ends as it is asked, has
+    /// nothing left to end: answered at once.
     fn kill(&mut self) -> Result<(), Refusal> {
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberSignal,
-        })
+        if self.ended.is_some() {
+            return Ok(());
+        }
+        let index = self.index.ok_or_else(|| {
+            Refusal::Broken(format!(
+                "box {}'s run declares no member {:?}, whose stdin it gave",
+                self.id, self.name
+            ))
+        })?;
+        self.control
+            .steering(&self.id, &self.guest)?
+            .signal(&self.id, index, signal_number(Signal::KILL)?)
+            .map(drop)
     }
 
     fn streams(&mut self) -> Result<Given, Refusal> {
@@ -1213,6 +1342,7 @@ impl ImageClass {
             diagnostics,
             runs: Runs::new(),
             session: OnceLock::new(),
+            control: Arc::new(Control::default()),
         });
     }
 
@@ -1330,8 +1460,9 @@ impl ImageClass {
             lessor: None,
             binary: Some(self.binary.clone()),
             env,
-            // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
-            control: CONTROL,
+            // The run's agent-control endpoint (D238, D252), of this class's key alone and no socket lane: its members'
+            // own lanes carry their signals (goal 2's item 2).
+            control: Some(self.image()?.control.ask()?),
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
             // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
@@ -1511,8 +1642,6 @@ impl ImageClass {
             crate::grants::program(image)?;
             // As are credentials no one can lease here (joint plan step 33).
             self.can_lease(image)?;
-            // And a member's MCP bridge where its run has no agent-control endpoint (Shards' D254).
-            bridges(image, CONTROL.is_some())?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
@@ -1707,15 +1836,42 @@ impl ImageClass {
         }
     }
 
+    /// `signal`, but KILL, to every live member of box `id`'s run in `state`, each on its own lane of the run's
+    /// agent-control endpoint (D238; goal 2's item 2; ROOT, 2026-11-14: a signal reaches every process in the box, a
+    /// VM's its members'): the box runs on, a member that has ended skipped. Refused NotRunning ([`NO_MEMBER`]) where
+    /// no member of its run runs a program to take it, or none runs one now; Pending while it boots; NotRunning before
+    /// its start and once its stop has begun.
+    fn signal_members(&self, id: &BoxId, state: State, signal: Signal) -> Result<(), Refusal> {
+        let guest = match state {
+            State::Running(guest) => guest,
+            State::Booting => return Err(pending(id)?),
+            State::Held => return Err(held()),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id.try_clone()?, "signal"));
+            }
+        };
+        let number = signal_number(signal)?;
+        if !guest.members().iter().any(|member| member.runs) {
+            return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
+        }
+        let steering = self.image()?.control.steering(id, &guest)?;
+        let mut reached = false;
+        for member in guest.members().iter().filter(|member| member.runs) {
+            reached |= steering.signal(id, member.index, number)?;
+        }
+        if !reached {
+            return Err(Refusal::NotRunning(id.try_clone()?, NO_MEMBER));
+        }
+        Ok(())
+    }
+
     pub(super) fn signal_image(&self, record: BoxRecord, signal: Signal) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let state = self.settle(&record)?;
         match state {
             State::Held => Err(held()),
             State::Ended(_) => Err(Refusal::NotRunning(id, "signal")),
-            _ if signal != Signal::KILL => Err(Refusal::Awaits {
-                needs: Upstream::MemberSignal,
-            }),
+            _ if signal != Signal::KILL => self.signal_members(&id, state, signal),
             // Ended before it booted: no run, and its end its record's.
             State::Created => devices::with_transaction(self.image_books()?, &id, &[], |t| {
                 let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -1902,10 +2058,17 @@ impl ImageClass {
             stdout: Some(stdout.into()),
             stderr: Some(stderr.into()),
         };
+        let index = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+            .map(|declared| declared.index);
         Ok(Box::new(MemberProc {
             id,
             guest,
             name,
+            index,
+            control: Arc::clone(&self.image()?.control),
             given: Some(given),
             ended: None,
         }))

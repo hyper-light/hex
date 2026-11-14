@@ -997,9 +997,20 @@ fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
     };
     assert_eq!(member.member, MemberName::harness("probe"));
     assert!(member.stdin && !member.terminal);
+    // Each asks its run's agent-control endpoint of its own runtime's key alone, no socket lane (goal 2's item 2).
+    for boot in [&first, &second] {
+        assert!(
+            boot.control
+                .as_ref()
+                .is_some_and(|ask| ask.sockets.is_none()),
+            "{:?}",
+            boot.control
+        );
+    }
     let mut alike = second.clone();
     alike.members.clone_from(&first.members);
     alike.ready_by = first.ready_by;
+    alike.control.clone_from(&first.control);
     assert_eq!(alike, first);
 }
 

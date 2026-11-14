@@ -77,7 +77,12 @@ pub trait Runtime: Send + Sync {
     /// refuses the run as [`Refusal::Platform`], naming its platform.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
 
-    /// Sends `signal` to every process in the box.
+    /// Sends `signal` to every process in the box. A Shards image VM's processes are its run's members (goal 2's item
+    /// 2): KILL stops the whole VM; any other signal goes to each member of its run that runs, on the member's own lane
+    /// of the run's agent-control endpoint, the VM running on and a member that has ended skipped. Where no member of
+    /// its run can take one (each runs no program, or has ended), it is refused
+    /// `NotRunning(id, "signal: its run has no member a signal reaches")`: nothing in the run takes a signal, which says
+    /// nothing of whether the VM runs.
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal>;
 
     /// The box as it is now.
