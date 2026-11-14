@@ -925,6 +925,38 @@ pub(super) fn vcpus_ns(
         .collect()
 }
 
+/// What a listing of image boxes does with a record that can't be read ([`ImageClass::image_infos`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unread {
+    /// Lists it by its id, Empty: the class's runtime alone, whose records are all image boxes'.
+    Listed,
+    /// Leaves it out: a guest runtime's records hold other classes' too, and an unreadable one names none.
+    Unlisted,
+}
+
+/// Box `id`, whose record can't be read, as a listing names it: Empty, of the class, and nothing more known of it, as
+/// Linux's node lists one.
+fn unread_info(id: BoxId) -> BoxInfo {
+    BoxInfo {
+        published: Vec::new(),
+        id,
+        class: hex_api::Class::Shards,
+        state: BoxState::Empty,
+        bounds: hex_api::Bounds::default(),
+        allocation: None,
+        adopted: false,
+        membership: None,
+        exit: None,
+        abandoned: 0,
+        route: None,
+        grants: Vec::new(),
+        last_resort: None,
+        ended: None,
+        control: None,
+        credentials: Vec::new(),
+    }
+}
+
 fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, Refusal> {
     Ok(BoxInfo {
         published: Vec::new(),
@@ -2540,16 +2572,27 @@ impl ImageClass {
     }
 
     /// Every Shards image box the node's records hold. A held one is listed running: Hex can't prove it
-    /// isn't (its inspect says why).
-    pub(super) fn image_infos(&self) -> Result<Vec<BoxInfo>, Refusal> {
+    /// isn't (its inspect says why). A record that can't be read names no class: where `unread` is the class's
+    /// runtime alone, every record of whose authority is an image box's (its create admits no other), it is listed by
+    /// its id, Empty, as Linux's node lists one, never hidden (the review's B-13); its inspect refuses it as unreadable.
+    pub(super) fn image_infos(&self, unread: Unread) -> Result<Vec<BoxInfo>, Refusal> {
         if !self.uses_books() {
             return Ok(Vec::new());
         }
         let records = self.authority()?.records()?;
         let mut infos = Vec::new();
-        for record in records.into_values() {
-            let Ok(record) = record else {
-                continue;
+        for (id, record) in records {
+            let record = match (record, unread) {
+                (Ok(record), _) => record,
+                (Err(_), Unread::Listed) => {
+                    infos.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                        what: "Shards image box listing",
+                        bound: crate::MAX_BOXES,
+                    })?;
+                    infos.push(unread_info(id));
+                    continue;
+                }
+                (Err(_), Unread::Unlisted) => continue,
             };
             if !matches!(record.spec.class, ClassSpec::ShardsImage(_)) {
                 continue;
@@ -2669,7 +2712,7 @@ impl hex_api::Runtime for ImageClass {
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
-        self.image_infos()
+        self.image_infos(Unread::Listed)
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {

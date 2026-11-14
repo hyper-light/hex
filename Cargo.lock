@@ -578,6 +578,7 @@ dependencies = [
  "shards-abi",
  "shards-afunix",
  "shards-api",
+ "shards-ipc",
  "shards-remote",
  "shards-testdir",
  "tar",

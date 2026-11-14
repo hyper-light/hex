@@ -595,11 +595,15 @@ fn put_image(out: &Path) -> String {
     image
 }
 
-/// A `hex node` of the run's own, ended by its pid as it drops; what it said on stderr is kept in `stderr`.
+/// A `hex node` of the run's own, ended by its pid as it drops, on Windows with its keeper (image_node's
+/// `end_keeper`); what it said on stderr is kept in `stderr`.
 struct Node {
     child: Child,
     socket: PathBuf,
     stderr: PathBuf,
+    /// The node's keeper's folder (`state\keeper`, hex-cli's `node.rs`), whose `keeper.owner` names it.
+    #[cfg(windows)]
+    keeping: PathBuf,
 }
 
 impl Node {
@@ -652,6 +656,8 @@ impl Node {
             child,
             socket,
             stderr,
+            #[cfg(windows)]
+            keeping: work.join("state").join("keeper"),
         }
     }
 
@@ -683,6 +689,8 @@ impl Drop for Node {
         }
         let status = self.child.wait().unwrap();
         eprintln!("CHARGE node ended: {status}");
+        #[cfg(windows)]
+        image_node::end_keeper(&self.keeping);
     }
 }
 

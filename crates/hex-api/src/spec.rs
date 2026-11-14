@@ -435,38 +435,7 @@ impl ShardsImage {
     /// exactly is the runtime's to refuse as it programs the boot. Its credentials, last, as
     /// [`crate::check_credentials`] takes them over its grants (refused naming `credentials`).
     pub fn check(&self) -> Result<(), Refusal> {
-        let (name, digest) = self.image.rsplit_once('@').ok_or_else(|| {
-            invalid_image(format!(
-                "image {:?} isn't pinned by a digest (NAME@sha256:…)",
-                self.image
-            ))
-        })?;
-        if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return Err(invalid_image(format!(
-                "image {:?} names no image before its digest",
-                self.image
-            )));
-        }
-        let (algorithm, hex) = digest.split_once(':').unwrap_or((digest, ""));
-        // go-digest v1.0.0's algorithms and their encoded lengths (sha256, sha384, sha512), as Shards'
-        // reference parser takes them (crates/image/src/reference.rs at 482c5d78).
-        let length = match algorithm {
-            "sha256" => 64,
-            "sha384" => 96,
-            "sha512" => 128,
-            _ => {
-                return Err(invalid_image(format!(
-                    "image {:?}'s digest algorithm isn't sha256, sha384 or sha512",
-                    self.image
-                )));
-            }
-        };
-        if hex.len() != length || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-            return Err(invalid_image(format!(
-                "image {:?}'s digest isn't {length} lowercase hex digits",
-                self.image
-            )));
-        }
+        check_pinned("shards image", &self.image)?;
         if let Some(command) = &self.command {
             match command.first() {
                 None => {
@@ -533,6 +502,44 @@ impl ShardsImage {
         crate::check_credentials(&self.credentials, &self.grants)?;
         crate::check_sign_ins(&self.sign_ins, &self.credentials, &self.grants)
     }
+}
+
+/// Whether `image` is pinned by a digest go-digest validates, as Shards' reference parser checks one: a name, then `@`,
+/// the algorithm `sha256`, `sha384` or `sha512` and exactly that many lowercase hex digits; refused `Invalid` naming
+/// `what` where it isn't. The rest of the name's grammar is Shards' to refuse as it resolves the image. A box's image
+/// is held to it ([`ShardsImage::check`]), and a node's own guest image (docs/design/node-under-shards-init.md §4; the
+/// review's C-17), so an image boots as it was admitted, whatever a tag names by then.
+pub fn check_pinned(what: &'static str, image: &str) -> Result<(), Refusal> {
+    let refused = |why: String| Refusal::Invalid { what, why };
+    let (name, digest) = image.rsplit_once('@').ok_or_else(|| {
+        refused(format!(
+            "image {image:?} isn't pinned by a digest (NAME@sha256:…)"
+        ))
+    })?;
+    if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(refused(format!(
+            "image {image:?} names no image before its digest"
+        )));
+    }
+    let (algorithm, hex) = digest.split_once(':').unwrap_or((digest, ""));
+    // go-digest v1.0.0's algorithms and their encoded lengths (sha256, sha384, sha512), as Shards'
+    // reference parser takes them (crates/image/src/reference.rs at 482c5d78).
+    let length = match algorithm {
+        "sha256" => 64,
+        "sha384" => 96,
+        "sha512" => 128,
+        _ => {
+            return Err(refused(format!(
+                "image {image:?}'s digest algorithm isn't sha256, sha384 or sha512"
+            )));
+        }
+    };
+    if hex.len() != length || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(refused(format!(
+            "image {image:?}'s digest isn't {length} lowercase hex digits"
+        )));
+    }
+    Ok(())
 }
 
 fn invalid_image(why: String) -> Refusal {

@@ -2295,7 +2295,9 @@ fn node_row(n: u8, phase: hex_api::NodeVmPhase) -> hex_core::record::NodeVmRecor
     hex_core::record::NodeVmRecord {
         version: hex_core::record::RECORD_VERSION,
         run: node_run(n),
-        image: "hex-node:rev@sha256:00".to_owned(),
+        image:
+            "hex-node:rev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
         allocation: cost().allocate(CapacityResources::default()).unwrap(),
         phase,
         diagnostics: None,
