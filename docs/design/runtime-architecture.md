@@ -455,7 +455,10 @@ refuses as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admis
 A hosted VM, a node VM under shards-init (`node-under-shards-init.md` §5), is reached by Shards' socket lanes, each a
 local socket pair on the node's side; its run admits as many as its guest client may hold open at once at the node's
 fitted places, its two control connections and four for each place (a program's three streams and its box's staging
-connection; `serve::fit::lanes`), two descriptors each with its controller's two, counted among the node's own.
+connection; `serve::fit::lanes`), counted among the node's own with its controller's two descriptors. A lane holds
+three on the node's side (its socket pair's two ends and its copiers' clone), a control connection five (a lane's and
+the client's two clones of its end): `hex_client::guest::lanes::FDS_A_LANE` and `FDS_A_CONTROL_LANE`, which its tests
+hold to the descriptors the process's own table shows (the review's D-6).
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of
