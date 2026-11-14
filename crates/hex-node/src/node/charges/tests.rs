@@ -1493,11 +1493,11 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         booked_at_four(id)
     };
     let read = || Ok((vms.clone(), Vec::new(), fleet_budget));
-    one_window(&shared, &watched, &store, read, &record, || start);
+    one_window(&shared, &watched, &store, read, record, || start);
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(&fleet().join(name), 0, held);
     }
-    one_window(&shared, &watched, &store, read, &record, || start + WINDOW);
+    one_window(&shared, &watched, &store, read, record, || start + WINDOW);
     assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
     let asked = watched.asked.borrow().clone();
     for what in [
