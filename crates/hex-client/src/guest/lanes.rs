@@ -9,6 +9,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{ConnectFailure, ConnectPhase, IoKind, Refusal};
@@ -30,14 +31,11 @@ use crate::Cut;
 pub const DIR: &str = "/run/hex/channel";
 
 /// The descriptors a lane holds on this node's side while it lives, as [`Link::dial`] hands it over ([`bridge`]): its
-/// local socket pair's two ends, the owner's and the copiers', the copiers' end cloned so each of its two copiers holds
-/// one. `hex-node`'s descriptor fit counts each lane by it (`serve::fit::hosted_descriptors`); the tests count the real
-/// ones (the review's D-6).
-pub const FDS_A_LANE: u64 = 3;
-
-/// The descriptors a control connection holds on this node's side through a lane, as the client's `Stream` keeps it:
-/// a lane's, and its two clones of the owner's end, its reading and its ending handles. The tests count the real ones.
-pub const FDS_A_CONTROL_LANE: u64 = FDS_A_LANE.saturating_add(2);
+/// local socket pair's two ends, the owner's and the copiers', which its two copiers share, as a control connection's
+/// handles, the client `Stream`'s reading and ending ones, share the owner's: no duplicate, which Windows makes
+/// inheritable (the review's D-5). `hex-node`'s descriptor fit counts each lane by it, a control connection's too
+/// (`serve::fit::hosted_descriptors`); the tests count the real ones (the review's D-6).
+pub const FDS_A_LANE: u64 = 2;
 
 /// The controller's connection to a node VM's endpoint and the lanes it opens on it to the node's relay.
 pub struct Lanes {
@@ -348,21 +346,23 @@ fn tls(link: shards_api::control::Link) -> Result<(), Refusal> {
 }
 
 /// `socket` as the owner's end of a local socket pair, its bytes the lane's: two threads copy between the pair's other
-/// end and the lane, one a way, each on one of the lane's halves ([`Socket::split`]). Each ends on a fact: the owner's
-/// end of writing or its close, the lane's end in order, or its reset or its connection's end, which the owner reads
-/// as the cut after the bytes before it.
+/// end and the lane, one a way, each on one of the lane's halves ([`Socket::split`]), sharing the pair's end, one
+/// reading it and one writing it: no duplicate, which Windows makes inheritable (the review's D-5). Each ends on a
+/// fact: the owner's end of writing or its close, the lane's end in order, or its reset or its connection's end, which
+/// the owner reads as the cut after the bytes before it.
 fn bridge(socket: Socket) -> std::io::Result<Bridged> {
     let (owner, ours) = pair()?;
     let (reader, writer) = socket.split();
     let cut = Cut::default();
-    let up = ours.try_clone()?;
+    let ours = Arc::new(ours);
+    let up = Arc::clone(&ours);
     std::thread::Builder::new()
         .name("hex-lane-up".to_owned())
-        .spawn(move || upward(writer, up))?;
+        .spawn(move || upward(writer, &up))?;
     let recorded = cut.clone();
     std::thread::Builder::new()
         .name("hex-lane-down".to_owned())
-        .spawn(move || downward(reader, ours, &recorded))?;
+        .spawn(move || downward(reader, &ours, &recorded))?;
     Ok(Bridged::new(owner, cut))
 }
 
@@ -372,11 +372,11 @@ fn bridge(socket: Socket) -> std::io::Result<Bridged> {
 /// [`Bridged`]'s write once the cut is recorded, what the owner sends meanwhile read here and let go, as Winsock resets
 /// a TCP pair whose receiving is shut while bytes wait or come, which drops what the owner hasn't read (the review's
 /// D-4). An error reading the pair aborts the lane.
-fn upward(mut writer: SocketWriter, mut from: Local) {
+fn upward(mut writer: SocketWriter, mut from: &Local) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         #[cfg(target_os = "macos")]
-        if crate::wait_readable(std::os::fd::AsFd::as_fd(&from)).is_err() {
+        if crate::wait_readable(std::os::fd::AsFd::as_fd(from)).is_err() {
             let _ = writer.abort();
             return;
         }
@@ -387,7 +387,7 @@ fn upward(mut writer: SocketWriter, mut from: Local) {
             }
             Ok(n) => {
                 if writer.write_all(buf.get(..n).unwrap_or_default()).is_err() {
-                    writes_refused(&mut from, &mut buf);
+                    writes_refused(from, &mut buf);
                     return;
                 }
             }
@@ -402,7 +402,7 @@ fn upward(mut writer: SocketWriter, mut from: Local) {
 
 /// The owner's writes once the lane refuses them: on Unix the pair's other end stops reading, so they fail.
 #[cfg(unix)]
-fn writes_refused(from: &mut Local, _: &mut [u8]) {
+fn writes_refused(from: &Local, _: &mut [u8]) {
     let _ = from.shutdown(Shutdown::Read);
 }
 
@@ -410,7 +410,7 @@ fn writes_refused(from: &mut Local, _: &mut [u8]) {
 /// close or its reset, so the pair's other end never closes with bytes unread, which would reset the owner's socket
 /// and drop what it hasn't read. The owner learns of the cut at its next read, or its next write ([`Bridged`]).
 #[cfg(windows)]
-fn writes_refused(from: &mut Local, buf: &mut [u8]) {
+fn writes_refused(mut from: &Local, buf: &mut [u8]) {
     loop {
         match from.read(buf) {
             Ok(0) => return,
@@ -424,7 +424,7 @@ fn writes_refused(from: &mut Local, buf: &mut [u8]) {
 /// What the relay sends, to the owner; the lane's end in order is the owner's end of input, and its reset or its
 /// connection's end the cut, recorded before the owner's socket ends. An owner gone lets the lane's reading go, which
 /// stops the relay's sending (STOP_SENDING).
-fn downward(mut reader: SocketReader, mut to: Local, cut: &Cut) {
+fn downward(mut reader: SocketReader, mut to: &Local, cut: &Cut) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         match reader.read(&mut buf) {
@@ -434,13 +434,13 @@ fn downward(mut reader: SocketReader, mut to: Local, cut: &Cut) {
             }
             Ok(n) => {
                 if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
-                    end(&to);
+                    end(to);
                     return;
                 }
             }
             Err(e) => {
                 cut.record(&e);
-                end(&to);
+                end(to);
                 return;
             }
         }

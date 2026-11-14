@@ -33,16 +33,15 @@ pub fn lanes(places: usize) -> usize {
         .saturating_add(CONTROL_LANES)
 }
 
-/// The descriptors `hosted` VMs hold at `places` program places: each one's lanes ([`lanes`]), its control
-/// connections' ([`hex_client::guest::lanes::FDS_A_CONTROL_LANE`] each) and the rest's
-/// ([`hex_client::guest::lanes::FDS_A_LANE`] each), and its controller.
+/// The descriptors `hosted` VMs hold at `places` program places: each one's lanes ([`lanes`]),
+/// [`hex_client::guest::lanes::FDS_A_LANE`] each, and its controller.
 pub fn hosted_descriptors(hosted: usize, places: usize) -> u64 {
-    use hex_client::guest::lanes::{FDS_A_CONTROL_LANE, FDS_A_LANE};
+    use hex_client::guest::lanes::FDS_A_LANE;
     let of = |n: usize, each: u64| u64::try_from(n).unwrap_or(u64::MAX).saturating_mul(each);
-    let each = of(lanes(places).saturating_sub(CONTROL_LANES), FDS_A_LANE)
-        .saturating_add(of(CONTROL_LANES, FDS_A_CONTROL_LANE))
-        .saturating_add(FDS_A_CONTROLLER);
-    of(hosted, each)
+    of(
+        hosted,
+        of(lanes(places), FDS_A_LANE).saturating_add(FDS_A_CONTROLLER),
+    )
 }
 
 /// The descriptors the program places hold: each place's streams ([`FDS_A_PLACE_STREAM`] for each of the
