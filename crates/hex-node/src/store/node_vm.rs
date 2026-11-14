@@ -33,6 +33,14 @@ use hex_core::record::NodeVmRecord;
 
 use super::{Store, TURNS, scoped_paths};
 
+#[cfg(test)]
+thread_local! {
+    /// What a test does once a node's start on this thread has read the node VM rows, before it takes any row's lock: an
+    /// earlier node process ending a row meanwhile, as one may (the review's C-11).
+    static SETTLE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `store.node_vm_owner`, W*: the slowest end of a node VM's owner this process has followed, from its start's look at
 /// its row (decision 9): past it the run-out is told, and the wait follows the owner by its life to its end.
 static OWNER_END: Patience = Patience::measuring("store.node_vm_owner");
@@ -500,6 +508,10 @@ impl Store {
     /// end each row it let go kept, read back before the row went (place 1).
     pub(crate) fn settle_node_vms(&self) -> Result<NodeVmsSettled, Refusal> {
         let records = self.all_node_vms()?;
+        #[cfg(test)]
+        if let Some(then) = SETTLE_READ.with(|then| then.borrow_mut().take()) {
+            then();
+        }
         let mut settled = Vec::new();
         settled
             .try_reserve_exact(records.len())
@@ -526,9 +538,23 @@ impl Store {
             }
             let file = open_lock(&directory, &record.run)?;
             if try_own(&file)? {
-                let end = record.last_resort.take();
-                self.let_go(&record)?;
-                settled.push((record.run, NodeVmSettled::OwnerEnded));
+                // Its row read again under its lock (the review's C-11), as the follow path reads it: its owner may have
+                // kept its end and written it Ended since the read above, then let the lock go as it ended.
+                let Some(mut row) = self.node_vm(&record.run)? else {
+                    remove_if_there(
+                        &lock_path(&directory, &record.run)?,
+                        "a node VM's lock file",
+                    )?;
+                    continue;
+                };
+                let end = row.last_resort.take();
+                let settled_as = if row.phase == NodeVmPhase::Ended {
+                    NodeVmSettled::Ended
+                } else {
+                    NodeVmSettled::OwnerEnded
+                };
+                self.let_go(&row)?;
+                settled.push((row.run, settled_as));
                 ends.extend(end);
             } else {
                 self.follow(record.run, file)?;

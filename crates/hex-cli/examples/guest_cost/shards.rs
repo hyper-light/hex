@@ -1258,8 +1258,8 @@ Swap:                  0 kB
 
     /// AC-T7.4.1 (light smoke, few boots): produce a pair over the configured Shards guest with SEEDABLE
     /// two, through the same census, evidence and output the measurement uses: expect it written and loaded
-    /// as a node loads it, its envelope the configured guest's, two guests in its evidence, and each with
-    /// its VMM's own memory. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
+    /// as a node loads it, its envelope the configured guest's, its cost carrying no VMM overhead and no guest
+    /// allowance, two guests in its evidence, and its VMM's own memory in its evidence. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
     /// HEX_GUEST_MEMORY_MIB, GUEST_COST_SMOKE_OUT (a folder under ~/.cache), on a Mac the window's
     /// CPU-response row file, GUEST_COST_SMOKE_ROW and GUEST_COST_SMOKE_ROW_SHA256, and on Linux a cgroup
     /// delegated to the test (`systemd-run --user --scope -p Delegate=yes <the test binary> ...`).
@@ -1287,10 +1287,28 @@ Swap:                  0 kB
         .unwrap();
         assert_eq!(rows.is_empty(), prefix.is_empty());
         assert_eq!((cost.floor, cost.ceiling), (envelope, envelope));
-        assert!(cost.overhead.mem_bytes > 0, "{cost:?}");
+        // The cost carries no VMM overhead and no guest allowance: a node learns both from its windows (joint plan
+        // step 14; ROOT, 2026-11-13, by decision 9's rule; fa865284b). What the census measured of them is evidence
+        // alone, its overhead line's.
+        let none = hex_api::CapacityResources::default();
+        assert_eq!(
+            (cost.overhead, cost.guest_overhead),
+            (none, none),
+            "{cost:?}"
+        );
         let evidence = std::fs::read(&made.evidence_file).unwrap();
         let text = String::from_utf8_lossy(&evidence[prefix.len()..]).into_owned();
         assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        let own_memory: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("overhead "))
+            .and_then(|l| {
+                l.split_whitespace()
+                    .find_map(|w| w.strip_prefix("mem_bytes="))
+            })
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("no overhead line naming its memory: {text}"));
+        assert!(own_memory > 0, "{text}");
         println!("{}\n{text}", made.summary);
     }
 }
