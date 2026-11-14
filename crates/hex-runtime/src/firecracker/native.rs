@@ -595,13 +595,14 @@ impl FirecrackerRuntime {
         let paths = self.paths(record)?;
         let identity = self.native_identity(record)?;
         let native = transaction.attach_managed(identity.as_ref())?;
+        let began = Instant::now();
         native
             .stop()
             .map_err(|_| uncertain(&id, "its managed VM's stop was refused"))?;
-        let end = native
-            .wait_for(self.config.stop_timeout)
+        // Its stop's own wait (managed.stop; decision 9): past the slowest stop seen, its scope followed by its life to
+        // its end, never refused at a configured time (A-13: census retirement at a node's start stops VMs this way).
+        let end = crate::guest::wait_stopped(&*native, began)
             .map_err(|_| uncertain(&id, "its managed VM's end can't be read"))?
-            .filter(|end| end.scope == shards_api::TerminalScope::Released)
             .ok_or(uncertain(
                 &id,
                 "its managed VM's scope hasn't been released",
