@@ -697,9 +697,10 @@ impl Parked {
 
 /// Which of `fds` turns readable first within `patience`, the earliest in the list where several have: `None` past it,
 /// and with none (a wait following its party) it waits until one does. A peer's end (`POLLHUP`) counts, for the read
-/// that says so, as does a process's end on its pidfd. `op` names the poll in its error.
-pub fn first_readable(
-    fds: &[BorrowedFd<'_>],
+/// that says so, as does a process's end on its pidfd. `op` names the poll in its error. Its poll set is an array on
+/// the stack, made again for each poll: nothing is allocated (the review's C-7).
+pub fn first_readable<const N: usize>(
+    fds: &[BorrowedFd<'_>; N],
     patience: Option<std::time::Duration>,
     op: &'static str,
 ) -> Result<Option<usize>, OciError> {
@@ -710,10 +711,8 @@ pub fn first_readable(
             tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(left.subsec_nanos()),
         });
-        let mut polled: Vec<rustix::event::PollFd<'_>> = fds
-            .iter()
-            .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
-            .collect();
+        let mut polled =
+            fds.map(|fd| rustix::event::PollFd::from_borrowed_fd(fd, rustix::event::PollFlags::IN));
         match rustix::event::poll(&mut polled, ts.as_ref()) {
             Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
             Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),

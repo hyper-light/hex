@@ -2507,8 +2507,9 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
 - **No caller failure where an alternative exists**: a seed past its bound is followed by its life, never retired
   (2026-11-13); the network check past its bound is told and follows the namespace to its kernel's answer (the review's
   C-9, 2026-11-14); a client's call whose caller gave a
-  deadline waits on to it, the learned bound's end a run-out it records (`Patience::ran_out`); only where there is no
-  alternative (a record write, a client's call with no caller's deadline) is the caller refused, by type. (AC-T7.4.1,
+  deadline waits on to it, the learned bound's end a run-out it records (`Patience::ran_out`); a client's call with no
+  caller's deadline follows its peer, its agent's connection or its guest's VM, refused only at its end (`64dc3034a`,
+  `b1dd9644d`); only where there is no alternative (a record write) is the caller refused, by type. (AC-T7.4.1,
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
   the node busy initializing the guest's GPU with most of the boot's 60 s left, and the guest panicked; the relay's
   hello now carries the boot's deadline, `hex guest`.)

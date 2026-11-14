@@ -500,7 +500,8 @@ impl ShardsImage {
             }
         }
         // Each share as a mount's paths are checked (its host directory absolute and UTF-8 with no NUL, where the guest
-        // sees it absolute with no `..`), never at the guest's root, which it would hide, and each path seen once.
+        // sees it absolute with no `..`), never at the guest's root, which it would hide, and each place seen once,
+        // however its path is spelled (the review's B-10), so no share's read-only intent is lost to mount order.
         for (at, share) in self.shares.iter().enumerate() {
             let as_image = |e: Refusal| match e {
                 Refusal::Invalid { why, .. } => invalid_image(why),
@@ -519,7 +520,7 @@ impl ShardsImage {
                 .get(..at)
                 .unwrap_or_default()
                 .iter()
-                .any(|s| s.destination == share.destination)
+                .any(|s| same_place(&s.destination, &share.destination))
             {
                 return Err(invalid_image(format!(
                     "{field} {:?} is another share's too",
@@ -639,6 +640,24 @@ fn path_parts(path: &str) -> impl Iterator<Item = &str> {
         (path, false)
     };
     rest.split(move |c| c == '/' || (windows && c == '\\'))
+}
+
+/// Whether two paths [`container_path`] took name one place: the same drive where either is drive-absolute (its letter
+/// in either case, as Windows reads it), then the same steps, past the empty components a doubled or trailing
+/// separator leaves and `.`, which names none (`..` is refused before).
+fn same_place(a: &str, b: &str) -> bool {
+    let drive = |path: &str| {
+        path.chars()
+            .next()
+            .filter(|_| drive_absolute(path))
+            .map(|letter| letter.to_ascii_lowercase())
+    };
+    drive(a) == drive(b) && steps(a).eq(steps(b))
+}
+
+/// The components of an absolute path that each name a step ([`path_parts`] past the empty ones and `.`).
+fn steps(path: &str) -> impl Iterator<Item = &str> {
+    path_parts(path).filter(|part| !part.is_empty() && *part != ".")
 }
 
 /// A host path a spec names: absolute on the host that runs the container (POSIX-absolute on Linux and
@@ -1514,6 +1533,57 @@ mod tests {
                 (what, why.contains(field)),
                 ("shards image", true),
                 "{bad:?}: {why}"
+            );
+        }
+    }
+
+    /// The review's B-10 (AC-T7.4.1, joint plan step 12): two shares the guest sees at one place are one share too
+    /// many, however their paths are spelled, or the read-only one's intent is lost to the order they are mounted in.
+    /// Do check a VM sharing a project read-only at `/work/hex` beside another directory, read-write, at the same place
+    /// spelled apart: a trailing slash, a `.` component, doubled slashes, a trailing `.`; and drive-absolute, the same
+    /// drive in the other case and with the other separator. Expect each refused as Invalid naming shares[1]'s
+    /// destination. Then shares at other places: a sibling whose name only begins alike, a folder above it, and the
+    /// same path on another drive. Expect those to pass.
+    #[test]
+    fn b10_two_shares_at_one_guest_place_spelled_apart_are_refused() {
+        let share = |source: &str, destination: &str, read_only: bool| Mount {
+            source: PathBuf::from(source),
+            destination: destination.to_owned(),
+            read_only,
+        };
+        let with = |first: &str, second: &str| ShardsImage {
+            shares: vec![
+                share("/srv/projects/hex", first, true),
+                share("/srv/other", second, false),
+            ],
+            ..ShardsImage::new(crate::sim::SIM_IMAGE)
+        };
+        for (first, second) in [
+            ("/work/hex", "/work/hex/"),
+            ("/work/hex", "/work/./hex"),
+            ("/work/hex", "//work/hex"),
+            ("/work/hex", "/work//hex"),
+            ("/work/hex", "/work/hex/."),
+            ("C:\\work\\hex", "c:/work/hex/"),
+        ] {
+            match with(first, second).check() {
+                Err(Refusal::Invalid { what, why }) => assert_eq!(
+                    (what, why.contains("shares[1].destination")),
+                    ("shards image", true),
+                    "{first:?} and {second:?}: {why}"
+                ),
+                other => panic!("{first:?} and {second:?}, one place: {other:?}"),
+            }
+        }
+        for (first, second) in [
+            ("/work/hex", "/work/hexa"),
+            ("/work/hex", "/work"),
+            ("C:\\work\\hex", "D:\\work\\hex"),
+        ] {
+            assert_eq!(
+                with(first, second).check(),
+                Ok(()),
+                "{first:?} and {second:?} are two places"
             );
         }
     }

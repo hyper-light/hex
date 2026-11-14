@@ -3132,6 +3132,7 @@ impl BootstrapCall {
                     route: None,
                     last_resort: None,
                     ended: None,
+                    control: None,
                     credentials: Vec::new(),
                 })
             }
