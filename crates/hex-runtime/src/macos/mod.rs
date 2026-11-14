@@ -114,6 +114,16 @@ pub fn cpu_control_cycle(
     })
 }
 
+/// AC-T7.4.1 (the review's C-9 (c)): the longest the managed CPU control arms its watcher's timer for with the measured
+/// stop `response`: its hold at the least rate it holds a scope at ([`cpu::LEAST_RATE`]; [`cpu_control_cycle`]), twice
+/// its burst over that rate, longer than any run, whose longest, near the ceiling, is its burst over one milli-CPU. The
+/// CPU-response producer measures the timer's waits up to it.
+pub fn cpu_control_longest_hold(
+    response: std::time::Duration,
+) -> Result<std::time::Duration, Refusal> {
+    cpu_control_cycle(cpu::LEAST_RATE, response).map(|(_, hold)| hold)
+}
+
 pub struct MacRuntime {
     shared: NativeArc<Shared>,
     /// Shared with a run's thread, which removes its box through [`remove_process_run`] as a delete of it does.
