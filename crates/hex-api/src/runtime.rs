@@ -2395,7 +2395,18 @@ pub trait Proc: Send {
     /// The caller's ends of the streams its exec asked for ([`crate::Stdio::ask`]), once: a later call gives
     /// none.
     fn streams(&mut self) -> Result<crate::Given, Refusal>;
+
+    /// Its kill, apart from it (goal 2's item 3; ROOT, 2026-11-14): a `Proc` whose [`Proc::wait_for`] holds `&mut` gives
+    /// a killer that another thread can call while the wait goes on, as a node holding it for a remote caller needs (its
+    /// end waited for on a thread of its own; its caller's kill and the disconnect rule from others). Given once. None
+    /// means the `Proc` ends only by its own end or its stdin's close.
+    fn killer(&mut self) -> Option<Killer> {
+        None
+    }
 }
+
+/// [`Proc::killer`]'s kill: [`Proc::kill`] once, from another thread, `Ok` once sent or where it had ended.
+pub type Killer = Box<dyn FnOnce() -> Result<(), Refusal> + Send>;
 
 /// A program and the caller's ends of the streams its exec asked for ([`crate::Stdio::make_asked`]), held
 /// until [`Proc::streams`] takes them: a runtime whose programs take pipes wraps its own `Proc` in it.
