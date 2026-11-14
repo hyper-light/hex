@@ -290,8 +290,9 @@ fn a_node_at_its_fitted_bounds_counts_every_program_place_within_its_hard_limit(
 }
 
 /// ROOT's one accounting of 2026-11-13 (joint plan step 39): a node whose guest runtime holds a node VM under
-/// shards-init counts that VM's lanes among its own, each its local socket pair's two descriptors, with its controller's
-/// two, fitted to its hard limit with every other bound. Do: fit a root node's pools on fedora's figures, 40 held
+/// shards-init counts that VM's lanes among its own, each the descriptors `hex_client::guest::lanes` counts for it (a
+/// control connection's five, every other lane's three), with its controller's two, fitted to its hard limit with every
+/// other bound. Do: fit a root node's pools on fedora's figures, 40 held
 /// beside, to a guest's 4,096 and to 65,536, hosting one VM and two. Expect: its own counts the hosted term at its
 /// fitted places (`serve::fit::hosted_descriptors`), within the limit; two VMs fit no more places than one.
 #[test]

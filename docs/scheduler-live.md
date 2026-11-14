@@ -5,6 +5,12 @@ Runtime endpoints. One node is a laptop deployment: its messages are drained loc
 same driver that handles remote messages. Peers each keep their own files; no central service or
 database is required.
 
+It is crash-only: where its placement core can't go on (a record it couldn't write, a record no core
+wrote), it exits 1, naming the stop on stderr, and its next start recovers from its files
+(`docs/design/capacity-view.md` CV11). Hex's installers don't set it up yet (they install `hex node`
+alone), so run it under a supervisor that restarts it on an unsuccessful exit (a systemd unit with
+`Restart=on-failure`, a launchd agent with `KeepAlive` on `SuccessfulExit` false).
+
 Start the ordinary runtime node first. A minimal Linux scheduler configuration is:
 
 ```json

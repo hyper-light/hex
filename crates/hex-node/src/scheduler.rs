@@ -1064,6 +1064,21 @@ impl Service {
         self.lane.as_ref().map(|lane| lane.endpoint.local_addr())
     }
 
+    /// Ends this scheduler crash-only where its placement core stops (the review's E-10): `end` is told why, once, as
+    /// the core stops (a record it couldn't write, a record no core wrote), and its shell ends its process with it, so
+    /// the process exits naming the stop and its next start recovers from the records (capacity-view.md CV11), where
+    /// until now it refused every placement for its life.
+    pub fn end_with(&self, end: impl Fn(String) + Send + Sync + 'static) -> Result<(), Refusal> {
+        self.driver
+            .on_stop(Arc::new(move |stop: &peer::Stop| {
+                end(format!(
+                    "its placement core stopped, so the scheduler ends; its next start recovers from its records: \
+                     {stop:?}"
+                ))
+            }))
+            .map_err(failed)
+    }
+
     /// Cancels and reaps only this service's authenticated peer children.
     pub fn shutdown(&self) -> Result<(), Refusal> {
         self.stopping
