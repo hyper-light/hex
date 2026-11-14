@@ -334,6 +334,39 @@ fn a_lane_its_socket_cuts_short_reads_its_bytes_then_the_cut() {
     assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
 }
 
+/// The review's D-4 (D251; AC-T7.4.1), on every OS: a lane its socket cuts short while Hex still sends, Hex reading
+/// only once a write of its has failed. Do: the relay writes a line, reads a byte of what Hex sends, and closes; Hex
+/// writes a lane's window at a time until a write fails, then reads. Expect the line, then the cut, a reset: no byte
+/// that came before the cut lost to how the bridge ends Hex's socket. (On Windows that socket is one end of a loopback
+/// TCP pair, where a shutdown of receiving resets the connection if bytes wait or come, Winsock's documented
+/// contract for `shutdown(SD_RECEIVE)`.)
+#[test]
+fn a_lane_cut_while_its_owner_sends_keeps_the_bytes_before_the_cut_for_a_later_read() {
+    let dir = socket_dir();
+    let listener = listen(dir.path(), stream::CONTROL_PORT);
+    let relay = std::thread::spawn(move || {
+        let mut conn = listener.accept();
+        conn.write_all(b"before the cut\n").unwrap();
+        let mut one = [0u8];
+        conn.read_exact(&mut one).unwrap();
+    });
+    let run = Run::new(dir, admission(4));
+    let mut conn = run.link.dial(stream::CONTROL_PORT).unwrap();
+    let window = vec![0x5a; stream::MAX_FRAME];
+    let refused = loop {
+        if let Err(e) = conn.write_all(&window) {
+            break e;
+        }
+    };
+    relay.join().unwrap();
+    let mut got = Vec::new();
+    let end = conn.read_to_end(&mut got);
+    eprintln!("d_4_cut_while_sending refused={refused:?} got={got:?} end={end:?}");
+    assert_eq!(got, b"before the cut\n", "the bytes before the cut");
+    let cut = end.expect_err("a cut read as the lane's end in order");
+    assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
+}
+
 /// The person's directive, and Shards' D239: a node's control link holds TLS13_AES_256_GCM_SHA384 at both ends. Do:
 /// judge a link each of whose ends negotiated another suite in turn. Expect: each refused, naming the suite.
 #[test]
