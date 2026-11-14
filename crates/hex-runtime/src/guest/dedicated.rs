@@ -308,6 +308,7 @@ mod tests {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         }
     }
@@ -1709,7 +1710,7 @@ impl GuestRuntime {
             socket,
             paths,
             self.native_images,
-            budget.remaining()?,
+            Some(budget.remaining()?),
         )
     }
 

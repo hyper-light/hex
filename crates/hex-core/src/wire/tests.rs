@@ -90,10 +90,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
-    // C7), no node VM's receipt (joint plan step 39) and no learner's why (A-3); a spec ends with one route option and
-    // its band, 0 here (joint plan step 14).
+    // C7), no node VM's receipt (joint plan step 39), no learner's why (A-3) and its boxes' CPU time unread (A-8); a spec
+    // ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1
+        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1 + 1
     } else {
         3
     };
@@ -210,12 +210,12 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 12..],
-        [0; 12],
-        "the empty list's count, then no learned use, its machine's time unread, no node VM's count and no learner's \
-         why, ends it"
+        cut[cut.len() - 13..],
+        [0; 13],
+        "the empty list's count, then no learned use, its machine's time unread, no node VM's count, no learner's why \
+         and its boxes' CPU time unread, ends it"
     );
-    cut.truncate(cut.len() - 12);
+    cut.truncate(cut.len() - 13);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -474,7 +474,12 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
-        own: Default::default(),
+        // Its machine's time and its boxes' together (joint plan step 14, C7; the review's A-8) cross with it.
+        own: hex_api::MachineTime {
+            cpu_ns: Some(4_000_000_000),
+            uptime_ns: Some(10_000_000_000),
+            boxes_cpu_ns: Some(1_000_000_000),
+        },
         cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
@@ -653,6 +658,7 @@ fn info() -> BoxInfo {
         abandoned: 2,
         last_resort: None,
         ended: None,
+        control: None,
         credentials: Vec::new(),
     }
 }
@@ -1215,6 +1221,7 @@ fn answers() -> Vec<(u64, Answer)> {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        control: None,
                         credentials: Vec::new(),
                     },
                 ],
@@ -2307,9 +2314,10 @@ fn hostile_values_are_refused_by_name() {
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
-    // empty grant and published lists' counts, the last resort's and the run's words' none tags and the empty
-    // credential list's count end the info.
-    let adopted = info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - 2 - 8 - 6 - 1;
+    // empty grant and published lists' counts, the last resort's and the run's words' none tags, the empty
+    // credential list's count and the agent-control endpoint's none tag end the info.
+    let adopted =
+        info.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -2525,6 +2533,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 abandoned,
                 last_resort: None,
                 ended: None,
+                control: None,
                 credentials: Vec::new(),
             },
         )
@@ -2959,8 +2968,9 @@ fn route_wire_capacity_bytes(
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
+    // its machine's time unread (C7), no node VM's count (joint plan step 39), no learner's why (A-3) and its boxes' CPU
+    // time unread (A-8), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1 - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2978,10 +2988,11 @@ fn route_wire_capacity_bytes(
     w.u32(0);
     w.u8(0);
     // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39), then no
-    // learner's why (A-3).
+    // learner's why (A-3), then its boxes' CPU time unread (A-8).
     w.u8(0);
     w.u8(0);
     w.u32(0);
+    w.u8(0);
     w.u8(0);
     w.done().unwrap()
 }
@@ -3438,8 +3449,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
+    // its machine's time unread (C7), no node VM's count (joint plan step 39), no learner's why (A-3) and its boxes' CPU
+    // time unread (A-8), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1 - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -3688,8 +3700,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         valid_info
     );
     // The info's route comes before its empty grant and published lists' counts, its last resort's and its run's
-    // words' none tags, and its empty credential list's count.
-    let route_at = bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - route_bytes;
+    // words' none tags, its empty credential list's count and its agent-control endpoint's none tag.
+    let route_at =
+        bad.len() - NO_GRANTS - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -4850,9 +4863,10 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 8..],
-        [0; 8],
-        "no learned use, its machine's time unread, then no node VM's count and no learner's why, ends it"
+        cut[cut.len() - 9..],
+        [0; 9],
+        "no learned use, its machine's time unread, then no node VM's count, no learner's why and its boxes' CPU time \
+         unread, ends it"
     );
     cut.truncate(cut.len() - 1);
     assert!(matches!(
@@ -4937,9 +4951,10 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
     twice.node_vms[1].run = twice.node_vms[0].run;
     assert!(twice.check().is_err());
     // The receipts' count, then each receipt: its run, its booking, its phase and its guest's room (V2), the last of
-    // which comes just before the learner's why, none here (A-3), which ends it.
+    // which comes just before the learner's why, none here (A-3), and its boxes' CPU time, unread here (A-8), which
+    // ends it.
     let receipt = 16 + 3 * size_of::<u64>() + 1 + 3 * size_of::<u64>();
-    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1);
+    let at = bytes.len() - (size_of::<u32>() + 3 * receipt + 1 + 1);
     let mut past = bytes.clone();
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -4948,8 +4963,8 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
         Err(Fault::Value { .. })
     ));
     let mut unknown = bytes;
-    // The last receipt's phase: before its guest's room and the learner's why.
-    let phase = unknown.len() - 2 - 3 * size_of::<u64>();
+    // The last receipt's phase: before its guest's room, the learner's why and the boxes' CPU time.
+    let phase = unknown.len() - 3 - 3 * size_of::<u64>();
     unknown[phase] = 3;
     assert!(matches!(
         read_answer(&received(&unknown, 0), MAX_MESSAGE),
@@ -5091,8 +5106,8 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
     // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
     // (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7), its machine's time unread,
-    // no node VM's count, and no learner's why (A-3).
-    let at = bytes.len() - (11 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
+    // no node VM's count, no learner's why (A-3) and its boxes' CPU time unread (A-8).
+    let at = bytes.len() - (11 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5189,10 +5204,10 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
     // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
     // await's and no ranked VM's (place 4), no unrecorded box's (the review's dropped records), no unacted VM's (A-7),
-    // its machine's time unread, no node VM's count, and no learner's why (A-3): five counts and lengths besides place
-    // 4's three, the unrecorded boxes' one and the unacted VMs' one.
+    // its machine's time unread, no node VM's count, no learner's why (A-3) and its boxes' CPU time unread (A-8): five
+    // counts and lengths besides place 4's three, the unrecorded boxes' one and the unacted VMs' one.
     let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>() + 2 * size_of::<u32>();
-    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
+    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5230,6 +5245,9 @@ const NO_WORDS: usize = 1;
 /// What ends an info granting no credential (joint plan step 33): its empty credential list's u32 count, after its
 /// words' tag.
 const NO_CREDENTIALS: usize = size_of::<u32>();
+/// What ends an info whose run told no agent-control endpoint (joint plan step 15, N6): its none tag, after its
+/// credentials.
+const NO_CONTROL: usize = 1;
 
 /// Joint plan step 14 (AC-T7.4.1, C5): why a node's last resort ended a VM crosses the wire after its info's grants. Do:
 /// encode an info with an end and one with none, cut the second before its end's none tag, and read and write both as
@@ -5249,11 +5267,11 @@ fn w14_an_infos_last_resort_crosses_the_wire_after_its_grants() {
     let plain = info();
     let mut cut = answer(3, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END],
+        cut[cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END],
         0,
         "no end's tag"
     );
-    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS - NO_END);
+    cut.truncate(cut.len() - NO_CONTROL - NO_CREDENTIALS - NO_WORDS - NO_END);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5284,9 +5302,9 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         Answer::Info(failed.clone())
     );
-    assert!(bytes[..bytes.len() - NO_CREDENTIALS].ends_with(words.as_bytes()));
+    assert!(bytes[..bytes.len() - NO_CREDENTIALS - NO_CONTROL].ends_with(words.as_bytes()));
     let mut garbled = bytes.clone();
-    let last = garbled.len() - NO_CREDENTIALS - 1;
+    let last = garbled.len() - NO_CREDENTIALS - NO_CONTROL - 1;
     garbled[last] = 0xff;
     assert!(matches!(
         read_answer(&received(&garbled, 0), MAX_MESSAGE),
@@ -5295,11 +5313,11 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
     let plain = info();
     let mut cut = answer(5, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        cut[cut.len() - NO_CREDENTIALS - 1],
+        cut[cut.len() - NO_CREDENTIALS - NO_CONTROL - 1],
         0,
-        "no words' tag ends it, but for its credentials"
+        "no words' tag ends it, but for its credentials and its agent-control endpoint"
     );
-    cut.truncate(cut.len() - NO_CREDENTIALS - NO_WORDS);
+    cut.truncate(cut.len() - NO_CREDENTIALS - NO_CONTROL - NO_WORDS);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -5785,7 +5803,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend(49152u16.to_le_bytes());
     tail.push(1);
     tail.extend(1455u16.to_le_bytes());
-    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS]);
+    tail.extend([0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL]);
     assert!(bytes.ends_with(&tail));
     let declared = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -5801,7 +5819,15 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         read_answer(&received(&older, 0), MAX_MESSAGE).unwrap().1,
         declared
     );
-    assert!(older.ends_with(&[&[0][..], &[0; NO_END + NO_WORDS + NO_CREDENTIALS][..]].concat()));
+    assert!(
+        older.ends_with(
+            &[
+                &[0][..],
+                &[0; NO_END + NO_WORDS + NO_CREDENTIALS + NO_CONTROL][..]
+            ]
+            .concat()
+        )
+    );
     let wrong = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: each_way(),
@@ -5819,7 +5845,8 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let receiver = hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS;
+    let receiver =
+        hostile.len() - 1 - size_of::<u16>() - NO_END - NO_WORDS - NO_CREDENTIALS - NO_CONTROL;
     hostile[receiver] = 2;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
@@ -5996,8 +6023,8 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
 }
 
 /// Joint plan step 33 (C4): do answer an inspect of a Shards image VM with its grants and its credential grants. Expect
-/// it read back whole, its credentials its last bytes. Do answer one whose credential its grants don't reach. Expect it
-/// refused as "credentials" written.
+/// it read back whole, its credentials its last bytes but for its agent-control endpoint's none tag (joint plan step 15).
+/// Do answer one whose credential its grants don't reach. Expect it refused as "credentials" written.
 #[test]
 fn w33_an_inspect_carries_its_credential_grants_last() {
     let credentials = openai_credential("api.openai.com");
@@ -6014,7 +6041,7 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
     );
     let mut listed = Writer::new(MAX_MESSAGE);
     put_credentials(&mut listed, &credentials, &each_way()).unwrap();
-    assert!(bytes.ends_with(&listed.done().unwrap()));
+    assert!(bytes[..bytes.len() - NO_CONTROL].ends_with(&listed.done().unwrap()));
     let unreached = Answer::Info(BoxInfo {
         class: Class::Shards,
         grants: Vec::new(),
@@ -6028,6 +6055,61 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
             ..
         })
     ));
+}
+
+/// Joint plan step 15 (N6; AC-T7.7.2): do answer an inspect of a running Shards image VM with its run's agent-control
+/// endpoint, at an IPv4 loopback address and at IPv6's, and one with none; read each back, and write each as JSON. Expect
+/// each back exactly, the endpoint its info's last bytes (tag 1, its address as a grant's is written, its port), none a
+/// 0 last and refused once cut, as every truncation is, and JSON without the field reading as none. Do read one whose
+/// endpoint's address family is none, and one whose tag is neither 0 nor 1; expect each refused by name.
+#[test]
+fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
+    for (at, address) in [
+        ("127.0.0.1:43471", [&[4u8][..], &[127, 0, 0, 1]].concat()),
+        (
+            "[::1]:43471",
+            [&[6u8][..], &std::net::Ipv6Addr::LOCALHOST.octets()].concat(),
+        ),
+    ] {
+        let shown = BoxInfo {
+            class: Class::Shards,
+            control: Some(at.parse().unwrap()),
+            ..info()
+        };
+        let bytes = answer(99, &Answer::Info(shown.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            Answer::Info(shown.clone()),
+            "{at}"
+        );
+        let tail = [&[1u8][..], &address, &43471u16.to_le_bytes()].concat();
+        assert!(bytes.ends_with(&tail), "{at}");
+        let json = serde_json::to_value(&shown).unwrap();
+        assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), shown);
+        let (tag, family) = (bytes.len() - tail.len(), bytes.len() - tail.len() + 1);
+        for (at_byte, byte, what) in [(family, 5, "grant address"), (tag, 2, "option")] {
+            let mut hostile = bytes.clone();
+            hostile[at_byte] = byte;
+            assert!(
+                matches!(
+                    read_answer(&received(&hostile, 0), MAX_MESSAGE),
+                    Err(Fault::Value { what: said, .. }) if said == what
+                ),
+                "{at}: byte {byte} at {at_byte}"
+            );
+        }
+    }
+    let plain = info();
+    let mut cut = answer(99, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
+    assert_eq!(cut.last(), Some(&0), "no endpoint's tag ends it");
+    cut.truncate(cut.len() - NO_CONTROL);
+    assert!(matches!(
+        read_answer(&received(&cut, 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let older = serde_json::to_value(&plain).unwrap();
+    assert!(older.get("control").is_none(), "skipped when none");
+    assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
 }
 
 /// docs/design/credential-grants.md C7: a lease's value crosses the wire in its own message alone, which says it carries
@@ -6486,4 +6568,243 @@ fn v2_a_node_vms_receipt_carries_its_guests_room_and_its_route_its_own_tag() {
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         offered
     );
+}
+
+/// A stand-in for hex-quic's AES-256-GCM, for the seal's format and rules (docs/design/hex-quic.md Q13), not its cipher:
+/// a body sealed by XOR with a key byte, its tag the first 16 bytes of SHA-256 over that byte, the nonce, the bound header
+/// and the sealed body, its nonces a counter as hex-quic's are; opened under the peer's byte.
+struct ToySeal {
+    mine: u8,
+    theirs: u8,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl ToySeal {
+    /// Two ends of one connection: what one seals, the other opens.
+    fn pair() -> (Self, Self) {
+        let end = |mine, theirs| ToySeal {
+            mine,
+            theirs,
+            next: std::sync::atomic::AtomicU64::new(0),
+        };
+        (end(0x5a, 0xa5), end(0xa5, 0x5a))
+    }
+
+    fn tag(key: u8, nonce: &[u8; NONCE_BYTES], aad: &[u8], sealed: &[u8]) -> [u8; TAG_BYTES] {
+        use sha2::Digest;
+        let digest = sha2::Sha256::new()
+            .chain_update([key])
+            .chain_update(nonce)
+            .chain_update(aad)
+            .chain_update(sealed)
+            .finalize();
+        let mut tag = [0u8; TAG_BYTES];
+        tag.copy_from_slice(&digest[..TAG_BYTES]);
+        tag
+    }
+}
+
+impl Seal for ToySeal {
+    fn seal(
+        &self,
+        aad: &[u8],
+        body: &[u8],
+        sealed: &mut [u8],
+    ) -> Result<([u8; NONCE_BYTES], [u8; TAG_BYTES]), SealFault> {
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut nonce = [0u8; NONCE_BYTES];
+        nonce[4..].copy_from_slice(&n.to_be_bytes());
+        for (to, from) in sealed.iter_mut().zip(body) {
+            *to = from ^ self.mine;
+        }
+        Ok((nonce, Self::tag(self.mine, &nonce, aad, sealed)))
+    }
+
+    fn open(
+        &self,
+        aad: &[u8],
+        nonce: &[u8; NONCE_BYTES],
+        sealed: &[u8],
+        tag: &[u8; TAG_BYTES],
+        body: &mut [u8],
+    ) -> Result<(), SealFault> {
+        if Self::tag(self.theirs, nonce, aad, sealed) != *tag {
+            return Err(SealFault::Broken);
+        }
+        for (to, from) in body.iter_mut().zip(sealed) {
+            *to = from ^ self.theirs;
+        }
+        Ok(())
+    }
+}
+
+/// Every message the wire's tests write that carries a secret, a client's and the node's, with its kind.
+fn secret_messages() -> Vec<(u16, Vec<u8>)> {
+    let requests = requests()
+        .into_iter()
+        .map(|(n, r, _)| request(n, &r, MAX_MESSAGE).unwrap());
+    let answers = answers()
+        .into_iter()
+        .map(|(n, a)| answer(n, &a, MAX_MESSAGE).unwrap());
+    requests
+        .chain(answers)
+        .filter(|bytes| carries_secret(bytes))
+        .map(|bytes| (u16::from_le_bytes([bytes[12], bytes[13]]), bytes))
+        .collect()
+}
+
+/// docs/design/hex-quic.md Q13 (the review's E-6; AC-T7.4.1): do seal each message the wire writes that carries a secret
+/// (a lease's value, a sign-in's tokens, a capture's and a refresh's answers) at one end of a connection, and open it at
+/// the other. Expect each sealed one marked so by its kind alone, its header otherwise its own, longer by its nonce and
+/// tag alone, holding none of its body in the clear and saying it carries no secret in the clear; each opened one the
+/// message sealed, byte for byte, read back as it was written; and each nonce one end took never taken again.
+#[test]
+fn q13_a_message_that_carries_a_secret_goes_sealed_and_opens_to_itself() {
+    let (here, there) = ToySeal::pair();
+    let secrets = secret_messages();
+    let kinds: BTreeSet<u16> = secrets.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([0x001b, 0x001c, 0x001d, 0x8015]),
+        "the leased, captured and refreshed answers and the capture's ask carry secrets"
+    );
+    let mut nonces = BTreeSet::new();
+    for (kind, message) in &secrets {
+        let sealed = seal(message, &here).unwrap();
+        assert!(super::sealed(&sealed) && !super::sealed(message));
+        assert!(
+            !carries_secret(&sealed),
+            "a sealed message holds no secret in the clear"
+        );
+        assert_eq!(sealed.len(), message.len() + SEAL_BYTES);
+        assert_eq!(&sealed[..12], &message[..12], "its magic and wire identity");
+        assert_eq!(u16::from_le_bytes([sealed[12], sealed[13]]), kind | SEALED);
+        assert_eq!(&sealed[14..22], &message[14..22], "its id");
+        let body = &message[HEADER_BYTES..];
+        assert!(
+            body.len() < 8 || !sealed.windows(body.len()).any(|w| w == body),
+            "kind {kind:#06x}'s body in the clear"
+        );
+        assert!(nonces.insert(sealed[HEADER_BYTES..HEADER_BYTES + NONCE_BYTES].to_vec()));
+        assert_eq!(&open(sealed, Some(&there)).unwrap(), message);
+    }
+    assert_eq!(nonces.len(), secrets.len());
+}
+
+/// docs/design/hex-quic.md Q13 (AC-T7.4.1): do open, at a connection that seals, each message that carries a secret as
+/// it came unsealed, and every other message unsealed. Expect each secret refused `Unsealed`, naming its kind, and every
+/// other message back as it came; and none of those sealed, their kinds carrying no secret (`NoSecret`).
+#[test]
+fn q13_a_connection_that_seals_refuses_a_secret_that_came_unsealed() {
+    let (here, there) = ToySeal::pair();
+    for (kind, message) in secret_messages() {
+        assert_eq!(
+            open(message, Some(&there)),
+            Err(Fault::Seal(SealFault::Unsealed { kind }))
+        );
+    }
+    let plain = requests()
+        .into_iter()
+        .map(|(n, r, _)| request(n, &r, MAX_MESSAGE).unwrap())
+        .chain(
+            answers()
+                .into_iter()
+                .map(|(n, a)| answer(n, &a, MAX_MESSAGE).unwrap()),
+        )
+        .filter(|bytes| !carries_secret(bytes));
+    let mut seen = 0;
+    for message in plain {
+        let kind = u16::from_le_bytes([message[12], message[13]]);
+        assert_eq!(
+            seal(&message, &here),
+            Err(Fault::Seal(SealFault::NoSecret { kind }))
+        );
+        assert_eq!(open(message.clone(), Some(&there)).unwrap(), message);
+        seen += 1;
+    }
+    assert!(seen > 100, "the wire's other messages: {seen}");
+}
+
+/// docs/design/hex-quic.md Q13 (AC-T7.4.1): do open a sealed lease whose kind was turned to an inspect's, sealed mark
+/// kept, and the same sealed lease at a connection that seals nothing. Expect the first refused `NoSecret`, naming the
+/// inspect's kind; the second refused `Unsealing`, naming the lease's; and a lease in the clear taken there as it came
+/// (a link that seals nothing carries secrets as the node's socket does, each copy wiped: credential-grants.md C7).
+#[test]
+fn q13_a_sealed_body_is_refused_where_its_kind_or_connection_takes_none() {
+    let (here, there) = ToySeal::pair();
+    let (kind, lease) = secret_messages().remove(0);
+    let sealed = seal(&lease, &here).unwrap();
+    let mut inspect = sealed.clone();
+    inspect[12..14].copy_from_slice(&(kind::INSPECT | SEALED).to_le_bytes());
+    assert_eq!(
+        open(inspect, Some(&there)),
+        Err(Fault::Seal(SealFault::NoSecret {
+            kind: kind::INSPECT
+        }))
+    );
+    assert_eq!(
+        open(sealed, None),
+        Err(Fault::Seal(SealFault::Unsealing { kind }))
+    );
+    assert_eq!(open(lease.clone(), None).unwrap(), lease);
+}
+
+/// docs/design/hex-quic.md Q13 (AC-T7.4.1): the header is bound to the sealed body. Do flip each bit of a sealed lease
+/// in turn, its header's, its nonce's, its body's and its tag's, and cut it short at every length, and open each at the
+/// other end. Expect every one refused, typed: `Broken` where its kind still names a secret, the kind's own mark or a
+/// secret's kind turned to another caught as such, and each cut `Truncated` or `Broken`; none opened.
+#[test]
+fn q13_a_seal_whose_header_nonce_body_or_tag_changed_is_refused() {
+    let (here, there) = ToySeal::pair();
+    let (_, lease) = secret_messages().remove(0);
+    let sealed = seal(&lease, &here).unwrap();
+    for at in 0..sealed.len() {
+        for bit in 0..8 {
+            let mut changed = sealed.clone();
+            changed[at] ^= 1 << bit;
+            match open(changed, Some(&there)) {
+                Err(Fault::Seal(SealFault::Broken)) => {}
+                Err(Fault::Seal(SealFault::Unsealed { .. } | SealFault::NoSecret { .. }))
+                    if (12..14).contains(&at) => {}
+                other => panic!("byte {at} bit {bit}: {other:?}"),
+            }
+        }
+    }
+    for len in HEADER_BYTES..sealed.len() {
+        match open(sealed[..len].to_vec(), Some(&there)) {
+            Err(Fault::Truncated { .. } | Fault::Seal(SealFault::Broken)) => {}
+            other => panic!("cut at {len}: {other:?}"),
+        }
+    }
+}
+
+/// docs/design/hex-quic.md Q13 (AC-T7.4.1): a sealed message is held to one message's bound. Do seal a lease whose
+/// message is exactly the bound less what sealing adds, and one a byte longer. Expect the first sealed at the bound
+/// exactly, and the second refused `Oversized`, naming the bound, before anything is sealed.
+#[test]
+fn q13_a_sealed_message_is_held_to_one_messages_bound() {
+    let (here, _) = ToySeal::pair();
+    let leased = |len: usize| {
+        let leased = Request::Leased {
+            run: 1,
+            answer: Ok(Lease {
+                lease: "lease-1".to_owned(),
+                value: Value::new(vec![7; len]),
+                life: None,
+            }),
+        };
+        request(2, &leased, MAX_MESSAGE).unwrap()
+    };
+    let base = leased(0).len();
+    let fits = leased(MAX_MESSAGE - SEAL_BYTES - base);
+    assert_eq!(seal(&fits, &here).unwrap().len(), MAX_MESSAGE);
+    let over = leased(MAX_MESSAGE - SEAL_BYTES - base + 1);
+    assert_eq!(
+        seal(&over, &here),
+        Err(Fault::Oversized {
+            bytes: MAX_MESSAGE + 1,
+            bound: MAX_MESSAGE
+        })
+    );
+    assert_eq!(here.next.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
