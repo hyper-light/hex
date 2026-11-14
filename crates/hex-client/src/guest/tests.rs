@@ -1508,10 +1508,10 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
 /// The review's D-3 (decision 9; AC-T7.4.1): an offered stream's CONNECT with no deadline is one dial, its OK taken
 /// however late. Past W*, the guest link's setup bound the offer carries, the run-out is told once, and the dial goes on
 /// with no clock of its own, ending at its OK, its connection's end or its VM's: it is never given up and made again,
-/// which would drop an answer coming late and redial a slow guest forever. Do open a stream for an offer whose W* every
-/// answer passes (a nanosecond), its muxer answering the first CONNECT only once the run-out has been told, and killing
-/// the stand-in VM at any second CONNECT. Expect the stream opened on its one CONNECT, none made after it, and its late
-/// OK the wait's sample.
+/// which would drop an answer coming late and redial a slow guest forever. Do measure one CONNECT and its OK against a
+/// stand-in VM's muxer, the W* the offer then carries; open a stream for that offer, the muxer answering its first
+/// CONNECT only once the run-out has been told, and killing the stand-in VM at any CONNECT after it. Expect the stream
+/// opened on its one CONNECT, none made after it, and its late OK the wait's sample.
 #[cfg(target_os = "linux")]
 #[test]
 fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
@@ -1523,19 +1523,15 @@ fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
     let dir = tempfile::tempdir().unwrap();
     let (vm, started) = offered_vm();
     let path = dir.path().join("m");
-    let offer = offered(&vm, started, path.clone(), Some(Duration::from_nanos(1)));
     let identity = shards_api::Identity {
-        pid: offer.pid,
-        started: offer.started,
-        vsock: offer.vsock.clone(),
+        pid: vm.id(),
+        started,
+        vsock: path.clone(),
     };
-    // Its learned W* stands until the run-out is told, which the muxer waits to see.
-    let wait = Arc::new(Patience::seeded(
-        "test.hex_client.guest.offered_connect",
-        Duration::from_nanos(1),
-    ));
     let vm = Arc::new(Mutex::new(vm));
     let listener = UnixListener::bind(&path).unwrap();
+    // Set once W* is measured: the wait whose run-out the muxer waits to see told.
+    let wait: Arc<std::sync::OnceLock<Patience>> = Arc::default();
     let (told, killed) = (Arc::clone(&wait), Arc::clone(&vm));
     let muxer = std::thread::spawn(move || {
         let (mut did, mut held) = (Vec::new(), Vec::new());
@@ -1549,20 +1545,23 @@ fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
             if line == b"STOP\n" {
                 break;
             }
-            if n > 0 {
-                // A second CONNECT: the first was given up. Its VM ends, which ends the dial's follow.
+            if n > 1 {
+                // A CONNECT after the open's first: that one was given up. Its VM ends, which ends the dial.
                 killed.lock().unwrap().kill().unwrap();
                 did.push(Muxed::GivenUp(line));
                 continue;
             }
-            follow::until(
-                &TOLD,
-                "the offered CONNECT's run-out, told",
-                || Party::Live,
-                || told.deadline().is_none(),
-            )
-            .unwrap();
-            // Answered: the test names nothing after its OK.
+            if n == 1 {
+                // The open's first CONNECT: its OK only once the run-out has been told, past W*.
+                follow::until(
+                    &TOLD,
+                    "the offered CONNECT's run-out, told",
+                    || Party::Live,
+                    || told.get().is_some_and(|wait| wait.deadline().is_none()),
+                )
+                .unwrap();
+            }
+            // Answered (the test names nothing after an OK).
             if conn.write_all(b"OK 1\n").is_ok() {
                 did.push(Muxed::Named(line));
                 held.push(conn);
@@ -1572,9 +1571,15 @@ fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
         }
         (did, held)
     });
-    let opened = connect_following(&identity, offer.setup, &wait);
+    // W*: one CONNECT and its OK, answered at once, measured as the link learns its setup bound.
+    let began = std::time::Instant::now();
+    drop(shards_api::connect_borrowed_before(&identity, stream::STDIO_PORT, None).unwrap());
+    let w_star = began.elapsed();
+    let wait =
+        wait.get_or_init(|| Patience::seeded("test.hex_client.guest.offered_connect", w_star));
+    let opened = connect_following(&identity, Some(w_star), wait);
     eprintln!(
-        "d3_offered_one_dial opened={:?}",
+        "d3_offered_one_dial w_star={w_star:?} opened={:?}",
         opened.as_ref().map(|_| ())
     );
     UnixStream::connect(&path)
@@ -1586,13 +1591,9 @@ fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
     let reaped = vm.lock().unwrap().wait();
     eprintln!("d3_offered_one_dial did={did:?} reaped={reaped:?}");
     assert!(opened.is_ok(), "{:?}", opened.map(|_| ()));
-    assert_eq!(
-        did,
-        [Muxed::Named(
-            format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes()
-        )]
-    );
-    assert!(wait.slowest().is_some(), "its late OK learned");
+    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+    assert_eq!(did, [Muxed::Named(connect.clone()), Muxed::Named(connect)]);
+    assert!(wait.slowest() >= Some(w_star), "its late OK learned");
     drop(held);
 }
 
