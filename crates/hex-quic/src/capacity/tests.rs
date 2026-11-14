@@ -10,7 +10,7 @@ use hex_api::capacity::{
     Amounts, Budget, Close, Event, Holder, Host, Out, ReservationId, ToHolder, ToKeeper, Why,
 };
 use hex_core::patience::Patience;
-use hex_testkit::waits::follow;
+use hex_testkit::waits::follow::{self, Party};
 use hyper_quic::rustls;
 
 use super::*;
