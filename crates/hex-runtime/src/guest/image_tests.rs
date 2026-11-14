@@ -6033,3 +6033,21 @@ fn c10_a_cold_ready_wait_is_told_as_it_starts() {
         .collect();
     assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
 }
+
+/// The review's B-12 (AC-T7.4.1): a call on an image VM whose record can't be read is refused saying why it can't. Do
+/// keep an image box's record unreadable in its owner, with why, and inspect the box through the image class. Expect it
+/// refused as broken, in the record's own words.
+#[test]
+fn b12_an_image_vm_whose_record_cant_be_read_is_refused_in_its_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = BoxId::new("unreadable").unwrap();
+    owner.records.lock().unwrap().insert(
+        id.try_clone().unwrap(),
+        Err("its bytes end mid-field".to_owned()),
+    );
+    match Runtime::inspect(&runtime.images, &id) {
+        Err(Refusal::Broken(why)) => assert!(why.contains("its bytes end mid-field"), "{why}"),
+        other => panic!("an unreadable record inspected: {other:?}"),
+    }
+}
