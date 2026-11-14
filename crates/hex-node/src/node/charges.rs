@@ -767,8 +767,20 @@ impl Learner {
                 vms.push((vm.lifetime, &vm.id, vm.receipt));
             }
         }
-        crate::recorded::charges::learned(&self.node, class, costs, vms, self.last.ended(class)?)
-            .map(Some)
+        // Its window, `cpu.max`'s period, the one the kernel holds every VM's cap over (C1): no cap's cycle sets it.
+        let window = hex_api::LearnedWindow {
+            window_ns: u64::try_from(WINDOW.as_nanos()).unwrap_or(u64::MAX),
+            slowed_by: None,
+        };
+        crate::recorded::charges::learned(
+            &self.node,
+            class,
+            costs,
+            vms,
+            self.last.ended(class)?,
+            Some(window),
+        )
+        .map(Some)
     }
 
     /// The last resort's state (C5).

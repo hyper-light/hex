@@ -722,7 +722,7 @@ fn w14_a_capping_platforms_rates_keep_every_booking_and_share_the_rest() {
         .unwrap();
     }
     let used = BTreeMap::from([(1, (4_000, 4_000)), (2, (500, 3_000))]);
-    let rates = n.rates(10_000, &used, 10).unwrap();
+    let rates = n.rates(10_000, &used, |_| 10).unwrap();
     assert_eq!(rates, vec![(1, 6_400), (2, 2_000), (3, 1_600)]);
     let mut none = node(res(1, 64 * GIB, 0));
     for id in 1..=3 {
@@ -736,8 +736,30 @@ fn w14_a_capping_platforms_rates_keep_every_booking_and_share_the_rest() {
         .unwrap();
     }
     let idle = BTreeMap::from([(1, (0, 1)), (2, (0, 1)), (3, (0, 1))]);
-    let least = none.rates(1, &idle, 10).unwrap();
+    let least = none.rates(1, &idle, |_| 10).unwrap();
     assert!(least.iter().all(|(_, cap)| *cap == 10), "{least:?}");
+}
+
+/// Joint plan step 14 (AC-T7.4.1; ROOT, 2026-11-13): each VM's cap is held at least at the least its own actuator takes,
+/// never one platform-wide number. Do cap three VMs booked nothing in a budget of one milli-CPU, their actuators' leasts
+/// 1, 13 and 4 milli-CPU (a governor's unit; a Windows job's on 128 and on 32 processors). Expect each at its own least.
+#[test]
+fn w14_each_vms_cap_is_held_at_its_own_actuators_least() {
+    let mut n = node(res(1, 64 * GIB, 0));
+    for id in 1..=3 {
+        n.track(
+            id,
+            class_of(u8::try_from(id).unwrap(), 8_000, 8 * GIB),
+            0,
+            8,
+            res(0, GIB, 0),
+        )
+        .unwrap();
+    }
+    let idle = BTreeMap::from([(1, (0, 1)), (2, (0, 1)), (3, (0, 1))]);
+    let leasts = BTreeMap::from([(1, 1), (2, 13), (3, 4)]);
+    let rates = n.rates(1, &idle, |id| leasts[id]).unwrap();
+    assert_eq!(rates, vec![(1, 1), (2, 13), (3, 4)]);
 }
 
 proptest! {
@@ -759,7 +781,7 @@ proptest! {
             n.track(id, class_of(u8::try_from(k).unwrap(), *ceiling, GIB), 0, 1, res(booking, GIB, 0)).unwrap();
             used.insert(id, (*ran, *cap));
         }
-        let rates = n.rates(capacity, &used, 10).unwrap();
+        let rates = n.rates(capacity, &used, |_| 10).unwrap();
         let mut lifted = 0;
         for (id, cap) in &rates {
             let booking = n.booking(id).unwrap().cpu_milli;

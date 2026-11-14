@@ -181,3 +181,64 @@ fn native_evidence_refuses_hostile_roles_lengths_and_present_prefixes() {
     );
     assert!(parse(&oversized, [1; 32]).is_err());
 }
+
+/// Joint plan step 14 (D255, D260; ROOT, 2026-11-13; AC-T7.4.1): every managed VM a node boots is booted
+/// `--host-managed`, so its VM process answers its governor's rate (D255) and its use (D260) on its socket: a VM its
+/// guest runtime plans with the node's native images and one it plans without. Do plan a managed boot each way. Expect
+/// each plan's arguments to carry `--host-managed`.
+#[test]
+fn w14_d260_every_managed_vm_a_node_boots_is_host_managed() {
+    let dir = tempfile::tempdir().unwrap();
+    let evidence = evidence();
+    let cost = cost(Sha256::digest(&evidence).into());
+    let file = dir.path().join("cost");
+    let proof = dir.path().join("evidence");
+    let encoded = serde_json::to_vec(&cost).unwrap();
+    std::fs::write(&file, &encoded).unwrap();
+    std::fs::write(&proof, &evidence).unwrap();
+    let (_, images) =
+        super::super::load_runtime_inputs(&file, Sha256::digest(&encoded).into(), &proof).unwrap();
+    let images = images.unwrap();
+    let config = GuestConfig {
+        binary: dir.path().join("cli"),
+        boot: crate::guest::Boot::Kernel {
+            kernel: dir.path().join("kernel"),
+            initrd: dir.path().join("init"),
+        },
+        vcpus: 1,
+        memory_mib: 256,
+        gpu: false,
+        shares: Vec::new(),
+        staged: "/run/hex/staged".into(),
+    };
+    std::fs::write(config.direct().unwrap().0, b"kernel").unwrap();
+    // Pure preparation creates/dials no socket; avoid long private TMPDIR paths.
+    let socket = dir
+        .path()
+        .ancestors()
+        .last()
+        .unwrap()
+        .join("host-managed-model.v");
+    for native in [true, false] {
+        let paths =
+            shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                .unwrap();
+        let mut runtime = GuestRuntime::new(Arc::new(shards_api::Shards::new()), config.clone())
+            .with_runtime_paths(paths)
+            .with_runtime_cost(cost)
+            .unwrap();
+        if native {
+            runtime = runtime.with_native_images(images).unwrap();
+        }
+        let budget =
+            crate::guest::managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
+        let plan = runtime
+            .managed_plan(&config.spec().unwrap(), &socket, budget)
+            .unwrap();
+        assert!(
+            plan.arguments().iter().any(|arg| arg == "--host-managed"),
+            "native images {native}: {:?}",
+            plan.arguments()
+        );
+    }
+}
