@@ -282,6 +282,16 @@ impl ImageClass {
         Ok(self.node_guest(run)?.rate_period())
     }
 
+    /// Tells node VM `run`'s guest its room (D188; joint plan step 39), `room` bytes past what it holds, as an image box's
+    /// guest is told: its answer waited for while its run lives, its end refusing it, never a timer. What it holds then.
+    pub fn room_node(&self, run: NodeRun, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        match self.node_guest(run)?.room(room, Duration::MAX) {
+            Ok(held) => Ok(held),
+            Err(ImageRefusal::Ended(_)) => Err(not_running(&run)),
+            Err(why) => Err(refused("telling the node VM's guest its room", why)),
+        }
+    }
+
     /// Node VM `run`'s guest while its run runs here; refused, typed, where it doesn't.
     fn node_guest(&self, run: NodeRun) -> Result<Arc<dyn ImageGuest>, Refusal> {
         let image = self.image()?;
@@ -353,6 +363,8 @@ impl ImageClass {
             gpu_devices: Vec::new(),
             // No sign-in grant (Shards' D242 step 8): a node VM signs in to nothing.
             sign_ins: Vec::new(),
+            // No upstream root (Shards' D242, image channel v26): it grants no credential to fill in.
+            upstream_roots: Vec::new(),
         })
     }
 }

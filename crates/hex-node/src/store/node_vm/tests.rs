@@ -487,3 +487,31 @@ fn w39_a_node_vm_rows_place_in_its_nodes_start_order_is_given_at_its_first_write
         "the order runs on past the node VM's place"
     );
 }
+
+/// Joint plan step 39 (ROOT, 2026-11-13): one node VM serves a node's oci class, its one guest, so a node holds one node
+/// VM Ready at a time, and a second is a damaged row, refused, typed. Do write node VM 1's row Booting, then Ready; node
+/// VM 2's Booting, then Ready; then node VM 1's Ended, and node VM 2's Ready again. Expect node VM 2's first Ready refused
+/// as a damaged row, naming the one guest, its row left Booting; then, node VM 1 ended, node VM 2 Ready.
+#[test]
+fn w39_a_node_holds_one_node_vm_ready_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    store.put_node_vm(&record(1, NodeVmPhase::Booting)).unwrap();
+    store.put_node_vm(&record(1, NodeVmPhase::Ready)).unwrap();
+    store.put_node_vm(&record(2, NodeVmPhase::Booting)).unwrap();
+    let refused = store.put_node_vm(&record(2, NodeVmPhase::Ready));
+    assert!(
+        matches!(&refused, Err(Refusal::Invalid { why, .. }) if why.contains("one guest")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        store.node_vm(&run(2)).unwrap().map(|row| row.phase),
+        Some(NodeVmPhase::Booting)
+    );
+    store.put_node_vm(&record(1, NodeVmPhase::Ended)).unwrap();
+    store.put_node_vm(&record(2, NodeVmPhase::Ready)).unwrap();
+    assert_eq!(
+        store.node_vm(&run(2)).unwrap().map(|row| row.phase),
+        Some(NodeVmPhase::Ready)
+    );
+}

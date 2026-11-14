@@ -1283,6 +1283,35 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_rates"
     )]
     pub rates: Vec<LearnedRate>,
+    /// The window its node's learner reads its VMs over (C1), where it holds a cap: the longest period of the caps it
+    /// holds, a governor's or an image run's, or a cycle of its platform's cap at the rate it holds a VM at, where that is
+    /// longer; then the VM whose cap's cycle sets it is named, as every VM's read waits on it (ROOT, 2026-11-13). Added
+    /// after the rates, so absent means none told (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<LearnedWindow>,
+}
+
+/// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
+/// cap's cycle sets it, where one does: a slowdown told, never silent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedWindow {
+    pub window_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slowed_by: Option<LearnedHolder>,
+}
+
+impl LearnedWindow {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            window_ns: self.window_ns,
+            slowed_by: self
+                .slowed_by
+                .as_ref()
+                .map(LearnedHolder::try_clone)
+                .transpose()?,
+        })
+    }
 }
 
 impl Learned {
@@ -1443,7 +1472,13 @@ impl Learned {
         for rate in &self.rates {
             rates.push(rate.try_clone()?);
         }
+        let window = self
+            .window
+            .as_ref()
+            .map(LearnedWindow::try_clone)
+            .transpose()?;
         Ok(Self {
+            window,
             priors: copy_capacity_values(&self.priors, "learned priors")?,
             used: self.used,
             holdings,
