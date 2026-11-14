@@ -171,11 +171,43 @@ impl<'a> Holder<'a> {
     }
 }
 
-/// A node VM's band (joint plan step 39, place 3; ROOT, 2026-11-13): what ending it ends, derived from its node's
-/// `records`.
-pub(crate) fn node_band<'r>(records: impl IntoIterator<Item = &'r Result<BoxRecord, String>>) -> u8 {
-    let _ = records.into_iter();
-    0
+/// A node VM's band (joint plan step 39, place 3; ROOT, 2026-11-13): what ending it ends. It runs its node's `oci`
+/// class, so ending it ends every box of that class whose run hasn't ended, and its band is the highest of theirs among
+/// its node's `records`, none ranking it lowest (it ends no box). A record that can't be read may be of a box it runs,
+/// of any band, so then it ranks above every box: the highest band there is.
+pub(crate) fn node_band<'r>(
+    records: impl IntoIterator<Item = &'r Result<BoxRecord, String>>,
+) -> u8 {
+    let mut band = 0;
+    for record in records {
+        match record {
+            Err(_) => return u8::MAX,
+            Ok(record)
+                if record.spec.class.class() == hex_api::Class::Oci && record.exit.is_none() =>
+            {
+                band = band.max(record.spec.band);
+            }
+            Ok(_) => {}
+        }
+    }
+    band
+}
+
+/// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
+pub(crate) fn nodes(rows: &[NodeVmRecord], band: u8) -> Result<Vec<Holder<'_>>, Refusal> {
+    let mut holders = Vec::new();
+    holders
+        .try_reserve_exact(rows.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a window's VMs",
+            bound: rows.len(),
+        })?;
+    holders.extend(
+        rows.iter()
+            .map(|row| Holder::Node { row, band })
+            .filter(|holder| holder.image()),
+    );
+    Ok(holders)
 }
 
 /// `records`, a node's boxes' records, as the holders a learner reads, each a box's.

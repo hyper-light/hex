@@ -311,11 +311,12 @@ impl Store {
         self.disk.join(".node-vms")
     }
 
-    /// Keeps `record`, its run's row replaced whole but for its last-resort end, published durably. A run's first row is
-    /// refused past [`TURNS`] rows. A Booting or Ready row of a run this process doesn't hold yet takes the run's lock
-    /// first, so no live run's row is ever written unlocked; an Ended row lets the lock go once written, its run its
-    /// owner's no more. The end is its learner's to write ([`Store::update_node_vm`]): a phase write, made from a read
-    /// before that write, keeps the row's (C5, intent first).
+    /// Keeps `record`, its run's row replaced whole but for its last-resort end and its start place, published durably.
+    /// A run's first row is refused past [`TURNS`] rows, and is given the next place in the node's start order (C3), which
+    /// every later write keeps. A Booting or Ready row of a run this process doesn't hold yet takes the run's lock first,
+    /// so no live run's row is ever written unlocked; an Ended row lets the lock go once written, its run its owner's no
+    /// more. The end is its learner's to write ([`Store::update_node_vm`]): a phase write, made from a read before that
+    /// write, keeps the row's (C5, intent first).
     pub(crate) fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         record.check()?;
         let _metadata = self.changing_metadata()?;
@@ -327,8 +328,13 @@ impl Store {
             return Err(allocation(TURNS));
         }
         let mut owners = self.node_vm_owners.lock().map_err(|_| poisoned())?;
+        let (last_resort, started) = match self.node_vm(&record.run)? {
+            Some(row) => (row.last_resort, row.started),
+            None => (None, Some(self.next_start()?)),
+        };
         let bytes = NodeVmRecord {
-            last_resort: self.node_vm(&record.run)?.and_then(|row| row.last_resort),
+            last_resort,
+            started,
             ..record.clone()
         }
         .encode()?;

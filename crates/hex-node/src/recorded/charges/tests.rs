@@ -127,18 +127,14 @@ impl Managed for Record {
 
     fn rate_period(&self, holder: Holder<'_>) -> Result<Option<Duration>, Refusal> {
         let name = named(holder);
-        if self.unread_periods.borrow().iter().any(|n| *n == name) {
+        if self.unread_periods.borrow().contains(&name) {
             return Err(Refusal::Broken("its run's period unread".into()));
         }
         if !holder.image() {
             return Ok(self.governed.borrow().get(&name).copied());
         }
         Ok(Some(
-            self.periods
-                .borrow()
-                .get(&name)
-                .copied()
-                .unwrap_or(WINDOW),
+            self.periods.borrow().get(&name).copied().unwrap_or(WINDOW),
         ))
     }
 
@@ -1765,26 +1761,27 @@ fn w39_a_node_with_no_node_vm_end_on_record_says_so_at_start() {
 /// runs; then the highest band there is, as a box it runs may be of any band; then band 0, as ending it ends no box.
 #[test]
 fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
-    let boxed = |name: &str, class: ClassSpec, band: u8, ended: bool| -> Result<BoxRecord, String> {
-        let mut record = BoxRecord::new(
-            BoxSpec {
-                id: BoxId::new(name).unwrap(),
-                bounds: hex_api::Bounds::default(),
-                class,
-                owner: None,
-                devices: Vec::new(),
-                allocation: None,
-                route: None,
-                band,
-            },
-            Phase::Ready,
-            Vec::new(),
-        );
-        if ended {
-            record.exit = Some(hex_api::Exit::Code(0));
-        }
-        Ok(record)
-    };
+    let boxed =
+        |name: &str, class: ClassSpec, band: u8, ended: bool| -> Result<BoxRecord, String> {
+            let mut record = BoxRecord::new(
+                BoxSpec {
+                    id: BoxId::new(name).unwrap(),
+                    bounds: hex_api::Bounds::default(),
+                    class,
+                    owner: None,
+                    devices: Vec::new(),
+                    allocation: None,
+                    route: None,
+                    band,
+                },
+                Phase::Ready,
+                Vec::new(),
+            );
+            if ended {
+                record.exit = Some(hex_api::Exit::Code(0));
+            }
+            Ok(record)
+        };
     let oci = || {
         ClassSpec::Oci(Box::new(OciSpec {
             rootfs: hex_api::Rootfs::Dir(std::path::PathBuf::from("/images/agent")),
@@ -1810,9 +1807,10 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is capped through its run's rate, D247, told
 /// Governor): a node whose guest is a node VM under shards-init learns that VM as it learns an image VM, over its run's
 /// period, and holds it through its run's rate. Do open a node whose platform holds no window, keep its node VM's row
-/// Ready, its run saying 70 ms, and a process box capped at all but a CPU of the machine; start its charge learner, run a
-/// window, and answer the Shards class. Expect the node VM's host use read, its run held to a rate below its 16-CPU
-/// receipt, the window its run's 70 ms, and the answer naming its holding and its rate held by its governor, by its run.
+/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, and a process box capped at all but 6 CPUs of the
+/// machine; start its charge learner, run a window, and answer the Shards class. Expect the node VM's host use read, its
+/// run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer naming its holding and its
+/// rate held by its governor, by its run.
 #[test]
 fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rate() {
     let dir = tempfile::tempdir().unwrap();
@@ -1823,18 +1821,22 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         .lock()
         .unwrap()
         .insert(node_run(7), Duration::from_millis(70));
-    let node = std::sync::Arc::new(
-        crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap(),
-    );
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     let store = &node.books.store;
+    let booked = |phase| {
+        let mut row = node_row(7, phase);
+        row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+        row
+    };
     store
-        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Booting))
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Booting))
         .unwrap();
     store
-        .put_node_vm(&node_row(7, hex_api::NodeVmPhase::Ready))
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
         .unwrap();
     let machine = node.machine().unwrap();
-    let cap = u32::try_from(machine.cpu_milli.saturating_sub(1_000)).unwrap();
+    let cap = u32::try_from(machine.cpu_milli.saturating_sub(6_000)).unwrap();
     let capped = BoxRecord::new(
         BoxSpec {
             id: BoxId::new("proc-1").unwrap(),
