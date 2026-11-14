@@ -538,9 +538,23 @@ impl Store {
             }
             let file = open_lock(&directory, &record.run)?;
             if try_own(&file)? {
-                let end = record.last_resort.take();
-                self.let_go(&record)?;
-                settled.push((record.run, NodeVmSettled::OwnerEnded));
+                // Its row read again under its lock (the review's C-11), as the follow path reads it: its owner may have
+                // kept its end and written it Ended since the read above, then let the lock go as it ended.
+                let Some(mut row) = self.node_vm(&record.run)? else {
+                    remove_if_there(
+                        &lock_path(&directory, &record.run)?,
+                        "a node VM's lock file",
+                    )?;
+                    continue;
+                };
+                let end = row.last_resort.take();
+                let settled_as = if row.phase == NodeVmPhase::Ended {
+                    NodeVmSettled::Ended
+                } else {
+                    NodeVmSettled::OwnerEnded
+                };
+                self.let_go(&row)?;
+                settled.push((row.run, settled_as));
                 ends.extend(end);
             } else {
                 self.follow(record.run, file)?;
