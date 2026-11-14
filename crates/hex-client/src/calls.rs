@@ -357,6 +357,57 @@ pub enum Sent {
     Refused(Refusal),
 }
 
+/// What the client armed, for its tests (ROOT's seam of 2026-11-14, AC-T7.4.1): each check of an operation's deadline
+/// by a step or a wait, and each wait it arms, with the absolute instant it took (none: a wait with no deadline), in the
+/// thread that armed it. A test reads back which instants an operation's waits took, so whether progress re-armed one
+/// is read from what was armed, never from a clock.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Armed {
+    /// The step or wait that armed it.
+    pub(crate) what: &'static str,
+    pub(crate) at: Option<Instant>,
+    /// A learned wait's bound under the caller's (decision 9): its end is a run-out to tell, never the operation's.
+    pub(crate) learned: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// This thread's [`Armed`] log, a repeat of its last entry folded into it.
+    static ARMED: std::cell::RefCell<Vec<Armed>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn arm(what: &'static str, at: Option<Instant>, learned: bool) {
+    let armed = Armed { what, at, learned };
+    ARMED.with(|log| {
+        let mut log = log.borrow_mut();
+        if log.last() != Some(&armed) {
+            log.push(armed);
+        }
+    });
+}
+
+/// What this thread has armed since it last asked, taken.
+#[cfg(test)]
+pub(crate) fn armed() -> Vec<Armed> {
+    ARMED.with(|log| log.take())
+}
+
+/// Whether `armed`, an operation's armed log, holds each of `waits` armed at `at` and every entry that isn't a learned
+/// wait's at `at` too: the one deadline the operation took, by value, whatever it armed besides.
+#[cfg(test)]
+pub(crate) fn armed_at(armed: &[Armed], waits: &[&str], at: Option<Instant>) -> bool {
+    waits.iter().all(|what| {
+        armed
+            .iter()
+            .any(|armed| armed.what == *what && !armed.learned && armed.at == at)
+    }) && armed
+        .iter()
+        .filter(|armed| !armed.learned)
+        .all(|armed| armed.at == at)
+}
+
 /// One operation's absolute reply/setup deadline. The caller's authority and the learned answer
 /// wait stay distinct: exhausting caller authority is not a slower-answer calibration sample.
 #[derive(Clone, Copy, Debug)]
@@ -413,6 +464,12 @@ impl ReplyDeadline {
 
     /// Remaining authority for protocol setup, or a refusal naming the bound that expired.
     pub fn remaining(self, op: &'static str) -> Result<Duration, Refusal> {
+        #[cfg(test)]
+        arm(
+            op,
+            Some(self.at),
+            matches!(self.source, ReplyBound::Learned(_)),
+        );
         let left = self.at.saturating_duration_since(Instant::now());
         if left.is_zero() {
             Err(self.refusal(op))
@@ -774,7 +831,7 @@ fn wait_refused(why: hex_wait::Failed) -> Refusal {
 /// The longest one wait on a connection can be: `i32::MAX` milliseconds, the most poll(2) takes where it has no
 /// `ppoll` (macOS; Windows' `WSAPoll`), its timeout a C `int` of milliseconds. A longer wait waits this long at a
 /// time, its caller waiting again until its own deadline.
-const MOST_ONE_WAIT: Duration = Duration::from_millis(2_147_483_647);
+pub(crate) const MOST_ONE_WAIT: Duration = Duration::from_millis(2_147_483_647);
 /// [`MOST_ONE_WAIT`] as poll(2) takes it.
 const MOST_ONE_WAIT_SPEC: rustix::event::Timespec = rustix::event::Timespec {
     tv_sec: 2_147_483,
@@ -819,6 +876,10 @@ struct Whole<'a>(&'a SendLock);
 
 impl SendLock {
     fn lock(&self, deadline: Option<Instant>) -> Result<Option<Whole<'_>>, Refusal> {
+        #[cfg(test)]
+        if deadline.is_some() {
+            arm("the send lock", deadline, false);
+        }
         let mut busy = self.busy.lock().map_err(poisoned)?;
         while *busy {
             busy = match deadline {
@@ -1521,6 +1582,8 @@ impl<'a, T: Transport> Caller<'a, T> {
         deadline: Option<Instant>,
         patience: Option<Duration>,
     ) -> Result<(), Sent> {
+        #[cfg(test)]
+        arm("sending", deadline, false);
         let shared = self.shared;
         let no_room = || Refusal::Os {
             op: "sending to the node agent",
@@ -1719,7 +1782,12 @@ impl<'a, T: Transport> Caller<'a, T> {
         deadline: Option<Instant>,
         waits: Option<&Patience>,
     ) -> Option<Result<Answer, Refusal>> {
+        // The answer's wait, under its caller's deadline, a learned bound inside it where its kind has one.
+        #[cfg(test)]
+        arm("the answer", deadline, false);
         if let Some(bound) = *learned {
+            #[cfg(test)]
+            arm("the answer", Some(bound.at), true);
             if let Some(answer) = self.wait(Some(bound.at)) {
                 return Some(answer);
             }

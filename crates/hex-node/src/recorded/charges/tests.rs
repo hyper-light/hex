@@ -116,6 +116,8 @@ struct Record {
     /// Each VM's actuator's least share (C4), as the test sets it: a governor's for a VM it sets none for.
     leasts: RefCell<BTreeMap<String, u64>>,
     refuse_rates: std::cell::Cell<bool>,
+    /// Whether an intent's write is refused, as a store whose write fails refuses it.
+    refuse_intents: std::cell::Cell<bool>,
     stops: RefCell<Vec<String>>,
     /// The node's records, where the test keeps them: an intent is written there, as the node writes it.
     records: RefCell<Option<Store>>,
@@ -226,6 +228,9 @@ impl Managed for Record {
         self.events
             .borrow_mut()
             .push(format!("intend {}", holder_name(id)));
+        if self.refuse_intents.get() {
+            return Err(Refusal::Broken("the record's write failed".into()));
+        }
         match self.records.borrow().as_ref() {
             Some(store) => record_last_resort(store, id, scope, Some(end)),
             None => Ok(false),
@@ -1130,11 +1135,11 @@ fn w14_a_window_books_whole_each_vm_it_doesnt_learn() {
             .collect()
     };
     let records = records();
-    let unmanaged = sort(&records, |_| false).unwrap();
+    let unmanaged = sort(&records, &[], |_| false).unwrap();
     assert_eq!(ids(&unmanaged), ["img-1"]);
     assert_eq!(unmanaged.whole, res(16_000, 8 * GIB));
     assert_eq!(unmanaged.native, res(2_000, GIB));
-    let both = sort(&records, |_| true).unwrap();
+    let both = sort(&records, &[], |_| true).unwrap();
     assert_eq!(ids(&both), ["vm-1", "img-1"]);
     assert_eq!(both.whole, CapacityResources::default());
     assert_eq!(both.native, res(2_000, GIB));
@@ -1655,7 +1660,7 @@ fn w14_d255_with_no_platform_window_a_managed_vm_is_learned_over_its_governors_p
         *io.rates.borrow(),
         vec![("vm-1".to_owned(), 16_000), ("vm-2".to_owned(), 16_000)]
     );
-    let sorted = sort(&vms, |holder| learner.learns(holder)).unwrap();
+    let sorted = sort(&vms, &[], |holder| learner.learns(holder)).unwrap();
     let learned: Vec<String> = sorted
         .learned
         .iter()
@@ -2407,4 +2412,135 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
         *images.0.box_rates.lock().unwrap(),
         [("img-1".to_owned(), left - booking.cpu_milli)]
     );
+}
+
+/// A-5 (ROOT's audit, 2026-11-13: the oci boxes a node VM hosts were counted twice, at their caps as native boxes and
+/// again in the node VM's footprint, so the VMs learned beside them got less room and the last resort fired early): an
+/// oci box's memory is held by the guest that runs it, so its caps are native only where no node VM on record runs the
+/// node's oci class. Do sort a node's records, an oci box capped at 2 CPUs and 2 GiB and a process box at 1 CPU and
+/// 1 GiB, with no node VM on record; then with node VM 7 on record Ready, then Booting, then Ended. Expect native both
+/// boxes' caps with none, the oci box's guest no holder its learner reads; and the process box's alone with each, the
+/// oci box its node VM's: in its footprint while it runs, in its booking while it boots, and nothing once it has ended.
+#[test]
+fn w39_a5_the_oci_boxes_a_node_vm_hosts_are_its_never_native_too() {
+    let capped = |name: &str, class: ClassSpec, cpu_milli: u32, mem_bytes: u64| {
+        BoxRecord::new(
+            BoxSpec {
+                id: BoxId::new(name).unwrap(),
+                bounds: hex_api::Bounds {
+                    cpu_max_milli: Some(cpu_milli),
+                    memory_max: Some(mem_bytes),
+                    ..hex_api::Bounds::default()
+                },
+                class,
+                owner: None,
+                devices: Vec::new(),
+                allocation: None,
+                route: None,
+                band: 0,
+            },
+            Phase::Ready,
+            Vec::new(),
+        )
+    };
+    let oci = ClassSpec::Oci(Box::new(OciSpec {
+        rootfs: hex_api::Rootfs::Dir(std::path::PathBuf::from("/images/agent")),
+        init: hex_api::Program::of(&["/bin/true"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: hex_api::Network::Private,
+        hosts: Vec::new(),
+    }));
+    let records = [
+        capped("oci-1", oci, 2_000, 2 * GIB),
+        capped("proc-1", ClassSpec::Process, 1_000, GIB),
+    ];
+    let native =
+        |rows: &[hex_core::record::NodeVmRecord]| sort(&records, rows, |_| true).unwrap().native;
+    assert_eq!(
+        native(&[]),
+        res(3_000, 3 * GIB),
+        "no node VM: the oci box's caps native"
+    );
+    for phase in [
+        hex_api::NodeVmPhase::Ready,
+        hex_api::NodeVmPhase::Booting,
+        hex_api::NodeVmPhase::Ended,
+    ] {
+        assert_eq!(
+            native(&[node_row(7, phase)]),
+            res(1_000, GIB),
+            "node VM {phase:?}"
+        );
+    }
+}
+
+/// Reviewer A's suspicion, verified (ROOT, 2026-11-13): a node VM learns under a key of its own, never its profile's
+/// box VMs': it runs every oci box of its node, so its windows are a container host's use, no box VM's, and they would
+/// raise its profile's priors and ceilings. Do run two windows of node VM 7 alone, of the Shards profile and envelope,
+/// booked at 4 CPUs and 4 GiB, its VM process holding 9 GiB, 1 GiB past its 8 GiB envelope; then answer the Shards
+/// class for that profile. Expect the profile's ceiling cold in every dimension: no box VM of it has shown its VMM's
+/// own, and the node VM's windows are none of its evidence.
+#[test]
+fn w39_a_node_vm_learns_under_a_key_of_its_own() {
+    let io = Record::default();
+    let mut row = node_row(7, hex_api::NodeVmPhase::Ready);
+    row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+    row.started = Some(1);
+    unused(&io, "node-7", 9 * GIB);
+    let node = [Holder::Node { row: &row, band: 0 }];
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &node, budget, start).unwrap();
+    learner.window(&io, &node, budget, start + WINDOW).unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &node)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned
+            .ceilings
+            .iter()
+            .map(|ceiling| ceiling.overhead)
+            .collect::<Vec<_>>(),
+        [hex_api::LearnedOverhead {
+            cpu_milli: None,
+            mem_bytes: None,
+            disk_bytes: None,
+        }]
+    );
+}
+
+/// Reviewer A's suspicion, verified (ROOT, 2026-11-13): an intent the last resort couldn't write into its VM's record
+/// is told, typed, never dropped. Do run a window of three Shards VMs booked at 4 GiB in a 16 GiB fleet, then one where
+/// they hold 6, 7 and 2 GiB, every intent's write refused. Expect vm-2 still stopped, the fleet held before its record;
+/// the window refused with the write's own refusal; and why it ended vm-2 kept for its record after the window.
+#[test]
+fn w39_an_intent_the_last_resort_couldnt_write_is_told_typed() {
+    let io = Record::default();
+    let vms = fleet_of_three();
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, 0);
+    }
+    io.refuse_intents.set(true);
+    let budget = res(24_000, 16 * GIB);
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &holders(&vms), budget, start).unwrap();
+    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(name, 0, held);
+    }
+    let told = learner.window(&io, &holders(&vms), budget, start + WINDOW);
+    assert_eq!(*io.stops.borrow(), ["vm-2"]);
+    assert_eq!(
+        told,
+        Err(Refusal::Broken("the record's write failed".into()))
+    );
+    let kept: Vec<_> = learner
+        .unrecorded()
+        .into_iter()
+        .map(|(id, _, end)| (box_of(&id).to_owned(), end.map(|end| end.held)))
+        .collect();
+    assert_eq!(kept, [("vm-2".to_owned(), Some(7 * GIB))]);
 }
