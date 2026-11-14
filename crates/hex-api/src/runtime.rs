@@ -1497,8 +1497,8 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends; at most [`MAX_LEARNED_PRIORS`]
-    /// ceilings, no profile and envelope twice.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends, rates, unread VMs, awaits and ranked
+    /// node VMs; at most [`MAX_LEARNED_PRIORS`] ceilings, no profile and envelope twice.
     pub fn check(&self) -> Result<(), Refusal> {
         if self.ceilings.len() > MAX_LEARNED_PRIORS {
             return Err(Refusal::Exhausted {
@@ -1522,11 +1522,18 @@ impl Learned {
                 bound: MAX_LEARNED_HOLDINGS,
             });
         }
-        if self.rates.len() > MAX_LEARNED_HOLDINGS {
-            return Err(Refusal::Exhausted {
-                what: "learned rates",
-                bound: MAX_LEARNED_HOLDINGS,
-            });
+        for (what, told) in [
+            ("learned rates", self.rates.len()),
+            ("learned unread VMs", self.unread.len()),
+            ("learned awaits", self.awaits.len()),
+            ("learned ranked VMs", self.ranked.len()),
+        ] {
+            if told > MAX_LEARNED_HOLDINGS {
+                return Err(Refusal::Exhausted {
+                    what,
+                    bound: MAX_LEARNED_HOLDINGS,
+                });
+            }
         }
         if self.holdings.len() > MAX_LEARNED_HOLDINGS {
             return Err(Refusal::Exhausted {
@@ -1611,17 +1618,9 @@ impl Learned {
             ended,
             ceilings: copy_capacity_values(&self.ceilings, "learned ceilings")?,
             rates,
-            unread: try_clones(
-                &self.unread,
-                "learned unread VMs",
-                LearnedUnread::try_clone,
-            )?,
+            unread: try_clones(&self.unread, "learned unread VMs", LearnedUnread::try_clone)?,
             awaits: try_clones(&self.awaits, "learned awaits", LearnedAwait::try_clone)?,
-            ranked: try_clones(
-                &self.ranked,
-                "learned ranked VMs",
-                LearnedRank::try_clone,
-            )?,
+            ranked: try_clones(&self.ranked, "learned ranked VMs", LearnedRank::try_clone)?,
         })
     }
 }

@@ -48,13 +48,13 @@ use hex_api::{
     ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
-    LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
-    LearnedRate, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS,
-    MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase,
-    NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published,
-    RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
-    check_published, check_sign_ins,
+    LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead,
+    LearnedPrior, LearnedRank, LearnedRate, LearnedUnread, LearnedUse, LearnedWindow,
+    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
+    Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice,
+    PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal, Rootfs,
+    RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream,
+    Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -958,13 +958,15 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 w.reserve_fixed(2)?;
                 w.option(capacity.own.cpu_ns, Writer::u64);
                 w.option(capacity.own.uptime_ns, Writer::u64);
-                // Joint plan step 39: last, after `own`.
+                // Joint plan step 39: after `own`.
                 w.reserve_fixed(size_of::<u32>())?;
                 w.device_count(capacity.node_vms.len(), NODE_VM_RECEIPT_BYTES)?;
                 for receipt in &capacity.node_vms {
                     put_node_vm_receipt(w, receipt)?;
                 }
-                Ok(())
+                // Last (A-3; ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
+                w.reserve_fixed(1)?;
+                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1520,14 +1522,15 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     cpu_ns: r.option(Reader::u64)?,
                     uptime_ns: r.option(Reader::u64)?,
                 },
-                // Last (joint plan step 39).
+                // Then (joint plan step 39).
                 node_vms: r.bounded_list(
                     NODE_VM_RECEIPT_BYTES,
                     MAX_LEARNED_HOLDINGS,
                     "node VM receipts",
                     node_vm_receipt,
                 )?,
-                unlearned: None,
+                // Last (A-3).
+                unlearned: r.option(|r| r.string("why a learner learned nothing"))?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -2299,6 +2302,14 @@ const LEARNED_CEILING_BYTES: usize = 32 + RESOURCE_BYTES + 3 * (1 + size_of::<u6
 const LEARNED_RATE_MIN_BYTES: usize = HOLDER_MIN_BYTES + 1;
 /// A learned rate's VMM own taking its share (D260): its tag, then its own and its share.
 const OWN_TAKES_SHARE_BYTES: usize = 1 + 2 * size_of::<u64>();
+/// One VM a learner couldn't read at its least (place 4): its holder at its least, then its reason's length.
+const LEARNED_UNREAD_MIN_BYTES: usize = HOLDER_MIN_BYTES + size_of::<u32>();
+/// One guest's room's await past its holder (place 4): its capability's tag.
+const LEARNED_AWAIT_BYTES: usize = 1;
+/// One guest's room's await at its least: its holder at its least, then its capability's tag.
+const LEARNED_AWAIT_MIN_BYTES: usize = HOLDER_MIN_BYTES + LEARNED_AWAIT_BYTES;
+/// One node VM ranked above every box at its least (place 4): its run's 16 bytes, then its reason's length.
+const LEARNED_RANK_MIN_BYTES: usize = 16 + size_of::<u32>();
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
@@ -2312,6 +2323,9 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
     let holdings = std::mem::take(&mut learned.holdings);
     let ended = std::mem::take(&mut learned.ended);
     let rates = std::mem::take(&mut learned.rates);
+    let unread = std::mem::take(&mut learned.unread);
+    let awaits = std::mem::take(&mut learned.awaits);
+    let ranked = std::mem::take(&mut learned.ranked);
     let probe = capacity
         .try_clone()
         .map_err(|e| Fault::value("capacity", e.to_string()))?;
@@ -2360,12 +2374,55 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
         room = left;
         told.push(rate);
     }
+    // Then, in the room the rates leave, as many of the VMs it couldn't read, then of the rooms' awaits, then of the
+    // node VMs it ranks above every box, as fit (place 4), each list in its order.
+    let unread = fitted(unread, &mut room, "learned unread VMs", |unread| {
+        holder_bytes(&unread.id).saturating_add(words_bytes(&unread.why))
+    })?;
+    let awaits = fitted(awaits, &mut room, "learned awaits", |awaited| {
+        holder_bytes(&awaited.id).saturating_add(LEARNED_AWAIT_BYTES)
+    })?;
+    let ranked = fitted(ranked, &mut room, "learned ranked VMs", |ranked| {
+        16usize.saturating_add(words_bytes(&ranked.why))
+    })?;
     if let Some(learned) = capacity.learned.as_mut() {
         learned.holdings = kept;
         learned.ended = ends;
         learned.rates = told;
+        learned.unread = unread;
+        learned.awaits = awaits;
+        learned.ranked = ranked;
     }
     Ok(())
+}
+
+/// As many of `values`, in their order, as fit `room`, each `bytes` of it, taken from `room`: the first that doesn't
+/// fit, and every one after it, left out (place 4).
+fn fitted<T>(
+    values: Vec<T>,
+    room: &mut usize,
+    what: &'static str,
+    bytes: impl Fn(&T) -> usize,
+) -> Result<Vec<T>, Fault> {
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(values.len())
+        .map_err(|_| Fault::Storage {
+            what,
+            bound: values.len(),
+        })?;
+    for value in values {
+        let Some(left) = room.checked_sub(bytes(&value)) else {
+            break;
+        };
+        *room = left;
+        kept.push(value);
+    }
+    Ok(kept)
+}
+
+/// What [`Writer::string`] writes of `words`: their length, then their bytes.
+fn words_bytes(words: &str) -> usize {
+    size_of::<u32>().saturating_add(words.len())
 }
 
 /// What a node learned of a class's microVMs (joint plan step 14): its priors, then its learned use.
@@ -2412,13 +2469,36 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     for rate in &learned.rates {
         put_learned_rate(w, rate)?;
     }
-    // Last (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
+    // Then (C1; ROOT, 2026-11-13): the learner's window and the VM whose cap's cycle sets it, where one does.
     w.reserve_fixed(1)?;
     w.option_with(learned.window.as_ref(), |w, window| {
         w.reserve_fixed(size_of::<u64>().saturating_add(1))?;
         w.u64(window.window_ns);
         w.option_with(window.slowed_by.as_ref(), put_holder)
-    })
+    })?;
+    // Last (place 4; ROOT, 2026-11-13): each VM its window couldn't read and why, each guest's room's await, and each
+    // node VM it ranks above every box and why.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.unread.len(), LEARNED_UNREAD_MIN_BYTES)?;
+    for unread in &learned.unread {
+        put_holder(w, &unread.id)?;
+        w.string(&unread.why)?;
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.awaits.len(), LEARNED_AWAIT_MIN_BYTES)?;
+    for awaited in &learned.awaits {
+        put_holder(w, &awaited.id)?;
+        w.reserve_fixed(LEARNED_AWAIT_BYTES)?;
+        put_upstream(w, awaited.needs)?;
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.ranked.len(), LEARNED_RANK_MIN_BYTES)?;
+    for ranked in &learned.ranked {
+        w.reserve_fixed(16)?;
+        w.raw(ranked.run.bytes());
+        w.string(&ranked.why)?;
+    }
+    Ok(())
 }
 
 /// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
@@ -2662,9 +2742,39 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         ceilings,
         rates,
         window,
-        unread: Vec::new(),
-        awaits: Vec::new(),
-        ranked: Vec::new(),
+        unread: r.bounded_list(
+            LEARNED_UNREAD_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned unread VMs",
+            |r| {
+                Ok(LearnedUnread {
+                    id: holder(r)?,
+                    why: r.string("why a learner couldn't read a VM")?,
+                })
+            },
+        )?,
+        awaits: r.bounded_list(
+            LEARNED_AWAIT_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned awaits",
+            |r| {
+                Ok(LearnedAwait {
+                    id: holder(r)?,
+                    needs: upstream(r)?,
+                })
+            },
+        )?,
+        ranked: r.bounded_list(
+            LEARNED_RANK_MIN_BYTES,
+            MAX_LEARNED_HOLDINGS,
+            "learned ranked VMs",
+            |r| {
+                Ok(LearnedRank {
+                    run: hex_api::NodeRun::from_bytes(r.array::<16>()?),
+                    why: r.string("why a node VM ranks above every box")?,
+                })
+            },
+        )?,
     })
 }
 

@@ -1277,7 +1277,11 @@ fn w14_a_vm_whose_cgroup_cant_be_read_counts_whole_against_the_budget() {
         io.file(&fleet().join("vm-1"), "memory.high"),
         Some((56 * GIB).to_string())
     );
-    let unread: Vec<&str> = learner.unread().iter().map(|(id, _)| box_of(id)).collect();
+    let unread: Vec<&str> = learner
+        .unread()
+        .iter()
+        .map(|(id, _, _)| box_of(id))
+        .collect();
     assert_eq!(unread, ["vm-2"]);
 }
 

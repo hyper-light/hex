@@ -90,10 +90,10 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists, no learned use and its machine's time unread (joint plan step 14,
-    // C7), and no node VM's receipt (joint plan step 39); a spec ends with one route option and its band, 0 here
-    // (joint plan step 14).
+    // C7), no node VM's receipt (joint plan step 39) and no learner's why (A-3); a spec ends with one route option and
+    // its band, 0 here (joint plan step 14).
     let following = if offer {
-        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>()
+        1 + 4 * size_of::<u32>() + 1 + 2 + size_of::<u32>() + 1
     } else {
         3
     };
@@ -210,11 +210,12 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 11..],
-        [0; 11],
-        "the empty list's count, then no learned use, its machine's time unread and no node VM's count, ends it"
+        cut[cut.len() - 12..],
+        [0; 12],
+        "the empty list's count, then no learned use, its machine's time unread, no node VM's count and no learner's \
+         why, ends it"
     );
-    cut.truncate(cut.len() - 11);
+    cut.truncate(cut.len() - 12);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -2912,8 +2913,8 @@ fn route_wire_capacity_bytes(
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
+    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2930,10 +2931,12 @@ fn route_wire_capacity_bytes(
     }
     w.u32(0);
     w.u8(0);
-    // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39).
+    // Its machine's time unread (joint plan step 14, C7), then no node VM's receipt (joint plan step 39), then no
+    // learner's why (A-3).
     w.u8(0);
     w.u8(0);
     w.u32(0);
+    w.u8(0);
     w.done().unwrap()
 }
 
@@ -3389,8 +3392,8 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
     )
     .unwrap();
     // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
-    // its machine's time unread (C7) and no node VM's count (joint plan step 39), end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>());
+    // its machine's time unread (C7), no node VM's count (joint plan step 39) and no learner's why (A-3), end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1 - 2 - size_of::<u32>() - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -4798,9 +4801,9 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 7..],
-        [0; 7],
-        "no learned use, its machine's time unread, then no node VM's count, ends it"
+        cut[cut.len() - 8..],
+        [0; 8],
+        "no learned use, its machine's time unread, then no node VM's count and no learner's why, ends it"
     );
     cut.truncate(cut.len() - 1);
     assert!(matches!(
@@ -4883,8 +4886,9 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
     let mut twice = capacity.try_clone().unwrap();
     twice.node_vms[1].run = twice.node_vms[0].run;
     assert!(twice.check().is_err());
-    // The receipts' count, then each receipt: its run, its booking and its phase, the last of which ends it.
-    let at = bytes.len() - (size_of::<u32>() + 3 * (16 + 3 * size_of::<u64>() + 1));
+    // The receipts' count, then each receipt: its run, its booking and its phase, the last of which comes just before
+    // the learner's why, none here (A-3), which ends it.
+    let at = bytes.len() - (size_of::<u32>() + 3 * (16 + 3 * size_of::<u64>() + 1) + 1);
     let mut past = bytes.clone();
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     past[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
@@ -4893,7 +4897,8 @@ fn w39_a_capacitys_node_vms_cross_the_wire_last() {
         Err(Fault::Value { .. })
     ));
     let mut unknown = bytes;
-    *unknown.last_mut().unwrap() = 3;
+    let phase = unknown.len() - 2;
+    unknown[phase] = 3;
     assert!(matches!(
         read_answer(&received(&unknown, 0), MAX_MESSAGE),
         Err(Fault::Value { .. })
@@ -5032,8 +5037,9 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The holdings' count, then the one holding (its holder's tag, its id's length, the id and its resources), then no
-    // end's count, no ceiling's and no rate's, its machine's time unread, and no node VM's count.
-    let at = bytes.len() - (6 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 2);
+    // end's count, no ceiling's and no rate's, no window (C1), no unread VM's count, no await's and no ranked VM's
+    // (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3).
+    let at = bytes.len() - (9 * size_of::<u32>() + 1 + 1 + 3 * size_of::<u64>() + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -5128,9 +5134,11 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
     // The ends' count, then the one end: its holder's tag, its id's length, the id, five u64s, its band and its unmoved
-    // capability's option and tag; then no ceiling's count and no rate's, its machine's time unread, and no node VM's
-    // count.
-    let at = bytes.len() - (5 * size_of::<u32>() + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 2);
+    // capability's option and tag; then no ceiling's count and no rate's, no window (C1), no unread VM's count, no
+    // await's and no ranked VM's (place 4), its machine's time unread, no node VM's count, and no learner's why (A-3):
+    // five counts and lengths before place 4's three.
+    let counts = 5 * size_of::<u32>() + 3 * size_of::<u32>();
+    let at = bytes.len() - (counts + 1 + 1 + 5 * size_of::<u64>() + 1 + 2 + 1 + 2 + 1);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -6080,7 +6088,10 @@ fn w39_what_a_learner_couldnt_read_awaits_and_ranks_crosses_the_wire_last() {
     for field in ["unread", "awaits", "ranked"] {
         json["learned"].as_object_mut().unwrap().remove(field);
     }
-    let older = serde_json::from_value::<Capacity>(json).unwrap().learned.unwrap();
+    let older = serde_json::from_value::<Capacity>(json)
+        .unwrap()
+        .learned
+        .unwrap();
     assert!(older.unread.is_empty() && older.awaits.is_empty() && older.ranked.is_empty());
 }
 
@@ -6091,7 +6102,8 @@ fn w39_what_a_learner_couldnt_read_awaits_and_ranks_crosses_the_wire_last() {
 /// fitted capacity within one message, each list a prefix of what it named, the first cut, and refused with one more.
 #[test]
 fn w39_what_a_learner_couldnt_read_awaits_and_ranks_is_held_to_a_nodes_boxes() {
-    let holder = |n: usize| LearnedHolder::Box(BoxId::new(&format!("hex-place-a-1-0-{n}")).unwrap());
+    let holder =
+        |n: usize| LearnedHolder::Box(BoxId::new(&format!("hex-place-a-1-0-{n}")).unwrap());
     let unread: Vec<hex_api::LearnedUnread> = (0..=MAX_LEARNED_HOLDINGS)
         .map(|n| hex_api::LearnedUnread {
             id: holder(n),
@@ -6112,9 +6124,27 @@ fn w39_what_a_learner_couldnt_read_awaits_and_ranks_is_held_to_a_nodes_boxes() {
         .collect();
     let learned = || learned_capacity().learned.unwrap();
     for (what, past) in [
-        ("learned unread VMs", Learned { unread: unread.clone(), ..learned() }),
-        ("learned awaits", Learned { awaits: awaits.clone(), ..learned() }),
-        ("learned ranked VMs", Learned { ranked: ranked.clone(), ..learned() }),
+        (
+            "learned unread VMs",
+            Learned {
+                unread: unread.clone(),
+                ..learned()
+            },
+        ),
+        (
+            "learned awaits",
+            Learned {
+                awaits: awaits.clone(),
+                ..learned()
+            },
+        ),
+        (
+            "learned ranked VMs",
+            Learned {
+                ranked: ranked.clone(),
+                ..learned()
+            },
+        ),
     ] {
         assert!(
             matches!(past.check(), Err(Refusal::Exhausted { what: named, bound }) if named == what && bound == MAX_LEARNED_HOLDINGS),
@@ -6161,7 +6191,8 @@ fn w39_what_a_learner_couldnt_read_awaits_and_ranks_is_held_to_a_nodes_boxes() {
 #[test]
 fn w14_a3_why_a_learner_learned_nothing_crosses_the_wire_last() {
     let mut capacity = device_capacity(Vec::new());
-    capacity.unlearned = Some(Refusal::Broken("the node's records can't be read".into()).to_string());
+    capacity.unlearned =
+        Some(Refusal::Broken("the node's records can't be read".into()).to_string());
     for offered in [capacity.try_clone().unwrap(), device_capacity(Vec::new())] {
         let offered = Answer::Capacity(Some(offered));
         let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
@@ -6172,5 +6203,8 @@ fn w14_a3_why_a_learner_learned_nothing_crosses_the_wire_last() {
     }
     let mut json = serde_json::to_value(&capacity).unwrap();
     json.as_object_mut().unwrap().remove("unlearned");
-    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap().unlearned, None);
+    assert_eq!(
+        serde_json::from_value::<Capacity>(json).unwrap().unlearned,
+        None
+    );
 }

@@ -2188,7 +2188,10 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
             unknown: None
         }
     );
-    records.insert(BoxId::new("torn-1").unwrap(), Err("its record is torn".to_owned()));
+    records.insert(
+        BoxId::new("torn-1").unwrap(),
+        Err("its record is torn".to_owned()),
+    );
     let unknown = node_band(records.iter());
     assert_eq!(unknown.band, u8::MAX);
     let why = unknown.unknown.unwrap_or_default();
