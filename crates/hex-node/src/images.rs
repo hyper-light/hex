@@ -81,6 +81,7 @@ impl ImageRuntime {
         lessors: Option<Arc<dyn Lessors>>,
     ) -> Result<Arc<Self>, Refusal> {
         let store = Store::open(&records.join("state"), &records.join("run"))?;
+        recover(&store)?;
         let class = ImageClass::new(shards)
             .with_boot(images, waits, records.join("image-diagnostics"))
             .with_paths(Arc::new(paths));
@@ -108,6 +109,29 @@ impl ImageRuntime {
     pub fn class(&self) -> &ImageClass {
         &self.class
     }
+}
+
+/// The recovery a node runs over its records (`Recorded::recover`; T-T7.1.2), as an image runtime opens its own (the
+/// review's B-13): the boot session marker taken, so a torn record is told from an earlier boot's; the temporary files a
+/// crash left mid-write removed; a record the state directory can't read refused, naming its file, as the damage it is;
+/// each record torn in the runtime place before this boot of the host removed, that boot's end having ended its run,
+/// and each torn in this boot kept, so its name is never reused and its box stays held, as a node holds one, its list
+/// naming it; and the node VM rows an earlier process left settled. A readable record's run of an earlier process is
+/// the class's to hold or take as it reads the record. The last-resort ends a let-go row kept go with it: an image
+/// runtime has no charge learner to carry them to.
+fn recover(store: &Store) -> Result<(), Refusal> {
+    let last_boot = store.take_boot_marker()?;
+    store.remove_strays()?;
+    let mut records = store.retained_records()?;
+    let torn = store.take_torn(&mut records)?;
+    store.refuse_unreadable(&records)?;
+    if store.before_this_boot(last_boot.as_ref()) {
+        for (id, _) in &torn {
+            store.remove(id)?;
+        }
+    }
+    store.settle_node_vms()?;
+    Ok(())
 }
 
 /// What the class never asks of this runtime's records: a pool, a device, a native launch. Refused as broken, since only
