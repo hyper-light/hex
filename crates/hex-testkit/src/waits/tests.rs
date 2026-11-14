@@ -128,3 +128,38 @@ fn the_census_records_a_tests_waits_and_disarms_none() {
     assert_eq!(name, "test.testkit.bounded");
     assert!(nanos.parse::<u64>().is_ok(), "{text:?}");
 }
+
+/// C-5 (decision 9; AC-T7.4.1): a test's wait for a fact fails once the party that would make it ends without it,
+/// rather than looking on for good. Do: wait, through the kit's wait for a fact, for one a thread would make at the
+/// thousandth look, the thread having ended before the first. Expect: refused, naming the fact, at its party's end:
+/// never the thousand looks.
+#[test]
+fn c5_a_wait_fails_once_its_party_ends_without_its_fact() {
+    let party = std::thread::spawn(|| {});
+    party.join().unwrap();
+    let wait = Patience::measuring("test.testkit.c5.ended");
+    let mut looks = 0;
+    let got = until(&wait, "a fact its ended party never made", || {
+        looks += 1;
+        looks == 1_000
+    });
+    assert!(
+        got.is_err(),
+        "the wait looked on past its party's end: {got:?} after {looks} looks"
+    );
+}
+
+/// C-5 (decision 9; AC-T7.4.1): a test's wait through a call is sliced at its W*'s end, so a party that ended within W*
+/// is seen between slices, rather than the call given no deadline and waiting on for good. Do: a wait whose W* is
+/// learned, its call keeping each deadline it is given. Expect: its first call given W*'s end.
+#[test]
+fn c5_a_calls_wait_is_given_its_w_stars_end() {
+    let wait = Patience::measuring("test.testkit.c5.sliced");
+    wait.answered(Duration::from_millis(1));
+    let mut given = Vec::new();
+    within(&wait, |by| given.push(by));
+    assert!(
+        matches!(given[..], [Some(_)]),
+        "its call was given no deadline: {given:?}"
+    );
+}
