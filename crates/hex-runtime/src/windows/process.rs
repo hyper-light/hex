@@ -694,9 +694,10 @@ fn follow_emptying(
 /// Whether killed job `job` empties within `slice` (`Duration::MAX`: until it does): the first member it lists waited
 /// for by its process handle, which the kernel signals at the member's end (WaitForSingleObject, no poll), and the job
 /// looked at again, until it lists none (`JobObjectBasicProcessIdList`'s count, which an ended member leaves though its
-/// handle is held). A member listed once a waited one has ended is ended with the job again: one a member started as the
-/// job was terminated may have joined it after the termination reached the rest. A member listed that ended before it
-/// could be opened (its process gone, or its id another's) is looked past. The job's completion port isn't the event:
+/// handle is held). The job is terminated again before each member's wait, so a process a member started as the job was
+/// terminated, which may have joined it after the termination reached the rest, is ended too (terminating members already
+/// ending changes nothing). A member listed that ended before it could be opened (its process gone, or its id another's)
+/// is looked past. The job's completion port isn't the event:
 /// Microsoft documents its messages as not guaranteed to arrive (`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`), and its
 /// active-process count lingers while a terminated member's handle is held ([`Job::live_processes`]).
 fn empties_within(job: &Job, slice: Duration, held: &str) -> Result<bool, Refusal> {
@@ -707,7 +708,6 @@ fn empties_within(job: &Job, slice: Duration, held: &str) -> Result<bool, Refusa
     #[cfg(not(test))]
     let _ = held;
     let by = Instant::now().checked_add(slice);
-    let mut waited = false;
     loop {
         let process = match job.member() {
             Ok(sys::Member::Empty) => return Ok(true),
@@ -715,10 +715,8 @@ fn empties_within(job: &Job, slice: Duration, held: &str) -> Result<bool, Refusa
             Err(e) if gone_before_its_open(&e) => continue,
             Err(e) => return Err(Refusal::os("reading a killed box's job", e)),
         };
-        if waited {
-            job.terminate(job::terminated_code(Signal::KILL))
-                .map_err(|e| Refusal::os("ending a box's job", e))?;
-        }
+        job.terminate(job::terminated_code(Signal::KILL))
+            .map_err(|e| Refusal::os("ending a box's job", e))?;
         let timeout = match by {
             None => u32::MAX,
             Some(by) => match by.checked_duration_since(Instant::now()) {
@@ -731,7 +729,6 @@ fn empties_within(job: &Job, slice: Duration, held: &str) -> Result<bool, Refusa
         {
             return Ok(false);
         }
-        waited = true;
     }
 }
 
