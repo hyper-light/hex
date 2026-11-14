@@ -280,3 +280,12 @@ fn the_keepers_name_bound_is_its_runners_longest_name() {
     let longest = world.runners.iter().map(|r| r.name.len()).max().unwrap();
     assert_eq!(world.budget.name_bytes, longest);
 }
+
+/// AC-T7.4.1, CV8 (R03: a bound derived, never picked): the most reservations a runner holds is how many runs of the
+/// generator's smallest charge the room holds, in the dimension that holds fewest. Do compute it from the room and the
+/// charge's steps; expect the bound the keeper and every holder take.
+#[test]
+fn a_runners_reservation_bound_is_the_smallest_charges_that_fill_the_room() {
+    let fits = (ROOM.cpu_milli / CHARGE_CPU).min(ROOM.mem_bytes / CHARGE_MEM);
+    assert_eq!(RESERVATIONS, usize::try_from(fits).unwrap());
+}
