@@ -484,8 +484,20 @@ window, which would under-count Hex here.
   down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
   as the node measures it: every CPU, and the memory that is free or Hex's own boxes', which lacks what each
   runner's process and its runs use, the runs held besides (counted twice: CV12). Each run uses memory within its
-  reservation, moved by the nemesis at any step, a sample's window among them (its reads a step apart), as often as it
-  has them: no bound on the moves. After every step:
+  reservation, moving at every step, a sample's window among them (its reads a step apart): no bound on the moves.
+  Every rate is a record's: kiln's runs arrive as they did at fedora (696 legs in the export's fourteen days), Hex's
+  boxes as the fleet day's `oci` boxes did at each of its 15 `oci` hosts, each run and box ends at one over its recorded
+  length, and links drop (a drop and a partition, each cause at the whole rate), runners crash and outages end at kiln's
+  records of its runners' links (topo's drops, time up and outage, read 2026-11-14). A step is one event of that
+  continuous-time chain, each kind as likely as its rate in the machine's state (Gillespie's direct method), delivery
+  at the least rate that drains the links (each kind's rate times the deliveries the protocol has it say). The faults no
+  record times (the keeper's crash between messages and at its next write, the write lost or landed; a wait run out; the
+  person's wrong release; a retirement) each strike once a run, at a step drawn for them or the first after where they
+  can. What the code does on its own trigger, the nemesis does there: a runner dials again as soon as its link can open
+  (kiln's `links`), the keeper's hints go out after each message it hears and each command of its host, and Hex's node
+  measures its room as it is asked to admit (`Submit`'s refresh). The bounded suite's time stretches each run's and box's
+  length by the one factor at which the recorded mean demand fills the room (ρ, by Little's law, 1 in memory), every
+  other ratio as recorded; the record sweep also runs every rate and length as recorded. After every step:
   every running run is in the keeper's books while it is up, but one so released, until its runner's next
   sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
   adopted; what the keeper books past the room (only an adoption's), its view says it is over by; and the
@@ -499,8 +511,9 @@ window, which would under-count Hex here.
   larger of two reads, whole reservations and a scope holding its runner, are folded into it). The runner counts: one,
   as the recorded fleet configures each machine's keeper, and two for a retirement, which takes a live runner and never
   the last. Bounded seeds here (64 of 2,000 steps with one runner, 32 with two, each with runs outliving their runner
-  and not); ROOT's sweeps take `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`,
-  `HEX_CAPACITY_STEPS`), every seed of which must hold, and each mistake caught on some.
+  and not), owed to ROOT's sweep, which gives the fewest at which every planted mistake is caught:
+  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS` as a list of budgets,
+  `HEX_CAPACITY_TIME` `filled` or `recorded`), every seed of which must hold, and each mistake caught on some.
 - The stand-in holder (`crates/hex-cli/tests/capacity_view/stand_in.rs`): kiln's runner's side of the contract above,
   item by item, driving `hex_api::capacity::Holder` over `hex_quic::capacity::Link`, its epoch and runs in a ledger
   written whole. A test driver, not a `hex` subcommand: kiln's runner is the holder, and Hex ships none (CLAUDE.md
