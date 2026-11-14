@@ -1089,7 +1089,6 @@ pub(super) mod tests {
             state_dir: "/fixture/state".into(),
             pool_id: "configured fixture pool".into(),
             boot_timeout: Duration::from_secs(3),
-            stop_timeout: Duration::from_secs(1),
             operation_timeout: Duration::from_secs(1),
             cost_evidence: "/fixture/evidence".into(),
             cost: RuntimeCost {
@@ -1454,7 +1453,7 @@ pub(super) mod tests {
     }
 
     /// A VMM slower to stop than any wait of a time (A-13): its scope ends, released, only for a wait that follows it
-    /// (`Duration::MAX`), as a stop that outlasts `stop_ms` ends.
+    /// (`Duration::MAX`), as a stop that outlasted the `stop_ms` it once waited ends.
     struct SlowStop {
         identity: shards_api::Identity,
         followed: std::sync::atomic::AtomicBool,
@@ -1572,7 +1571,7 @@ pub(super) mod tests {
         let mut vm = consuming_box(&runtime, &source, "first-consumer");
         let turn = Stopping::default();
         let stopped = runtime.stop_vm(&mut vm, &turn);
-        assert_eq!(stopped, Ok(()), "a stop slower than stop_ms");
+        assert_eq!(stopped, Ok(()), "a stop slower than any timer");
         assert_eq!(vm.exit, Some(hex_api::Exit::Code(0)));
         assert_eq!(turn.finalized.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -1589,7 +1588,7 @@ pub(super) mod tests {
         let mut observer = family_row(&runtime, &[256], BackingPhase::Live);
         let turn = Stopping::default();
         let stopped = runtime.stop_observer(&turn, &mut observer, None);
-        assert_eq!(stopped, Ok(()), "a stop slower than stop_ms");
+        assert_eq!(stopped, Ok(()), "a stop slower than any timer");
         assert_eq!(observer.phase, BackingPhase::Released);
         assert_eq!(observer.exit, Some(hex_api::Exit::Code(0)));
         assert_eq!(turn.finalized.load(std::sync::atomic::Ordering::Relaxed), 1);
