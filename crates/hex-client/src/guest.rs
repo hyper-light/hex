@@ -680,10 +680,9 @@ fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
 /// own across processes): each a borrowed CONNECT to the guest the offer names, taking no VM lifetime, named
 /// for the exec as the guest's own stdio dial names it, the caller's end handed off as its own.
 ///
-/// AC-T7.4.1: Shards' borrowed CONNECT waits for its OK only within a finite deadline (zero patience reads it
-/// without waiting, so a guest that hasn't answered yet is refused). The call's deadline, where it has one, bounds
-/// every stream's CONNECT and name. A call with none follows the guest ([`connect_following`]) and names each
-/// stream as long as the guest takes to read it, as the link's own named dial does with no deadline.
+/// AC-T7.4.1: the call's deadline, where it has one, bounds every stream's CONNECT (Shards' `connect_borrowed`) and
+/// name. A call with none makes each stream's one CONNECT with no clock ([`connect_following`]) and names each stream
+/// as long as the guest takes to read it, as the link's own named dial does with no deadline.
 // Windows calls it; elsewhere only its test does, which needs Linux's /proc for a stand-in VM's identity.
 #[cfg(any(windows, all(test, target_os = "linux")))]
 pub(crate) fn open_offered(
@@ -721,7 +720,8 @@ pub(crate) fn open_offered(
                 conn
             }
             None => {
-                let mut conn = shards::ShardsStream(connect_following(&identity, offer.setup)?);
+                let mut conn =
+                    shards::ShardsStream(connect_following(&identity, offer.setup, &OFFERED)?);
                 conn.write_all(&stream::name(named))
                     .map_err(os("naming a stdio connection"))?;
                 conn
@@ -737,85 +737,80 @@ pub(crate) fn open_offered(
 }
 
 /// HEX-RT-17's offered CONNECTs for calls with no deadline, as the waits census keeps them (decision 9): each OK,
-/// timed from its wait's start, and each wait's run-out past its guest link's setup bound ([`connect_following`]).
+/// timed from its dial's start, and each run-out past its guest link's setup bound ([`connect_following`]).
 #[cfg(any(windows, all(test, target_os = "linux")))]
 static OFFERED: Patience = Patience::measuring("client.guest.offered.connect");
 
-/// An offered stream's CONNECT for a call with no deadline, as decision 9 waits (the person's ruling of 2026-11-13).
-/// Its W* is the guest link's own setup bound, which the offer carries: the slowest boot to ready its node has seen,
-/// whose ready includes a whole CONNECT/OK exchange, and the one finite deadline Shards' borrowed connector waits in.
-/// - **Within it** the OK is the answer.
-/// - **Past it** the run-out is told, once, and the wait follows the VM the offer names by its life: the next CONNECT
-///   is made, waiting the bound again, as each passes, refused at the VM's end (the connector holds the VM's process
-///   before and after each CONNECT) or by any failure that isn't a deadline's passing, never at a bound.
+/// An offered stream's CONNECT for a call with no deadline, as decision 9 waits (the person's ruling of 2026-11-13;
+/// the review's D-3): one dial with no clock of its own (Shards' `connect_borrowed_before` with no deadline), ending at
+/// its OK however late it comes, at its connection's end, or at the end of the VM the offer names, whose process it
+/// holds by its pid and start before the dial and waits on beside the socket.
+/// - **W*** is the guest link's own setup bound, which the offer carries: the slowest boot to ready its node has seen,
+///   whose ready includes a whole CONNECT and its OK. Past it the run-out is told, once ([`told_past`]), and the dial
+///   goes on: it is never given up and made again, which would drop an OK coming late and redial a slow guest forever.
+/// - **With none** (a link with no setup bound) the dial follows its VM from its start.
 ///
-/// No CONNECT is given up sooner: one given up is closed unnamed and made again, a connection the guest takes for
-/// nothing (the guest's relay drops it, `hex_node::relay`). The OK, however long it took, is told to the census
-/// ([`OFFERED`]). An offer whose link has no positive bound is refused by type before any CONNECT: nothing then says
-/// how long one may wait.
+/// The OK, however long it took, is `wait`'s sample ([`OFFERED`]'s in production); a refusal is none.
 #[cfg(any(windows, all(test, target_os = "linux")))]
 fn connect_following(
     identity: &shards_api::Identity,
     setup: Option<Duration>,
+    wait: &Patience,
 ) -> Result<Box<dyn shards_api::Stream>, Refusal> {
     const OP: &str = "opening an offered guest stream";
-    let bound = setup
-        .filter(|setup| !setup.is_zero())
-        .ok_or_else(|| Refusal::Invalid {
-            what: "offered guest streams",
-            why: "a borrowed guest's CONNECT waits for its OK only within a finite deadline, and neither this \
-                  call nor its guest's link has one: give the client a reply budget or call with a deadline"
-                .to_owned(),
-        })?;
     let began = Instant::now();
-    let mut told = false;
-    loop {
-        match shards_api::connect_borrowed(identity, stream::STDIO_PORT, bound) {
-            Ok(conn) => {
-                OFFERED.answered(began.elapsed());
-                return Ok(conn);
-            }
-            Err(why) if !deadline_passed(&why) => return Err(shards::refusal(OP, &why)),
-            Err(_) => {
-                if !told {
-                    // No sample (Karn's point): the run-out is told, and the wait goes on.
-                    OFFERED.ran_out(
-                        bound,
-                        began.elapsed(),
-                        &[
-                            hex_core::patience::Piece::Kind(
-                                "the borrowed guest's VM process, pid ",
-                            ),
-                            hex_core::patience::Piece::Pid(i64::from(identity.pid)),
-                            hex_core::patience::Piece::Kind(", its stdio CONNECT's OK"),
-                        ],
-                    );
-                    told = true;
-                }
-            }
-        }
+    let dial = || shards_api::connect_borrowed_before(identity, stream::STDIO_PORT, None);
+    let conn = match setup.filter(|bound| !bound.is_zero()) {
+        Some(w_star) => told_past(wait, w_star, identity.pid, dial)?,
+        None => dial(),
     }
+    .map_err(|why| shards::refusal(OP, &why))?;
+    wait.answered(began.elapsed());
+    Ok(conn)
 }
 
-/// Whether Shards' borrowed CONNECT ended at its deadline alone: its handshake's deadline passed, or a socket's
-/// timeout set to it did, or its OK came at or after it.
+/// `dial`'s answer, a watcher of its own telling `wait`'s run-out once `w_star` passes with none, while the dial goes
+/// on (decision 9: past W* the run-out is told, never a verdict): the borrowed guest's VM process `pid`, its CONNECT's
+/// OK, is what the dial follows from then on.
 #[cfg(any(windows, all(test, target_os = "linux")))]
-fn deadline_passed(why: &shards_api::Refusal) -> bool {
-    use shards_api::{BorrowFailure, HandshakeError};
-    let shards_api::Refusal::Borrowed { failure, .. } = why else {
-        return false;
-    };
-    matches!(
-        failure,
-        BorrowFailure::Expired
-            | BorrowFailure::Channel(
-                HandshakeError::Expired { .. }
-                    | HandshakeError::Io {
-                        kind: io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock,
-                        ..
-                    }
-            )
-    )
+fn told_past<T>(
+    wait: &Patience,
+    w_star: Duration,
+    pid: u32,
+    dial: impl FnOnce() -> T,
+) -> Result<T, Refusal> {
+    let (answered, waiting) = hex_wait::mpsc::sync_channel::<()>(1).map_err(|why| match why {
+        hex_wait::Failed::Poisoned => {
+            Refusal::Broken("an offered CONNECT's watch is poisoned".to_owned())
+        }
+        hex_wait::Failed::Os(why) => Refusal::os("making an offered CONNECT's watch", why),
+    })?;
+    let began = Instant::now();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("hex-offered-connect".to_owned())
+            .spawn_scoped(scope, move || {
+                if matches!(
+                    waiting.recv_timeout(w_star),
+                    Err(hex_wait::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    // No sample (Karn's point): the run-out is told, and the dial goes on.
+                    wait.ran_out(
+                        w_star,
+                        began.elapsed(),
+                        &[
+                            Piece::Kind("the borrowed guest's VM process, pid "),
+                            Piece::Pid(i64::from(pid)),
+                            Piece::Kind(", its stdio CONNECT's OK"),
+                        ],
+                    );
+                }
+            })
+            .map_err(|why| Refusal::os("starting an offered CONNECT's watcher", why))?;
+        let answer = dial();
+        drop(answered);
+        Ok(answer)
+    })
 }
 
 impl<W: Waits> Transport for Stream<W> {
