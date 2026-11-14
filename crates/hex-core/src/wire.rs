@@ -2029,6 +2029,7 @@ fn put_route_key(w: &mut Writer, key: RouteKey) -> Result<(), Fault> {
         Execution::ShardsShared => 1,
         Execution::ShardsDedicated => 2,
         Execution::Firecracker => 3,
+        Execution::NodeVm => 4,
     });
     w.u8(match key.gpu {
         GpuEligibility::Any => 0,
@@ -2059,6 +2060,7 @@ fn route_key(r: &mut Reader<'_>) -> Result<RouteKey, Fault> {
         1 => Execution::ShardsShared,
         2 => Execution::ShardsDedicated,
         3 => Execution::Firecracker,
+        4 => Execution::NodeVm,
         _ => return Err(Fault::value("route.execution", "unsupported tag")),
     };
     let gpu = match r.u8()? {
@@ -2628,6 +2630,7 @@ fn node_vm_receipt(r: &mut Reader<'_>) -> Result<NodeVmReceipt, Fault> {
                 ));
             }
         },
+        guest: CapacityResources::default(),
     })
 }
 

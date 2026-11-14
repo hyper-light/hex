@@ -1140,6 +1140,7 @@ impl GuestRuntime {
             run: record.run,
             booking: record.allocation.booking(),
             phase: record.phase,
+            guest: hex_api::CapacityResources::default(),
         }));
         Ok(receipts)
     }

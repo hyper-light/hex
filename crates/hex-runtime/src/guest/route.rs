@@ -60,6 +60,8 @@ pub(super) fn committed_side(spec: &BoxSpec, host: ImagePlatform) -> Result<Opti
             }
             Ok(Some(Side::Host))
         }
+        // V2's route, its node VM's guest: not yet a side of its own (red).
+        Execution::NodeVm => Err(invalid("a node VM's route has no side yet")),
         Execution::ShardsShared | Execution::ShardsDedicated => {
             if receipt.key.image.os != ImageOs::Linux || receipt.key.image.arch != host.arch {
                 return Err(invalid(

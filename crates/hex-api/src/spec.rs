@@ -74,7 +74,10 @@ impl BoxSpec {
     pub fn backend_class(&self) -> Result<Class, Refusal> {
         self.check()?;
         Ok(match self.route_execution() {
-            None | Some(crate::runtime::Execution::Native) => self.class.class(),
+            None
+            | Some(crate::runtime::Execution::Native | crate::runtime::Execution::NodeVm) => {
+                self.class.class()
+            }
             Some(
                 crate::runtime::Execution::ShardsShared
                 | crate::runtime::Execution::ShardsDedicated,

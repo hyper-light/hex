@@ -121,7 +121,7 @@ impl GuestRuntime {
                 Execution::ShardsShared => {
                     return Err(route::invalid("shared CPU backing cannot claim GPU IDs"));
                 }
-                Execution::Native | Execution::Firecracker => return Ok(()),
+                Execution::Native | Execution::Firecracker | Execution::NodeVm => return Ok(()),
             }
             let (first, alias) = backing_route_keys(execution, ids)?;
             projection.introduce(first)?;

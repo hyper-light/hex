@@ -183,6 +183,7 @@ pub(super) fn apply(
         offers,
         device_routes: masks,
         backings,
+        node_vm_room: None,
     };
     let provisioned = routes
         .unobserved_claims(&devices, node.id)

@@ -599,6 +599,7 @@ fn write_route(
         hex_api::Execution::ShardsShared => "shared",
         hex_api::Execution::ShardsDedicated => "dedicated",
         hex_api::Execution::Firecracker => "firecracker",
+        hex_api::Execution::NodeVm => "node-vm",
     };
     let gpu = match route.key.gpu {
         hex_api::GpuEligibility::Any => "any",
@@ -3266,6 +3267,58 @@ mod adversarial_device_recovery_tests;
 mod tests {
     use super::*;
 
+    /// V2 (ROOT, 2026-11-13: placement rows written before NodeVm still read): a row names its route's execution by
+    /// word, so one written before NodeVm, naming only the executions there were, reads as it was written, and one
+    /// naming NodeVm reads back. Do write an owner's row for an oci box routed natively and one for an oci box routed
+    /// NodeVm, then read each. Expect the native row's route word the one a build before NodeVm wrote,
+    /// "r1:oci:linux:amd64:native:none:-", the NodeVm row's "r1:oci:linux:amd64:node-vm:none:-", and each read back to
+    /// its demand and route.
+    #[test]
+    fn v2_placement_rows_written_before_node_vm_routes_still_read() {
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 1_000,
+                mem_bytes: hex_api::MIN_MEMORY,
+                ..Resources::default()
+            },
+            kind: Kind::Plain,
+            class: Class::Oci,
+            ask: Ask {
+                runtime_class: Some(hex_api::Class::Oci),
+                ..Ask::default()
+            },
+        };
+        for (execution, word) in [
+            (
+                hex_api::Execution::Native,
+                "r1:oci:linux:amd64:native:none:-",
+            ),
+            (
+                hex_api::Execution::NodeVm,
+                "r1:oci:linux:amd64:node-vm:none:-",
+            ),
+        ] {
+            let route = hex_api::RouteReceipt {
+                key: hex_api::RouteKey {
+                    class: hex_api::Class::Oci,
+                    image: hex_api::ImagePlatform {
+                        os: hex_api::ImageOs::Linux,
+                        arch: hex_api::ImageArch::Amd64,
+                    },
+                    execution,
+                    gpu: hex_api::GpuEligibility::None,
+                },
+                backing: None,
+            };
+            let row = own_text(State::Asked, &demand, &[], None, Some(route)).unwrap();
+            assert!(row.split(' ').any(|said| said == word), "{row}");
+            assert_eq!(
+                recorded_assignment(&row, &[]).unwrap(),
+                (demand, None, Some(route))
+            );
+        }
+    }
+
     /// AC-T7.4.1: an original OCI payload keeps its actual guest route through commit, wire and
     /// recovery. These are model callbacks/rows, not native VM receipts or execution evidence.
     #[test]
@@ -3325,6 +3378,7 @@ mod tests {
                     phase: BackingPhase::Live,
                     devices: Vec::new(),
                 }],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3431,6 +3485,7 @@ mod tests {
                     phase: BackingPhase::Live,
                     devices: Vec::new(),
                 }],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3503,6 +3558,7 @@ mod tests {
                 offers: vec![offer],
                 device_routes: vec![1; 2],
                 backings: vec![parent.try_clone().unwrap()],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),
@@ -3614,6 +3670,7 @@ mod tests {
                 ],
                 device_routes: vec![1, 0],
                 backings: vec![parent.try_clone().unwrap(), current.try_clone().unwrap()],
+                node_vm_room: None,
             }
             .share()
             .unwrap(),

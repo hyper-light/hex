@@ -2818,7 +2818,7 @@ fn route_wire_route(execution: Execution) -> RouteOffer {
             execution,
             gpu: match execution {
                 Execution::ShardsDedicated => GpuEligibility::Required,
-                Execution::ShardsShared => GpuEligibility::None,
+                Execution::ShardsShared | Execution::NodeVm => GpuEligibility::None,
                 _ => GpuEligibility::Any,
             },
         },
@@ -2829,7 +2829,7 @@ fn route_wire_route(execution: Execution) -> RouteOffer {
         backing: match execution {
             Execution::ShardsShared => Some(route_wire_shared_key()),
             Execution::ShardsDedicated => Some(route_wire_key()),
-            Execution::Native | Execution::Firecracker => None,
+            Execution::Native | Execution::Firecracker | Execution::NodeVm => None,
         },
     }
 }
@@ -4855,6 +4855,7 @@ fn node_vm_receipt(run: u8, phase: NodeVmPhase) -> NodeVmReceipt {
         run: hex_api::NodeRun::from_bytes([run; 16]),
         booking: learned_resources(2_000, 4),
         phase,
+        guest: learned_resources(1_500, 3),
     }
 }
 
@@ -6208,5 +6209,34 @@ fn w14_a3_why_a_learner_learned_nothing_crosses_the_wire_last() {
     assert_eq!(
         serde_json::from_value::<Capacity>(json).unwrap().unlearned,
         None
+    );
+}
+
+/// V2 (ROOT, 2026-11-13: a node VM's route's room is its guest): a node VM's receipt carries what its guest is admitted
+/// at, after its phase, and a route naming NodeVm crosses the wire by its own tag. Do encode a capacity answer naming a
+/// node VM whose guest is admitted at 1.5 CPUs and 3 GiB, and a route offer naming NodeVm, and read both back. Expect
+/// each back exactly.
+#[test]
+fn v2_a_node_vms_receipt_carries_its_guests_room_and_its_route_its_own_tag() {
+    let mut capacity = device_capacity(Vec::new());
+    capacity.node_vms = vec![node_vm_receipt(7, NodeVmPhase::Ready)];
+    capacity.routes = vec![RouteOffer {
+        key: RouteKey {
+            class: Class::Oci,
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Arm64,
+            },
+            execution: Execution::NodeVm,
+            gpu: GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    }];
+    let offered = Answer::Capacity(Some(capacity));
+    let bytes = answer(39, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
     );
 }
