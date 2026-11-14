@@ -2505,7 +2505,8 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   rule of 2026-11-08, owed as well. Each owed piece's design is in
   `docs/research/runtime/learned-waits.md` ("Owed").
 - **No caller failure where an alternative exists**: a seed past its bound is followed by its life, never retired
-  (2026-11-13); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a
+  (2026-11-13); the network check past its bound is told and follows the namespace to its kernel's answer (the review's
+  C-9, 2026-11-14); a client's call whose caller gave a
   deadline waits on to it, the learned bound's end a run-out it records (`Patience::ran_out`); only where there is no
   alternative (a record write, a client's call with no caller's deadline) is the caller refused, by type. (AC-T7.4.1,
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
@@ -2556,7 +2557,7 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 | a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 7,043 ns an entry, debug 137,124 ns<!-- /record --> |
 | a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: the `serve.reads` rows are short of 1,000 samples (only the parts that waited) |
 | a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | each kind's `client.answer.<kind>` rows, a create's being <!-- record: bench/competitive/probes/waits_census.md -->release 43.655 ms, debug 49.798 ms<!-- /record --> |
-| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 0.454 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
+| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the run-out told and the namespace followed to the kernel's answer (the review's C-9) | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 0.454 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
 
 Each row's record is `bench/competitive/probes/waits_census.md`'s rows of the same wait name, from the waits' own
 timing points (`hex_node::census`): a release build's the largest max of the release arms of its run 4 (adacachy2,
