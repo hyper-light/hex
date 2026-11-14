@@ -41,7 +41,9 @@
 //!
 //! Before a restart, the start before it ends (its node killed, as a crash ends it, or on Linux its node VM stopped)
 //! and the test waits for each of its processes' ends, by their lives, so no VM ending overlaps the next start's
-//! measure. The kernel form's shared guest is released through the node's socket before its node ends.
+//! measure. On Windows the node's keeper, which outlives a killed node by design and never ends on its own, is then
+//! asked to stop, as a node going down cleanly asks it. The kernel form's shared guest is released through the node's
+//! socket before its node ends.
 //!
 //! Explicit inputs only, each by its own variable, a missing one failing by name:
 //! - `HEX_NODE_GUEST_FORM`: `image` or `kernel`; `HEX_NODE_GUEST_WORK`: a directory of this run's own, made here;
@@ -681,12 +683,31 @@ mod suite {
         (node, client, shared)
     }
 
-    /// Ends a start's node, as a crash ends it: the processes its tree had, each still to be waited for.
-    pub fn end(node: Node, _work: &Path) -> Vec<u32> {
+    /// Ends a start's node, as a crash ends it, then its keeper where its OS's node has one ([`end_keeper`]): the
+    /// processes its tree had, each still to be waited for.
+    pub fn end(node: Node, work: &Path) -> Vec<u32> {
         let processes: Vec<u32> = tree(node.child.id()).iter().map(|held| held.pid).collect();
         drop(node);
+        end_keeper(work);
         processes
     }
+
+    /// A Windows node's keeper outlives its killed node by design and never ends on its own ([`keeper`]), so a start's
+    /// end asks it to stop, as a node going down cleanly does (windows_node.rs's `Node`), and waits on its process for
+    /// its end.
+    #[cfg(windows)]
+    fn end_keeper(work: &Path) {
+        if let Some(keeper) = keeper(work) {
+            keeper.stop();
+            // `u32::MAX` is WaitForSingleObject's INFINITE: the wait follows the keeper's life alone.
+            let ended = hex_runtime::windows::sys::wait(keeper.process(), u32::MAX).unwrap();
+            assert!(ended, "the node's keeper, pid {}, didn't end", keeper.pid());
+        }
+    }
+
+    /// A macOS node starts no keeper: its tree's processes end with it, or with their release.
+    #[cfg(target_os = "macos")]
+    fn end_keeper(_: &Path) {}
 
     /// Ends a start's node ([`end`]) and waits for each process of its tree to end.
     pub fn stop(node: Node, work: &Path) {
