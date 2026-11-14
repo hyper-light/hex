@@ -102,3 +102,39 @@ fn a_lane_its_owner_reads_faster_than_it_carries_holds_back_its_credit_and_keeps
         .sum();
     assert_eq!(granted, frame * u64::try_from(reads).unwrap());
 }
+
+/// The review's E-1 path, AC-T7.4.1, Q3: a Credit held back takes in the later grants of its own connection alone. Do:
+/// on one lane, hold back a Credit, the connection's End and a second Credit (its owner still reads once its half has
+/// ended); then its Reset, the next connection's Accept, and a Credit of that one. Expect: the first connection's two
+/// Credits one, before its End; the next connection's Credit apart, after its Accept, never added to the first's.
+#[test]
+fn a_held_back_credit_takes_in_its_own_connections_grants_alone() {
+    use std::collections::VecDeque;
+
+    use hex_core::lanes::Kind;
+
+    use super::hold_back;
+
+    let credit = |bytes: u64| bytes.to_be_bytes().to_vec();
+    let mut waiting = VecDeque::new();
+    for (kind, payload) in [
+        (Kind::Credit, credit(3)),
+        (Kind::End, Vec::new()),
+        (Kind::Credit, credit(4)),
+        (Kind::Reset, vec![0]),
+        (Kind::Accept, 9u64.to_be_bytes().to_vec()),
+        (Kind::Credit, credit(5)),
+    ] {
+        hold_back(&mut waiting, kind, payload).unwrap();
+    }
+    assert_eq!(
+        Vec::from(waiting),
+        vec![
+            (Kind::Credit, credit(7)),
+            (Kind::End, Vec::new()),
+            (Kind::Reset, vec![0]),
+            (Kind::Accept, 9u64.to_be_bytes().to_vec()),
+            (Kind::Credit, credit(5)),
+        ]
+    );
+}
