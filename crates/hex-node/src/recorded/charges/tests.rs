@@ -1283,11 +1283,10 @@ impl hex_api::Runtime for Images {
         id: &BoxId,
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
-        self.0
-            .box_rates
-            .lock()
-            .unwrap()
-            .push((id.as_str().to_owned(), rate.map_or(0, std::num::NonZeroU64::get)));
+        self.0.box_rates.lock().unwrap().push((
+            id.as_str().to_owned(),
+            rate.map_or(0, std::num::NonZeroU64::get),
+        ));
         Ok(rate)
     }
     fn host_use(&self, _: &BoxId) -> Result<HostUse, Refusal> {
