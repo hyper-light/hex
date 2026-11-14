@@ -622,6 +622,26 @@ pub(crate) fn wait(
     }
 }
 
+/// The learner's thread (C1): it waits for each window ([`wait`]) on `begun`, a box's beginning told there, and runs it
+/// through `look`, which answers the span of the next, none once its node has gone; until its node has gone. Refused,
+/// typed, where it can't wait.
+pub(crate) fn learn(
+    begun: &hex_wait::mpsc::Receiver<()>,
+    mut look: impl FnMut() -> Option<Option<Duration>>,
+) -> Result<(), Refusal> {
+    // A learner holds no cap before its first window, so it has no window yet ([`Learner::next_window`]).
+    let mut window = None;
+    loop {
+        if wait(begun, window)? == Waited::Gone {
+            return Ok(());
+        }
+        let Some(next) = look() else {
+            return Ok(());
+        };
+        window = next;
+    }
+}
+
 /// One reading of a VM (C1): its VMM's whole CPU so far, in nanoseconds, the memory it holds now, and each vCPU's guest
 /// time so far, or why none apart: an image VM's host use (D241), a managed VM's guest time as its VM process answers
 /// its use (D260) and its scope's use through its native owner.

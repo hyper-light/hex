@@ -2467,6 +2467,14 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
     }
 }
 
+/// A node's charge learner as it is set ([`Recorded::start_charges`]): the receiver its thread waits on, its window, and
+/// what of the rule it can't hold.
+type Charges = (
+    hex_wait::mpsc::Receiver<()>,
+    Option<std::time::Duration>,
+    Vec<Refusal>,
+);
+
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's VMs, a thread that runs a window each
     /// time its window passes, until the node is gone, and says its window and what of the rule it can't hold, typed: a
@@ -2478,6 +2486,30 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     pub fn start_charges(
         self: &Arc<Self>,
     ) -> Result<(Option<std::time::Duration>, Vec<Refusal>), Refusal> {
+        let (waits, window, unheld) = self.set_charges()?;
+        let node = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("hex-charges".to_owned())
+            .spawn(move || {
+                let learned =
+                    charges::learn(&waits, || node.upgrade().map(|node| node.learn_window()));
+                // It can't wait for a window: it says so where its failures are kept, and stops.
+                if let Err(why) = learned
+                    && let Some(node) = node.upgrade()
+                    && let Some((learner, _)) = node.books.charges.get()
+                    && let Ok(mut learner) = learner.lock()
+                {
+                    learner.failed(why);
+                }
+            })
+            .map_err(|e| Refusal::os("starting the charge learner", e))?;
+        Ok((window, unheld))
+    }
+
+    /// The charge learner of the node's VMs, kept where its capacity answers read it ([`Recorded::start_charges`]),
+    /// with the receiver its thread waits on, told each box's beginning ([`Recorded::begun`]), its window and what of the
+    /// rule it can't hold.
+    fn set_charges(&self) -> Result<Charges, Refusal> {
         // Whether its platform's cap derives a cycle at all, asked at its least.
         let managed = self.runtime.cap_cycle(self.runtime.managed_least());
         let mut learner = charges::Learner::new(managed.is_ok(), self.machine()?)?;
@@ -2508,34 +2540,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             .charges
             .set((Mutex::new(learner), Mutex::new(begun)))
             .map_err(|_| broken("the charge learner is started already"))?;
-        let node = Arc::downgrade(self);
-        std::thread::Builder::new()
-            .name("hex-charges".to_owned())
-            .spawn(move || {
-                let mut next = window;
-                loop {
-                    match charges::wait(&waits, next) {
-                        Ok(charges::Waited::Look) => {}
-                        Ok(charges::Waited::Gone) => return,
-                        Err(why) => {
-                            // It can't wait for a window: it says so where its failures are kept, and stops.
-                            if let Some(node) = node.upgrade()
-                                && let Some((learner, _)) = node.books.charges.get()
-                                && let Ok(mut learner) = learner.lock()
-                            {
-                                learner.failed(why);
-                            }
-                            return;
-                        }
-                    }
-                    let Some(node) = node.upgrade() else {
-                        return;
-                    };
-                    next = node.learn_window();
-                }
-            })
-            .map_err(|e| Refusal::os("starting the charge learner", e))?;
-        Ok((window, unheld))
+        Ok((waits, window, unheld))
     }
 
     /// The machine's resources, as its facts say them.
