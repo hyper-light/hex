@@ -23,7 +23,8 @@
 //!   from its start ([`Patience::ran_out`]) until an answer comes.
 //! - **Told**: a run-out is told on the process's stderr in every configuration, one line naming the wait, its W*, how
 //!   long it waited and the party it follows from then on ([`Patience::ran_out`]): a node's journal, a service's log, a
-//!   test's output. A wedged party that stays alive holds its wait, and that line says which, and how long the wait had
+//!   test's output. A wait that starts with no W* and whose party could hang alive tells, once as it starts, that it
+//!   follows that party ([`Patience::following`]; the review's C-10), so even a cold wait is never silent. A wedged party that stays alive holds its wait, and that line says which, and how long the wait had
 //!   gone. The party is named in pieces of a few kinds alone ([`Piece`]), so the line carries nothing a caller holds
 //!   that could be large or secret, and the line is bounded ([`LINE_BOUND`]).
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
@@ -187,6 +188,22 @@ impl Patience {
         }
     }
 
+    /// The wait starts with no W* to bound it (before its first answer, or from a run-out to the next), its party one
+    /// that could hang alive (a VM's init on its way to READY): told once, as it starts, where a person sees it, so a party
+    /// that never answers is never silent (the review's C-10). A wait site opts in where its party can hang with no W*;
+    /// a wait with a W* tells nothing here, its run-out told past W* ([`Patience::ran_out`]). The line, at most
+    /// [`LINE_BOUND`] bytes, as the run-out's is: `hex.wait event=following wait=<name> party=<its pieces, a JSON
+    /// string>`. Says whether it told.
+    pub fn following(&self, party: &[Piece<'_>]) -> bool {
+        if self.deadline().is_some() {
+            return false;
+        }
+        let line = following_line(self.name, party);
+        // A process with no stderr to write has no log of its own to tell.
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+        true
+    }
+
     /// The wait's name.
     pub fn name(&self) -> &'static str {
         self.name
@@ -214,11 +231,27 @@ impl Patience {
 /// what the line leaves them (the bound less its other fields and the cut's own words, at a `usize`'s widest count),
 /// and a cut told by those words, so no line passes [`LINE_BOUND`] and no cut is silent.
 fn told_line(name: &str, w_star: Duration, waited: Duration, party: &[Piece<'_>]) -> String {
-    let mut line = format!(
-        "hex.wait event=ran_out wait={name} w_star_ns={} waited_ns={} party=\"",
-        w_star.as_nanos(),
-        waited.as_nanos()
-    );
+    with_party(
+        format!(
+            "hex.wait event=ran_out wait={name} w_star_ns={} waited_ns={} party=\"",
+            w_star.as_nanos(),
+            waited.as_nanos()
+        ),
+        party,
+    )
+}
+
+/// The line a wait that starts with no W* is told by ([`Patience::following`]), bounded as [`told_line`]'s is.
+fn following_line(name: &str, party: &[Piece<'_>]) -> String {
+    with_party(
+        format!("hex.wait event=following wait={name} party=\""),
+        party,
+    )
+}
+
+/// `line`, its fields to the party's opening quote, ended with the party's pieces and the line's end, cut as
+/// [`told_line`] says, so no line passes [`LINE_BOUND`] and no cut is silent.
+fn with_party(mut line: String, party: &[Piece<'_>]) -> String {
     let cut_words = |cut: usize| format!(" [cut {cut} bytes]");
     let room = LINE_BOUND
         .saturating_sub(cut_words(usize::MAX).len())

@@ -5705,3 +5705,45 @@ fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
         _ => panic!("the stopped boot's run isn't ended"),
     }
 }
+
+/// Set in the child [`c10_a_cold_ready_wait_is_told_as_it_starts`] starts of itself: there it boots a node VM cold.
+const C10_CHILD: &str = "HEX_TEST_C10_COLD_READY_CHILD";
+
+/// The review's C-10 (AC-T7.4.1; decision 9; ROOT, 2026-11-14): a node VM's READY wait at its process's first boot has no
+/// W* to bound it, so an init hanging alive would hold its node's start for good, told to no one. Do, in a process of
+/// its own (so no other boot of this binary has taught READY its W*), boot a node VM through the model. Expect its stderr
+/// to tell once, as the wait starts, that it follows its party with no W*: `hex.wait event=following
+/// wait=guest.hosted.ready party=<a JSON string>`.
+#[test]
+fn c10_a_cold_ready_wait_is_told_as_it_starts() {
+    if std::env::var_os(C10_CHILD).is_some() {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        runtime.images.boot_node(&node_vm()).unwrap();
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            &format!("{module}::c10_a_cold_ready_wait_is_told_as_it_starts"),
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(C10_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{stdout}\n{stderr}"
+    );
+    let told: Vec<&str> = stderr
+        .lines()
+        .filter(|line| {
+            line.starts_with("hex.wait event=following wait=guest.hosted.ready party=\"")
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
+}
