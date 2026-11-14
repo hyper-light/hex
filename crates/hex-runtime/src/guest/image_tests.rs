@@ -4034,8 +4034,9 @@ fn b5_a_delete_with_host_use_whose_final_read_is_refused_says_so_and_keeps_the_b
 /// over its host's and the guest's, passes `started` and `delete_with_host_use` of an image VM to the guest runtime, as
 /// it passes `host_use`, never the trait's defaults (`started` an inspect, a delete answering none). Do, through
 /// `WithGuest`: start a VM and ask its delete with its host use; start another whose run fails as it boots and ask
-/// `started` of it. Expect: the first's final use, its record gone; `started` the second's failure in its runtime's
-/// words, as the guest runtime answers it.
+/// `started` of it. Expect: the first's final use, its record gone; the second's start its failure, or Pending where its
+/// boot took longer than the first's answer, its W* (decision 9); `started` its failure in its runtime's words either
+/// way, as the guest runtime answers it.
 #[test]
 fn b6_with_guest_passes_started_and_delete_with_host_use_to_its_guest() {
     let vcpus = allocation().vm_size().unwrap().vcpus;
@@ -4060,7 +4061,14 @@ fn b6_with_guest_passes_started_and_delete_with_host_use_to_its_guest() {
         .create(spec("b6-with-guest-failed", Some(command)))
         .unwrap()
         .id;
-    assert!(matches!(node.start(&failed), Err(Refusal::Failed { .. })));
+    assert!(matches!(
+        node.start(&failed),
+        Err(Refusal::Failed { .. }
+            | Refusal::Lifecycle {
+                cause: LifecycleCause::Pending,
+                ..
+            })
+    ));
     let started = node.started(&failed);
     assert!(
         matches!(&started, Err(Refusal::Failed { why, .. }) if why == NEVER_STARTED),
