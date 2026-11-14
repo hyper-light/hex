@@ -1073,6 +1073,9 @@ mod tests {
         disk: Files,
         /// The rates its governed window was asked at.
         governed: Vec<u64>,
+        /// A folder its VMs leave records in, and whether each launch sweeps the records there no VM holds, as Shards'
+        /// next VM start sweeps its AppContainer profile records (D141).
+        sweeps: Option<(PathBuf, bool)>,
     }
 
     impl Driven {
@@ -1085,6 +1088,7 @@ mod tests {
                 torn_down: 0,
                 disk: Vec::new(),
                 governed: Vec::new(),
+                sweeps: None,
             }
         }
     }
@@ -1136,6 +1140,9 @@ mod tests {
                 .ok_or("no launch left")?;
             self.launched += 1;
             self.launched_at = Some(Instant::now());
+            if let Some((dir, true)) = &self.sweeps {
+                self.disk.retain(|held| !held.path.starts_with(dir));
+            }
             let (uses, holdings) = next
                 .as_ref()
                 .map(|s| (s.uses.clone(), s.holdings.clone()))
@@ -1556,6 +1563,53 @@ mod tests {
             "{:?}",
             census.samples.iter().map(|s| s.ready).collect::<Vec<_>>()
         );
+    }
+
+    /// Guests that each leave a record of their own in `dir`, read steady and reporting 400 MiB free.
+    fn recording(dir: &Path, guests: u64) -> Vec<Option<Script>> {
+        let steady: Vec<(Use, Holding)> = (0..64)
+            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
+            .collect();
+        (0..guests)
+            .map(|n| {
+                let mut guest = script(steady.clone(), 400 << 20);
+                guest.left = vec![Held {
+                    path: dir.join(format!("shards.vm.{n}.0")),
+                    file: (9, n),
+                    bytes: 0,
+                }];
+                Some(guest)
+            })
+            .collect()
+    }
+
+    /// AC-T7.4.1 (ROOT, 2026-11-14: a leftover is counted and named, never hidden): a class each of whose VMs leaves a
+    /// record its next VM's start sweeps (Windows: Shards' AppContainer profile records, D141, which a VM ended by its
+    /// job's end leaves): expect the run made, each guest's record named in the evidence with whether the next guest's
+    /// start swept it, and none taken for a one-time host cache.
+    #[test]
+    fn a_record_the_next_start_sweeps_is_named_never_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("containers");
+        let mut driver = Driven::new(dir.path(), recording(&records, 3));
+        driver.sweeps = Some((records.clone(), true));
+        let made = produce(
+            &mut driver,
+            &Plan { seedable: 3 },
+            &dir.path().join("out"),
+            &Windows::Fixed(window(5)),
+            &[],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        for n in 0..3 {
+            let named = format!(
+                "disk_left guest={n} {} 0 (",
+                records.join(format!("shards.vm.{n}.0")).display()
+            );
+            assert!(text.contains(&named), "{named} in {text}");
+        }
+        assert!(text.contains("\ndisk_host none"), "{text}");
     }
 
     /// AC-T7.4.1 (ROOT, 2026-11-14: a Windows node holds a managed VM's rate with its own governor, Shards' D255): a
