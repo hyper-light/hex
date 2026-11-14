@@ -292,6 +292,9 @@ init waits for its node's and its relay's ready lines by each child's life, with
     none, and a window with no reading judges no stall, the run then followed by its life alone. A VM's boot is the
     one place decision 9 judges a stall.
   - The run's end, its host's end or a refusal of Shards' ends it at any time, typed.
+  - Its answer, once the node VM's record is Ready, is said as `hex.guest event=node_vm_ready run= started_from=
+    ready= took_ns=`: its run, how its run started (booted, its template saved or restored, or warm, as `boot_node`
+    answers it), `on_time` or `late`, and from its boot's ask to its READY.
 - **The channel** (`Lanes::dial`): both ends' word on the connection's TLS, followed by the connection: its
   handshake's end, the endpoint's refusal or the connection's end answers it.
 - **The room** (`room_node`): its guest's answer, waited for while its run lives; the run's end refuses it.
