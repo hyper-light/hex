@@ -249,6 +249,17 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   borrowed output sockets. Only active endpoints enter the fixed stack array; the finite
   deadline and native array remain owned for the call. No data, socket mode, timeout option,
   asynchronous operation or handle ownership changes. These Winsock calls have no safe SDK wrapper.
+  - guest_cost on Windows (crates/hex-cli/examples/guest_cost) measures a running Shards VM from outside its process,
+    without reading the process's memory:
+    - Opens the VM process for query only (no memory access) and closes the handle once.
+    - Walks the process's address-space map (VirtualQueryEx) to find the one block that is the guest's RAM.
+      Addresses go to Windows as plain numbers and are never dereferenced; each answer lands in a buffer of the
+      exact size Windows expects.
+    - Asks for the page size (GetSystemInfo) and a disk's block size (GetVolumePathNameW, GetDiskFreeSpaceW).
+    - Opens a file for its attributes only (CreateFileW) to read its identity and size on disk
+      (GetFileInformationByHandle, GetFileInformationByHandleEx); the handle is closed once.
+    - Reads no CPU or memory totals itself: those come from the VM's job, through the reader the node already
+      uses (QueryInformationJobObject); guest CPU time comes from Shards' own report (ManagedGuest::host_use).
 
 - `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
   turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
