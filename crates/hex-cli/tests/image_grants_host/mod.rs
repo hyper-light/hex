@@ -39,6 +39,29 @@ pub struct Socket {
     pub remote: Option<SocketAddr>,
     /// A TCP socket in its listening state.
     pub listening: bool,
+    /// The processes holding it, each once, as the host shows them: on Linux and macOS each process whose descriptors
+    /// hold it (a socket handed on is held by each), on Windows its owning process.
+    pub pids: Vec<u32>,
+}
+
+/// `socket` added to `out`: its holders joined to the one already there with its protocol, addresses and state (the
+/// same socket, shown for another process), else as one more. For the readers that name no socket's own identity
+/// (Linux's names each by its inode).
+#[cfg(not(target_os = "linux"))]
+fn add(out: &mut Vec<Socket>, socket: Socket) {
+    match out.iter_mut().find(|s| {
+        (s.tcp, s.local, s.remote, s.listening)
+            == (socket.tcp, socket.local, socket.remote, socket.listening)
+    }) {
+        Some(known) => {
+            for pid in socket.pids {
+                if !known.pids.contains(&pid) {
+                    known.pids.push(pid);
+                }
+            }
+        }
+        None => out.push(socket),
+    }
 }
 
 impl Socket {
@@ -101,18 +124,31 @@ fn run_of(node: u32) -> Vec<Process> {
     run
 }
 
-/// The TCP and UDP sockets the run's processes hold, each once.
+/// The TCP and UDP sockets the run's processes hold, each once, each told with the processes holding it.
 fn sockets_of(run: &[Process]) -> Vec<Socket> {
     let pids: Vec<u32> = run.iter().map(|p| p.pid).collect();
     let sockets = os::sockets(&pids);
     for s in &sockets {
+        let holders: Vec<String> = s
+            .pids
+            .iter()
+            .map(|pid| {
+                let name = run
+                    .iter()
+                    .find(|p| p.pid == *pid)
+                    .map_or("", |p| p.name.as_str());
+                format!("{pid} {name}")
+            })
+            .collect();
+        assert!(!holders.is_empty(), "a socket no process holds ({HOW}): {s:?}");
         eprintln!(
-            "GRANTS-SOCKET {} {} -> {} {}",
+            "GRANTS-SOCKET {} {} -> {} {} held by {}",
             if s.tcp { "tcp" } else { "udp" },
             s.local,
             s.remote
                 .map_or_else(|| "none".to_owned(), |r| r.to_string()),
-            if s.listens() { "listens" } else { "" }
+            if s.listens() { "listens" } else { "" },
+            holders.join(", ")
         );
     }
     sockets
@@ -203,8 +239,8 @@ pub fn no_run_left(node: u32) {
 /// connection to the listener, and the connection the listener accepted. Expect the child found under this process
 /// by its name; the listener (at its address, no peer) and the UDP socket listening; and the connection at its own
 /// address, its peer the listener's, and the accepted one at the listener's, its peer the connection's, neither
-/// listening nor leaving the host. Each socket is told by its address and its peer's: the accepted connection shares
-/// the listener's address.
+/// listening nor leaving the host; each held by this process alone. Each socket is told by its address and its
+/// peer's: the accepted connection shares the listener's address.
 #[test]
 fn the_hosts_reading_finds_a_known_child_and_a_processs_own_sockets() {
     let mut child = std::process::Command::new("sort")
@@ -233,12 +269,14 @@ fn the_hosts_reading_finds_a_known_child_and_a_processs_own_sockets() {
     );
     assert!(under(&all, vec![this]).contains(&child.id()));
     let at = |local: SocketAddr, remote: Option<SocketAddr>, tcp: bool| {
-        sockets
+        let found = sockets
             .iter()
             .find(|s| s.local == local && s.remote == remote && s.tcp == tcp)
             .unwrap_or_else(|| {
                 panic!("no socket at {local}, peer {remote:?} (tcp {tcp}) in {sockets:#?}")
-            })
+            });
+        assert_eq!(found.pids, [this], "{found:?}");
+        found
     };
     let (listening, near) = (
         listener.local_addr().unwrap(),
@@ -262,6 +300,7 @@ fn only_a_flow_past_the_loopback_leaves() {
         local: "10.0.0.2:40000".parse().unwrap(),
         remote: remote.map(|r| r.parse().unwrap()),
         listening,
+        pids: vec![1],
     };
     assert!(tcp(Some("192.0.2.1:443"), false).leaves());
     assert!(!tcp(Some("127.0.0.1:443"), false).leaves());
@@ -274,6 +313,7 @@ fn only_a_flow_past_the_loopback_leaves() {
         local: "127.0.0.1:5353".parse().unwrap(),
         remote: remote.map(|r| r.parse().unwrap()),
         listening: false,
+        pids: vec![1],
     };
     assert!(udp(None).listens() && !udp(None).leaves());
     assert!(udp(Some("192.0.2.53:53")).leaves());
