@@ -64,9 +64,13 @@ impl Run {
         });
         let theirs = Arc::clone(&ended);
         let named = id.clone();
+        #[cfg(test)]
+        let token = hold::token(id);
         std::thread::Builder::new()
             .name(format!("hex-run-{id}"))
             .spawn(move || {
+                #[cfg(test)]
+                let _token = token;
                 // Waits as long as the program runs: each wait returns at its end, or with none yet.
                 let exit = loop {
                     match program.wait_for(Duration::MAX) {
@@ -76,6 +80,11 @@ impl Run {
                     }
                 };
                 drop(program);
+                #[cfg(test)]
+                {
+                    hold::stop_here(&named, hold::At::End);
+                    hold::stop_here(&named, hold::At::Removal);
+                }
                 // The box goes before the end is given, so a caller that saw the end finds it gone; a
                 // removal that fails is the run's to report, never dropped (CLAUDE.md §3).
                 let end = match (exit, remove()) {
@@ -158,5 +167,108 @@ impl Proc for Run {
 
     fn streams(&mut self) -> Result<Given, Refusal> {
         Ok(self.given.take().unwrap_or_default())
+    }
+}
+
+/// The review's E-11 test control (runtime goal 7): a hold on one run box's thread. While it stands for box `id`, the
+/// run's thread stops where the hold says, as one descheduled there would: once its program has ended, before it
+/// claims the box's removal ([`hold::At::End`]), or once it has claimed it, before it removes the box
+/// ([`hold::At::Removal`]). It counts the deletes that waited on a claimer's word, and gives the run's thread as a
+/// party to follow. Keyed by box id, so tests side by side hold their own boxes alone.
+#[cfg(test)]
+pub(crate) mod hold {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+
+    use hex_api::BoxId;
+    use hex_core::patience::Party;
+
+    /// Where a held run's thread stops.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum At {
+        /// Once its program has ended, before it claims the box's removal.
+        End,
+        /// Once it has claimed the box's removal, before it removes the box.
+        Removal,
+    }
+
+    struct Held {
+        at: At,
+        /// Whether the run's thread is stopped at the hold now.
+        stopped: bool,
+        /// The deletes that waited on the word of the box's claimer.
+        waiting: u64,
+        /// The run's thread's token, which the thread holds for its life.
+        thread: Weak<()>,
+    }
+
+    static HOLDS: Mutex<BTreeMap<BoxId, Held>> = Mutex::new(BTreeMap::new());
+    static GONE: Condvar = Condvar::new();
+
+    fn holds() -> MutexGuard<'static, BTreeMap<BoxId, Held>> {
+        HOLDS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The hold on box `id`'s run at `at`, standing until it goes. Taken before the run starts.
+    pub(crate) fn hold(id: &BoxId, at: At) -> Hold {
+        holds().insert(
+            id.clone(),
+            Held {
+                at,
+                stopped: false,
+                waiting: 0,
+                thread: Weak::new(),
+            },
+        );
+        Hold(id.clone())
+    }
+
+    /// A hold, standing until this goes.
+    pub(crate) struct Hold(BoxId);
+
+    impl Hold {
+        /// Whether the run's thread is stopped at the hold now.
+        pub(crate) fn stopped(&self) -> bool {
+            holds().get(&self.0).is_some_and(|held| held.stopped)
+        }
+
+        /// The deletes that waited on the word of the box's claimer.
+        pub(crate) fn waiting(&self) -> u64 {
+            holds().get(&self.0).map_or(0, |held| held.waiting)
+        }
+
+        /// The run's thread as a party: live while it runs, ended once it has gone.
+        pub(crate) fn thread(&self) -> Party {
+            match holds().get(&self.0) {
+                Some(held) if held.thread.strong_count() > 0 => Party::Live,
+                _ => Party::Ended,
+            }
+        }
+    }
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            holds().remove(&self.0);
+            GONE.notify_all();
+        }
+    }
+
+    /// The token box `id`'s run's thread holds for its life, where a hold stands for the box.
+    pub(super) fn token(id: &BoxId) -> Option<Arc<()>> {
+        let token = Arc::new(());
+        holds().get_mut(id)?.thread = Arc::downgrade(&token);
+        Some(token)
+    }
+
+    /// Box `id`'s run's thread at `at`: stopped there while a hold at `at` stands for the box.
+    pub(super) fn stop_here(id: &BoxId, at: At) {
+        let mut holds = holds();
+        match holds.get_mut(id) {
+            Some(held) if held.at == at => held.stopped = true,
+            _ => return,
+        }
+        let _gone = GONE
+            .wait_while(holds, |holds| holds.contains_key(id))
+            .unwrap_or_else(PoisonError::into_inner);
     }
 }

@@ -3658,4 +3658,132 @@ mod tests {
             matches!(&slot.state, SlotState::CleanupPending(Held::Process(current)) if NativeArc::ptr_eq(current, &newer))
         );
     }
+
+    /// The run's thread's stop at the hold on its box (the review's E-11): a fact no recorded operation makes, waited
+    /// for measuring, following the run's thread (`hex_testkit::waits::follow`).
+    static RUN_STOPPED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_runtime.run_stopped_at_hold");
+    /// A delete's wait on the word of the run's thread removing the box, or its answer beside it, following the delete.
+    static RUN_BESIDE: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_runtime.delete_beside_run_removal");
+
+    /// A program that runs until it is ended or its stdin closes (the test's end among them): sort, which reads its
+    /// input to its end before it writes any. A fact, never a delay.
+    fn until_ended() -> Program {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let sort = format!("{system}\\System32\\sort.exe");
+        Program::of(&[sort.as_str()])
+    }
+
+    /// Its stdin a pipe the runtime makes, whose end the caller holds ([`Proc::streams`]).
+    fn fed() -> Stdio {
+        Stdio {
+            ask: hex_api::Ask {
+                stdin: true,
+                ..hex_api::Ask::default()
+            },
+            ..Stdio::null()
+        }
+    }
+
+    /// The review's E-11 (runtime goal 7, decision 7), AC-T7.4.1: a run's late removal never takes a later box of its
+    /// id. Do: hold run box `e11-late-win`'s thread once its program has ended; run a program in it until it is ended,
+    /// and end it through the run; once the run's thread has stopped at the hold, delete the box, make it again and
+    /// start a program in it; let the run's thread go and take its end. Expect: the run ends Signal(9); the later box
+    /// stands and its program runs on.
+    #[test]
+    fn e11_a_runs_late_removal_leaves_a_later_box_of_its_id() {
+        let rt = WinRuntime::new();
+        let spec = process_box("e11-late-win");
+        let id = spec.id.clone();
+        let held = crate::run::hold::hold(&id, crate::run::hold::At::End);
+        let mut run = rt.run(spec.clone(), until_ended(), fed()).unwrap();
+        let _feeding = run.streams().unwrap().stdin;
+        run.kill().unwrap();
+        hex_testkit::waits::follow::until(
+            &RUN_STOPPED,
+            "the run's thread at the hold, its program ended",
+            || held.thread(),
+            || held.stopped(),
+        )
+        .unwrap();
+        rt.delete(&id).unwrap();
+        rt.create(spec).unwrap();
+        let mut later = rt.exec(&id, until_ended(), fed()).unwrap();
+        let _feeding_later = later.streams().unwrap().stdin;
+        drop(held);
+        assert_eq!(
+            hex_api::conformance::end_of(&mut *run),
+            Ok(hex_api::Exit::Signal(9)),
+            "the run's end"
+        );
+        assert!(
+            rt.inspect(&id).is_ok(),
+            "the run's late removal took the later box of its id: {:?}",
+            rt.inspect(&id)
+        );
+        assert_eq!(
+            later.try_wait(),
+            Ok(None),
+            "the run's late removal ended the later box's program"
+        );
+        later.kill().unwrap();
+        hex_api::conformance::end_of(&mut *later).unwrap();
+        rt.delete(&id).unwrap();
+    }
+
+    /// The review's E-11 (runtime goal 7), AC-T7.4.1: a delete of a run's box that its program's end is removing
+    /// answers as that removal does, never beside it. Do: hold run box `e11-beside-win`'s thread once it has claimed the
+    /// box's removal; run a program in it until it is ended, and end it through the run; once the run's thread has
+    /// stopped at the hold, delete the box from another thread; once that delete waits on the removal or answers, let
+    /// the removal go. Expect: the delete waits rather than answer while the removal is under way, then answers Ok; the
+    /// run ends Signal(9); and the box is gone.
+    #[test]
+    fn e11_a_delete_beside_a_runs_removal_waits_for_its_word() {
+        let rt = WinRuntime::new();
+        let spec = process_box("e11-beside-win");
+        let id = spec.id.clone();
+        let held = crate::run::hold::hold(&id, crate::run::hold::At::Removal);
+        let mut run = rt.run(spec, until_ended(), fed()).unwrap();
+        let _feeding = run.streams().unwrap().stdin;
+        run.kill().unwrap();
+        hex_testkit::waits::follow::until(
+            &RUN_STOPPED,
+            "the run's thread at the hold, its removal claimed",
+            || held.thread(),
+            || held.stopped(),
+        )
+        .unwrap();
+        std::thread::scope(|s| {
+            let deleting = s.spawn(|| rt.delete(&id));
+            hex_testkit::waits::follow::until(
+                &RUN_BESIDE,
+                "the delete's wait on the run's removal, or its answer",
+                || {
+                    if deleting.is_finished() {
+                        hex_core::patience::Party::Ended
+                    } else {
+                        hex_core::patience::Party::Live
+                    }
+                },
+                || held.waiting() == 1 || deleting.is_finished(),
+            )
+            .unwrap();
+            assert!(
+                !deleting.is_finished(),
+                "the delete answered beside the run's removal under way"
+            );
+            drop(held);
+            assert_eq!(
+                deleting.join().unwrap(),
+                Ok(()),
+                "the delete once the removal went"
+            );
+        });
+        assert_eq!(
+            hex_api::conformance::end_of(&mut *run),
+            Ok(hex_api::Exit::Signal(9))
+        );
+        assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+    }
 }

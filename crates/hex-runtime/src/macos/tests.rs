@@ -197,7 +197,10 @@ fn box_user_mode_routes_through_the_helper() {
 
 /// A backend whose programs are real but children of a shell of their own, never of this process: as a
 /// box-user program is the root helper's child, not the node's. Each spawn starts
-/// `sh -c '"$@" & echo $!; wait $!; echo $?'`, reads the program's pid, and a thread reads its status.
+/// `sh -c 'exec 3<&0; "$@" <&3 3<&- & exec 3<&-; echo $!; wait $!; echo $?'`, reads the program's pid, and a thread
+/// reads its status. The program's stdin is the one the node passed, redirected by name: a shell gives a program it
+/// starts in the background with no stdin of its own the null device (POSIX's asynchronous lists, without job
+/// control).
 #[derive(Default)]
 struct Shells {
     ends: Mutex<BTreeMap<i32, mpsc::Receiver<Exit>>>,
@@ -274,7 +277,7 @@ impl Privileged for Shells {
         let mut shell: Child = Command::new("/bin/sh")
             .args([
                 "-c",
-                "\"$@\" >/dev/null 2>&1 & echo $!; wait $!; echo $?",
+                "exec 3<&0; \"$@\" <&3 3<&- >/dev/null 2>&1 & exec 3<&-; echo $!; wait $!; echo $?",
                 "sh",
             ])
             .args(&program.args)
@@ -1045,4 +1048,216 @@ fn w14_the_controls_cycle_at_a_rate_is_its_run_and_hold_there() {
     assert_eq!(runtime.cap_cycle(1_000).unwrap(), Some(at(1_000)));
     assert!(at(1) > at(1_000));
     assert_eq!(runtime.cap_cycle(ceiling).unwrap(), None);
+}
+
+/// The run's thread's stop at the hold on its box (the review's E-11): a fact no recorded operation makes, waited for
+/// measuring, following the run's thread (`hex_testkit::waits::follow`).
+static RUN_STOPPED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_runtime.run_stopped_at_hold");
+/// A delete's wait on the word of the run's thread removing the box, or its answer beside it, following the delete.
+static RUN_BESIDE: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.hex_runtime.delete_beside_run_removal");
+
+/// A process box of the default bounds.
+fn run_spec(id: &BoxId) -> BoxSpec {
+    BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+        owner: None,
+        band: 0,
+    }
+}
+
+/// A program that runs until it is ended or its stdin closes (the test's end among them): a fact, never a delay.
+fn until_ended() -> Program {
+    Program::of(&["/bin/cat"])
+}
+
+/// Its stdin a pipe the runtime makes, whose end the caller holds ([`Proc::streams`]).
+fn fed() -> Stdio {
+    Stdio {
+        ask: hex_api::Ask {
+            stdin: true,
+            ..hex_api::Ask::default()
+        },
+        ..Stdio::null()
+    }
+}
+
+/// A rootless runtime at this Mac's model's pacing.
+fn rootless() -> MacRuntime {
+    let model = super::machine_model().expect("this Mac's model");
+    let rates = hex_core::watch::seed(&model);
+    MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .expect("a rootless runtime")
+}
+
+/// A box-user runtime whose helper's backend is [`Shells`] on a socket in `dir`, with two pool users.
+fn helped(dir: &std::path::Path) -> MacRuntime {
+    let sock = dir.join("helper.sock");
+    let listener = helper_daemon::bind(&sock).expect("bind the helper socket");
+    thread::spawn(move || {
+        let daemon = Daemon::new(Shells::default(), vec![7000, 7001], 64);
+        let _ = daemon.serve_listener(listener.as_fd());
+    });
+    MacRuntime::detect(
+        NonZeroU64::new(1 << 40).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        hex_core::watch::lateness_seed(&super::machine_model().expect("this Mac's model")),
+        &sock,
+    )
+    .expect("a box-user runtime")
+}
+
+/// Ends a box-user run's program as its helper would: [`Shells`]' own kill is a stand-in's no-op.
+fn kill_by_pid(run: &mut dyn Proc) {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(run.pid()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+}
+
+/// Ends a rootless run's program through its box's KILL.
+fn kill_by_run(run: &mut dyn Proc) {
+    run.kill().unwrap();
+}
+
+/// The review's E-11 (runtime goal 7, decision 7), AC-T7.4.1: a run's late removal never takes a later box of its id.
+/// Do: hold run box `name`'s thread once its program has ended; run a program in it until it is ended, and end it
+/// (`end`); once the run's thread has stopped at the hold, delete the box, make it again and start a program in it;
+/// let the run's thread go and take its end. Expect: the run ends Signal(9); the later box stands and its program
+/// runs on.
+fn a_runs_late_removal_leaves_a_later_box(rt: &MacRuntime, name: &str, end: fn(&mut dyn Proc)) {
+    let id = BoxId::new(name).unwrap();
+    let held = crate::run::hold::hold(&id, crate::run::hold::At::End);
+    let mut run = rt
+        .run(run_spec(&id), until_ended(), fed())
+        .expect("run a program until it is ended");
+    let _feeding = run.streams().unwrap().stdin;
+    end(&mut *run);
+    hex_testkit::waits::follow::until(
+        &RUN_STOPPED,
+        "the run's thread at the hold, its program ended",
+        || held.thread(),
+        || held.stopped(),
+    )
+    .unwrap();
+    rt.delete(&id).expect("delete the run's box");
+    rt.create(run_spec(&id)).expect("make the box again");
+    let mut later = rt
+        .exec(&id, until_ended(), fed())
+        .expect("start a program in the later box");
+    let _feeding_later = later.streams().unwrap().stdin;
+    drop(held);
+    assert_eq!(
+        hex_api::conformance::end_of(&mut *run),
+        Ok(Exit::Signal(9)),
+        "the run's end"
+    );
+    assert!(
+        rt.inspect(&id).is_ok(),
+        "the run's late removal took the later box of its id: {:?}",
+        rt.inspect(&id)
+    );
+    assert_eq!(
+        later.try_wait(),
+        Ok(None),
+        "the run's late removal ended the later box's program"
+    );
+    end(&mut *later);
+    rt.delete(&id).expect("delete the later box");
+}
+
+/// The review's E-11 (runtime goal 7), AC-T7.4.1: a delete of a run's box that its program's end is removing answers as
+/// that removal does, never beside it. Do: hold run box `name`'s thread once it has claimed the box's removal; run a
+/// program in it until it is ended, and end it (`end`); once the run's thread has stopped at the hold, delete the box
+/// from another thread; once that delete waits on the removal or answers, let the removal go. Expect: the delete waits
+/// rather than answer while the removal is under way, then answers Ok; the run ends Signal(9); and the box is gone.
+fn a_delete_beside_a_runs_removal_waits_for_its_word(
+    rt: &MacRuntime,
+    name: &str,
+    end: fn(&mut dyn Proc),
+) {
+    let id = BoxId::new(name).unwrap();
+    let held = crate::run::hold::hold(&id, crate::run::hold::At::Removal);
+    let mut run = rt
+        .run(run_spec(&id), until_ended(), fed())
+        .expect("run a program until it is ended");
+    let _feeding = run.streams().unwrap().stdin;
+    end(&mut *run);
+    hex_testkit::waits::follow::until(
+        &RUN_STOPPED,
+        "the run's thread at the hold, its removal claimed",
+        || held.thread(),
+        || held.stopped(),
+    )
+    .unwrap();
+    thread::scope(|s| {
+        let deleting = s.spawn(|| rt.delete(&id));
+        hex_testkit::waits::follow::until(
+            &RUN_BESIDE,
+            "the delete's wait on the run's removal, or its answer",
+            || {
+                if deleting.is_finished() {
+                    hex_core::patience::Party::Ended
+                } else {
+                    hex_core::patience::Party::Live
+                }
+            },
+            || held.waiting() == 1 || deleting.is_finished(),
+        )
+        .unwrap();
+        assert!(
+            !deleting.is_finished(),
+            "the delete answered beside the run's removal under way"
+        );
+        drop(held);
+        assert_eq!(
+            deleting.join().unwrap(),
+            Ok(()),
+            "the delete once the removal went"
+        );
+    });
+    assert_eq!(hex_api::conformance::end_of(&mut *run), Ok(Exit::Signal(9)));
+    assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
+}
+
+/// E-11 in the rootless process-group mode (step 1).
+#[test]
+fn e11_a_rootless_runs_late_removal_leaves_a_later_box_of_its_id() {
+    a_runs_late_removal_leaves_a_later_box(&rootless(), "e11-late-rootless", kill_by_run);
+}
+
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket.
+#[test]
+fn e11_a_box_user_runs_late_removal_leaves_a_later_box_of_its_id() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    a_runs_late_removal_leaves_a_later_box(&helped(dir.path()), "e11-late-helped", kill_by_pid);
+}
+
+/// E-11 in the rootless process-group mode (step 1).
+#[test]
+fn e11_a_rootless_delete_beside_a_runs_removal_waits_for_its_word() {
+    a_delete_beside_a_runs_removal_waits_for_its_word(
+        &rootless(),
+        "e11-beside-rootless",
+        kill_by_run,
+    );
+}
+
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket.
+#[test]
+fn e11_a_box_user_delete_beside_a_runs_removal_waits_for_its_word() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    a_delete_beside_a_runs_removal_waits_for_its_word(
+        &helped(dir.path()),
+        "e11-beside-helped",
+        kill_by_pid,
+    );
 }
