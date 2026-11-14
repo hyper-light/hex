@@ -610,9 +610,10 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
     if rt.status(&id).is_ok() {
         // Its party is the runtime's watcher, which lives while this test holds the runtime: the wait follows the fact.
         let mut found = None;
-        hex_testkit::waits::until(
+        follow::until(
             &WATCHED,
             "the watcher's read that found the box empty",
+            || Party::Live,
             || {
                 let status = rt.status(&id).expect("status");
                 match status.end_trace {
@@ -1480,9 +1481,12 @@ fn a_program_whose_caller_goes_is_no_memory_end_of_its_box() {
     );
     drop(caller);
     // Its party is the node, which lives while this test holds it: the wait follows the fact.
-    hex_testkit::waits::until(&ABANDONED, "the box counting its abandoned program", || {
-        client.inspect(&id).is_ok_and(|i| i.abandoned == 1)
-    })
+    follow::until(
+        &ABANDONED,
+        "the box counting its abandoned program",
+        || Party::Live,
+        || client.inspect(&id).is_ok_and(|i| i.abandoned == 1),
+    )
     .expect("the box counts its abandoned program");
     let usage = client.usage(&id).expect("usage");
     client.delete(&id).expect("delete");
