@@ -63,7 +63,8 @@ pub use runtime::{
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, ImageMember,
-    Mount, Network, OciSpec, Program, Rootfs, ShardsImage, Stdio, StringUnit, User, drive_absolute,
+    Mount, Network, OciSpec, Program, Rootfs, ShardsImage, Stdio, StringUnit, User, check_pinned,
+    drive_absolute,
 };
 
 /// A caller's owned stream: Unix's descriptor becomes a file; Windows keeps the handle's resource kind.

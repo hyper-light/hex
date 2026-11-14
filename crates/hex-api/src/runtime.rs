@@ -111,6 +111,25 @@ pub trait Runtime: Send + Sync {
         })
     }
 
+    /// The next connection member `member`'s harness makes to its MCP bridge (D254) in running Shards image box `id`,
+    /// whose spec asks the bridge of it ([`crate::ImageMember::mcp`]; goal 2's item 3), as a program: its stdout what the
+    /// harness sends, its stdin what it is sent, given once ([`Proc::streams`]), and no stderr; its end the connection's
+    /// end. Each call takes one connection. Waited for as decision 9 has a wait follow its party: within its W*, past it
+    /// the run-out told once and the run's agent-control connection followed, never a timer. Refused, typed: by a class
+    /// whose boxes have no members, naming the class; `Invalid` for a member whose spec asks no bridge, or one its run
+    /// declares not; as `member` is for a box that isn't running; `NotRunning(id, "mcp: its member takes no MCP
+    /// connection")` where the run's member takes none, and `NotRunning(id, "mcp: its run ended")` where the run's
+    /// connection ends first.
+    fn mcp(&self, id: &BoxId, member: &crate::Member) -> Result<Box<dyn Proc>, Refusal> {
+        let _ = member;
+        Err(Refusal::Invalid {
+            what: "mcp",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members with an MCP bridge"
+            ),
+        })
+    }
+
     /// Sends `signal` to member `member` of running Shards image box `id` alone, on its own lane of its run's
     /// agent-control endpoint (goal 2's item 2; D238), KILL among them: the member's, never its VM's, which runs on.
     /// Refused `NotRunning(id, "signal a member: it has ended")` where the member has ended, `NotRunning(id, "signal a
@@ -1848,12 +1867,18 @@ fn try_clones<T>(
 }
 
 /// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
-/// platform's answer doesn't read it (joint plan step 14, C7).
+/// platform's answer doesn't read it (joint plan step 14, C7); and its boxes' CPU time together, ended boxes' among it,
+/// so an interval between two answers spans its boxes' coming and going (the review's A-8).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineTime {
     pub cpu_ns: Option<u64>,
     pub uptime_ns: Option<u64>,
+    /// The CPU time of everything under the node's box root since that root was made: its cgroup's `usage_usec`,
+    /// which keeps a child's time once the child is removed (cgroup v2 flushes a removed cgroup's counts into its
+    /// parent's), so an ended box's work stays in it.
+    #[serde(default)]
+    pub boxes_cpu_ns: Option<u64>,
 }
 
 impl MachineTime {

@@ -5,8 +5,11 @@
 //! guests end with this process), its record a canonical one kept in memory ([`Scope`]: a backing of the Shards
 //! class's shared execution, as a node's shared guest is, the producer keeping no records). Each guest is held to the
 //! census's rate by its own governor (Shards' D191, D255, `ManagedGuest::rate`), whose period is the window
-//! ([`Driver::governed_window`]), and read as its node reads it: its vCPUs' guest time first, from its VM process's
-//! own answer (`ManagedGuest::host_use`, D260: WHP's run-time counter, which only that process reads), then its job's
+//! ([`Driver::governed_window`]), once it is ready, as a node's learner holds a VM it has booted: its VM process takes
+//! a rate on its socket only once its machine runs (its socket listening, its microVM started), which its agent's
+//! answer shows. It is read as its node reads it: its vCPUs' guest time first, from its VM process's own answer
+//! (`ManagedGuest::host_use`, D260: WHP's run-time counter, which only that process reads), none before that process
+//! says it (its socket not yet listening, its microVM not yet started: its guest has run nothing), then its job's
 //! kernel accounting (`WinRuntime::managed_usage`: the job's CPU time and committed peak), so its VMM's own CPU, the
 //! whole less its vCPUs', is never less than none; a job that counts less CPU than its VM process says it used is
 //! refused, told. Its guest RAM's part of its job's commit is its committed region of that size, which Shards' WHP
@@ -39,6 +42,8 @@ pub struct Managed {
     paths: shards_api::RuntimePaths,
     cache: PathBuf,
     home: PathBuf,
+    /// Shards' records of its VM processes' AppContainer profiles, in its cache ([`Driver::swept_at_next_start`]).
+    containers: PathBuf,
     /// The run's own folder of runtime folders, its guests' sockets among them.
     folder: PathBuf,
     /// The cost each guest is booted under while its own is measured: its envelope's, floor and ceiling, in this
@@ -85,7 +90,7 @@ impl Scope {
         PoolRecord::decode(&self.lock()?.encode()?)
     }
 
-    /// The backing moves to `phase`, as a node's records move it (draining before its VM stops, released after).
+    /// The backing moves to `phase`, as a node's records move it (draining before its VM stops).
     fn moved(&self, phase: BackingPhase) -> Result<(), Refusal> {
         self.lock()?.phase = phase;
         Ok(())
@@ -247,6 +252,7 @@ impl Managed {
             config,
             runtime: Arc::new(WinRuntime::new()),
             paths,
+            containers: cache.join("containers"),
             cache,
             home,
             folder,
@@ -273,12 +279,9 @@ impl Managed {
         }
     }
 
-    /// Boots the next guest managed, its record granted the envelope, its plan's guest told what is left until
-    /// `deadline`.
-    fn boot(
-        &mut self,
-        deadline: Instant,
-    ) -> Result<(Arc<shards_api::ManagedGuest>, Arc<Scope>), String> {
+    /// Boots the next guest managed, its record granted the envelope, its plan's guest told no deadline (it keeps its
+    /// learned bounds), its native launch within the class's W*.
+    fn boot(&mut self) -> Result<(Arc<shards_api::ManagedGuest>, Arc<Scope>), String> {
         let n = self.next;
         self.next = n.checked_add(1).ok_or("the guests' count overflows")?;
         let record = PoolRecord {
@@ -302,7 +305,6 @@ impl Managed {
             record: Mutex::new(record),
         });
         let socket = self.folder.join(format!("vm-{n}.sock"));
-        let left = deadline.saturating_duration_since(Instant::now());
         let spec = self.config.spec().map_err(|e| e.to_string())?;
         let plan = hex_runtime::guest::managed_plan(
             &spec,
@@ -310,16 +312,16 @@ impl Managed {
             &socket,
             &self.paths,
             None,
-            left,
+            None,
         )
         .map_err(|e| format!("preparing the guest's managed plan: {e}"))?;
-        let vm = hex_runtime::guest::boot_managed(scope.as_ref(), plan, left)
+        let vm = hex_runtime::guest::boot_managed(scope.as_ref(), plan, self.patience()?.bound)
             .map_err(|e| format!("booting the guest managed: {e}"))?;
         Ok((Arc::new(vm), scope))
     }
 
     /// Asks `vm`'s governor to hold `rate` milli-CPU, as a node's learner asks a managed VM's (D255), and the period it
-    /// holds it over.
+    /// holds it over. One dial, which its VM process takes once its machine runs: a ready guest's.
     fn hold(vm: &shards_api::ManagedGuest, rate: u64) -> Result<Duration, String> {
         vm.rate(NonZeroU64::new(rate), Duration::MAX)
             .map_err(|e| format!("asking the guest's governor to hold {rate} milli-CPU: {e}"))?;
@@ -327,8 +329,34 @@ impl Managed {
             .ok_or_else(|| "the guest's governor answered no period".to_owned())
     }
 
-    /// Ends `vm` as a node deletes a backing: drained, stopped and waited for until `deadline`, its whole scope
-    /// released, then released and finalized through its record.
+    /// Holds ready guest `vm` to the census's rate ([`Self::hold`]), its governor's period the census's window.
+    fn governed(&self, vm: &shards_api::ManagedGuest) -> Result<(), String> {
+        let (rate, window) = self
+            .held
+            .as_ref()
+            .ok_or("no census window was asked before a guest's hold")?;
+        let period = Self::hold(vm, *rate)?;
+        if period != window.length {
+            return Err(format!(
+                "the guest's governor answered a period of {period:?}, not the census's window of {:?}",
+                window.length
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ends `vm` ([`Self::end`]) within the class's patience from now.
+    fn ended(&self, vm: &shards_api::ManagedGuest, scope: &Scope) -> Result<(), String> {
+        let patience = self.patience()?;
+        let at = Instant::now()
+            .checked_add(patience.bound)
+            .ok_or("the end's wait overflows")?;
+        Self::end(vm, scope, at)
+    }
+
+    /// Ends `vm` as a node deletes a backing (hex-runtime's shared release): drained, stopped and waited for until
+    /// `deadline`, its whole scope released, then finalized through its record while it drains, as a node's records
+    /// finalize a backing before they write its end (the producer writes no record).
     fn end(vm: &shards_api::ManagedGuest, scope: &Scope, deadline: Instant) -> Result<(), String> {
         scope
             .moved(BackingPhase::Draining)
@@ -349,9 +377,6 @@ impl Managed {
                 ));
             }
         }
-        scope
-            .moved(BackingPhase::Released)
-            .map_err(|e| e.to_string())?;
         scope
             .finalize_managed(identity.as_ref())
             .map_err(|e| format!("finalizing the guest's scope: {e}"))
@@ -377,6 +402,7 @@ impl Managed {
             VmmCpu {
                 vm: Arc::clone(vm),
                 scope: Arc::clone(scope),
+                said: Said::Not("no reading yet".to_owned()),
             },
             VmmHolds {
                 scope: Arc::clone(scope),
@@ -436,7 +462,7 @@ impl Driver for Managed {
 
     fn sources(&self) -> Lines {
         vec![
-            ("cpu".to_owned(), "as its node reads it (D260): each vCPU's guest time from its VM process's answer, read first (ManagedGuest::host_use: WHP's run-time counter, TotalRuntime100ns less HypervisorRuntime100ns), then its job's CPU time (WinRuntime::managed_usage: the job's kernel and user time, its VM process's and every process it starts), so its VMM's own, the whole less its vCPUs', is never less than none; a job counting less than its VM process says it used (HostUse::cpu_ns) refused, told".to_owned()),
+            ("cpu".to_owned(), "as its node reads it (D260): each vCPU's guest time from its VM process's answer, read first (ManagedGuest::host_use: WHP's run-time counter, TotalRuntime100ns less HypervisorRuntime100ns), none before its VM process says it (its socket not yet listening, its microVM not yet started: its guest has run nothing) and said at every reading from its first on, then its job's CPU time (WinRuntime::managed_usage: the job's kernel and user time, its VM process's and every process it starts), so its VMM's own, the whole less its vCPUs', is never less than none; a job counting less than its VM process says it used (HostUse::cpu_ns) refused, told".to_owned()),
             ("memory".to_owned(), "as its node reads it: its job's committed peak (WinRuntime::managed_usage: PeakJobMemoryUsed, at most its bound), less its guest RAM's commit, the committed private read/write region of exactly its RAM (VirtualQueryEx), which Shards' WHP reserve_ram commits whole from the start".to_owned()),
             ("disk".to_owned(), format!(
                 "the allocated bytes (FileStandardInfo's AllocationSize, a file linked twice once, by its volume and index) of every path under SHARDS_CACHE {}, SHARDS_HOME {} and the guest's socket folder",
@@ -450,22 +476,23 @@ impl Driver for Managed {
         walk(&[self.cache.clone(), self.home.clone()])
     }
 
-    fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String> {
-        let (rate, window) = self
-            .held
-            .clone()
-            .ok_or("no census window was asked before a guest's launch")?;
-        let (vm, scope) = self.boot(deadline)?;
-        let launched = Self::hold(&vm, rate).and_then(|period| {
-            if period != window.length {
-                return Err(format!(
-                    "the guest's governor answered a period of {period:?}, not the census's window of {:?}",
-                    window.length
-                ));
-            }
-            self.probes(&vm, &scope)
-        });
-        match launched {
+    /// Shards' records of its VM processes' AppContainer profiles (Shards' helpers::containers, D141): each VM process
+    /// makes its profile and a record of it as it starts, and deletes both as it ends; Hex ends a managed VM by its
+    /// job's end (its native owner's stop: shards_api has no other for a managed VM), so the profile and its record
+    /// stay until the next VM's start sweeps them.
+    fn swept_at_next_start(&self) -> Option<(PathBuf, String)> {
+        Some((
+            self.containers.clone(),
+            "Shards' AppContainer profile record left by a killed VM, swept at the next start (D141; its profile, in LOCALAPPDATA's Packages and the registry, lives as long)".to_owned(),
+        ))
+    }
+
+    fn launch(&mut self) -> Result<Launched<Self>, String> {
+        if self.held.is_none() {
+            return Err("no census window was asked before a guest's launch".to_owned());
+        }
+        let (vm, scope) = self.boot()?;
+        match self.probes(&vm, &scope) {
             Ok((cpu, holds)) => Ok((
                 Guest {
                     vm,
@@ -476,39 +503,28 @@ impl Driver for Managed {
                 holds,
             )),
             // Whatever kept it from being read, the guest is ended first: none is left running.
-            Err(why) => {
-                let ended = self
-                    .patience()
-                    .and_then(|patience| {
-                        Instant::now()
-                            .checked_add(patience.bound)
-                            .ok_or_else(|| "the end's wait overflows".to_owned())
-                    })
-                    .and_then(|at| Self::end(&vm, &scope, at));
-                Err(match ended {
-                    Ok(()) => why,
-                    Err(end) => format!("{why}; then {end}"),
-                })
-            }
+            Err(why) => Err(match self.ended(&vm, &scope) {
+                Ok(()) => why,
+                Err(end) => format!("{why}; then {end}"),
+            }),
         }
     }
 
-    fn ready(&mut self, guest: &mut Guest, deadline: Instant) -> Result<bool, String> {
-        let span = deadline.saturating_duration_since(Instant::now());
+    fn ready(&mut self, guest: &mut Guest) -> Result<(), String> {
+        // Followed to its answer: its link's dials past the class's W* tell the run-out once and follow the guest's VM by
+        // its life, and its hello waits on its connection (decision 9).
+        let bound = self.patience()?.bound;
         let vm: Arc<dyn shards_api::Guest> = Arc::clone(&guest.vm) as Arc<dyn shards_api::Guest>;
-        match own_link(ShardsLink::new(vm, span))
-            .and_then(|link| Client::connect_before(link, deadline))
-        {
-            Ok(client) => {
-                guest.client = Some(client);
-                Ok(true)
-            }
-            Err(_) if Instant::now() >= deadline => Ok(false),
-            Err(why) => Err(format!("reaching the guest's agent: {why}")),
-        }
+        let client = own_link(ShardsLink::new(vm, bound))
+            .and_then(Client::connect)
+            .map_err(|why| format!("reaching the guest's agent: {why}"))?;
+        guest.client = Some(client);
+        Ok(())
     }
 
     fn idle(&mut self, guest: &Guest, until: Instant) -> Result<(), String> {
+        // Ready, it is held to the census's rate for its idle hold, as a node's learner holds a VM it has booted.
+        self.governed(&guest.vm)?;
         // The hold is a wait on the guest's end, until `until`: it must not come.
         match shards_api::Guest::wait_for(
             guest.vm.as_ref(),
@@ -543,18 +559,31 @@ impl Driver for Managed {
             from.checked_add(patience.bound)
                 .ok_or_else(|| "the window's boot overflows the clock".to_owned())
         };
-        let (vm, scope) = self.boot(at(Instant::now())?)?;
-        let period = Self::hold(&vm, rate);
-        let ended = at(Instant::now()).and_then(|deadline| Self::end(&vm, &scope, deadline));
-        let length = match (period, ended) {
-            (Ok(length), Ok(())) => length,
+        let began = Instant::now();
+        let (vm, scope) = self.boot()?;
+        let mut guest = Guest {
+            vm,
+            scope,
+            client: None,
+        };
+        // Asked once it is ready, as a node asks a VM's governor once it has booted it: its VM process takes a rate
+        // only once its machine runs, which its agent's answer shows. Its boot is followed to that answer, told no
+        // deadline (decision 9), and its boot-to-ready time is the window's evidence.
+        let held = self.ready(&mut guest).and_then(|()| {
+            let ready = began.elapsed();
+            Self::hold(&guest.vm, rate).map(|period| (period, ready))
+        });
+        let ended = at(Instant::now()).and_then(|deadline| self.tear_down(guest, deadline));
+        let (length, ready) = match (held, ended) {
+            (Ok(held), Ok(())) => held,
             (Err(why), Ok(())) | (Ok(_), Err(why)) => return Err(why),
             (Err(why), Err(end)) => return Err(format!("{why}; then {end}")),
         };
         let window = Window {
             length,
             source: format!(
-                "the period a guest's governor holds {rate} milli-CPU over, as its VM process answered it, a guest booted for it alone (ManagedGuest::rate and rate_period; Shards' D191, D255): the CPU control a node holds a managed VM's rate with, and every guest of the census held to it"
+                "the period a guest's governor holds {rate} milli-CPU over, as its VM process answered it, a guest booted for it alone, told no deadline and followed to its agent's answer, ready {} ns after its launch, and asked once ready (ManagedGuest::rate and rate_period; Shards' D191, D255): the CPU control a node holds a managed VM's rate with, and every guest of the census held to it once ready",
+                ready.as_nanos()
             ),
         };
         self.held = Some((rate, window.clone()));
@@ -562,11 +591,21 @@ impl Driver for Managed {
     }
 }
 
+/// Whether a guest's VM process has said its vCPUs' guest time (D260). It can't before its machine runs: its socket
+/// listens as it builds its machine, before any vCPU runs, and its answer says why not until its microVM has started.
+/// Its guest has run nothing until then. Once said, it is said at every reading.
+enum Said {
+    /// Not yet, and why.
+    Not(String),
+    Yes,
+}
+
 /// A launched guest's VMM's CPU, as its node reads it: its vCPUs' guest time from its VM process's answer, then its
 /// job's.
 pub struct VmmCpu {
     vm: Arc<shards_api::ManagedGuest>,
     scope: Arc<Scope>,
+    said: Said,
 }
 
 impl Probe for VmmCpu {
@@ -577,23 +616,43 @@ impl Probe for VmmCpu {
         // never less than none.
         let asked =
             |why: &dyn std::fmt::Display| format!("asking the guest's VM process its use: {why}");
-        let used = match self.vm.host_use(Duration::MAX).map_err(|e| asked(&e))? {
-            shards_api::ManagedUsed::Running(used) => used,
+        let used = match self.vm.host_use(Duration::MAX) {
+            Ok(shards_api::ManagedUsed::Running(used)) => Some(used),
             // Its end (Shards' D260), in the words its refusal of the ask said it before.
-            shards_api::ManagedUsed::Ended(ended) => {
+            Ok(shards_api::ManagedUsed::Ended(ended)) => {
                 return Err(asked(&shards_api::Refusal::Ended(ended.end)));
             }
+            Err(shards_api::Refusal::ManagedIo {
+                kind: std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound,
+                ..
+            }) if matches!(self.said, Said::Not(_)) => None,
+            Err(e) => return Err(asked(&e)),
         };
-        let times = used
-            .microvm
-            .guest
-            .map_err(|why| format!("the guest's VM process read no guest time: {why}"))?;
+        let times = match used.as_ref().map(|used| &used.microvm.guest) {
+            Some(Ok(times)) => {
+                self.said = Said::Yes;
+                Some(times)
+            }
+            Some(Err(why)) if matches!(self.said, Said::Not(_)) => {
+                self.said = Said::Not(why.clone());
+                None
+            }
+            Some(Err(why)) => {
+                return Err(format!(
+                    "the guest's VM process stopped saying its guest time: {why}"
+                ));
+            }
+            None => {
+                self.said = Said::Not("its socket didn't listen yet".to_owned());
+                None
+            }
+        };
         let usage = self
             .scope
             .managed_usage()
             .map_err(|e| format!("reading the guest's job: {e}"))?;
         // Its VM process's own count, read before its job's: the job, which holds that process, counts no less.
-        if let Ok(host) = &used.microvm.host
+        if let Some(Ok(host)) = used.as_ref().map(|used| &used.microvm.host)
             && usage.cpu_usec < host.cpu_ns / 1000
         {
             return Err(format!(
@@ -603,9 +662,24 @@ impl Probe for VmmCpu {
         }
         Ok(Use {
             cpu: Duration::from_micros(usage.cpu_usec),
-            guest_cpu: Duration::from_nanos(times.total_ns()),
-            guest_threads: Some(u32::try_from(times.vcpus.len()).map_err(|e| e.to_string())?),
+            guest_cpu: times.map_or(Duration::ZERO, |times| {
+                Duration::from_nanos(times.total_ns())
+            }),
+            guest_threads: times
+                .map(|times| u32::try_from(times.vcpus.len()))
+                .transpose()
+                .map_err(|e| e.to_string())?,
         })
+    }
+
+    /// After its last reading, its guest ready and held: its VM process has said its guest's time.
+    fn verify(&mut self) -> Result<(), String> {
+        match &self.said {
+            Said::Yes => Ok(()),
+            Said::Not(why) => Err(format!(
+                "the guest's VM process never said its guest time, though its guest was ready: {why}"
+            )),
+        }
     }
 }
 
@@ -670,5 +744,51 @@ impl Probe for VmmHolds {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::run::{Plan, Windows, produce};
+    use super::*;
+
+    /// AC-T7.4.1 (light smoke, few boots), Windows' managed driver natively under WHP: produce a pair over the
+    /// configured Shards guest with SEEDABLE two, through the same census, evidence and output the measurement uses:
+    /// the governed window's guest booted, held and ended, then two guests each launched, read from their launch,
+    /// held idle at the census's rate and torn down. Expect the pair written and loaded as a node loads it, its
+    /// envelope the configured guest's, its window the governor's period, and two guests in its evidence. Needs
+    /// SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS, HEX_GUEST_MEMORY_MIB and GUEST_COST_SMOKE_OUT (a
+    /// folder of the run's own under the user's profile).
+    #[test]
+    #[ignore = "boots three real guests under WHP: run with --ignored where a Shards guest is configured"]
+    fn two_managed_guests_make_a_pair_the_node_loads() {
+        let out =
+            PathBuf::from(std::env::var_os("GUEST_COST_SMOKE_OUT").expect("GUEST_COST_SMOKE_OUT"));
+        let mut driver = Managed::from_env(&out).unwrap();
+        let envelope = driver.envelope().unwrap().resources;
+        let made = produce(
+            &mut driver,
+            &Plan { seedable: 2 },
+            &out,
+            &Windows::Governed,
+            &[],
+        )
+        .unwrap();
+        let (cost, _, rows) = hex_runtime::guest::load_runtime_evidence(
+            &made.cost_file,
+            made.cost_sha256,
+            &made.evidence_file,
+        )
+        .unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!((cost.floor, cost.ceiling), (envelope, envelope));
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("window ") && l.contains("governor")),
+            "{text}"
+        );
+        assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        println!("{}\n{text}", made.summary);
     }
 }
