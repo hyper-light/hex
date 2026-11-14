@@ -14,8 +14,8 @@ use hex_api::{
 use hex_core::record::NodeVmRecord;
 use hex_testkit::waits::follow::{self, Party};
 use shards_api::image::{
-    Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
-    Receiving, StartedFrom, VcpuTime,
+    Bound, Channel, ChannelEnd, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName,
+    Microvm, Receiving, StartedFrom, Unused, VcpuTime,
 };
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
@@ -41,6 +41,8 @@ struct Owner {
     ending: Holding,
     /// Whether it refuses node VMs' Ready rows, as the test sets it: as a Store whose disk is full refuses a write.
     refuse_ready: AtomicBool,
+    /// Whether it refuses node VMs' Ended rows, as the test sets it, as a full disk refuses them.
+    refuse_ended: AtomicBool,
 }
 
 /// Where one of the owner's holds stands ([`Holding`]).
@@ -102,6 +104,7 @@ impl Owner {
             reading: Holding::default(),
             ending: Holding::default(),
             refuse_ready: AtomicBool::new(false),
+            refuse_ended: AtomicBool::new(false),
         }
     }
 
@@ -281,7 +284,12 @@ impl Books for Owner {
     }
     fn put_node_vm(&self, record: &NodeVmRecord) -> Result<(), Refusal> {
         record.check()?;
-        if record.phase == NodeVmPhase::Ready && self.refuse_ready.load(Ordering::SeqCst) {
+        let refused = match record.phase {
+            NodeVmPhase::Ready => self.refuse_ready.load(Ordering::SeqCst),
+            NodeVmPhase::Ended => self.refuse_ended.load(Ordering::SeqCst),
+            NodeVmPhase::Booting => false,
+        };
+        if refused {
             return Err(Refusal::Os {
                 op: "writing a node VM's row",
                 why: "no space left on the device, as the test asked".to_owned(),
@@ -472,7 +480,7 @@ impl ImageGuest for ModelGuest {
     fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
         self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
-            Some(end) => Err(ImageRefusal::Ended(end)),
+            Some(end) => Err(ImageRefusal::Ended(ended(end))),
             None => Ok(self.run.stats.lock().unwrap().clone()),
         }
     }
@@ -480,7 +488,7 @@ impl ImageGuest for ModelGuest {
     // where it is short; it gives no member a terminal (D244), refused as unsupported.
     fn room(&self, room: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
         if let Some(end) = self.run.end.lock().unwrap().clone() {
-            return Err(ImageRefusal::Ended(end));
+            return Err(ImageRefusal::Ended(ended(end)));
         }
         self.run.rooms.lock().unwrap().push(room);
         Ok(room.map(|room| u64::try_from(room.max(0)).unwrap()))
@@ -491,7 +499,7 @@ impl ImageGuest for ModelGuest {
         _: Duration,
     ) -> Result<Option<std::num::NonZeroU64>, ImageRefusal> {
         if let Some(end) = self.run.end.lock().unwrap().clone() {
-            return Err(ImageRefusal::Ended(end));
+            return Err(ImageRefusal::Ended(ended(end)));
         }
         self.run.rates.lock().unwrap().push(rate);
         Ok(rate)
@@ -561,14 +569,61 @@ impl ImageGuest for ModelGuest {
         self.run.diagnostics.lock().unwrap().push(to);
         Ok(())
     }
-    fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
+    fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
         let end = self.run.end.lock().unwrap().clone();
-        Ok(end.or_else(|| {
+        Ok(end.map(ended).or_else(|| {
             self.run.gone.lock().unwrap().as_ref().map(|said| {
-                RunEnd::Failed(format!("the run host exited without its run's end: {said}"))
+                RunEnded::unused(
+                    RunEnd::Failed(format!("the run host exited without its run's end: {said}")),
+                    Unused::Untold,
+                )
             })
         }))
     }
+    // The model tells no channel's end apart from its run's (control-01's `WithRun`), as a host's answers that end
+    // without telling one do; a member that runs nothing is refused as Shards refuses it.
+    fn wait_channel(
+        &self,
+        member: &MemberName,
+        _: Channel,
+        _: Duration,
+    ) -> Result<Option<ChannelEnd>, ImageRefusal> {
+        if !self
+            .members
+            .iter()
+            .any(|m| m.kind == member.kind && m.name == member.name && m.runs)
+        {
+            return Err(ImageRefusal::Image(format!(
+                "{member:?} is files alone, and runs nothing"
+            )));
+        }
+        let ended =
+            self.run.end.lock().unwrap().is_some() || self.run.gone.lock().unwrap().is_some();
+        Ok(if ended {
+            Some(ChannelEnd::WithRun)
+        } else {
+            None
+        })
+    }
+    // No run of the model asks its GPU report (D233): refused as Shards refuses a run that asked none.
+    fn take_gpu_report(
+        &self,
+        _: Duration,
+    ) -> Result<shards_api::physical::GpuReport, ImageRefusal> {
+        Err(ImageRefusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+}
+
+/// `end` as the model's run host says it (image channel v28): its microVM's final use unread, killed where its run was
+/// stopped, else untold. No call of the class reads a final use.
+fn ended(end: RunEnd) -> RunEnded {
+    let why = match end {
+        RunEnd::Stopped => Unused::Killed,
+        RunEnd::Exited(_) | RunEnd::Failed(_) => Unused::Untold,
+    };
+    RunEnded::unused(end, why)
 }
 
 /// Where the model holds a boot, as D231's boot goes: before its run host has started, when its patience
@@ -774,7 +829,10 @@ impl Images for ModelImages {
         }
         if stop.is_stopped() {
             self.stopped.fetch_add(1, Ordering::SeqCst);
-            return Err(ImageRefusal::Ended(RunEnd::Stopped));
+            return Err(ImageRefusal::Ended(RunEnded::unused(
+                RunEnd::Stopped,
+                Unused::NotStarted,
+            )));
         }
         let (gate, _) = self
             .opened
@@ -1069,6 +1127,25 @@ fn kill_stops_the_run_and_records_signal_9() {
     runtime.delete(&id).unwrap();
     assert!(record(&owner, &id).is_none());
     assert!(matches!(runtime.inspect(&id), Err(Refusal::NoSuchBox(_))));
+}
+
+/// Joint plan step 15 (AC-T7.7.2; N6): do start an image VM and inspect it, then KILL it and inspect it again. Expect the
+/// running VM's inspect to say where its run's agent-control endpoint is bound, as its run host told it (the model's, on
+/// the host's loopback), with no port published; and the ended VM's to say none.
+#[test]
+fn an_inspect_says_where_its_runs_agent_control_endpoint_is_bound_while_it_runs() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-control", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.control, shown.published.len()),
+        (BoxState::Running, Some(model_control().address), 0)
+    );
+    runtime.signal(&id, Signal::KILL).unwrap();
+    let ended = runtime.inspect(&id).unwrap();
+    assert_eq!((ended.state, ended.control), (BoxState::Empty, None));
 }
 
 /// Joint plan step 12: do end a running VM's run on its own, its command exiting 3. Expect: its run
@@ -1871,6 +1948,215 @@ fn r12_a_members_end_tells_a_signal_from_its_exit() {
             .unwrap()
             .insert(name.to_owned(), end);
         assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(exit), "{name}");
+    }
+}
+
+/// Goal 2's r13 (decision 9; Shards' pending lane handles, 155b5ee2e; AC-T7.4.1): a member lane's ask goes once, and
+/// its answer is waited for within the lane wait's W*, past it on, by the run's connection's life. Do wait through
+/// `followed` on a stand-in handle that answers nothing within the patience it is given unless that is `Duration::MAX`:
+/// with a W* learned, then cold, then for the endpoint's refusal and for the connection's end. Expect: a learned wait
+/// given its W* and then, its run-out told, `Duration::MAX` on the same ask, the answer taken and learned; a cold wait
+/// given `Duration::MAX` at once; a refusal learned as a refusal's sample; the connection's end learned as none.
+#[test]
+fn r13_a_lanes_answer_past_its_w_star_is_followed_on_its_one_ask_and_learned() {
+    let party = [Piece::Kind("the test's lane")];
+    let w_star = Duration::from_nanos(1);
+    let learned = Patience::seeded("hex.test.lane", w_star);
+    let given = Mutex::new(Vec::new());
+    assert_eq!(
+        followed(&learned, &party, asked(&given, Ok(7))).unwrap(),
+        Ok(7)
+    );
+    assert_eq!(*given.lock().unwrap(), [w_star, Duration::MAX]);
+    assert!(learned.slowest() >= Some(w_star));
+    assert_eq!(
+        learned.deadline(),
+        learned.slowest(),
+        "answered, no longer following"
+    );
+
+    let cold = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    assert_eq!(
+        followed(&cold, &party, asked(&given, Ok(7))).unwrap(),
+        Ok(7)
+    );
+    assert_eq!(*given.lock().unwrap(), [Duration::MAX]);
+    assert!(cold.slowest().is_some(), "its answer learned");
+
+    let refused = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    let scope = Fault::Refused(shards_api::control::Reason::Scope);
+    assert_eq!(
+        followed(&refused, &party, asked(&given, Err(scope))).unwrap(),
+        Err(scope)
+    );
+    assert!(refused.slowest().is_some(), "a refusal is an answer");
+
+    let lost = Patience::measuring("hex.test.lane");
+    let given = Mutex::new(Vec::new());
+    let gone = Fault::Lost(shards_api::control::Ended::Local);
+    assert_eq!(
+        followed(&lost, &party, asked(&given, Err(gone))).unwrap(),
+        Err(gone)
+    );
+    assert_eq!(
+        lost.slowest(),
+        None,
+        "the connection's end answered nothing"
+    );
+}
+
+/// A lane's handle as `followed` waits on it: each patience it is given noted in `given`, `answer` given only to a wait
+/// with no bound, as an endpoint that answers later than any W* does.
+fn asked(
+    given: &Mutex<Vec<Duration>>,
+    answer: Result<u32, Fault>,
+) -> impl FnMut(Duration) -> Result<Option<u32>, Fault> + '_ {
+    move |patience| {
+        given.lock().unwrap().push(patience);
+        if patience == Duration::MAX {
+            answer.map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// The review's B-4 (AC-T7.4.1): an image VM's delete answers only once its run is released, its run host exited and
+/// every process that host started gone, so kiln frees no room a run still holds. Do boot an image box through Shards'
+/// own image boot (`ImageShards`, its run's session real) whose run host is a stand-in: it starts the run, starts a VM
+/// of its own that holds its diagnostics as the VM, network and share processes hold its stderr, says the run's end once
+/// asked to stop, and exits as its stdin closes, its VM left running until the test lets it go. Delete the box on a
+/// thread, and let the VM go only once the run host has exited. Expect the delete to answer `Ok` only after the VM has
+/// gone. Red where Shards' stop returned as the run's end was told and its host reaped what it started after (to
+/// ce80cbb37: `image_real`'s release case on KVM at 45fc1605d found three processes left as the delete returned).
+#[cfg(unix)]
+#[test]
+fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started_are_gone() {
+    use shards_api::image::wire;
+    use std::io::BufRead as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (host_seen, vm_seen, vm_gate) = (
+        dir.path().join("h"),
+        dir.path().join("v"),
+        dir.path().join("g"),
+    );
+    for fifo in [&host_seen, &vm_seen, &vm_gate] {
+        let made = std::process::Command::new("mkfifo").arg(fifo).status();
+        assert!(made.unwrap().success(), "mkfifo {fifo:?}");
+    }
+    let octal = |kind, payload: &[u8]| -> String {
+        wire::frame(kind, payload)
+            .unwrap()
+            .iter()
+            .map(|b| format!("\\{b:03o}"))
+            .collect()
+    };
+    // Its start names the agent-control endpoint the class's runs ask for; the test never dials it.
+    let started = wire::Started {
+        members: Vec::new(),
+        published: Vec::new(),
+        control: Some(shards_api::image::ControlAt {
+            address: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            vm: [7; 32],
+        }),
+        rate_period: Duration::from_millis(100),
+        from: StartedFrom::Booted,
+    }
+    .encode()
+    .unwrap();
+    let ended = RunEnded::unused(RunEnd::Stopped, Unused::Killed)
+        .encode()
+        .unwrap();
+    // The run host: its start said; its VM started, holding its stderr until the gate closes; each frame its orchestrator
+    // sends read whole until STOP, answered with the run's end; then its stdin read to its end, as it closes.
+    let host = dir.path().join("host");
+    std::fs::write(
+        &host,
+        format!(
+            "#!/bin/sh\n\
+             printf '{started}'\n\
+             exec 3>'{host_seen}'\n\
+             (read _ <'{vm_gate}') >'{vm_seen}' 3>&- &\n\
+             echo \"$!\" >&3\n\
+             while :; do\n\
+             set -- $(dd bs=1 count=8 2>/dev/null | od -An -tu1)\n\
+             [ \"$#\" -eq 8 ] || exit 3\n\
+             len=$(( ($5 << 24) + ($6 << 16) + ($7 << 8) + $8 ))\n\
+             [ \"$len\" -eq 0 ] || dd bs=1 count=\"$len\" of=/dev/null 2>/dev/null\n\
+             [ \"$1\" -eq {stop} ] && break\n\
+             done\n\
+             printf '{ended}'\n\
+             exec cat >/dev/null\n",
+            started = octal(wire::to_client::STARTED, &started),
+            ended = octal(wire::to_client::ENDED, &ended),
+            stop = wire::to_host::STOP,
+            host_seen = host_seen.display(),
+            vm_seen = vm_seen.display(),
+            vm_gate = vm_gate.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let owner = Arc::new(Owner::new());
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        crate::guest::GuestConfig {
+            binary: host.clone(),
+            ..super::super::tests::config()
+        },
+    )
+    .with_images(
+        Ok(Arc::new(shards_api::image::ImageShards::new()) as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    );
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let id = runtime.create(spec("b4-release", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    // Each open waits for its other end: the run host's, its VM's, then the VM's gate, each held from here.
+    let mut host_end = std::io::BufReader::new(std::fs::File::open(&host_seen).unwrap());
+    let mut vm_pid = String::new();
+    host_end.read_line(&mut vm_pid).unwrap();
+    let vm_end = std::fs::File::open(&vm_seen).unwrap();
+    let gate = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&vm_gate)
+        .unwrap();
+    std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| {
+            let deleted = runtime.delete(&id);
+            (deleted, writers_gone(&vm_end))
+        });
+        // The run host's end: its end of `host_seen` closes as it exits, its VM's closed as it started.
+        let mut rest = String::new();
+        assert_eq!(host_end.read_line(&mut rest).unwrap(), 0, "{rest:?}");
+        drop(gate);
+        let (deleted, vm_gone) = deleting.join().unwrap();
+        assert_eq!(deleted, Ok(()));
+        assert!(
+            vm_gone,
+            "the delete answered while the VM its run host started (pid {}) still ran",
+            vm_pid.trim()
+        );
+    });
+}
+
+/// Whether every writer of the FIFO `reader` reads has closed it: a read that would wait says one still holds it.
+#[cfg(unix)]
+fn writers_gone(reader: &std::fs::File) -> bool {
+    use std::io::Read as _;
+    let flags = rustix::fs::fcntl_getfl(reader).unwrap();
+    rustix::fs::fcntl_setfl(reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+    match (&mut &*reader).read(&mut [0u8; 1]) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(e) => panic!("reading a FIFO's end: {e}"),
     }
 }
 
@@ -4359,6 +4645,49 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
     assert!(relay.join().unwrap());
 }
 
+/// The review's C-4 (AC-T7.4.1; joint plan step 39): a node VM whose run ended on its own, its end not yet kept in its
+/// row, is no reason to boot another beside it while that row stays Ready, locked and booked. Do boot a node's guest
+/// under shards-init, end its run on its own, refuse its row's Ended write as a full disk refuses it, and ask the guest
+/// again. Expect the ask refused in the write's words, no second boot asked of Shards, and the row still Ready.
+#[test]
+fn c4_a_node_vm_whose_end_cant_be_kept_refuses_the_next_ask_rather_than_boot_beside_it() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), None);
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(0));
+    owner.refuse_ended.store(true, Ordering::SeqCst);
+    let asked = runtime.boot();
+    assert!(
+        matches!(
+            &asked,
+            Err(Refusal::Os {
+                op: "writing a node VM's row",
+                ..
+            })
+        ),
+        "{asked:?}"
+    );
+    assert_eq!(
+        images.asked.lock().unwrap().len(),
+        1,
+        "a second node VM was booted beside the first"
+    );
+    let phases: Vec<NodeVmPhase> = owner
+        .node_vms
+        .lock()
+        .unwrap()
+        .values()
+        .map(|row| row.phase)
+        .collect();
+    assert_eq!(phases, [NodeVmPhase::Ready]);
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
+
 /// A node's loop with no room for one more connection: it refuses every guest connection's join.
 struct FullLoop;
 
@@ -5332,4 +5661,89 @@ fn b2_a_delete_of_a_booting_box_whose_read_its_start_outdated_answers_once_it_is
     );
     assert_eq!(deleted, Ok(()));
     assert!(record(&owner, &id).is_none());
+}
+
+/// The review's B-7 (AC-T7.4.1): a boot its delete stopped mid-boot (D231's `BootStop`) answers `Ended(Stopped)`, and
+/// where the start that asked it takes that answer (`Runs::booted`) it is no boot's answer: the time to the stop is no
+/// sample of the boot's W* (a boot hung ten minutes and then stopped would make W* ten minutes), and its run ends as the
+/// stop ended it, KILL, as `Runs::settle` records the same answer. Do put a stopped boot's answer in a booting run's
+/// slot and take it as its start does. Expect the stop given back, the boot's wait with no sample, and the run ended by
+/// signal 9.
+#[test]
+fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
+    let runs = Runs::new();
+    let id = BoxId::new("b7-stopped-boot").unwrap();
+    let slot = Arc::new(Slot::<Booted>::new());
+    runs.insert(
+        &id,
+        Run::Booting(Arc::clone(&slot), Arc::new(BootStop::new())),
+    )
+    .unwrap();
+    slot.put(Err(ImageRefusal::Ended(RunEnded::unused(
+        RunEnd::Stopped,
+        Unused::NotStarted,
+    ))));
+    let waits = waits().unwrap();
+    let taken = runs.booted(&id, &slot, &waits).unwrap();
+    assert!(
+        matches!(
+            taken,
+            Err(ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }))
+        ),
+        "{taken:?}"
+    );
+    assert_eq!(
+        waits.boot.slowest(),
+        None,
+        "the stop taken for a boot's answer"
+    );
+    match runs.lock().unwrap().get(Key::Box(&id)) {
+        Some(Run::Ended(end)) => assert_eq!(end.exit, hex_api::Exit::Signal(9)),
+        _ => panic!("the stopped boot's run isn't ended"),
+    }
+}
+
+/// Set in the child [`c10_a_cold_ready_wait_is_told_as_it_starts`] starts of itself: there it boots a node VM cold.
+const C10_CHILD: &str = "HEX_TEST_C10_COLD_READY_CHILD";
+
+/// The review's C-10 (AC-T7.4.1; decision 9; ROOT, 2026-11-14): a node VM's READY wait at its process's first boot has no
+/// W* to bound it, so an init hanging alive would hold its node's start for good, told to no one. Do, in a process of
+/// its own (so no other boot of this binary has taught READY its W*), boot a node VM through the model. Expect its stderr
+/// to tell once, as the wait starts, that it follows its party with no W*: `hex.wait event=following
+/// wait=guest.hosted.ready party=<a JSON string>`.
+#[test]
+fn c10_a_cold_ready_wait_is_told_as_it_starts() {
+    if std::env::var_os(C10_CHILD).is_some() {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        runtime.images.boot_node(&node_vm()).unwrap();
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            &format!("{module}::c10_a_cold_ready_wait_is_told_as_it_starts"),
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(C10_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{stdout}\n{stderr}"
+    );
+    let told: Vec<&str> = stderr
+        .lines()
+        .filter(|line| {
+            line.starts_with("hex.wait event=following wait=guest.hosted.ready party=\"")
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "the cold READY wait told once: {stderr}");
 }

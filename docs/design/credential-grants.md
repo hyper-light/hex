@@ -162,9 +162,10 @@ its boot refuses a credential or sign-in grant's field past what its network pro
 length (`shards_dns::credential::WIRE_MOST`, 65,535 bytes or hosts), by field and never quoting it, as a spec's
 (`ImageRefusal::Spec`), which the image class says as `Invalid` naming `shards image` as it says every spec refusal. The roots a run's
 injector trusts toward a credential's host are its host's (Shards' D242 upstream roots, `37ddeb080`): Hex names none
-of its own (`ImageSpec::upstream_roots` empty), and since then no `SSL_CERT_FILE` or `SSL_CERT_DIR` adds one. The check's three working lists (each grant's hosts, its member and credential, its
-placeholder and credential) are reserved fallibly (refused `Exhausted` past what memory gives), sorted, O(n log n) in
-the hosts named, with no recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
+of its own (`ImageSpec::upstream_roots` empty), and since then no `SSL_CERT_FILE` or `SSL_CERT_DIR` adds one. The checks' working lists (each grant's hosts with its member, every egress grant's
+member and host by name, each grant's member and credential, its placeholder and credential) are reserved fallibly
+(refused `Exhausted` past what memory gives), sorted and merged, O(n log n) in the hosts named and the grants, with no
+recursion (§11). A lease's value is held by the orchestrator's lessor, Hex's adapter and
 Shards' run host only as long as each passes it on, wiped as each lets go of it, and never printed.
 
 ## C6. What would falsify it
@@ -210,12 +211,12 @@ are its caller's (`hex_client::Core::with_lessors`).
   ended. Over QUIC, the node wipes the framed copy it writes and each message it holds, and hex-quic wipes what a
   control data lane holds: each connection's outbox and the frames come and not read, its bridge's buffers, and each
   frame its driver holds back. The wire's writer wipes what it held of a message that fails, and reserves the
-  message's room before the value goes in, so no copy is left as it grows. `crates/hex-node/tests/wipes.rs` holds it:
-  every block its test binary frees is read for the secret, on this OS's socket and over QUIC. What hyper-raft holds
-  below hex-quic isn't wiped: hyper-quic's stream send buffer keeps each frame until it is acked, and
-  hyper-transport's receive pool keeps the decrypted chunk. Not built yet: Hex sealing each message that carries a
-  secret before it reaches hex-quic's lanes, so those buffers hold ciphertext alone (ROOT, 2026-11-14); the test's QUIC
-  leg is ignored until it lands. The kernel's buffers are not Hex's to wipe.
+  message's room before the value goes in, so no copy is left as it grows. Over QUIC, what hyper-raft holds below
+  hex-quic Hex can't wipe (hyper-quic's stream send buffer keeps each frame until it is acked, and hyper-transport's
+  receive pool keeps the decrypted chunk), so each message that carries a secret is sealed before it reaches hex-quic's
+  lanes, and those buffers hold it as ciphertext alone (`docs/design/hex-quic.md` Q13; ROOT, 2026-11-14).
+  `crates/hex-node/tests/wipes.rs` holds it: every block its test binary frees is read for the secret, on this OS's
+  socket and over QUIC. The kernel's buffers are not Hex's to wipe.
 - **Waits.** Every ask waits for its answer while its connection stands (decision 9): the answer, or the connection's
   end, ends it, however long that takes, and no ask is bounded by a time of its own. From `with_lessors` on, the client
   reads its connection with a thread of its own (the event form's loop), so the node's asks are read whatever its calls
@@ -276,7 +277,7 @@ answered outside too. Hex passes each through, adding none:
   `RefreshAsk` (`0x8016`) and `SignInRevoked` (`0x8017`, not answered), answered `Request::Captured` (`0x001c`) and
   `Request::Refreshed` (`0x001d`); appended, the wire's `IDENTITY` moving. A capture's ask, and the captured and
   refreshed answers, carry secrets (`wire::carries_secret`): every copy Hex makes of them is wiped as a lease's is
-  (C7), on the node and its client alike, and what hyper-raft holds below hex-quic waits on the seal C7 names.
+  (C7), on the node and its client alike, and over QUIC each goes sealed (C7; `docs/design/hex-quic.md` Q13).
   A create granting a sign-in on a connection that sent no `Lessors` is refused `Unconfigured` (default deny).
 
 Not built: an inspect's report of a box's sign-ins (its record holds them); kiln's broker answering captures and

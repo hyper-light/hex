@@ -20,6 +20,10 @@ struct Loopback {
 }
 
 impl Link for Loopback {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = match port {
             stream::CONTROL_PORT => self.control,
@@ -56,6 +60,10 @@ fn link_owner_retains_one_instance_without_dial_effects() {
         drops: Arc<AtomicUsize>,
     }
     impl Link for Counted {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
             self.dials.fetch_add(1, Ordering::SeqCst);
             Err(Refusal::Broken("owned test dial".into()))
@@ -418,6 +426,10 @@ struct Recording {
 }
 
 impl Link for Recording {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
@@ -2015,6 +2027,10 @@ struct ConnectLink {
 }
 
 impl Link for ConnectLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         self.budget
     }
@@ -2579,6 +2595,119 @@ fn duplex_owner_preserves_io_and_explicit_native_clone_lifetime() {
     assert_eq!(eof.unwrap(), 0);
 }
 
+/// The relay's token on a control connection whose caller gave no deadline, as decision 9 waits (the review's D-2).
+mod relay_token {
+    use std::net::Shutdown;
+    use std::thread::JoinHandle;
+
+    use hex_core::patience::Patience;
+    use hex_testkit::waits::follow::{self, Party, Unmet};
+
+    use super::*;
+
+    /// A transport of this test's own: the guest's answer tables, and a token wait no other test's tokens move.
+    struct Own;
+
+    static OWN_TOKEN: Patience = Patience::measuring("test.hex_client.guest.relay_token");
+    /// The relay's wait for the token wait's run-out to be told, the connecting thread its party.
+    static TOLD: Patience = Patience::measuring("test.hex_client.guest.relay_token_told");
+
+    impl Waits for Own {
+        fn answers() -> &'static [Patience; KINDS] {
+            Guest::answers()
+        }
+
+        fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+            Guest::class_answers(class)
+        }
+
+        fn token() -> &'static Patience {
+            &OWN_TOKEN
+        }
+    }
+
+    /// A connect through `link` with no caller deadline, on a thread of its own: its relay's token, or its refusal.
+    fn connecting(link: &LinkOwner) -> JoinHandle<Result<u64, Refusal>> {
+        let link = triomphe::Arc::clone(link);
+        std::thread::spawn(move || Stream::<Own>::dial_before(link, None, None).map(|s| s.token))
+    }
+
+    /// The token wait's run-out told (its W* gone), waited for while `connect` runs.
+    fn told(connect: &JoinHandle<Result<u64, Refusal>>) -> Result<u64, Unmet> {
+        follow::until(
+            &TOLD,
+            "the relay token's run-out told",
+            || {
+                if connect.is_finished() {
+                    Party::Ended
+                } else {
+                    Party::Live
+                }
+            },
+            || OWN_TOKEN.deadline().is_none(),
+        )
+    }
+
+    /// The review's D-2 (decision 9; AC-T7.4.1), on every OS: connect three times with no caller deadline. The relay
+    /// sends the first connect's token at once; the second's first half at once, and its second half once the token
+    /// wait's run-out has been told; the third's first half, then ends its sending once the run-out has been told.
+    /// Expect the first token its wait's first sample, W*; the second read past W*, its run-out told and the read
+    /// following the connection to the token, the half read before kept, and W* risen to that late token; the third
+    /// refused at the connection's end, typed, naming the token, and no sample.
+    #[test]
+    fn ac_t7_4_1_a_relay_token_with_no_deadline_is_waited_for_past_w_star_by_its_connection() {
+        let (control, _stdio, link) = listeners();
+        let token = TOKEN.to_le_bytes();
+        let (head, tail) = token.split_at(stream::TOKEN_BYTES / 2);
+
+        let connect = connecting(&link);
+        let (mut relay, _) = control.accept().unwrap();
+        relay.write_all(&token).unwrap();
+        let first = connect.join().unwrap();
+        let w_star = OWN_TOKEN.slowest();
+        eprintln!("d_2_relay_token first={first:?} w_star={w_star:?}");
+        assert_eq!(first, Ok(TOKEN));
+        assert!(
+            w_star.is_some(),
+            "the first token was no sample of its wait"
+        );
+
+        let connect = connecting(&link);
+        let (mut relay, _) = control.accept().unwrap();
+        relay.write_all(head).unwrap();
+        let past = told(&connect);
+        relay.write_all(tail).unwrap();
+        let second = connect.join().unwrap();
+        let risen = OWN_TOKEN.slowest();
+        eprintln!("d_2_relay_token past={past:?} second={second:?} risen={risen:?}");
+        assert!(past.is_ok(), "{past:?}: no run-out was told past W*");
+        assert_eq!(
+            second,
+            Ok(TOKEN),
+            "the half read before W* passed wasn't kept"
+        );
+        assert!(
+            risen > w_star,
+            "W* didn't rise to the late token: {w_star:?}, then {risen:?}"
+        );
+
+        let connect = connecting(&link);
+        let (mut relay, _) = control.accept().unwrap();
+        relay.write_all(head).unwrap();
+        let past = told(&connect);
+        relay.shutdown(Shutdown::Write).unwrap();
+        let third = connect.join().unwrap();
+        let after = OWN_TOKEN.slowest();
+        eprintln!("d_2_relay_token past={past:?} third={third:?} after={after:?}");
+        assert!(past.is_ok(), "{past:?}: no run-out was told past W*");
+        assert!(
+            matches!(&third, Err(Refusal::Os { op, .. }) if op.contains("token")),
+            "{third:?}"
+        );
+        assert_eq!(after, risen, "a refusal moved W*");
+    }
+}
+
 /// The relay token's read on a link with no setup bound of its own, as QUIC's bridged socket is (`hex_quic::link`),
 /// against XNU's lost half-close wakeup (joint plan step 4, 2(a); Shards M236, D175).
 #[cfg(unix)]
@@ -2614,6 +2743,10 @@ mod token_end {
     struct Paired(Mutex<Option<UnixStream>>);
 
     impl Link for Paired {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             assert_eq!(port, stream::CONTROL_PORT);
             own_duplex(self.0.lock().unwrap().take().expect("dialed once"))
@@ -2848,6 +2981,10 @@ mod cut_short {
     }
 
     impl Link for Cuttables {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             if port == stream::CONTROL_PORT {
                 return own_duplex(TcpStream::connect(self.control).unwrap());

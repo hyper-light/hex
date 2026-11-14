@@ -3,12 +3,13 @@
 //! [`DIR`], over the run's own endpoint (D252), whose controller is Shards' own (`shards_api::control`). [`Lanes`]
 //! dials a port as a lane to the socket that port names ([`hex_core::stream::socket_name`]), bridged to a local
 //! socket pair ([`super::bridge`]), so the client's event loop waits on an OS handle as it does on vsock's. The lane
-//! carries a half-close each way, and its reset or its connection's end is told after its bytes.
+//! carries a half-close each way, and its reset or its connection's end is told after its bytes. On Windows an exec's
+//! stream is a lane carried on a pipe instead (`Lanes::piped`): the node hands a caller in another process handles
+//! alone, and its run's endpoint lends no caller the lanes themselves (the review's D-10).
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr};
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hex_api::{ConnectFailure, ConnectPhase, IoKind, Refusal};
 use hex_core::lanes::DATA_BOUND;
@@ -18,6 +19,8 @@ use shards_api::control::{
     SocketWriter, Sockets, Subscriptions,
 };
 
+#[cfg(windows)]
+use super::Piped;
 use super::bridge::{Bridged, Local, end, pair};
 use super::{DuplexOwner, Link, own_duplex};
 use crate::Cut;
@@ -38,7 +41,7 @@ pub const FDS_A_CONTROL_LANE: u64 = FDS_A_LANE.saturating_add(2);
 
 /// The controller's connection to a node VM's endpoint and the lanes it opens on it to the node's relay.
 pub struct Lanes {
-    sockets: Arc<Sockets>,
+    sockets: Sockets,
     /// The connection: kept for the lanes' life, which end with it (dropped, it ends the connection and every lane).
     _hangup: Hangup,
     /// The most lanes open at once, as the run admits them: what a dial past it is refused naming.
@@ -93,7 +96,7 @@ impl Lanes {
             Refusal::Broken("a controller dialed for socket lanes was given none".to_owned())
         })?;
         Ok(Lanes {
-            sockets: Arc::new(sockets),
+            sockets,
             _hangup: hangup,
             lanes: admission.lanes,
         })
@@ -105,42 +108,162 @@ impl Link for Lanes {
         self.dial_before(port, None)
     }
 
-    /// A lane to the socket `port` names, bridged to a local socket. Its answer (connected, the endpoint's refusal, its
-    /// run host's errno) is waited for by the connection's life, and within `deadline` where the caller gives one: past
-    /// it the dial is refused, expired, and a lane that connects after it is let go, aborted.
+    /// A lane to the socket `port` names ([`Lanes::connect`]), bridged to a local socket.
     fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
-        let name = named(port)?;
-        let answer = match deadline {
-            None => self.sockets.connect(name),
-            Some(at) => {
-                let left = at
-                    .checked_duration_since(Instant::now())
-                    .filter(|left| !left.is_zero())
-                    .ok_or_else(|| expired(port))?;
-                let (told, heard) = mpsc::channel();
-                let sockets = Arc::clone(&self.sockets);
-                std::thread::Builder::new()
-                    .name("hex-lanes-dial".to_owned())
-                    .spawn(move || {
-                        // Past the deadline no one hears it, and the lane is let go with it.
-                        let _ = told.send(sockets.connect(name));
-                    })
-                    .map_err(|e| Refusal::os("starting a lane's dial", e))?;
-                match heard.recv_timeout(left) {
-                    Ok(answer) => answer,
-                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(expired(port)),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(Refusal::Broken("a lane's dial ended unanswered".to_owned()));
-                    }
-                }
-            }
-        };
-        let socket = answer.map_err(|fault| refused(port, fault, self.lanes))?;
+        let socket = self.connect(port, deadline)?;
         own_duplex(bridge(socket).map_err(|e| Refusal::os("bridging a lane to a local socket", e))?)
     }
 
     fn carries_half_close(&self) -> bool {
         true
+    }
+
+    /// Its run's endpoint takes this node's key alone (D252): no caller in another process can open its lanes.
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
+    /// An exec's stream on a lane of its own carried on a pipe ([`Lanes::piped`]).
+    #[cfg(windows)]
+    fn dial_piped(
+        &self,
+        named: stream::Named,
+        deadline: Option<Instant>,
+    ) -> Option<Result<Piped, Refusal>> {
+        Some(self.piped(named, deadline))
+    }
+}
+
+impl Lanes {
+    /// A lane to the socket `port` names. Its answer (connected, the endpoint's refusal, its run host's errno) is
+    /// waited for by the connection's life, and within `deadline` where the caller gives one: past it the dial is
+    /// refused, expired, and a lane that connects after it is let go, aborted.
+    fn connect(&self, port: u32, deadline: Option<Instant>) -> Result<Socket, Refusal> {
+        let name = named(port)?;
+        let patience = match deadline {
+            None => Duration::MAX,
+            Some(at) => at
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| expired(port))?,
+        };
+        // Asked once; past the deadline the ask is let go, and a lane that connects after is closed as it opens.
+        let answer = self
+            .sockets
+            .connect(name)
+            .and_then(|mut asked| asked.wait(patience));
+        let socket = match answer {
+            Ok(Some(socket)) => socket,
+            Ok(None) if deadline.is_some() => return Err(expired(port)),
+            Ok(None) => {
+                return Err(Refusal::Broken(
+                    "a lane's dial with no deadline returned unanswered".to_owned(),
+                ));
+            }
+            Err(fault) => return Err(refused(port, fault, self.lanes)),
+        };
+        Ok(socket)
+    }
+
+    /// An exec's stream on a lane of its own, carried on a pipe whose end is the caller's (Windows, HEX-RT-17: the node
+    /// hands a caller in another process handles alone, never sockets), its name written on the lane first. An output
+    /// stream's lane ends its own half once named, and a thread copies the lane into the pipe ([`piped_out`]); stdin's
+    /// copies the pipe into the lane ([`piped_in`]).
+    ///
+    /// One thread a stream, for want of an evented lane: Shards' socket lanes block per lane, each `SocketReader` and
+    /// `SocketWriter` waiting on a channel of its own, with no try-read and no waker, so each stream's bridge holds a
+    /// thread until Shards gives an evented lane API; then one loop per node VM drives every lane and its pipes. It is
+    /// half what each lane's bridge to a socket pair holds ([`bridge`]'s two), with no loopback TCP pair.
+    #[cfg(windows)]
+    fn piped(&self, named: stream::Named, deadline: Option<Instant>) -> Result<Piped, Refusal> {
+        let (reader, mut writer) = self.connect(stream::STDIO_PORT, deadline)?.split();
+        writer
+            .write_all(&stream::name(named))
+            .map_err(|e| Refusal::os("naming an exec's stream on its lane", e))?;
+        let (from, to) =
+            std::io::pipe().map_err(|e| Refusal::os("making an exec's stream's pipe", e))?;
+        match named.stream {
+            stream::Stdio::In => {
+                std::thread::Builder::new()
+                    .name("hex-lane-stdin".to_owned())
+                    .spawn(move || piped_in(from, writer, reader))
+                    .map_err(|e| Refusal::os("starting a stdin lane's copier", e))?;
+                Ok(Piped {
+                    end: to.into(),
+                    cut: None,
+                })
+            }
+            stream::Stdio::Out | stream::Stdio::Err => {
+                // It carries nothing this way once named: its peer's End then closes the stream whole.
+                writer.shutdown_write().map_err(|fault| Refusal::Os {
+                    op: "ending an output stream's own half",
+                    why: fault.to_string(),
+                })?;
+                let cut = Cut::default();
+                let recorded = cut.clone();
+                std::thread::Builder::new()
+                    .name("hex-lane-output".to_owned())
+                    .spawn(move || piped_out(reader, to, &recorded))
+                    .map_err(|e| Refusal::os("starting an output lane's copier", e))?;
+                Ok(Piped {
+                    end: from.into(),
+                    cut: Some(cut),
+                })
+            }
+        }
+    }
+}
+
+/// Stdin's lane: what the caller writes to its pipe, into the lane, its pipe's end the lane's FIN. A write the lane
+/// refuses (its reset: the program let its stdin go) lets the pipe go, so the caller's next write fails, as a closed
+/// stdin's does. The lane's reading half, which carries nothing this way, is held to the lane's end, so it never stops
+/// the relay's socket before the relay has read what came (STOP_SENDING).
+#[cfg(windows)]
+fn piped_in(mut from: std::io::PipeReader, mut writer: SocketWriter, mut reader: SocketReader) {
+    let mut buf = vec![0u8; DATA_BOUND];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => {
+                if writer.shutdown_write().is_err() {
+                    return;
+                }
+                break;
+            }
+            Ok(n) => {
+                if writer.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                let _ = writer.abort();
+                return;
+            }
+        }
+    }
+    drop(from);
+    while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+}
+
+/// An output stream's lane: its bytes into the caller's pipe, the lane's end in order the pipe's, and its reset or its
+/// connection's end the cut, recorded before the pipe ends. A caller gone from its pipe lets the lane's reading go,
+/// which stops the relay's sending (STOP_SENDING), as a program's write fails once its stdout's pipe has no reader.
+#[cfg(windows)]
+fn piped_out(mut reader: SocketReader, mut to: std::io::PipeWriter, cut: &Cut) {
+    let mut buf = vec![0u8; DATA_BOUND];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                cut.record(&e);
+                return;
+            }
+        }
     }
 }
 
@@ -300,5 +423,5 @@ fn downward(mut reader: SocketReader, mut to: Local, cut: &Cut) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

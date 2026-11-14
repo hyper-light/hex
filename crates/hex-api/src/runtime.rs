@@ -1800,12 +1800,18 @@ fn try_clones<T>(
 }
 
 /// A node's machine's CPU time since its boot, every CPU's own work together, and its uptime, each none where its
-/// platform's answer doesn't read it (joint plan step 14, C7).
+/// platform's answer doesn't read it (joint plan step 14, C7); and its boxes' CPU time together, ended boxes' among it,
+/// so an interval between two answers spans its boxes' coming and going (the review's A-8).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineTime {
     pub cpu_ns: Option<u64>,
     pub uptime_ns: Option<u64>,
+    /// The CPU time of everything under the node's box root since that root was made: its cgroup's `usage_usec`,
+    /// which keeps a child's time once the child is removed (cgroup v2 flushes a removed cgroup's counts into its
+    /// parent's), so an ended box's work stays in it.
+    #[serde(default)]
+    pub boxes_cpu_ns: Option<u64>,
 }
 
 impl MachineTime {
@@ -2513,6 +2519,13 @@ pub struct BoxInfo {
     /// C4): a Shards image VM's, none for any other class. After `ended`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<crate::CredentialGrant>,
+    /// Where its run's agent-control endpoint is bound, while it runs (Shards' D238, D252), as its run host told it:
+    /// Hex's own control endpoint on the host's loopback, a QUIC endpoint on a UDP socket that takes Hex's key alone. It
+    /// is never a published port and no grant makes it (joint plan step 15, docs/design/network-grants.md N6). A Shards
+    /// image VM's; none for any other class, and none once its run has ended. After `credentials`, so absent means none
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<std::net::SocketAddr>,
 }
 
 fn is_zero(n: &u64) -> bool {

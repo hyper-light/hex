@@ -131,6 +131,17 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with
   `closesocket`; native pipe ends keep their file ownership.
 
+  A guest whose link lends no VM identity (`guest::Link::lends_identity`), a node VM under shards-init, whose run's
+  endpoint takes this node's key alone (node-under-shards-init.md §5), has nothing to offer (the review's D-10). Its
+  exec goes as on Unix, the node's event-form client making the streams asked for, but each is a lane carried on a
+  pipe (`guest::lanes::Lanes::piped`): the stream's name written on the lane, then one thread copying the lane into
+  the pipe (stdout, stderr: the lane's own half ended once named) or the pipe into the lane (stdin). The caller gets
+  the pipe's end, a handle the Windows node gives as it gives a host box's. Its cost is one thread a stream, and the
+  cause is Shards': its socket lanes block per lane, each reader and writer waiting on a channel of its own, with no
+  try-read and no waker, so each stream's bridge holds a thread until Shards gives an evented lane API; then one
+  loop per node VM drives every lane and its pipes. That is half what each lane's bridge to a socket pair holds
+  (two threads), with no loopback TCP pair.
+
   Each offer consumes the existing in-flight and program budgets. A guest answer, cancellation and disconnect
   share one admission owner, including when the guest fails before the offer is registered. Failed/late offers
   queue `Release` in the program-bounded acknowledgement queue. Cancelling an uncommitted offer drops its
@@ -602,8 +613,10 @@ Hex's tests of the channel, each citing its ID:
   patience, as Shards' client awaits a zero or `Duration::MAX` patience's CONNECT answer without a bound
   (`hex_client::guest::shards::ShardsLink`). A dial with no caller deadline waits as decision 9 waits, the bound its
   W*: past it, the run-out told, the dial is made again while the guest lives, refused at its end, never at a bound
-  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as long as the
-  link's transport takes, the connection's end refusing it.
+  (`ShardsLink::dial_following`); a control connection's relay token, with no caller deadline, is read as decision 9
+  waits (the review's D-2): within its W*, the slowest token its transport has carried (`client.guest.relay.token`,
+  `client.quic.relay.token`), the token is the answer; past it, the run-out told, the read follows the connection,
+  the bytes read before kept, refused at its end, never at a bound (`guest::token_following`).
 - HEX-GUEST-34: a boot's first dial is bounded, never unbounded: the slowest boot to ready on record before any
   boot is seen (bench/native/guest/boot-ready/RECORD.md), then the slowest of the record's and the node's own, only
   rising, with no margin (decision 9 of runtime-architecture.md, 2026-11-13); a guest alive and not ready within it is

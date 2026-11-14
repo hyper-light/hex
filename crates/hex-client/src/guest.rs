@@ -16,15 +16,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_api::{Refusal, Stdio};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{
     BOX_KINDS, CLASSES, Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take,
-    Transport, by_class, class_waits, poisoned, protocol_ready,
+    Transport, by_class, class_waits, poisoned, protocol_ready, readable,
 };
-use crate::copy::{Cut, Cuts, DuplexIo, Waiting, copy, copy_in};
+use crate::copy::{Cut, Cuts, DuplexIo, copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -164,6 +164,36 @@ pub trait Link: Send + Sync + 'static {
             why: "this link has no lendable VM identity".to_owned(),
         })
     }
+    /// Whether this link lends its VM's identity ([`Link::identity`]) to a caller in another process, which then opens
+    /// an exec's streams itself (HEX-RT-17): a Shards guest's vsock does; a node VM's lanes, which its run's endpoint
+    /// opens to this node's key alone, don't. Each link says which: none is taken for either.
+    fn lends_identity(&self) -> bool;
+    /// An exec's stream named `named`, for a caller in another process, on Windows, where the node hands such a caller
+    /// handles alone, never sockets (HEX-RT-17): a link that lends no identity carries the stream on a pipe of its own,
+    /// whose end is the caller's ([`Piped`]); `None` where the link's own connection is that end.
+    #[cfg(windows)]
+    fn dial_piped(
+        &self,
+        named: Named,
+        deadline: Option<Instant>,
+    ) -> Option<Result<Piped, Refusal>> {
+        let _ = (named, deadline);
+        None
+    }
+    /// The seal its control connection's messages that carry a secret go under (`hex_core::wire::seal`; a node over
+    /// QUIC, docs/design/hex-quic.md Q13), asked once that connection is dialed: none where the link seals nothing, its
+    /// secrets crossing as the node's socket carries them, each copy wiped (docs/design/credential-grants.md C7).
+    fn sealing(&self) -> Result<Option<Arc<dyn wire::Seal>>, Refusal> {
+        Ok(None)
+    }
+}
+
+/// An exec's stream a link carries on a pipe of its own ([`Link::dial_piped`]): the caller's end, and, for an output
+/// stream, what tells its cut to its program's end.
+#[cfg(windows)]
+pub struct Piped {
+    pub end: hex_api::End,
+    pub cut: Option<Cut>,
 }
 
 /// The same fallibly allocated link retained by every stream on a connection.
@@ -237,6 +267,10 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.guest.answer", "shards", measuring),
 ];
 
+/// The relay's token on a guest's control connection whose caller gave no deadline (the review's D-2), learned as
+/// [`ANSWERS`] are.
+static RELAY_TOKEN: Patience = Patience::measuring("client.guest.relay.token");
+
 /// The learned waits a guest's protocol carries a client's calls under (decision 9; AC-T7.4.1): each transport that
 /// carries it learns its own, never another's record, so the type names whose tables a [`Stream`] times by.
 pub trait Waits: Send + Sync + 'static {
@@ -244,6 +278,9 @@ pub trait Waits: Send + Sync + 'static {
     fn answers() -> &'static [Patience; KINDS];
     /// A class's box kinds' waits ([`Transport::class_answers`]).
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS];
+    /// The wait for the relay's token on a control connection whose caller gave no deadline (the review's D-2): the
+    /// slowest token this transport has carried to this process ([`token_following`]).
+    fn token() -> &'static Patience;
 }
 
 /// A guest's node, over vsock or its stand-in: the tables above.
@@ -256,6 +293,10 @@ impl Waits for Guest {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &RELAY_TOKEN
     }
 }
 
@@ -296,6 +337,8 @@ static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.quic.answer", "shards", measuring),
 ];
 
+static QUIC_RELAY_TOKEN: Patience = Patience::measuring("client.quic.relay.token");
+
 impl Waits for Quic {
     fn answers() -> &'static [Patience; KINDS] {
         &QUIC_ANSWERS
@@ -303,6 +346,10 @@ impl Waits for Quic {
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
         by_class(&QUIC_CLASS_ANSWERS, class)
+    }
+
+    fn token() -> &'static Patience {
+        &QUIC_RELAY_TOKEN
     }
 }
 
@@ -328,6 +375,9 @@ pub struct Stream<W = Guest> {
     /// Each exec's streams being set up whose cut is told, by name, until its start takes them
     /// ([`Transport::cuts`]): at most the calls in flight hold one.
     cuts: Mutex<BTreeMap<u64, Cuts>>,
+    /// The seal its messages that carry a secret go under, its link's ([`Link::sealing`]); none where the link seals
+    /// nothing.
+    seal: Option<Arc<dyn wire::Seal>>,
 }
 
 /// What the turn's holder reads with and into, and what of a frame has come.
@@ -407,6 +457,62 @@ fn protocol_write(
     Ok(())
 }
 
+/// The relay's token on a control connection whose caller gave no deadline, read as decision 9 waits (the review's
+/// D-2; AC-T7.4.1). Its W* is `wait`'s ([`Waits::token`]), the slowest token its transport has carried to this process.
+/// - **Within it** the token is the answer.
+/// - **Past it** the run-out is told, once, and the read follows the connection: refused at its end or reset, never at
+///   a bound, the bytes read before kept.
+/// - **With none** (before the first token, and from a run-out to the next) the read follows the connection from its
+///   start.
+///
+/// The token, however long it took, is the sample W* rises to; a refusal is none. Each wait is poll(2)'s on the
+/// connection (Winsock's `WSAPoll`), which on macOS sees the relay's end where a read waiting in recv(2) can sleep
+/// through it (Shards M236).
+fn token_following(
+    conn: &mut dyn Duplex,
+    mut token: &mut [u8],
+    wait: &Patience,
+) -> Result<(), Refusal> {
+    const OP: &str = "reading the relay's token for the connection";
+    conn.set_nonblocking(true)
+        .map_err(os("reading the relay token without waiting"))?;
+    let began = Instant::now();
+    let mut w_star = wait.deadline();
+    while !token.is_empty() {
+        match conn.read(token) {
+            Ok(0) => return Err(Refusal::os(OP, io::ErrorKind::UnexpectedEof)),
+            Ok(n) => {
+                token = token.get_mut(n..).ok_or_else(|| {
+                    Refusal::Broken("a guest stream read more bytes than it was lent".to_owned())
+                })?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let left = match w_star {
+                    Some(bound) => match bound.checked_sub(began.elapsed()) {
+                        Some(left) if !left.is_zero() => Some(left),
+                        _ => {
+                            // No sample (Karn's point): the run-out is told, and the read goes on.
+                            wait.ran_out(
+                                bound,
+                                began.elapsed(),
+                                &[Piece::Kind("the relay's token, by its control connection")],
+                            );
+                            w_star = None;
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                readable(conn.handle(), left)?;
+            }
+            Err(e) => return Err(Refusal::os(OP, e)),
+        }
+    }
+    wait.answered(began.elapsed());
+    Ok(())
+}
+
 impl<W: Waits> Stream<W> {
     /// A stdio connection of its own to the guest, named for `named`, so the guest's relay hands it to that exec's
     /// program as its stream.
@@ -483,7 +589,16 @@ impl<W: Waits> Stream<W> {
             if !on {
                 return Ok(None);
             }
-            let conn = self.dial_named_before(Named { exec, stream }, deadline)?;
+            let named = Named { exec, stream };
+            #[cfg(windows)]
+            if let Some(piped) = self.link.dial_piped(named, deadline.map(ReplyDeadline::at)) {
+                let Piped { end, cut } = piped?;
+                if let (Some(name), Some(cut)) = (output(stream), cut) {
+                    self.watch(exec.id, name, cut)?;
+                }
+                return Ok(Some(end));
+            }
+            let conn = self.dial_named_before(named, deadline)?;
             if let (Some(name), Some(cut)) = (output(stream), conn.cut()) {
                 self.watch(exec.id, name, cut)?;
             }
@@ -892,7 +1007,13 @@ impl<W: Waits> Transport for Stream<W> {
                     }
                 };
                 input = input.get(took..).unwrap_or_default();
-                let Some(mut message) = whole else { continue };
+                let Some(message) = whole else { continue };
+                // Opened where it came sealed, as its link seals (docs/design/hex-quic.md Q13): refused, typed, where it
+                // came otherwise than the link carries it.
+                let mut message = match wire::open(message, self.seal.as_deref()) {
+                    Ok(message) => message,
+                    Err(fault) => break 'framed Err(Refusal::from(fault)),
+                };
                 let received = Received {
                     bytes: &message,
                     size: message.len(),
@@ -915,6 +1036,20 @@ impl<W: Waits> Transport for Stream<W> {
             hex_api::lease::wipe_in_place(held);
         }
         framed.map(|()| true)
+    }
+
+    /// A message that carries a secret, sealed where the link seals (docs/design/hex-quic.md Q13), its bytes in the clear
+    /// wiped as the sealed copy takes their place.
+    fn seal(&self, mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let Some(seal) = self.seal.as_deref() else {
+            return Ok(message);
+        };
+        if !wire::carries_secret(&message) {
+            return Ok(message);
+        }
+        let sealed = wire::seal(&message, seal).map_err(Refusal::from);
+        hex_api::lease::wipe(&mut message);
+        sealed
     }
 
     fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
@@ -1216,8 +1351,8 @@ impl<W: Waits> Stream<W> {
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {
         // Decision 9 (AC-T7.4.1): a caller's deadline bounds the dial and the relay's token together. With
-        // none, the dial follows the guest past its link's bound (`Link::dial_before`), and the token is read
-        // as long as the link's transport takes, refused at the connection's end, never at a bound.
+        // none, the dial follows the guest past its link's bound (`Link::dial_before`), and the token's read
+        // follows the connection past its own W* (`token_following`), refused at its end, never at a bound.
         if let Some(deadline) = deadline {
             deadline.remaining("dialing the guest control connection")?;
         }
@@ -1234,12 +1369,10 @@ impl<W: Waits> Stream<W> {
                     "reading the relay's token for the connection",
                 )?;
             }
-            // As long as the link's transport takes, in poll(2) first on macOS (AC-T7.4.1, joint plan step 4, 2(a)).
-            None => Waiting(&mut *conn)
-                .read_exact(&mut token)
-                .map_err(os("reading the relay's token for the connection"))?,
+            None => token_following(&mut *conn, &mut token, W::token())?,
         }
         let token = u64::from_le_bytes(token);
+        let seal = link.sealing()?;
         let read = conn
             .try_clone()
             .map_err(os("holding the node agent's connection"))?;
@@ -1258,6 +1391,7 @@ impl<W: Waits> Stream<W> {
             read: Mutex::new(Some(read)),
             backlog: Mutex::new(None),
             cuts: Mutex::new(BTreeMap::new()),
+            seal,
         })
     }
 }
