@@ -189,6 +189,7 @@ pub const NAMES_STEP: &str = "\u{0}names";
 /// Message kinds between the daemon, warm VMs and clients.
 /// [`kind::DEVICE`]'s steps (D214), each a byte after the request's number.
 pub mod device {
+    pub use super::device_reply::{Refusal, Retry, decode, encode};
     /// A disk plugged in: a flags byte ([`READ_ONLY`]) and its serial; its file a
     /// descriptor. Answers its place on the PCI bus (`devfn`, decimal) and its guest's
     /// address of it, a space between.
@@ -214,6 +215,8 @@ pub mod device {
     /// iommufd, not its group's.
     pub const BY_NODE: u8 = 1;
 }
+
+mod device_reply;
 
 pub mod kind {
     /// Warm VM → daemon: the guest is connected and waiting for its command.
@@ -680,6 +683,10 @@ pub mod kind {
     /// [`LANE_HELD`] (M24); on Windows none, its owner answering [`LANE_HELD`] with the socket
     /// the VM relays it onto, or none for one it closes.
     pub const LANE_ACCEPTED: u8 = 102;
+    /// A VM → its owner, last, once its machine is down and before its process lets go of
+    /// it (D260's final use): what its vCPUs ran of its guest in all, each by its index, then
+    /// what this process used of its host, as `shards_abi::rate::used` writes a use's answer.
+    pub const FINAL_USE: u8 = 106;
 
     /// Whether a network process's control message of `kind` hands it sockets: published
     /// ports' (`PUBLISH`, `NET_PUBLISHED`) and a peer's link (`NET_PEER`). Beside the
@@ -2361,6 +2368,8 @@ pub const MAX_FDS: usize = run_fds::CLIENT
     + run_fds::SHARES
     + run_fds::CAPTURE;
 
+mod host_memory;
+pub use host_memory::{holdable, holdable_known, host_available, host_memory};
 pub mod slots;
 #[cfg(unix)]
 mod spawner;
@@ -2375,12 +2384,43 @@ mod pipe;
 #[cfg(windows)]
 pub use pipe::{
     Arriving, Event, ExitWatch, Listener, Message, Pipe, Poller, Stream, await_any, await_streams, byte_pair,
-    end, hung_up, readable_raw, recv, recv_by, send,
+    end, hung_up, input_pair, readable_raw, recv, recv_by, send,
 };
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+/// Starts `command` by std's Command: every child shards starts so, whatever it then waits
+/// for (`spawn` then `wait` or `wait_with_output`, never `status` or `output`, which hold the
+/// spawn for the child's life). On Windows, where std's child inherits every handle this
+/// process holds inheritable (CreateProcessW, bInheritHandles TRUE, Rust's
+/// library/std/src/sys/process/windows.rs), it waits for each of shards' own spawns that holds
+/// one inheritable for its child alone ([`windows::spawn_std`]).
+#[cfg(windows)]
+pub fn spawn_std(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    windows::spawn_std(command)
+}
+
+/// Starts `command` by std's Command (Windows' twin above): a descriptor std's children
+/// inherit is one made without close-on-exec, which no shards spawn makes for its child
+/// (`unix::spawn` hands each one by dup2 in the child alone).
+#[cfg(not(windows))]
+pub fn spawn_std(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    command.spawn()
+}
+
+/// A caller's ordinary pipe writer paired with a cancellable reader. Ending a clone
+/// wakes an idle read; once all reader copies close, later writes fail. No relay thread.
+#[cfg(unix)]
+pub fn input_pair(room: u32) -> std::io::Result<(Stream, std::io::PipeWriter)> {
+    use std::os::fd::OwnedFd;
+    if room == 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let (reader, writer) = Stream::pair()?;
+    Ok((reader, std::io::PipeWriter::from(OwnedFd::from(writer))))
+}
 
 /// A new file at `path`, its user's alone wherever it is, as a file a user's secret is
 /// written to must be (an invitation, a home's identity): mode 0600 on Unix; on Windows a
@@ -2572,9 +2612,58 @@ impl Latch {
     }
 }
 
+/// `set`, what setting a socket's read or write timeout (SO_RCVTIMEO, SO_SNDTIMEO) did, as
+/// every caller is to take it: macOS refuses any option with EINVAL on a socket ended both ways
+/// (SS_CANTRCVMORE and SS_CANTSENDMORE, XNU bsd/kern/uipc_socket.c `sosetoptlock`), as a Unix
+/// stream is once its peer closes and a TCP connection once it is reset or closed both ways.
+/// Such a socket needs no bound: a read returns what is buffered, then its end, and a write fails,
+/// at once (PM M579: a peer that wrote six bytes and closed; the refusal, then all six read). So
+/// the refusal is no timeout needed, and the caller goes on to read the answer its peer sent.
+/// std's own refusal of a zero timeout, which carries no OS error, stays an error. Linux and
+/// Windows take the option on an ended socket, so this is theirs unchanged.
+pub fn timeout_set(set: std::io::Result<()>) -> std::io::Result<()> {
+    match set {
+        #[cfg(target_os = "macos")]
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        set => set,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
+    /// A timeout set after its peer wrote its answer and closed (PM M579): macOS refuses the
+    /// option itself (EINVAL), which `timeout_set` takes for none needed, and the answer is
+    /// read whole, then its end, at once. Red where the refusal is the caller's error: a fully
+    /// answered request failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_set_after_its_peer_answered_and_closed_reads_the_answer() {
+        use std::io::{Read as _, Write as _};
+        let (mut peer, ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(b"answer").unwrap();
+        drop(peer);
+        let raw = ours.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            raw.as_ref().map_err(std::io::Error::raw_os_error),
+            Err(Some(libc::EINVAL))
+        );
+        super::timeout_set(raw).unwrap();
+        super::timeout_set(ours.set_write_timeout(Some(std::time::Duration::from_secs(5)))).unwrap();
+        let began = std::time::Instant::now();
+        let mut answer = Vec::new();
+        (&ours).read_to_end(&mut answer).unwrap();
+        assert_eq!(answer, b"answer");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+        // std's own refusal, of a zero timeout, is no OS's: still an error.
+        assert!(super::timeout_set(ours.set_read_timeout(Some(std::time::Duration::ZERO))).is_err());
+    }
+
     /// A layer's file's name says its maker's pid; a name no process makes there (a kept
     /// layer's, one half a name) says none.
     #[test]
@@ -2948,6 +3037,40 @@ mod tests {
             std::fs::write(home.join(PID), format!("{pid} {child_start}\n")).unwrap();
             assert!(!daemon_lives(&home), "{pid} {child_start} has gone");
         }
+    }
+
+    /// A daemon that has exited lives no more while its parent has not reaped it (waits-08):
+    /// its ID's process still answers kill(2) and keeps its start (Linux's `/proc/PID/stat`,
+    /// macOS's `proc_pid_rusage`), so a client that waits on it while it lives would wait for
+    /// ever on a zombie. Red with liveness its ID and start alone. Here the child that names
+    /// itself is left unreaped (waitid's `WNOWAIT`) and so is a zombie.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreaped_daemon_does_not_live() {
+        let home = shards_testdir::TempDir::new("ipc-zombie").unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let id = libc::id_t::try_from(pid).unwrap();
+        // SAFETY: a siginfo_t, plain data, for waitid(2) to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waitid(2) of our own child into a siginfo_t of ours; WNOWAIT leaves it
+        // unreaped.
+        let waited = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        assert_eq!(waited, 0, "{}", std::io::Error::last_os_error());
+        let start = started(pid).expect("an unreaped child's start");
+        std::fs::write(home.join(PID), format!("{pid} {start}\n")).unwrap();
+        std::fs::write(home.join(STOPPING), format!("{pid} {start}\n")).unwrap();
+        let named = Named {
+            pid,
+            start: Some(start),
+        };
+        assert!(!named.lives(), "{pid}, exited and unreaped, lives");
+        assert!(!daemon_lives(&home), "{pid}, exited and unreaped, lives");
+        assert!(!exiting(&home), "{pid}, exited and unreaped, is ending its runs");
+        let _ = child.wait();
     }
 
     /// A working set goes in parts each within a message's payload, and comes back whole,

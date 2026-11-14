@@ -75,7 +75,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   HEX-QUIC-28 to -31). Closes with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
   and a waits census over QUIC to seed its measuring waits.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
-  Shards `16451e19f` (D231 with D234-D259, its boot's stop, D254's MCP bridge, D242's upstream roots and #72's typed member end, image channel version 27). Linux, macOS and Windows boot image VMs, D231's
+  Shards `2737fc4ec` (D231 with D234-D260, its boot's stop, D254's MCP bridge, D242's upstream roots, #72's typed member end, D260's final use, the agent-control lanes' asks waited within a patience, D233's GPU report and a run's stop returning released, image channel version 29). Linux, macOS and Windows boot image VMs, D231's
   run host started holding only its stdio (D248, Hex's former 0001 upstream); its usage carries each vCPU's guest
   time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
   SHARDS_INIT aren't a pair serves none.
@@ -83,7 +83,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
   of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
-  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `16451e19f` or later).
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `2737fc4ec` or later).
   Every run asks its agent-control endpoint of the class's own key (D238, D252): a signal but KILL reaches each member
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
