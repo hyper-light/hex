@@ -1996,6 +1996,143 @@ fn asked(
     }
 }
 
+/// The review's B-4 (AC-T7.4.1): an image VM's delete answers only once its run is released, its run host exited and
+/// every process that host started gone, so kiln frees no room a run still holds. Do boot an image box through Shards'
+/// own image boot (`ImageShards`, its run's session real) whose run host is a stand-in: it starts the run, starts a VM
+/// of its own that holds its diagnostics as the VM, network and share processes hold its stderr, says the run's end once
+/// asked to stop, and exits as its stdin closes, its VM left running until the test lets it go. Delete the box on a
+/// thread, and let the VM go only once the run host has exited. Expect the delete to answer `Ok` only after the VM has
+/// gone. Red where Shards' stop returned as the run's end was told and its host reaped what it started after (to
+/// ce80cbb37: `image_real`'s release case on KVM at 45fc1605d found three processes left as the delete returned).
+#[cfg(unix)]
+#[test]
+fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started_are_gone() {
+    use shards_api::image::wire;
+    use std::io::BufRead as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (host_seen, vm_seen, vm_gate) = (
+        dir.path().join("h"),
+        dir.path().join("v"),
+        dir.path().join("g"),
+    );
+    for fifo in [&host_seen, &vm_seen, &vm_gate] {
+        let made = std::process::Command::new("mkfifo").arg(fifo).status();
+        assert!(made.unwrap().success(), "mkfifo {fifo:?}");
+    }
+    let octal = |kind, payload: &[u8]| -> String {
+        wire::frame(kind, payload)
+            .unwrap()
+            .iter()
+            .map(|b| format!("\\{b:03o}"))
+            .collect()
+    };
+    // Its start names the agent-control endpoint the class's runs ask for; the test never dials it.
+    let started = wire::Started {
+        members: Vec::new(),
+        published: Vec::new(),
+        control: Some(shards_api::image::ControlAt {
+            address: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            vm: [7; 32],
+        }),
+        rate_period: Duration::from_millis(100),
+        from: StartedFrom::Booted,
+    }
+    .encode()
+    .unwrap();
+    let ended = RunEnded::unused(RunEnd::Stopped, Unused::Killed)
+        .encode()
+        .unwrap();
+    // The run host: its start said; its VM started, holding its stderr until the gate closes; each frame its orchestrator
+    // sends read whole until STOP, answered with the run's end; then its stdin read to its end, as it closes.
+    let host = dir.path().join("host");
+    std::fs::write(
+        &host,
+        format!(
+            "#!/bin/sh\n\
+             printf '{started}'\n\
+             exec 3>'{host_seen}'\n\
+             (read _ <'{vm_gate}') >'{vm_seen}' 3>&- &\n\
+             echo \"$!\" >&3\n\
+             while :; do\n\
+             set -- $(dd bs=1 count=8 2>/dev/null | od -An -tu1)\n\
+             [ \"$#\" -eq 8 ] || exit 3\n\
+             len=$(( ($5 << 24) + ($6 << 16) + ($7 << 8) + $8 ))\n\
+             [ \"$len\" -eq 0 ] || dd bs=1 count=\"$len\" of=/dev/null 2>/dev/null\n\
+             [ \"$1\" -eq {stop} ] && break\n\
+             done\n\
+             printf '{ended}'\n\
+             exec cat >/dev/null\n",
+            started = octal(wire::to_client::STARTED, &started),
+            ended = octal(wire::to_client::ENDED, &ended),
+            stop = wire::to_host::STOP,
+            host_seen = host_seen.display(),
+            vm_seen = vm_seen.display(),
+            vm_gate = vm_gate.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let owner = Arc::new(Owner::new());
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        crate::guest::GuestConfig {
+            binary: host.clone(),
+            ..super::super::tests::config()
+        },
+    )
+    .with_images(
+        Ok(Arc::new(shards_api::image::ImageShards::new()) as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    );
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    let id = runtime.create(spec("b4-release", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    // Each open waits for its other end: the run host's, its VM's, then the VM's gate, each held from here.
+    let mut host_end = std::io::BufReader::new(std::fs::File::open(&host_seen).unwrap());
+    let mut vm_pid = String::new();
+    host_end.read_line(&mut vm_pid).unwrap();
+    let vm_end = std::fs::File::open(&vm_seen).unwrap();
+    let gate = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&vm_gate)
+        .unwrap();
+    std::thread::scope(|scope| {
+        let deleting = scope.spawn(|| {
+            let deleted = runtime.delete(&id);
+            (deleted, writers_gone(&vm_end))
+        });
+        // The run host's end: its end of `host_seen` closes as it exits, its VM's closed as it started.
+        let mut rest = String::new();
+        assert_eq!(host_end.read_line(&mut rest).unwrap(), 0, "{rest:?}");
+        drop(gate);
+        let (deleted, vm_gone) = deleting.join().unwrap();
+        assert_eq!(deleted, Ok(()));
+        assert!(
+            vm_gone,
+            "the delete answered while the VM its run host started (pid {}) still ran",
+            vm_pid.trim()
+        );
+    });
+}
+
+/// Whether every writer of the FIFO `reader` reads has closed it: a read that would wait says one still holds it.
+#[cfg(unix)]
+fn writers_gone(reader: &std::fs::File) -> bool {
+    use std::io::Read as _;
+    let flags = rustix::fs::fcntl_getfl(reader).unwrap();
+    rustix::fs::fcntl_setfl(reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+    match (&mut &*reader).read(&mut [0u8; 1]) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(e) => panic!("reading a FIFO's end: {e}"),
+    }
+}
+
 /// What a run's microVM ran of its guest, as D241's run host reads it: `vcpus` vCPUs by index, vCPU `n` having run
 /// `1_000 * (n + 1)` ns, and none departed.
 fn guest_times(vcpus: u32) -> GuestTimes {
