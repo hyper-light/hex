@@ -190,9 +190,14 @@ fn node_vm_role() {
     if role == "child" {
         // Its pid, for a run that kills its test to stop it by.
         std::fs::write(dir.join("child.pid"), std::process::id().to_string()).unwrap();
-        hex_testkit::waits::until(&FACT, "its test's word to go", || {
-            dir.join("done").exists() || !dir.exists()
-        })
+        // A look: a file's appearing tells this fixture no event on every OS. Its party, its test, ends taking its
+        // directory with it, which the fact takes for its word too.
+        hex_testkit::waits::follow::until(
+            &FACT,
+            "its test's word to go",
+            || hex_testkit::waits::follow::Party::Live,
+            || dir.join("done").exists() || !dir.exists(),
+        )
         .unwrap();
         let _ = std::fs::write(dir.join("bye"), b"");
         return;
@@ -328,9 +333,14 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
     ends.write_all(b"end\n").unwrap();
     drop(ends);
     assert!(owner.wait().unwrap().success());
-    hex_testkit::waits::until(&FACT, "the row let go", || {
-        store.node_vm(&run(7)).unwrap().is_none()
-    })
+    // A look: the store tells no event as a row is let go, its row read. Its party, the follow of the owner's end, is
+    // a thread the store keeps to itself; one refused leaves the row and says why (`node_vm_unfollowed`).
+    hex_testkit::waits::follow::until(
+        &FACT,
+        "the row let go",
+        || hex_testkit::waits::follow::Party::Live,
+        || store.node_vm(&run(7)).unwrap().is_none(),
+    )
     .unwrap();
     assert!(
         !dir.path().join("bye").exists(),
@@ -345,9 +355,14 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
     );
     assert!(!dir.path().join("node-7.log").exists());
     std::fs::write(dir.path().join("done"), b"").unwrap();
-    hex_testkit::waits::until(&FACT, "the owner's child gone", || {
-        dir.path().join("bye").exists()
-    })
+    // A look: the child, the owner's and no child of this test's, has no handle here; its going is the file it
+    // writes as it goes.
+    hex_testkit::waits::follow::until(
+        &FACT,
+        "the owner's child gone",
+        || hex_testkit::waits::follow::Party::Live,
+        || dir.path().join("bye").exists(),
+    )
     .unwrap();
 }
 
