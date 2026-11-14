@@ -378,10 +378,13 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
 /// Joint plan step 12 (AC-T7.4.1; ROOT's HVF run at c8b4ce6b, whose cases were refused for an image with no member): the
 /// in-tree harness context, `image_harness/`, which `HEX_IMAGE_CONTEXT` and image_record's home take on any host, an
 /// aarch64 one's (macOS on HVF, Windows on arm64) among them, where no harness build of its arch is at hand. Its base is
-/// pinned by its digest, an index each home pulls its own arch's image of as a node's does, and its one harness runs
-/// `/bin/sh -c cat`, so a run of the image's members alone has a member. Do read its Agentfile and its harness's startup
-/// descriptor. Expect one FROM, pinned (`NAME@sha256:<64 hex>`); one HARNESS, from its own directory; and that
-/// harness's descriptor in Shards' simple form (`entrypoint` and `options`), saying `/bin/sh -c cat`.
+/// pinned by its digest, an index each home pulls its own arch's image of as a node's does, and its one harness is
+/// `cat` and then holds until a signal ends it, so a run of the image's members alone has a member that runs: a member
+/// whose stdin nothing drives reads `/dev/null` (Shards' `MemberSpec::stdin`), where `cat` alone ended at once, and
+/// HEX-IMG-5's TERM then reached no member (goal 2's item 2; ROOT's HVF run at cf0ca967). Do read its Agentfile and its
+/// harness's startup descriptor. Expect one FROM, pinned (`NAME@sha256:<64 hex>`); one HARNESS, from its own directory;
+/// and that harness's descriptor in Shards' simple form (`entrypoint` and `options`), saying
+/// `/bin/sh -c 'cat; exec sleep infinity'`.
 #[test]
 fn the_in_tree_harness_context_pins_its_base_and_runs_one_member() {
     let context = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/image_harness");
@@ -414,7 +417,7 @@ fn the_in_tree_harness_context_pins_its_base_and_runs_one_member() {
         serde_json::from_slice(&fs::read(context.join("cat/harness.json")).unwrap()).unwrap();
     assert_eq!(
         descriptor,
-        serde_json::json!({"entrypoint": "/bin/sh -c", "options": ["cat"]})
+        serde_json::json!({"entrypoint": "/bin/sh -c", "options": ["cat; exec sleep infinity"]})
     );
 }
 
