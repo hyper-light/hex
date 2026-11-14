@@ -1778,8 +1778,80 @@ impl GuestRuntime {
         booked: hex_api::CapacityResources,
         free: Option<hex_api::CapacityResources>,
     ) -> Refusal {
-        let _ = (pool, booked, free);
-        refusal
+        let guest = free.map_or_else(
+            || "its own room unread".to_owned(),
+            |free| {
+                format!(
+                    "{} milli-CPU and {} bytes free by its own answer",
+                    free.cpu_milli, free.mem_bytes
+                )
+            },
+        );
+        Refusal::Invalid {
+            what: "a node VM's guest's room",
+            why: format!(
+                "its guest refused a box its host's pool admitted: the pool holds {} milli-CPU and {} bytes \
+                 for its node VM's boxes, {} milli-CPU and {} bytes booked with this one; its guest has \
+                 {guest}, and says: {refusal}",
+                pool.cpu_milli, pool.mem_bytes, booked.cpu_milli, booked.mem_bytes
+            ),
+        }
+    }
+
+    /// Box `refused`'s create refusal, its spec routed `NodeVm`, as [`GuestRuntime::guest_room_refusal`] tells it
+    /// where its guest refused it for room (Full or Exhausted): the pool its Ready node VM's guest is, what that pool
+    /// books of its node VM's oci boxes with this one (their caps, as each record keeps them), and what the guest says
+    /// is free. Any other refusal is the guest's as it gave it.
+    fn told_guest_refusal(&self, b: &Booted, refused: &BoxSpec, refusal: Refusal) -> Refusal {
+        if !matches!(refusal, Refusal::Full(_) | Refusal::Exhausted { .. }) {
+            return refusal;
+        }
+        match self.node_vm_pool(refused) {
+            Ok((pool, booked)) => {
+                let free = b
+                    .client
+                    .capacity(Class::Oci)
+                    .ok()
+                    .flatten()
+                    .map(|capacity| capacity.free);
+                Self::guest_room_refusal(refusal, pool, booked, free)
+            }
+            Err(_) => refusal,
+        }
+    }
+
+    /// Its node VM's pool as its host's scheduler holds it (V2): its Ready node VM's guest, and what the pool books of
+    /// its node VM's oci boxes with `refused` (each one's caps as its record keeps them).
+    fn node_vm_pool(
+        &self,
+        refused: &BoxSpec,
+    ) -> Result<(hex_api::CapacityResources, hex_api::CapacityResources), Refusal> {
+        let books = self.authority()?;
+        let pool = books
+            .all_node_vms()?
+            .into_iter()
+            .find(|row| row.phase == hex_api::NodeVmPhase::Ready && row.exit.is_none())
+            .map(|row| row.allocation.guest())
+            .transpose()?
+            .unwrap_or_default();
+        let caps = |spec: &BoxSpec| hex_api::CapacityResources {
+            cpu_milli: spec.bounds.cpu_max_milli.map_or(0, u64::from),
+            mem_bytes: spec.bounds.memory_max.unwrap_or(0),
+            disk_bytes: 0,
+        };
+        let mut booked = caps(refused);
+        for record in books.records()?.into_values().flatten() {
+            let hosted = record.exit.is_none()
+                && record.spec.id != refused.id
+                && record
+                    .spec
+                    .route
+                    .is_some_and(|route| route.key.execution == hex_api::Execution::NodeVm);
+            if hosted {
+                booked = booked.checked_add(caps(&record.spec)).unwrap_or(booked);
+            }
+        }
+        Ok((pool, booked))
     }
 
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -1791,10 +1863,23 @@ impl GuestRuntime {
         if self.managed_shared() {
             return self.create_shared(spec);
         }
+        // Its route, kept to tell a refusal of what its host's pool admitted (V2): the guest sees none.
+        let routed = if spec
+            .route
+            .is_some_and(|route| route.key.execution == hex_api::Execution::NodeVm)
+        {
+            Some(spec.clone())
+        } else {
+            None
+        };
         let rewritten = self.rewrite_spec(spec)?;
         let b = self.guest()?;
         self.warm_if_changed()?;
         self.create_in(&b, rewritten)
+            .map_err(|refusal| match &routed {
+                Some(spec) => self.told_guest_refusal(&b, spec, refusal),
+                None => refusal,
+            })
     }
 
     /// Deletes box `id` from the guest that holds it, `snapshot` the call's one read of its record.
@@ -2071,7 +2156,22 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         match class {
-            Class::Process => self.process.capacity(class),
+            // A host whose process class answers no pool of its own (macOS's) answers it on its host's plane, the one
+            // its oci answer is on, with its native process route (V2; ROOT, 2026-11-13): so its process boxes keep a
+            // route beside its guest's, as Windows' own answer keeps one.
+            Class::Process => match self.process.capacity(class)? {
+                Some(report) => Ok(Some(report)),
+                None if self.oci.uses_books() => {
+                    let mut capacity = self.oci.authority()?.capacity()?;
+                    crate::devices::native_routes(
+                        &mut capacity,
+                        Class::Process,
+                        route::host_platform()?,
+                    )?;
+                    Ok(Some(capacity))
+                }
+                None => Ok(None),
+            },
             Class::Oci => {
                 // Windows runs its own OCI images as well as guest Linux images. Its initialized
                 // native pool (including exact device holders) must not disappear behind the guest.
