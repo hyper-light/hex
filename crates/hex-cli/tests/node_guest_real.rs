@@ -7,7 +7,8 @@
 //!   image's one file, and its READY comes only once that init has started its node and relay.
 //! - **`kernel`**, Hex's own PID-1 path: Shards' direct boot of `HEX_GUEST_KERNEL` and `HEX_GUEST_INITRD`, `hex` the
 //!   VM's init, as the node's managed shared guest, which boots as its shared backing is granted (as the scheduler's
-//!   Index grants it, through the node's socket).
+//!   Index grants it, through the node's socket); on Linux, whose node has no managed shared guest, as a Shards box's
+//!   own VM, which boots as the box is created.
 //!
 //! On macOS (HVF) and Windows (WHP), the oci class's conformance suite, every case, through a live `hex node`'s socket,
 //! its guest the form `HEX_NODE_GUEST_FORM` names: in the image form its oci answer books one node VM, Ready, and
@@ -15,7 +16,8 @@
 //! native by design, so no Linux node boots a node VM for it (node-under-shards-init.md §9): there each form's boot is
 //! measured through its own production class instead, with no suite. The image form's through `ImageClass::boot_node`,
 //! as a node's guest runtime boots its node VM, with hex-node's image runtime as its record authority; the kernel
-//! form's through a live `hex node`'s managed shared guest, granted as above.
+//! form's through a live `hex node`'s Shards class, one box created through its socket at its dedicated route's cost,
+//! a Linux node keeping no shared guest to grant.
 //!
 //! Its starts, cold and restored told apart, never one figure (ROOT, 2026-11-13):
 //! - **The image form.** Its run hosts boot the guest the node's Shards home stores, so D253's templates engage: never
@@ -30,12 +32,14 @@
 //! Each start prints (`NODE-GUEST`):
 //! - its start: from the node's spawn to its ready line (in the image form its node VM booted, ready and greeted by
 //!   then), in the kernel form then its shared guest's grant to Live, and on macOS and Windows its first create through
-//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's, and how its run started;
+//!   the socket; on Linux's image form, `boot_node`'s own READY time and its call's, and how its run started; on Linux's
+//!   kernel form, its box's create (its VM booted, its node and relay up, the box made in it);
 //! - the memory of the VM's processes as their OS counts it, read once each is up and, at start 1 on macOS and Windows,
 //!   once the suite is done: macOS's physical footprint and its peak (proc_pid_rusage); Windows' private working set
 //!   (its perf counters) and its peak working set (Win32_Process, through PowerShell's CIM); Linux's anonymous resident
 //!   pages and its resident peak (`/proc/<pid>/status`'s `RssAnon` and `VmHWM`). Beside it, Hex's own reading: the
-//!   node VM's host use (Shards' D241 reading) on Linux, and the shared guest's backing usage in the kernel form;
+//!   node VM's host use (Shards' D241 reading) on Linux, and in the kernel form the shared guest's backing usage, on
+//!   Linux its box's usage;
 //! - in the image form, the node's census answers for its node VM's boot (`hex.image.boot`) and READY
 //!   (`guest.hosted.ready`), where a node runs.
 //!
@@ -43,7 +47,7 @@
 //! and the test waits for each of its processes' ends, by their lives, so no VM ending overlaps the next start's
 //! measure. On Windows the node's keeper, which outlives a killed node by design and never ends on its own, is then
 //! asked to stop, as a node going down cleanly asks it. The kernel form's shared guest is released through the node's
-//! socket before its node ends.
+//! socket before its node ends; on Linux its box is deleted, and its node's processes' ends are waited for.
 //!
 //! Explicit inputs only, each by its own variable, a missing one failing by name:
 //! - `HEX_NODE_GUEST_FORM`: `image` or `kernel`; `HEX_NODE_GUEST_WORK`: a directory of this run's own, made here;
@@ -74,9 +78,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+#[cfg(any(target_os = "macos", windows))]
+use std::time::Duration;
+use std::time::Instant;
 
-use hex_api::{BackingGrant, BackingKey, BackingPhase, CapacityResources, Class, Runtime};
+use hex_api::conformance::Act;
+#[cfg(any(target_os = "macos", windows))]
+use hex_api::{BackingGrant, BackingKey, BackingPhase};
+use hex_api::{CapacityResources, Class, Program, Runtime};
 use hex_client::Client;
 
 // image_real's real-node helpers: this test takes the node, the image's build and the inputs.
@@ -474,8 +483,41 @@ fn say_census(start: u64, census: &Path, seen: &mut usize) {
     *seen = lines.len();
 }
 
+/// A box root as a tarball in `dir`, its one file `/hex` mode 0755 (guest_real's fixture), staged from its own entries
+/// on every host (docs/design/shards-guest.md §4a).
+fn hex_root(dir: &Path, hex: &Path) -> PathBuf {
+    let rootfs = dir.join("rootfs.tar");
+    let hex = fs::read(hex).unwrap();
+    let mut tarball = tar::Builder::new(fs::File::create(&rootfs).unwrap());
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_mode(0o755);
+    header.set_size(u64::try_from(hex.len()).unwrap());
+    tarball
+        .append_data(&mut header, "hex", hex.as_slice())
+        .unwrap();
+    tarball.into_inner().unwrap();
+    rootfs
+}
+
+/// The program of `act`, as `hex_root`'s `/hex` runs it: its selftest act.
+fn act(act: &Act) -> Program {
+    let mut args = vec!["/hex".to_owned(), "selftest-box".to_owned()];
+    args.extend(match act {
+        Act::Say(words) => vec!["say".to_owned(), (*words).to_owned()],
+        Act::Fail(code) => vec!["fail".to_owned(), code.to_string()],
+        Act::Wait => vec!["wait".to_owned()],
+        Act::Hog(bytes) => vec!["hog".to_owned(), bytes.to_string()],
+        Act::Spawn(n) => vec!["spawn".to_owned(), n.to_string()],
+        Act::Echo => vec!["echo".to_owned()],
+    });
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Program::of(&args)
+}
+
 /// The kernel form's shared guest booted as the scheduler's Index boots it: the node's one Prepared shared backing
 /// granted through its socket at its cost's allocation, timed to Live. Its key, and how long its grant took.
+#[cfg(any(target_os = "macos", windows))]
 fn grant_shared(client: &Client) -> (BackingKey, Duration) {
     let capacity = client.capacity(Class::Oci).unwrap().unwrap();
     let prepared: Vec<_> = capacity
@@ -499,6 +541,7 @@ fn grant_shared(client: &Client) -> (BackingKey, Duration) {
 }
 
 /// The shared guest's use as Hex reads it (its backing's usage), said beside its OS's reading.
+#[cfg(any(target_os = "macos", windows))]
 fn say_shared_usage(client: &Client, key: BackingKey, start: u64) {
     let usage = client.backing_usage(&key).unwrap();
     println!(
@@ -508,6 +551,7 @@ fn say_shared_usage(client: &Client, key: BackingKey, start: u64) {
 }
 
 /// The shared guest released through the node's socket, as the Index releases a backing, so none outlives the run.
+#[cfg(any(target_os = "macos", windows))]
 fn release_shared(client: &Client, key: BackingKey) {
     let released = client.release_backing(key).unwrap();
     println!("NODE-GUEST released phase={:?}", released.phase);
@@ -517,45 +561,18 @@ fn release_shared(client: &Client, key: BackingKey) {
 #[cfg(any(target_os = "macos", windows))]
 mod suite {
     use super::*;
-    use hex_api::conformance::{Act, Fixture};
+    use hex_api::conformance::Fixture;
     use hex_api::{
-        Bounds, BoxId, BoxSpec, ClassSpec, Execution, Network, NodeVmPhase, OciSpec, Program,
-        Rootfs,
+        Bounds, BoxId, BoxSpec, ClassSpec, Execution, Network, NodeVmPhase, OciSpec, Rootfs,
     };
 
     /// `oci` boxes whose root holds the Linux `hex` at `/hex` alone, their programs its selftest acts (guest_real's).
     pub struct OciBoxes(PathBuf);
 
-    fn act(act: &Act) -> Program {
-        let mut args = vec!["/hex".to_owned(), "selftest-box".to_owned()];
-        args.extend(match act {
-            Act::Say(words) => vec!["say".to_owned(), (*words).to_owned()],
-            Act::Fail(code) => vec!["fail".to_owned(), code.to_string()],
-            Act::Wait => vec!["wait".to_owned()],
-            Act::Hog(bytes) => vec!["hog".to_owned(), bytes.to_string()],
-            Act::Spawn(n) => vec!["spawn".to_owned(), n.to_string()],
-            Act::Echo => vec!["echo".to_owned()],
-        });
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        Program::of(&args)
-    }
-
     impl OciBoxes {
-        /// The boxes' root as a tarball in `dir`, its one file `/hex` mode 0755, staged from its own entries on every
-        /// host (docs/design/shards-guest.md §4a).
+        /// The boxes' root, [`hex_root`]'s in `dir`.
         pub fn new(dir: &Path, hex: &Path) -> Self {
-            let rootfs = dir.join("rootfs.tar");
-            let hex = fs::read(hex).unwrap();
-            let mut tarball = tar::Builder::new(fs::File::create(&rootfs).unwrap());
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_mode(0o755);
-            header.set_size(u64::try_from(hex.len()).unwrap());
-            tarball
-                .append_data(&mut header, "hex", hex.as_slice())
-                .unwrap();
-            tarball.into_inner().unwrap();
-            Self(rootfs)
+            Self(hex_root(dir, hex))
         }
 
         fn box_spec(&self, id: BoxId, bounds: Bounds, init: &Act) -> BoxSpec {
@@ -820,13 +837,14 @@ fn w39_each_guest_forms_boot_is_measured_through_its_production_class_on_kvm() {
     println!("NODE-GUEST form={} starts={starts}", form.word());
     match form {
         Form::Image => kvm::image(&work, &file("HEX_GUEST_LINUX_HEX"), starts),
-        Form::Kernel => kvm::kernel(&work),
+        Form::Kernel => kvm::kernel(&work, &file("HEX_GUEST_LINUX_HEX")),
     }
 }
 
 #[cfg(target_os = "linux")]
 mod kvm {
     use super::*;
+    use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Execution, Network, OciSpec, Rootfs};
     use hex_core::stream::files::FILES_PORT;
     use hex_core::stream::{CONTROL_PORT, STAMPS_PORT, STDIO_PORT, socket_name};
     use hex_runtime::devices::Books as _;
@@ -839,7 +857,7 @@ mod kvm {
         keep_guest(&shards, work);
         let image = node_image(&shards, hex, work);
         let (home, cache) = shards_dirs(&work.join("state"));
-        let provider = shards_api::Shards::configured(home, cache).unwrap();
+        let provider = shards_api::Shards::configured(cache, home).unwrap();
         let paths = provider.runtime_paths().try_clone().unwrap();
         let runtime =
             hex_node::images::ImageRuntime::new(shards, paths, &work.join("records")).unwrap();
@@ -918,25 +936,78 @@ mod kvm {
         }
     }
 
-    /// The kernel form: a live `hex node` whose managed shared guest is granted through its socket, timed to Live, its
-    /// use read, then released.
-    pub fn kernel(work: &Path) {
+    /// The kernel form: Hex's own PID-1 path through the class a Linux node runs it in, its Shards class. A Linux node
+    /// has no managed shared guest: its oci class is native (hex-node's `Node::backend` gives it no backend), and its
+    /// Shards guest prepares a shared backing only where one is retained (`Node::install_backends`). So one Shards box,
+    /// created through a live `hex node`'s socket at its dedicated route's cost (the configured VM, as the image form's
+    /// receipt is): its create boots the box's own VM from `HEX_GUEST_KERNEL` and `HEX_GUEST_INITRD`, `hex` its init,
+    /// and makes the box in it, timed to its answer. Its use read, as its OS counts its processes and as Hex reads it,
+    /// then the box deleted and each process of the node's tree waited for.
+    pub fn kernel(work: &Path, hex: &Path) {
         let boxes = image_node::own_cgroup("hex-node-guest-real").join("hex-node-guest-node");
+        let rootfs = hex_root(work, hex);
         let began = Instant::now();
         let node = Node::start_with(work, Some(&boxes), &[]);
         let ready = began.elapsed();
         let client = Client::connect(&node.socket).unwrap();
-        let (key, live) = grant_shared(&client);
+        let capacity = client.capacity(Class::Shards).unwrap().unwrap();
+        let cost = capacity
+            .routes
+            .iter()
+            .find(|offer| {
+                offer.key.execution == Execution::ShardsDedicated && offer.backing.is_none()
+            })
+            .and_then(|offer| offer.cost)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the Shards class's dedicated route, with its cost: {:?}",
+                    capacity.routes
+                )
+            });
+        let id = BoxId::new("node-guest-kernel").unwrap();
+        let spec = BoxSpec {
+            route: None,
+            allocation: Some(cost.allocate(CapacityResources::default()).unwrap()),
+            devices: Vec::new(),
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Shards(Box::new(OciSpec {
+                rootfs: Rootfs::Dir(rootfs),
+                init: act(&Act::Say("first")),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            band: 0,
+        };
+        let creating = Instant::now();
+        client.create(spec).unwrap();
+        let created = creating.elapsed();
         println!(
-            "NODE-GUEST start=1 form=kernel ready_us={} live_us={} to_live_us={}",
+            "NODE-GUEST start=1 form=kernel ready_us={} create_us={} to_created_us={}",
             ready.as_micros(),
-            live.as_micros(),
+            created.as_micros(),
             began.elapsed().as_micros()
         );
-        say_shared_usage(&client, key, 1);
-        say_memory(1, "up", &tree(node.child.id()));
-        release_shared(&client, key);
+        let processes = tree(node.child.id());
+        say_memory(1, "up", &processes);
+        // Said once the box is deleted, so a refused reading leaves no VM running into the next run's measure.
+        let usage = client.usage(&id);
+        let deleting = Instant::now();
+        client.delete(&id).unwrap();
+        println!(
+            "NODE-GUEST delete start=1 us={}",
+            deleting.elapsed().as_micros()
+        );
         drop(client);
         drop(node);
+        ended(&processes.iter().map(|held| held.pid).collect::<Vec<_>>());
+        let usage = usage.unwrap();
+        println!(
+            "NODE-GUEST box_usage start=1 memory_bytes={} memory_peak_bytes={} cpu_usec={}",
+            usage.memory_bytes, usage.memory_peak_bytes, usage.cpu_usec
+        );
     }
 }

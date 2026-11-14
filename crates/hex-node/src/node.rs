@@ -1124,6 +1124,7 @@ impl Node {
                 .saturating_add(self.abandoned.unrecorded(id)?),
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -1647,6 +1648,7 @@ impl Node {
             abandoned: 0,
             last_resort: None,
             ended: None,
+            control: None,
             credentials: Vec::new(),
         })
     }
@@ -2311,6 +2313,7 @@ impl Runtime for Node {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        control: None,
                         credentials: Vec::new(),
                     }),
                     Err(why) => return Err(why),
@@ -2333,6 +2336,7 @@ impl Runtime for Node {
                     abandoned: 0,
                     last_resort: None,
                     ended: None,
+                    control: None,
                     credentials: Vec::new(),
                 });
             }
