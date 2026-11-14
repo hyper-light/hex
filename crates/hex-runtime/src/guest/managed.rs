@@ -7,58 +7,11 @@ use super::*;
 use crate::devices::{ManagedLaunch, Transaction};
 use hex_core::patience::{Patience, Piece};
 
-/// One create/attach attempt's budget (decision 9; the review's C-9). It follows its guest: no deadline of its own, each
-/// wait in it (native launch, GPU report, first relay dial, join) waiting within its own W* and past it following its
-/// party. Since a GPU create's followed too (C-9, (c2)) no create's is finite: its finite form is a test's alone, owed
-/// its removal with the waits that read it.
-#[derive(Clone, Copy)]
-pub(super) struct Budget {
-    deadline: Option<Instant>,
-}
-
-impl Budget {
-    /// A budget that follows its guest, with no deadline of its own.
-    pub fn following() -> Self {
-        Self { deadline: None }
-    }
-
-    /// What is left of it: none for one that follows; refused once a finite one is spent.
-    pub fn remaining(self) -> Result<Option<Duration>, Refusal> {
-        self.remaining_at(Instant::now())
-    }
-
-    pub fn deadline(self) -> Option<Instant> {
-        self.deadline
-    }
-
-    fn remaining_at(self, now: Instant) -> Result<Option<Duration>, Refusal> {
-        let Some(deadline) = self.deadline else {
-            return Ok(None);
-        };
-        deadline
-            .checked_duration_since(now)
-            .filter(|remaining| !remaining.is_zero())
-            .map(Some)
-            .ok_or_else(|| {
-                Refusal::os(
-                    "spending the original managed guest create budget",
-                    std::io::ErrorKind::TimedOut,
-                )
-            })
-    }
-}
-
-/// How Shards waits for a GPU create's report (`PreparedBoot::with_gpu_report`): by `budget`'s deadline where it has one,
-/// else until the report comes or its VM process ends (`Until::Released`).
-pub(super) fn gpu_until(budget: Budget) -> shards_api::Until {
-    budget
-        .deadline()
-        .map_or(shards_api::Until::Released, shards_api::Until::At)
-}
-
+/// A managed create's or attach's launch through its transaction: told no deadline, it follows its guest, each wait in it
+/// (native launch, GPU report, first relay dial, join) within its own W* and past it following its party (decision 9;
+/// the review's C-9).
 struct Launcher<'a> {
     transaction: &'a dyn Transaction,
-    budget: Budget,
     refused: RefCell<Option<Refusal>>,
 }
 
@@ -80,10 +33,10 @@ impl shards_api::ManagedLauncher for Launcher<'_> {
         plan: &shards_api::PreparedBoot,
         io: shards_api::LaunchIo,
     ) -> Result<shards_api::ManagedReceipt, shards_api::Refusal> {
-        self.remember(self.budget.remaining().and_then(|remaining| {
+        self.remember(
             self.transaction
-                .launch_managed(&ManagedLaunch::Shards(plan), io, remaining)
-        }))
+                .launch_managed(&ManagedLaunch::Shards(plan), io, None),
+        )
     }
 
     fn attach(
@@ -96,12 +49,10 @@ impl shards_api::ManagedLauncher for Launcher<'_> {
 
 fn launch<T>(
     transaction: &dyn Transaction,
-    budget: Budget,
     operation: impl FnOnce(&mut dyn shards_api::ManagedLauncher) -> Result<T, shards_api::Refusal>,
 ) -> Result<T, Refusal> {
     let mut launcher = Launcher {
         transaction,
-        budget,
         refused: RefCell::new(None),
     };
     let result = operation(&mut launcher);
@@ -114,10 +65,8 @@ fn launch<T>(
 pub(super) fn boot(
     transaction: &dyn Transaction,
     plan: shards_api::PreparedBoot,
-    budget: Budget,
 ) -> Result<shards_api::ManagedGuest, Refusal> {
-    budget.remaining()?;
-    launch(transaction, budget, |launcher| {
+    launch(transaction, |launcher| {
         shards_api::boot_managed(plan, launcher)
     })
 }
@@ -126,10 +75,8 @@ pub(super) fn attach(
     transaction: &dyn Transaction,
     plan: shards_api::PreparedBoot,
     identity: &shards_api::Identity,
-    budget: Budget,
 ) -> Result<shards_api::ManagedGuest, Refusal> {
-    budget.remaining()?;
-    launch(transaction, budget, |launcher| {
+    launch(transaction, |launcher| {
         shards_api::attach_managed(plan, identity, launcher)
     })
 }
@@ -716,40 +663,5 @@ mod tests {
             start_ticks: 8,
         });
         assert!(same_init(&record, &identity).is_err());
-    }
-
-    /// AC-T7.4.1: no stage restarts a finite create budget after scope publication.
-    #[test]
-    fn managed_budget_is_one_absolute_finite_deadline() {
-        let start = Instant::now();
-        let deadline = start.checked_add(Duration::from_secs(1)).unwrap();
-        let budget = Budget {
-            deadline: Some(deadline),
-        };
-        assert_eq!(
-            budget.remaining_at(start).unwrap(),
-            Some(Duration::from_secs(1))
-        );
-        assert!(budget.remaining_at(deadline).is_err());
-        assert!(
-            budget
-                .remaining_at(deadline.checked_add(Duration::from_nanos(1)).unwrap())
-                .is_err()
-        );
-    }
-
-    /// The review's C-9, (c2) (decision 9; Shards b4a018090's `Until::Released`): a GPU create's budget follows its
-    /// guest as every managed create's does, no deadline and none left, its report taken with no clock. Do take the one
-    /// budget a create can take (`Budget::following`, its only constructor since (c2)). Expect it to follow and its GPU
-    /// report's wait to be `Until::Released`; a finite one's (a test's alone) waits by its deadline.
-    #[test]
-    fn c9_c2_a_gpu_creates_budget_follows_its_guest() {
-        let gpu = Budget::following();
-        assert_eq!(gpu.deadline(), None, "a GPU create's budget has a deadline");
-        assert_eq!(gpu.remaining().unwrap(), None);
-        assert_eq!(gpu_until(gpu), shards_api::Until::Released);
-        let at = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
-        let finite = Budget { deadline: Some(at) };
-        assert_eq!(gpu_until(finite), shards_api::Until::At(at));
     }
 }

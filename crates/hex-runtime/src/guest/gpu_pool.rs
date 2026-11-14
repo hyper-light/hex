@@ -424,9 +424,6 @@ impl GuestRuntime {
 
     pub(super) fn initialize_gpu_pool(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
         grant.check()?;
-        // This one budget is captured before grant persistence, native effects, report observation, guest workload or
-        // publication, and follows its guest: Shards takes the report with no clock (the review's C-9, (c2)).
-        let budget = managed::Budget::following();
         let definition = self.gpu_definition_for(grant.key)?;
         if grant.devices != definition.devices
             || grant.allocation != self.configured_allocation()?
@@ -441,7 +438,6 @@ impl GuestRuntime {
             .as_ref()
             .ok_or_else(|| refused(grant.key, LifecycleCause::Pending))?;
         observer.verify(&self.config)?;
-        budget.remaining()?;
         let keys = self.turn_keys(&definition.devices)?;
         let books = self.books.get().ok_or_else(|| {
             uncertain(
@@ -476,7 +472,7 @@ impl GuestRuntime {
                     receipt.checked_work_ready()?;
                     triomphe::Arc::clone(&known.booted)
                 }
-                None => self.boot_gpu_pool(transaction, &definition, record, budget)?,
+                None => self.boot_gpu_pool(transaction, &definition, record)?,
             };
             record = transaction
                 .read_pool(&grant.key)?
@@ -487,7 +483,6 @@ impl GuestRuntime {
             receipt.matches(&record)?;
             receipt.checked_work_ready()?;
             self.pool_alive(&booted, grant.key)?;
-            budget.remaining()?;
             if record.phase == BackingPhase::Granted {
                 record.phase = BackingPhase::Live;
                 transaction.put_pool(&record)?;
@@ -540,7 +535,6 @@ impl GuestRuntime {
         transaction: &dyn Transaction,
         definition: &GpuBacking,
         record: PoolRecord,
-        budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
         let key = record.key;
         let retained = pool::read(&definition.path)?;
@@ -586,11 +580,11 @@ impl GuestRuntime {
                 let plan = plan
                     .with_gpu_report(
                         *receipt.original.scope().bytes(),
-                        managed::gpu_until(budget),
+                        shards_api::Until::Released,
                     )
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
                 pool::write(&definition.path, &receipt)?;
-                managed::boot(transaction, plan, budget)?
+                managed::boot(transaction, plan)?
             }
             Phase::Running(identity) => {
                 receipt.checked_report()?;
@@ -606,7 +600,7 @@ impl GuestRuntime {
                 if identity.vsock != socket {
                     return Err(uncertain(key, "its controller's vsock isn't its socket"));
                 }
-                managed::attach(transaction, plan, identity, budget)?
+                managed::attach(transaction, plan, identity)?
             }
             // An interrupted Intent/report/workload is uncertainty, never a
             // second VM/program launch or an automatic grant refund.
@@ -633,8 +627,9 @@ impl GuestRuntime {
         if fresh {
             receipt.report = Some(
                 guest
-                    // Its report's own deadline bounds it where its budget has none left to give.
-                    .take_gpu_report(budget.remaining()?.unwrap_or(std::time::Duration::MAX))
+                    // Its report comes or its VM process ends: Shards waits with no clock (`Until::Released`; the
+                    // review's C-9).
+                    .take_gpu_report(std::time::Duration::MAX)
                     .map_err(|why| refusal("observing same-scope full renderer ACK", &why))?,
             );
             receipt.checked_report()?;
@@ -642,17 +637,16 @@ impl GuestRuntime {
         }
         receipt.phase = Phase::Running(identity);
         pool::write(&definition.path, &receipt)?;
-        let booted = self.connect_managed(guest, None, Some(binding), budget)?;
+        let booted = self.connect_managed(guest, None, Some(binding))?;
         if fresh {
             let observer = self
                 .gpu_observer
                 .as_ref()
                 .ok_or_else(|| refused(key, LifecycleCause::Pending))?;
-            observer::observe(observer, &booted, &mut receipt, &definition.path, budget)?;
+            observer::observe(observer, &booted, &mut receipt, &definition.path)?;
         }
         receipt.checked_work_ready()?;
         self.check_pool_native_report(&receipt)?;
-        budget.remaining()?;
         Ok(booted)
     }
 

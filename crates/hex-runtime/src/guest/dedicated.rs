@@ -872,8 +872,7 @@ mod tests {
             });
             let books: Arc<dyn crate::devices::Books> = owner.clone();
             runtime.bind_books(Arc::downgrade(&books)).unwrap();
-            let budget = managed::Budget::following();
-            let result = runtime.create_selected(spec.clone(), owner.as_ref(), budget);
+            let result = runtime.create_selected(spec.clone(), owner.as_ref());
             let allowed = current == Some(9u64.to_le_bytes());
             assert_eq!(
                 owner.launches.load(Ordering::SeqCst),
@@ -1463,7 +1462,6 @@ impl GuestRuntime {
         guest: shards_api::ManagedGuest,
         receipt: &Record,
         record: &BoxRecord,
-        budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
         let owner = Owner {
             id: receipt.id.try_clone()?,
@@ -1471,7 +1469,7 @@ impl GuestRuntime {
             allocation: record.spec.allocation,
             route: record.spec.route,
         };
-        self.connect_managed(guest, Some(owner), None, budget)
+        self.connect_managed(guest, Some(owner), None)
     }
 
     pub(super) fn connect_managed(
@@ -1479,22 +1477,16 @@ impl GuestRuntime {
         guest: shards_api::ManagedGuest,
         owner: Option<Owner>,
         backing: Option<shared::Binding>,
-        budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
-        budget.remaining()?;
         let link: LinkOwner = own_link(ShardsLink::managed(
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
-            // HEX-GUEST-33: a later dial without its caller's deadline waits its own W*, never what this
-            // create had left; the create's own dials carry its deadline, where it has one.
+            // HEX-GUEST-33: a dial without its caller's deadline waits its own W*, and past it follows the guest.
             self.boot_bound()?,
         ))?;
         // With no deadline its first dial, token and hello follow the guest (the review's C-9).
-        let client = match budget.deadline() {
-            Some(at) => Client::connect_before(triomphe::Arc::clone(&link), at)?,
-            None => Client::connect(triomphe::Arc::clone(&link))?,
-        };
+        let client = Client::connect(triomphe::Arc::clone(&link))?;
         let booted = booted_owner(Booted {
             guest: GuestHandle::Managed(guest),
             link,
@@ -1503,8 +1495,7 @@ impl GuestRuntime {
             owner,
             backing,
         })?;
-        budget.remaining()?;
-        self.join_before(&booted, budget)?;
+        self.join(&booted)?;
         Ok(booted)
     }
 
@@ -1663,8 +1654,6 @@ impl GuestRuntime {
             return self.cached_selected(id);
         }
         let reservation = self.reserve(id, Operation::Loading)?;
-        // An attach launches nothing: it follows its guest (the review's C-9).
-        let budget = managed::Budget::following();
         let receipt = selected::read(&self.selected_path(id)?)?
             .ok_or(super::books::uncertain(id, "it has no selected receipt")?)?;
         receipt.matches_record(record)?;
@@ -1690,8 +1679,8 @@ impl GuestRuntime {
         }
         let plan = self.managed_plan(&spec, &identity.vsock)?;
         self.check_selected_observer(&receipt)?;
-        let guest = managed::attach(transaction, plan, identity, budget)?;
-        let booted = self.booted(guest, &receipt, record, budget)?;
+        let guest = managed::attach(transaction, plan, identity)?;
+        let booted = self.booted(guest, &receipt, record)?;
         reservation.publish(Some(Guest {
             booted: triomphe::Arc::clone(&booted),
         }))?;
@@ -1803,9 +1792,7 @@ impl GuestRuntime {
         &self,
         spec: BoxSpec,
         transaction: &dyn Transaction,
-        budget: managed::Budget,
     ) -> Result<BoxInfo, Refusal> {
-        budget.remaining()?;
         self.check_allocation(&spec)?;
         let reservation = self.reserve(&spec.id, Operation::Creating)?;
         let path = self.selected_path(&spec.id)?;
@@ -1862,12 +1849,11 @@ impl GuestRuntime {
                 "its selected receipt has no scope",
             )?)?;
             plan = plan
-                .with_gpu_report(*scope.bytes(), managed::gpu_until(budget))
+                .with_gpu_report(*scope.bytes(), shards_api::Until::Released)
                 .map_err(|why| refusal("preparing selected renderer report", &why))?;
         }
-        budget.remaining()?;
         selected::write(&path, &receipt)?;
-        let guest = managed::boot(transaction, plan, budget)?;
+        let guest = managed::boot(transaction, plan)?;
         let identity = shards_api::Guest::identity(&guest)
             .map_err(|why| refusal("recording selected guest identity", &why))?;
         let record = transaction
@@ -1876,15 +1862,13 @@ impl GuestRuntime {
         managed::same_init(&record, &identity)?;
         receipt.matches_record(&record)?;
         if !receipt.physical.is_empty() {
-            // Its report's own deadline bounds it where its budget has none left to give.
-            let report = guest
-                .take_gpu_report(budget.remaining()?.unwrap_or(Duration::MAX))
-                .map_err(|why| {
-                    refusal(
-                        "observing the selected renderer in its original scope",
-                        &why,
-                    )
-                })?;
+            // Its report comes or its VM process ends: Shards waits with no clock (`Until::Released`; the review's C-9).
+            let report = guest.take_gpu_report(Duration::MAX).map_err(|why| {
+                refusal(
+                    "observing the selected renderer in its original scope",
+                    &why,
+                )
+            })?;
             receipt.report = Some(report);
             let report = receipt.checked_report()?.ok_or(super::books::uncertain(
                 &receipt.id,
@@ -1902,16 +1886,15 @@ impl GuestRuntime {
         }
         receipt.phase = Phase::Running(identity);
         selected::write(&path, &receipt)?;
-        let booted = self.booted(guest, &receipt, &record, budget)?;
+        let booted = self.booted(guest, &receipt, &record)?;
         if !receipt.physical.is_empty() {
             let observer = self.gpu_observer.as_ref().ok_or(super::books::uncertain(
                 &receipt.id,
                 "its selected receipt has no report writer",
             )?)?;
-            super::observer::observe_selected(observer, &booted, &mut receipt, &path, budget)?;
+            super::observer::observe_selected(observer, &booted, &mut receipt, &path)?;
             self.check_selected_observer(&receipt)?;
         }
-        budget.remaining()?;
         let created = self.create_in(&booted, rewritten);
         reservation.publish(Some(Guest { booted }))?;
         created
