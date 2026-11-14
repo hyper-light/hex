@@ -4,9 +4,10 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `ce80cbb37`, image channel v29 (`9ff60efb`, a run's end with its microVM's final use, of which
-the class reads the end alone yet, a member's lane asks waited within their W* and followed past it, told, and no GPU
-report asked; `16451e19f` before it, v27, at `cf844022`, a member's end typed, a member a signal killed
+Merged on Hex's main at Shards `2737fc4ec`, image channel v29 (`20015fb5`, a run's stop returning released, so a delete frees
+nothing the run still holds, the review's B-4; `ce80cbb37` before it, at `9ff60efb`, a run's end with its microVM's final
+use, of which the class reads the end alone yet, a member's lane asks waited within their W* and followed past it, told,
+and no GPU report asked; `16451e19f` before that, v27, at `cf844022`, a member's end typed, a member a signal killed
 `Exit::Signal(n)`, never its 128-plus status; `37ddeb080` before that, v26, at `2f55dccf`, no upstream root named;
 `097ec0047` before that, v25, at `1314e5f2`, a member's MCP bridge refused by its field while the class asks no agent-control endpoint with
 `2f5d20e7`; `3114e082f` before that, at `8dfe6df8`, a delete stopping a
@@ -19,7 +20,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
-  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f` and `ce80cbb37`) and
+  `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37` and `2737fc4ec`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -56,8 +57,9 @@ Sources, read at the revisions named:
   run's end with what its microVM used in all (D260 amended, `1e2d403ec`: `RunEnded`, `FinalUse`, `Unused`), a member's
   channel's end typed (`ImageGuest::wait_channel`, `a3352f573`), the agent-control lanes' asks waited within their
   caller's patience (`155b5ee2e`: `PendingMember`, `MemberSteering::steered`), and a run's GPU report (D233,
-  `fad757af4`: `ImageSpec::gpu_report`, `ImageGuest::take_gpu_report`), which the class asks of no run.
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f` and `ce80cbb37`: `crates/api/src/image.rs` (`Images`, its `boot` and
+  `fad757af4`: `ImageSpec::gpu_report`, `ImageGuest::take_gpu_report`), which the class asks of no run. At `2737fc4ec`:
+  a run's stop returning released (D231, `c133bfb56`: its run host exited and reaped, every process it started gone).
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37` and `2737fc4ec`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -151,7 +153,7 @@ split, so a box can be admitted and recorded before it is needed:
 |---|---|
 | `create` | No call. The box's record, `Creating`: admitted and named, nothing booted. |
 | `start` | `Phase::Ready` written first (the boot's intent, before any effect), then `Images::boot`, given the boot's learned bound as its patience (§6). |
-| `signal(KILL)`, Hex's stop | `ImageGuest::stop`: the VM process killed at once; it returns once the run's end, `RunEnd::Stopped`, is told, its VM gone, and the run host then exits on its own. The exit, `Signal(9)`, is recorded then. |
+| `signal(KILL)`, Hex's stop | `ImageGuest::stop`: the VM process killed at once; it returns once the run is released (Shards `2737fc4ec`): its end, `RunEnd::Stopped`, told, its run host exited and reaped, and every process the host started (its VM, network and share processes) gone, so a delete frees nothing the run still holds (the review's B-4). The exit, `Signal(9)`, is recorded then. |
 | `signal(other)` | To every member of the run that runs, each on its own lane of the run's agent-control endpoint (D238, D252; goal 2's item 2): the run asks the endpoint of the class's own key and no socket lane, and its controller is dialed as the first signal goes, kept for that run. The VM runs on; a member that has ended is skipped; a run none of whose members can take it is refused `NotRunning(id, "signal: its run has no member a signal reaches")`. |
 | `exec` | Refused `Awaits(MemberExec)`: a member's exec is the agent-control endpoint's (step 11). |
 | `inspect`, `list` | The record's phase and exit, and this process's run (`wait_for` with no wait). |
@@ -300,7 +302,7 @@ image box: `ImageWaits::new` measures from nothing.
 |---|---|---|
 | `hex.image.boot` | `Images::boot`'s answer: the run started, or the refusal | the boot's thread, D231's run host |
 | `hex.image.stats` | `stats(Run)`'s answer | the run |
-| `hex.image.stop` | `stop`'s return: its run's end told, its VM gone (the run host exits after, on its own) | the stop's thread, the run host |
+| `hex.image.stop` | `stop`'s return: its run released, its end told, its run host and every process it started gone (Shards `2737fc4ec`) | the stop's thread, the run host |
 | `hex.image.delete_boot` | a delete's ask to the boot of the box it deletes answering, its run started or its host ended (§3) | the boot's thread |
 | `hex.image.started` | a `started` call's ask to the boot of the box it asks answering (§3) | the boot's thread |
 | `hex.image.member` | a member's own lane's first word (D238): whether it runs, its steering then | the run's agent-control connection |
@@ -349,7 +351,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `ce80cbb37` or later (image channel version 29: Hex's `shards` and its shards-init, rebuilt on each host by
+  `2737fc4ec` or later (image channel version 29: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec

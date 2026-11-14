@@ -61,6 +61,11 @@ tempfile.workspace = true
 # test's, which the guest under shards-init is reached through.
 shards-remote = { path = "../../vendor/shards/crates/remote" }
 
+# tests/first_readable_alloc.rs: a counting global allocator, by which the create, claim and park poll is held to
+# allocating nothing (the review's C-7).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+cap = { version = "0.1.2", features = ["stats"] }
+
 # src/guest/image_tests.rs on Windows: a lane's ends as Shards' run host makes them there, a plain pipe pair
 # (shards_ipc::Stream), the relay holding its VM's end.
 [target.'cfg(windows)'.dev-dependencies]

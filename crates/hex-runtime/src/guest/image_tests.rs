@@ -1121,6 +1121,25 @@ fn kill_stops_the_run_and_records_signal_9() {
     assert!(matches!(runtime.inspect(&id), Err(Refusal::NoSuchBox(_))));
 }
 
+/// Joint plan step 15 (AC-T7.7.2; N6): do start an image VM and inspect it, then KILL it and inspect it again. Expect the
+/// running VM's inspect to say where its run's agent-control endpoint is bound, as its run host told it (the model's, on
+/// the host's loopback), with no port published; and the ended VM's to say none.
+#[test]
+fn an_inspect_says_where_its_runs_agent_control_endpoint_is_bound_while_it_runs() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-control", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.control, shown.published.len()),
+        (BoxState::Running, Some(model_control().address), 0)
+    );
+    runtime.signal(&id, Signal::KILL).unwrap();
+    let ended = runtime.inspect(&id).unwrap();
+    assert_eq!((ended.state, ended.control), (BoxState::Empty, None));
+}
+
 /// Joint plan step 12: do end a running VM's run on its own, its command exiting 3. Expect: its run
 /// host reaped through its stop, its end recorded as Code(3) and shown Empty.
 #[test]
@@ -5591,4 +5610,47 @@ fn b2_a_delete_of_a_booting_box_whose_read_its_start_outdated_answers_once_it_is
     );
     assert_eq!(deleted, Ok(()));
     assert!(record(&owner, &id).is_none());
+}
+
+/// The review's B-7 (AC-T7.4.1): a boot its delete stopped mid-boot (D231's `BootStop`) answers `Ended(Stopped)`, and
+/// where the start that asked it takes that answer (`Runs::booted`) it is no boot's answer: the time to the stop is no
+/// sample of the boot's W* (a boot hung ten minutes and then stopped would make W* ten minutes), and its run ends as the
+/// stop ended it, KILL, as `Runs::settle` records the same answer. Do put a stopped boot's answer in a booting run's
+/// slot and take it as its start does. Expect the stop given back, the boot's wait with no sample, and the run ended by
+/// signal 9.
+#[test]
+fn b7_a_stopped_boot_its_start_takes_is_no_sample_and_ends_killed() {
+    let runs = Runs::new();
+    let id = BoxId::new("b7-stopped-boot").unwrap();
+    let slot = Arc::new(Slot::<Booted>::new());
+    runs.insert(
+        &id,
+        Run::Booting(Arc::clone(&slot), Arc::new(BootStop::new())),
+    )
+    .unwrap();
+    slot.put(Err(ImageRefusal::Ended(RunEnded::unused(
+        RunEnd::Stopped,
+        Unused::NotStarted,
+    ))));
+    let waits = waits().unwrap();
+    let taken = runs.booted(&id, &slot, &waits).unwrap();
+    assert!(
+        matches!(
+            taken,
+            Err(ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }))
+        ),
+        "{taken:?}"
+    );
+    assert_eq!(
+        waits.boot.slowest(),
+        None,
+        "the stop taken for a boot's answer"
+    );
+    match runs.lock().unwrap().get(Key::Box(&id)) {
+        Some(Run::Ended(end)) => assert_eq!(end.exit, hex_api::Exit::Signal(9)),
+        _ => panic!("the stopped boot's run isn't ended"),
+    }
 }

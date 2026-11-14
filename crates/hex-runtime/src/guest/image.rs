@@ -634,6 +634,18 @@ impl End {
         stopped
     }
 
+    /// The end of a run whose boot Shards refused, `why`: one its stop ended mid-boot (D231's `BootStop`) as the stop
+    /// ended it, KILL; any other an end Hex can't read the exit of, in Shards' words (the review's B-7).
+    fn of_refused(why: &ImageRefusal) -> Self {
+        match why {
+            ImageRefusal::Ended(RunEnded {
+                end: RunEnd::Stopped,
+                ..
+            }) => Self::of(&RunEnd::Stopped),
+            why => Self::unknown(Some(why.to_string())),
+        }
+    }
+
     /// An end Hex can't read the exit of, with why where its runtime said it.
     fn unknown(why: Option<String>) -> Self {
         Self {
@@ -933,6 +945,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         },
         last_resort: None,
         ended: None,
+        control: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),
@@ -1224,8 +1237,18 @@ impl Runs {
                     Ok(())
                 }
                 Some((Err(why), took)) => {
-                    waits.boot.refused(took);
-                    *run = Run::Ended(End::unknown(Some(why.to_string())));
+                    // A boot its delete's stop ended mid-boot, as `settle` finds it, is no boot's answer: the time to
+                    // the stop is no sample (the review's B-7).
+                    if !matches!(
+                        why,
+                        ImageRefusal::Ended(RunEnded {
+                            end: RunEnd::Stopped,
+                            ..
+                        })
+                    ) {
+                        waits.boot.refused(took);
+                    }
+                    *run = Run::Ended(End::of_refused(&why));
                     Err(why)
                 }
                 None => Ok(()),
@@ -1280,8 +1303,10 @@ impl ImageBoot {
         )
     }
 
-    /// Stops `guest` on a thread of its own: D231's stop returns once its run's end is told, its VM gone;
-    /// the guest goes with the thread, and its run host then exits on its own. Its answer is `seen`, the end its run
+    /// Stops `guest` on a thread of its own: D231's stop returns once its run is released (Shards 2737fc4ec): its end
+    /// told, its run host exited and reaped, and every process the host started, its VM, network and share processes,
+    /// gone, so a delete that follows it frees nothing the run still holds (the review's B-4); the guest goes with the
+    /// thread. Its answer is `seen`, the end its run
     /// reached on its own before the stop where one was seen ([`Self::settle_running`]'s, the stop then its host's
     /// reaping): shards-api's stop of a run host that exited without its run's end answers `Stopped`, where its end
     /// before was `Failed` in what the host said last. Else the end its stop leaves.
@@ -1954,7 +1979,7 @@ impl ImageClass {
                 }
             }
             Err(why) => {
-                self.record_end(&id, &End::unknown(Some(why.to_string())))?;
+                self.record_end(&id, &End::of_refused(&why))?;
                 image.runs.forget(&id)?;
                 Err(refused(&id, "booting a Shards image VM", why))
             }
@@ -2137,6 +2162,9 @@ impl ImageClass {
                     shown.published =
                         crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
                 }
+                // Its run's agent-control endpoint, as its run host told it (N6), so a reading of the host tells it
+                // from a socket no grant made.
+                shown.control = guest.control().map(|at| at.address);
                 Ok(shown)
             }
             State::Stopping(..) => info(&record.spec, BoxState::Running, None),

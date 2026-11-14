@@ -65,11 +65,13 @@ owner, 2026-11-14): the names below are stable. What each follows, and what is w
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
 | `seeds.hang` (hex-core `seeds`, hex-node `createpool`) | a seed serving a create | its pidfd, polled with its socket (`createpool::wait_answer`) | none: a local site | liveness alone past W*, never taken for hung (`Seeds::past_hang`) |
-| `seeds.wait`, `exec_seeds.answers` (hex-node `seed`) | the busy seeds | their pidfds; the line refused only when none can come | none: a local site | liveness alone past W* |
+| `seeds.wait` (hex-core `seeds`, hex-node `createpool`'s line) | the seeds up or starting | a seed handed to the create, on the pool's condition variable; refused only when none can come (`Seeds::none_can_come`) | none: a local site | liveness alone past W* |
+| `exec_seeds.answers` (hex-node `seed`'s `SeedPool::acquire`) | the busy exec seeds | a seed released, or a slot let go by a seed discarded, on the pool's condition variable. The round trip's answer that follows (`round_trip`) is read on the seed's socket alone, which the seed's end closes; no pidfd is polled beside it | none: a local site | liveness alone past W* |
 | `parked.ready` (`createpool::CLAIMS`), `wait_parked` | a parked init | its sync pipe and claim socket ending | its CPU time | liveness; progress owed |
 | `node.listing` | the listing | none needed (in process) | entries listed | owed |
 | `node.turns`, `store.turns` | a turn's holder | its let-go | its work's progress | owed |
 | `node.emptying` | a killed box | its cgroup emptying | none: a local site | liveness alone past W*, the run-out told as W* passes; on the supervising thread, which every box shares, within W* alone, a run's box past it followed on a thread of its own (the review's E-3) |
+| `process.emptying` (hex-runtime `emptying`; macOS `process::end_followed`) | a killed `process` box, a delete's or a recovery's end's | its members' ends: `EVFILT_PROC` `NOTE_EXIT` on each member running, the group listed again once none is left watched or one forked, a member new to it killed too | none: a local site | liveness alone past W*, the run-out told as W* passes (the review's E-12: it was `hex_core::drain`'s record times 2, refused past it, the group listed again and again) |
 | `node.run_said` (hex-node `supervise::run`) | the claimer removing a run's box | its word, which comes on every path, its drop saying it stopped where it unwound | none: a local site | liveness alone past W* (the review's E-3) |
 | `runtime.run_made`, `runtime.run_said` (hex-runtime `run`, macOS and Windows) | a run's setup making its box; the claimer removing it | the setup's move or the claimer's word, each coming on every path, a drop saying its holder stopped where it unwound | none: a local site | liveness alone past W* (the review's E-11) |
 | `serve.reads` | a client reading a list | its connection | none: a local site | liveness alone past W* |
@@ -87,6 +89,7 @@ owner, 2026-11-14): the names below are stable. What each follows, and what is w
 | `managed.stop` (hex-runtime `guest::managed::stop_scope`) | a managed scope being stopped | its observer, `ManagedProcess::wait_for(Duration::MAX)`: the scope's end, or refused once the observer fails (on macOS the helper that keeps the scope, or its watcher) | none: a local site | liveness alone past W*; never a boot's record (ROOT, 2026-11-13; joint plan step 14's (C)); a Firecracker VM's and observer's stop too (`guest::wait_stopped`; A-13, 2026-11-14: they waited the configured `stop_ms`, so census retirement failed past it), an observer's under a caller's deadline to that deadline |
 | `client.guest.link.dial` (hex-client `guest::shards::ShardsLink::dial_following`) | the guest's VM, a dial to one of its ports with no caller's deadline | Shards' connector's look at its VM before each CONNECT and after | none | liveness alone past W*; each attempt still cut at the link's bound, a later answer discarded (the review's D-3, owed) |
 | `client.guest.offered.connect` (hex-client `guest::connect_following`, Windows) | a borrowed guest's stdio CONNECT, waiting for its OK, with no caller's deadline | Shards' borrowed CONNECT's own deadline passing, made again | none | liveness alone past W*; each attempt cut at the link's setup bound (the review's D-3, owed) |
+| `client.guest.relay.token`, `client.quic.relay.token` (hex-client `guest::token_following`) | the guest's or node's relay, its token on a control connection with no caller's deadline | the connection's end or reset | none | liveness alone past W*, the run-out told, the bytes read before kept (the review's D-2) |
 | `store.node_vm_owner` (hex-node `store::node_vm::follow_owner`) | a node VM row's owner, a node process | its lock, which a thread of its own takes as the owner ends | none: a local site | liveness alone past W*, the run-out told |
 | `managed.rate`, `managed.use` (hex-runtime `guest::managed::rate`, `guest_time`) | a managed VM's process answering its rate (D255) or its use (D260) on its vsock socket | Shards' ask with `Duration::MAX`: its answer, or the guest's end; past W* a watcher tells the run-out while the ask goes on | none: a local site | liveness alone past W* (joint plan step 14, D255 and D260) |
 
@@ -152,10 +155,10 @@ answer was slower than the first's: half the time. The cost above, with `p = 0` 
 all. Since 2026-11-13 (decision 9's (c), the person's ruling) none ends at it: each records its run-out there and goes
 on following its party, as `wait_past` does under a caller's deadline. `combine` gives a call with no caller's deadline
 no budget, and it follows its agent's connection; a listing goes on, in process; `serve.reads` follows its client by
-the messages it takes; and the create seeds' line (`Seeds::claim`) and the exec seeds' (`SeedPool::acquire`) follow the
-seeds freed. Each is refused only at its party's end, a reset, or a whole W* window with no advance. Where that progress
-is no finer than the answer itself (a client taking one waiting part, a create first in line), the stall is judged one
-whole window past the run-out.
+its connection; the create seeds' line (`Seeds::claim`) follows the seeds up or starting, refused only when none can
+come; and the exec seeds' (`SeedPool::acquire`) waits for a seed freed or a slot let go. Each is refused only at its
+party's end or a reset: none judges a stall of its party's progress, which refuses healthy parties ("A stall judged at
+the slowest gap seen", above).
 
 The turns (`node.turns`, `store.turns`) do so since 2026-11-13: a hold past the slowest seen is told to the census and
 the wait follows the holder, this process's own thread, to its let-go. Refused there, the store failed HEX-SOCK-6
