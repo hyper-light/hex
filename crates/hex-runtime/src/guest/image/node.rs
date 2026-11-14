@@ -17,8 +17,8 @@ use shards_api::image::{
 };
 
 use super::{
-    End, ImageClass, Run, Settled, Slot, Told, admitted_size, boot_on_its_thread, diagnostics_file,
-    host_use_of, timed_stats,
+    Booted, End, ImageClass, Run, Settled, Slot, Told, admitted_size, boot_on_its_thread,
+    diagnostics_file, host_use_of, timed_stats,
 };
 use crate::devices::Books;
 
@@ -65,7 +65,8 @@ impl ImageClass {
     ///   W*, its answer; past it, the run-out told and the boot followed by its thread's life (decision 9), never
     ///   Pending, as the node waits for its own VM.
     /// - **READY** is followed as [`follow_ready`] says, its answer the sample W* rises to.
-    /// - **A boot that fails to READY** has its run stopped, and is refused, typed by what failed.
+    /// - **A boot that fails** once its run has started has that run stopped, so none runs held by no one beside the
+    ///   next boot's (C-2), and is refused, typed by what failed; one that fails before has its record Ended.
     pub fn boot_node(&self, vm: &NodeVm) -> Result<NodeBooted, Refusal> {
         let image = self.image()?;
         let images = Arc::clone(image.images()?);
@@ -98,9 +99,14 @@ impl ImageClass {
         };
         let slot = Arc::new(Slot::new());
         let stop = Arc::new(BootStop::new());
-        image
+        if let Err(why) = image
             .runs
-            .insert(vm.run, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))?;
+            .insert(vm.run, Run::Booting(Arc::clone(&slot), Arc::clone(&stop)))
+        {
+            // No boot began: its record Ended, never left Booting and booked (C-2).
+            end_record(books.as_ref(), &mut record, Exit::Unknown)?;
+            return Err(why);
+        }
         if let Err(why) = boot_on_its_thread(images, spec, kept, Arc::clone(&slot), stop) {
             image.runs.insert(vm.run, Run::Ended(End::unknown(None)))?;
             image.runs.forget(vm.run)?;
@@ -136,36 +142,43 @@ impl ImageClass {
             end_record(books.as_ref(), &mut record, Exit::Unknown)?;
             return Err(refused(BOOTING, why));
         }
-        let guest = image.runs.guest(vm.run)?.ok_or_else(|| {
+        // Its run is up: from here a failure stops it (C-2), so no node VM runs held by no one, its record unwritten,
+        // beside the one the node's next boot starts.
+        self.ready_node(vm.run, &slot, books.as_ref(), &mut record)
+            .map_err(|why| match self.stop_node(vm.run) {
+                Ok(_) => why,
+                Err(cleanup) => Refusal::Broken(format!(
+                    "node VM {}: {why}; and its stop: {cleanup}",
+                    run_name(&vm.run)
+                )),
+            })
+    }
+
+    /// Node VM `run`, its run up since its boot's answer (`slot`'s), followed to its init's READY and its `record`
+    /// written Ready: its endpoint and how its init said it.
+    fn ready_node(
+        &self,
+        run: NodeRun,
+        slot: &Slot<Booted>,
+        books: &dyn Books,
+        record: &mut NodeVmRecord,
+    ) -> Result<NodeBooted, Refusal> {
+        let guest = self.image()?.runs.guest(run)?.ok_or_else(|| {
             Refusal::Broken("a node VM's run started with no guest held".to_owned())
         })?;
-        let ready = match guest.control().copied() {
-            None => Err(Refusal::Broken(
+        let control = guest.control().copied().ok_or_else(|| {
+            Refusal::Broken(
                 "the node VM's run host bound no agent-control endpoint, though its boot asked one"
                     .to_owned(),
-            )),
-            Some(control) => follow_ready(guest.as_ref(), READY.deadline(), slot.asked, &READY)
-                .map(|ready| (control, ready)),
-        };
-        let (control, ready) = match ready {
-            Ok(said) => said,
-            Err(why) => {
-                drop(guest);
-                return match self.stop_node(vm.run) {
-                    Ok(_) => Err(why),
-                    Err(cleanup) => Err(Refusal::Broken(format!(
-                        "node VM {}: {why}; and its stop: {cleanup}",
-                        run_name(&vm.run)
-                    ))),
-                };
-            }
-        };
+            )
+        })?;
+        let ready = follow_ready(guest.as_ref(), READY.deadline(), slot.asked, &READY)?;
         let took = slot.asked.elapsed();
         READY.answered(took);
         record.phase = NodeVmPhase::Ready;
-        books.put_node_vm(&record)?;
+        books.put_node_vm(record)?;
         Ok(NodeBooted {
-            run: vm.run,
+            run,
             control,
             ready,
             took,
@@ -198,26 +211,28 @@ impl ImageClass {
             }
             Settled::None => return Err(not_running(&run)),
         };
+        // The stop's thread followed as its party (B-1, C-3): its answer seen given though another call took it first,
+        // and its end with none refusing the stop, never waited for forever.
         let bound = waits.stop.deadline();
-        if !slot.came_within(bound)? {
-            if let Some(bound) = bound {
-                let name = run_name(&run);
-                waits.stop.ran_out(
-                    bound,
-                    bound,
-                    &[
-                        Piece::Kind("the stop of node VM "),
-                        Piece::Name(&name),
-                        Piece::Kind(", by its stop's thread"),
-                    ],
-                );
-            }
-            if !matches!(slot.told_within(None)?, Told::Came) {
-                return Err(Refusal::Broken(format!(
-                    "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
-                    run_name(&run)
-                )));
-            }
+        let mut told = slot.told_within(bound)?;
+        if let (Told::NotYet, Some(bound)) = (&told, bound) {
+            let name = run_name(&run);
+            waits.stop.ran_out(
+                bound,
+                bound,
+                &[
+                    Piece::Kind("the stop of node VM "),
+                    Piece::Name(&name),
+                    Piece::Kind(", by its stop's thread"),
+                ],
+            );
+            told = slot.told_within(None)?;
+        }
+        if !matches!(told, Told::Came) {
+            return Err(Refusal::Broken(format!(
+                "node VM {}: its stop's thread ended with no answer, so its run's end is unknown",
+                run_name(&run)
+            )));
         }
         match image.runs.settle(run, Some(waits))? {
             Settled::Ends(end) => self.ended_node(books.as_ref(), run, &end),

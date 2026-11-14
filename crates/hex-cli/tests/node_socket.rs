@@ -153,9 +153,9 @@ fn an_installed_node_serves_every_class() {
     assert_eq!(client.classes(), [Class::Process, Class::Oci]);
     let lab = Lab::new(&cache_dir(), exe);
     example(&lab, &client).expect("an oci box on the installed node");
-    let failures = conformance::run(&client, &OciBoxes(&lab, false));
+    let failures = conformance::run(&client, &OciBoxes(&lab, false, None));
     assert!(failures.is_empty(), "oci boxes: {failures:#?}");
-    let failures = conformance::run(&client, &ProcessBoxes(exe));
+    let failures = conformance::run(&client, &ProcessBoxes(exe, None));
     assert!(failures.is_empty(), "process boxes: {failures:#?}");
     // What a box whose spec names no RLIMIT_NOFILE gets from the installed node: recorded for the lab,
     // since the unit's LimitNOFILE= reaches it (docs/research/runtime/nofile-limit.md).
@@ -397,6 +397,11 @@ impl Agent {
         }
     }
 
+    /// The agent as the party of what its socket serves: ended once its process has.
+    fn serving(&self) -> Party {
+        running(self.child.id())
+    }
+
     /// The party of a line the agent says: its stderr's drain, which delivers what the agent wrote, even after the
     /// agent's end, until its stderr ends, its last line read.
     fn saying(&self) -> Party {
@@ -574,8 +579,9 @@ fn program(args: &[String]) -> Program {
 
 /// `oci` boxes from bundles whose init and programs are `hex selftest-box` acts, each with a network
 /// namespace of its own when the second field is set: one taken from the agent's pool as root, made on
-/// the create's path rootless (decision 4).
-struct OciBoxes<'a>(&'a Lab, bool);
+/// the create's path rootless (decision 4). The third is the agent this test started whose socket serves them, which
+/// the suites follow (the review's E-4); none for an installed node, no child of this test's, followed by its answers.
+struct OciBoxes<'a>(&'a Lab, bool, Option<&'a Agent>);
 
 /// The bound a program crosses the node's socket under: the tighter of the wire's (the client refuses past it)
 /// and Linux's (the node refuses past it).
@@ -621,10 +627,14 @@ impl Fixture for OciBoxes<'_> {
     fn program(&self, act: &Act) -> Program {
         program(&Lab::act(act))
     }
+
+    fn party(&self) -> Party {
+        self.2.map_or(Party::Live, Agent::serving)
+    }
 }
 
-/// `process` boxes, whose programs are the host's `hex selftest-box` acts.
-struct ProcessBoxes<'a>(&'a str);
+/// `process` boxes, whose programs are the host's `hex selftest-box` acts, served by the agent as [`OciBoxes`]' are.
+struct ProcessBoxes<'a>(&'a str, Option<&'a Agent>);
 
 impl Fixture for ProcessBoxes<'_> {
     fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
@@ -652,6 +662,10 @@ impl Fixture for ProcessBoxes<'_> {
         args.extend(act_args(act));
         program(&args)
     }
+
+    fn party(&self) -> Party {
+        self.1.map_or(Party::Live, Agent::serving)
+    }
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
@@ -671,13 +685,13 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     }
     namespaces_counted(&lab, &client);
     the_agent_parks_procs_as_root_and_none_rootless(&lab, own, cache, exe);
-    let failures = hex_api::differential::run(&client, &OciBoxes(&lab, false));
+    let failures = hex_api::differential::run(&client, &OciBoxes(&lab, false, Some(&agent)));
     assert!(
         failures.is_empty(),
         "oci boxes over the socket: {failures:#?}"
     );
-    conformance_with_namespaces(&lab, &client);
-    let failures = hex_api::differential::run(&client, &ProcessBoxes(exe));
+    conformance_with_namespaces(&lab, &agent, &client);
+    let failures = hex_api::differential::run(&client, &ProcessBoxes(exe, Some(&agent)));
     assert!(
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
@@ -760,12 +774,12 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
     )
     .expect("connect through the guest relay");
     assert_eq!(guest.classes(), [Class::Process, Class::Oci]);
-    let failures = conformance::run(&guest, &OciBoxes(lab, false));
+    let failures = conformance::run(&guest, &OciBoxes(lab, false, Some(agent)));
     assert!(
         failures.is_empty(),
         "oci boxes through the guest relay: {failures:#?}"
     );
-    let failures = conformance::run(&guest, &ProcessBoxes(exe));
+    let failures = conformance::run(&guest, &ProcessBoxes(exe, Some(agent)));
     assert!(
         failures.is_empty(),
         "process boxes through the guest relay: {failures:#?}"
@@ -923,7 +937,7 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     )
     .unwrap();
     assert_eq!(node.classes(), [Class::Process, Class::Oci]);
-    let failures = conformance::run(&node, &OciBoxes(lab, false));
+    let failures = conformance::run(&node, &OciBoxes(lab, false, Some(agent)));
     assert!(
         failures.is_empty(),
         "oci boxes through a simulated Shards guest: {failures:#?}"
@@ -943,7 +957,7 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     assert!(left.is_empty(), "staged copies left: {left:?}");
     // HEX-GUEST-18 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): a second create of an id the
     // guest's node holds is refused as `Exists` before anything is staged: one stage for the two creates.
-    let fixture = OciBoxes(lab, false);
+    let fixture = OciBoxes(lab, false, Some(agent));
     let id = BoxId::new("twice").unwrap();
     let before = stages.load(Ordering::SeqCst);
     node.create(fixture.spec(id.clone(), Bounds::default()))
@@ -1066,7 +1080,7 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
     .unwrap();
     let client = Client::connect(&socket).unwrap();
     assert_eq!(client.classes(), [Class::Process, Class::Oci]);
-    let failures = conformance::run(&client, &OciBoxes(lab, false));
+    let failures = conformance::run(&client, &OciBoxes(lab, false, Some(agent)));
     assert!(
         failures.is_empty(),
         "oci boxes through a host node's socket over a simulated Shards guest: {failures:#?}"
@@ -1183,7 +1197,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
 /// The conformance suite again over the socket, every `oci` box with a network namespace of its own
 /// (decision 4): as root, once the agent's pool holds one, the boxes take theirs from it; rootless, each
 /// is made on its create's path and none is taken.
-fn conformance_with_namespaces(lab: &Lab, client: &Client) {
+fn conformance_with_namespaces(lab: &Lab, agent: &Agent, client: &Client) {
     if !lab.rootless {
         // Its party, the agent, is read by each look: a count asked of an agent that ended is refused.
         wait_for(
@@ -1197,7 +1211,7 @@ fn conformance_with_namespaces(lab: &Lab, client: &Client) {
         );
     }
     let before = client.netns().unwrap();
-    let failures = hex_api::differential::run(client, &OciBoxes(lab, true));
+    let failures = hex_api::differential::run(client, &OciBoxes(lab, true, Some(agent)));
     assert!(
         failures.is_empty(),
         "oci boxes with network namespaces of their own over the socket: {failures:#?}"

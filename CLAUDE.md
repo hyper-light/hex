@@ -366,6 +366,18 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `bsd/sys/proc_info_private.h`: the SDK ships none of them, so Hex declares them); `proc_pidinfo`'s
   `PROC_PIDTHREADID64INFO` reads whether the waiting thread has blocked, by `pthread_threadid_np`'s id; and
   `mach_timebase_info` converts the timer's Mach ticks. Rust can express none of these foreign calls safely.
+- The wipes watch (crates/hex-testkit/src/wipes.rs), in tests only, checks that every copy the node and hex-quic make
+  of a secret they carry is wiped before its memory is given back (the review's E-6). It is a memory allocator that a
+  test binary names as its own (#[global_allocator], under #[cfg(test)]); no production binary has it:
+  - Passes every allocation and free to the system's allocator (std::alloc::System) unchanged, with the same size and
+    alignment. A block that changes size is copied into a new one and the old one freed through the watch, so it is
+    checked too.
+  - While a test watches, reads each block it is asked to free, just before freeing it, for that test's 32 random
+    bytes. The block is still the program's to read then, for exactly the size it was given.
+  - Reads each byte with one load instruction (mov on x86_64, ldrb on aarch64) that writes nothing, so bytes the
+    program never wrote (a struct's padding) are read as whatever memory holds, never as a Rust value.
+  - Counts each block that still held them in an atomic counter, which the test reads; while freeing it never
+    allocates, takes a lock or prints.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
 no Hex change (`vendor/MANIFEST.toml`): every change Hex carried is upstream. Its `unsafe` follows Shards'

@@ -111,14 +111,15 @@ struct Framing {
     passed: Vec<OwnedFd>,
     /// Descriptors came while a frame was under way, or more than a message takes.
     cut: bool,
-    /// The rest of a message the stream took only part of.
-    unsent: Vec<u8>,
+    /// The rest of a message the stream took only part of, wiped as it goes if the message carried a secret.
+    unsent: hex_api::lease::Wiped,
     /// The stream can't be read further (an oversized frame): the next read is its end.
     broken: bool,
 }
 
 struct Message {
-    bytes: Vec<u8>,
+    /// Its bytes, wiped as they drop if it carries a lease's value or a sign-in's tokens, read or not.
+    bytes: hex_api::lease::Wiped,
     /// Its declared size, when it was past the bound and not kept.
     size: usize,
     passed: Vec<OwnedFd>,
@@ -325,7 +326,7 @@ impl Os for MacOs {
                             ready: VecDeque::new(),
                             passed: Vec::new(),
                             cut: false,
-                            unsent: Vec::new(),
+                            unsent: hex_api::lease::Wiped::default(),
                             broken: false,
                         }),
                     })),
@@ -390,15 +391,13 @@ impl Os for MacOs {
             return Recv::Gone;
         };
         loop {
-            if let Some(mut m) = f.ready.pop_front() {
+            if let Some(m) = f.ready.pop_front() {
                 let n = m.bytes.len().min(buf.len());
-                if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.get(..n)) {
+                if let (Some(into), Some(from)) = (buf.get_mut(..n), m.bytes.bytes().get(..n)) {
                     into.copy_from_slice(from);
                 }
-                // A lease's value crosses in the core's buffer alone from here (docs/design/credential-grants.md C7).
-                if wire::carries_secret(&m.bytes) {
-                    hex_api::lease::wipe(&mut m.bytes);
-                }
+                // A lease's value crosses in the core's buffer alone from here: the message's bytes here are wiped as
+                // they drop (docs/design/credential-grants.md C7).
                 return Recv::Message {
                     size: m.size,
                     got: n,
@@ -432,6 +431,9 @@ impl Os for MacOs {
         let Ok(framed) = stream::frame(bytes, wire::MAX_MESSAGE) else {
             return Sent::Gone;
         };
+        // Its framed copy, and what the stream doesn't take of it, wiped as each goes where the message carries a
+        // lease's value or a sign-in's tokens (docs/design/credential-grants.md C7, C8; the review's E-6).
+        let framed = hex_api::lease::Wiped::new(framed, wire::carries_secret(bytes));
         let borrowed: Vec<std::os::fd::BorrowedFd<'_>> =
             fds.iter().map(std::os::fd::AsFd::as_fd).collect();
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
@@ -443,11 +445,11 @@ impl Os for MacOs {
         }
         loop {
             let sent = if borrowed.is_empty() {
-                rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT)
+                rustix::net::send(&conn.fd, framed.bytes(), SendFlags::DONTWAIT)
             } else {
                 rustix::net::sendmsg(
                     &conn.fd,
-                    &[std::io::IoSlice::new(&framed)],
+                    &[std::io::IoSlice::new(framed.bytes())],
                     &mut control,
                     SendFlags::DONTWAIT,
                 )
@@ -457,7 +459,7 @@ impl Os for MacOs {
                 Ok(n) => {
                     // Taken in part: the rest goes when the socket has room ([`finish_unsent`]), which
                     // its write filter now reports.
-                    f.unsent = framed.get(n..).unwrap_or_default().to_vec();
+                    f.unsent = framed.rest(n);
                     let token = conn.token.load(Ordering::SeqCst);
                     if token != UNWATCHED && self.kq.fd(&conn.fd, token, true, true).is_err() {
                         return Sent::Gone;
@@ -604,11 +606,8 @@ impl MacOs {
 fn finish_unsent(s: &Stream) -> Result<bool, Refusal> {
     let mut f = s.framing.lock().map_err(poisoned)?;
     while !f.unsent.is_empty() {
-        match rustix::net::send(&s.fd, &f.unsent, SendFlags::DONTWAIT) {
-            Ok(n) => {
-                let len = f.unsent.len();
-                f.unsent.drain(..n.min(len));
-            }
+        match rustix::net::send(&s.fd, f.unsent.bytes(), SendFlags::DONTWAIT) {
+            Ok(n) => f.unsent.take_front(n),
             Err(Errno::INTR) => {}
             Err(Errno::AGAIN) => return Ok(false),
             Err(_) => {
@@ -676,9 +675,10 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
                 if let Some(message) = done {
                     let passed = std::mem::take(&mut f.passed);
                     let cut = std::mem::take(&mut f.cut);
+                    let secret = wire::carries_secret(&message);
                     f.ready.push_back(Message {
                         size: message.len(),
-                        bytes: message,
+                        bytes: hex_api::lease::Wiped::new(message, secret),
                         passed,
                         cut,
                     });
@@ -698,23 +698,24 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
                 } else {
                     Vec::new()
                 };
+                let secret = wire::carries_secret(&header);
                 f.ready.push_back(Message {
-                    bytes: header,
+                    bytes: hex_api::lease::Wiped::new(header, secret),
                     size: bytes,
                     passed: std::mem::take(&mut f.passed),
                     cut: false,
                 });
                 f.broken = true;
-                return Ok(true);
+                break;
             }
             Err(_) => {
                 f.broken = true;
-                return Ok(true);
+                break;
             }
         }
     }
-    // What it read is framed into the messages it holds now: its bytes here, which may carry a lease's value, wiped
-    // (docs/design/credential-grants.md C7).
+    // What it read is framed into the messages it holds now, or refused: its bytes here, which may carry a lease's
+    // value, wiped (docs/design/credential-grants.md C7; the review's E-6, for a refused frame's too).
     if let Some(held) = bytes.get_mut(..read) {
         hex_api::lease::wipe_in_place(held);
     }
