@@ -89,7 +89,7 @@ pub fn check_credentials(credentials: &[CredentialGrant], grants: &[Grant]) -> R
             )));
         }
         for (i, host) in grant.toward.iter().enumerate() {
-            if grant.toward.get(..i).unwrap_or_default().contains(host) {
+            if named_before(grant.toward.get(..i).unwrap_or_default(), host) {
                 return Err(invalid(format!(
                     "credentials[{at}].toward names {host:?} twice"
                 )));
@@ -207,9 +207,32 @@ fn token(placeholder: &str) -> bool {
 /// Whether an egress grant of `member`'s reaches `host` by name, by TCP.
 fn reached(grants: &[Grant], member: &Member, host: &str) -> bool {
     grants.iter().any(|grant| {
+        looked();
         matches!(grant, Grant::Egress { member: m, to: Destination::Name(name), ports }
             if m == member && name == host && ports.proto == Proto::Tcp)
     })
+}
+
+/// Whether `host` is among `before`, the hosts its list names ahead of it.
+fn named_before(before: &[String], host: &str) -> bool {
+    before.iter().any(|earlier| {
+        looked();
+        earlier == host
+    })
+}
+
+/// The looks this thread's checks have made at an earlier host or an egress grant, as each answers whether a grant's
+/// host was named before in its list and whether its member's egress reaches it: the work C5 bounds by the hosts named,
+/// which the tests count (CLAUDE.md §6).
+#[cfg(test)]
+thread_local! {
+    static LOOKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// One look at an earlier host or an egress grant ([`LOOKS`], the tests' count alone).
+fn looked() {
+    #[cfg(test)]
+    LOOKS.with(|looks| looks.set(looks.get().saturating_add(1)));
 }
 
 /// The check's working list: room for `count` entries, reserved fallibly (C5).
@@ -346,7 +369,7 @@ pub fn check_sign_ins(
             )));
         }
         for (i, host) in grant.toward.iter().enumerate() {
-            if grant.toward.get(..i).unwrap_or_default().contains(host) {
+            if named_before(grant.toward.get(..i).unwrap_or_default(), host) {
                 return Err(signed_in(format!(
                     "sign_ins[{at}].toward names {host:?} twice"
                 )));

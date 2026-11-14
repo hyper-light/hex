@@ -455,3 +455,39 @@ fn s33_a_sign_in_is_checked_by_its_fields_beside_the_runs_credentials() {
         "a placeholder printed: {printed}"
     );
 }
+
+/// The review's B-11 (= E-7; AC-T7.7.2, C5): the checks of a box's credential and sign-in grants sort and merge, O(n log
+/// n) in the hosts named, never a look at every earlier host and every egress grant for each host. Do check a
+/// credential, then a sign-in, each toward 1,024 hosts that egress grants of its member's own reach, counting the looks
+/// each check makes at an earlier host or an egress grant. Expect both taken, each with at most the looks a merge of the
+/// two sorted lists makes: a step past each host or egress grant, and a look at the host before each, 2 x hosts +
+/// grants (the sorts are std's `sort_unstable`, O(n log n) by its contract, and not counted).
+#[test]
+fn b11_the_credential_and_sign_in_checks_merge_their_hosts_against_the_egress_grants() {
+    let n = 1024;
+    let hosts: Vec<String> = (0..n).map(|i| format!("h{i}.example.com")).collect();
+    let grants: Vec<Grant> = hosts
+        .iter()
+        .map(|host| egress(claude(), host, Proto::Tcp))
+        .collect();
+    let toward: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let credentials = [credential(claude(), "anthropic/ada", &toward)];
+    let signed_in = SignInGrant {
+        toward: hosts.clone(),
+        ..sign_in("claude/ada", SignInCli::ClaudeCode)
+    };
+    let counted = |check: &dyn Fn() -> Result<(), Refusal>| {
+        LOOKS.with(|looks| looks.set(0));
+        check().unwrap();
+        LOOKS.with(std::cell::Cell::get)
+    };
+    let credential_looks = counted(&|| check_credentials(&credentials, &grants));
+    let sign_in_looks = counted(&|| {
+        check_sign_ins(std::slice::from_ref(&signed_in), &credentials, &grants)
+    });
+    let bound = u64::try_from(2 * n + grants.len()).unwrap();
+    assert!(
+        credential_looks <= bound && sign_in_looks <= bound,
+        "looks: the credential's {credential_looks}, the sign-in's {sign_in_looks}; a merge's at most {bound}"
+    );
+}
