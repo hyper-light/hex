@@ -3735,7 +3735,9 @@ mod tests {
         let bounds = super::managed::host_bounds(native).unwrap();
         let boxed =
             JobBox::prepare_vm(native, bounds, rt.processors, Some(&name), &rt.holding).unwrap();
-        boxed.adopt_vm(super::sys::Job::open(&name).unwrap().unwrap()).unwrap();
+        boxed
+            .adopt_vm(super::sys::Job::open(&name).unwrap().unwrap())
+            .unwrap();
         assert_eq!(old.memory_limit().unwrap(), None);
     }
 
