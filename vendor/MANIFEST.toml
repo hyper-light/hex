@@ -116,9 +116,9 @@ own = ["UPSTREAM.md"]
 [projects.shards]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "16451e19f172cfb29882efcab6502cc43b8bd061"
+commit = "ce80cbb37ee1183fae575511778f0ee29a5fe4f9"
 path = "vendor/shards"
-take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/dns", "crates/ipc", "crates/remote", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs", "docs/research/measurements/api-flakes/spawns.rs", "docs/research/measurements/api-flakes/half-close.rs"]
+take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/dns", "crates/ipc", "crates/remote", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/borrowed-no-clock/focused.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs", "docs/research/measurements/api-flakes/spawns.rs", "docs/research/measurements/api-flakes/half-close.rs"]
 own = ["Cargo.toml", "UPSTREAM.md"]
 
 # Hex's `shards` build (hyper-light): the `shards` binary a node boots its Shards guests and image VMs with
@@ -130,7 +130,7 @@ own = ["Cargo.toml", "UPSTREAM.md"]
 [projects.shards-gpu]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "16451e19f172cfb29882efcab6502cc43b8bd061"
+commit = "ce80cbb37ee1183fae575511778f0ee29a5fe4f9"
 path = "vendor/shards-gpu"
 take = [
     "LICENSE",

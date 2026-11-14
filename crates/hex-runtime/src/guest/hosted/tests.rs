@@ -4,8 +4,8 @@
 use std::sync::{Arc, Mutex};
 
 use shards_api::image::{
-    Bound, Channel, GuestTimes, HostUse, ImageRefusal, MemberEnd, MemberInfo, MemberName, Microvm,
-    RunEnd, Stats, StatsScope,
+    Bound, Channel, ChannelEnd, GuestTimes, HostUse, ImageRefusal, MemberEnd, MemberInfo,
+    MemberName, Microvm, RunEnd, RunEnded, Stats, StatsScope, Unused,
 };
 
 use super::*;
@@ -180,7 +180,10 @@ impl ImageGuest for Run {
             .or(self.script.readies.last())
         {
             Some(Says::Stands(ready)) => Ok(*ready),
-            Some(Says::Ends(end)) => Err(ImageRefusal::Ended(end.clone())),
+            Some(Says::Ends(end)) => Err(ImageRefusal::Ended(RunEnded::unused(
+                end.clone(),
+                Unused::Untold,
+            ))),
             None => Ok(None),
         }
     }
@@ -209,11 +212,27 @@ impl ImageGuest for Run {
         Ok(())
     }
 
-    fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(Some(RunEnd::Stopped))
+    fn wait_for(&self, _: Duration) -> Result<Option<RunEnded>, ImageRefusal> {
+        Ok(Some(RunEnded::unused(RunEnd::Stopped, Unused::Killed)))
     }
 
     fn keep_diagnostics(&self, _: std::fs::File) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
+
+    fn wait_channel(
+        &self,
+        _: &MemberName,
+        _: Channel,
+        _: Duration,
+    ) -> Result<Option<ChannelEnd>, ImageRefusal> {
+        Err(unasked())
+    }
+
+    fn take_gpu_report(
+        &self,
+        _: Duration,
+    ) -> Result<shards_api::physical::GpuReport, ImageRefusal> {
         Err(unasked())
     }
 }

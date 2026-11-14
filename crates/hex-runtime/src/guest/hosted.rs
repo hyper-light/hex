@@ -90,6 +90,8 @@ impl HostedConfig {
             sign_ins: Vec::new(),
             // No upstream root (Shards' D242, image channel v26): it grants no credential to fill in.
             upstream_roots: Vec::new(),
+            // No GPU report (Shards' D233, image channel v29): a node VM renders on no GPU.
+            gpu_report: None,
         }
     }
 }

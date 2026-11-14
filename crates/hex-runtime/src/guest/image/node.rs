@@ -404,6 +404,8 @@ impl ImageClass {
             sign_ins: Vec::new(),
             // No upstream root (Shards' D242, image channel v26): it grants no credential to fill in.
             upstream_roots: Vec::new(),
+            // No GPU report (Shards' D233, image channel v29): a node VM renders on no GPU.
+            gpu_report: None,
         })
     }
 }
@@ -583,9 +585,12 @@ pub(in crate::guest) fn refused(op: &'static str, why: ImageRefusal) -> Refusal 
             platform: std::env::consts::OS,
             why,
         },
-        ImageRefusal::Ended(end) => Refusal::Os {
+        ImageRefusal::Ended(ended) => Refusal::Os {
             op,
-            why: format!("its run ended before its init said it was ready: {end:?}"),
+            why: format!(
+                "its run ended before its init said it was ready: {:?}",
+                ended.end
+            ),
         },
         other => Refusal::Os {
             op,
