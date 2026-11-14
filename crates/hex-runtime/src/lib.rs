@@ -21,7 +21,7 @@
 pub const MAX_BOXES: usize = 65_536;
 
 pub mod devices;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod emptying;
 /// Firecracker runs only on Linux, under KVM: its configuration names that host's paths, and only its Linux node reads it.
 #[cfg(target_os = "linux")]

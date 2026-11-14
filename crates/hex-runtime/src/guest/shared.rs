@@ -1395,8 +1395,8 @@ impl GuestRuntime {
     }
 
     /// The shared backing `key`'s guest as `booted` answers it now (joint plan step 14, C7): its agent's capacity
-    /// answer, and what the boxes on the backing among `records` hold, each one's usage read. A read that fails
-    /// refuses.
+    /// answer, its boxes' CPU time together among it, and the memory the boxes on the backing among `records` hold,
+    /// each one's usage read. A read that fails refuses.
     fn reading(
         &self,
         booted: &Booted,
@@ -1408,22 +1408,12 @@ impl GuestRuntime {
             .capacity(Class::Oci)?
             .ok_or_else(|| uncertain(key, "its guest reports no capacity for its class"))?;
         let mut boxes = Boxes::default();
-        let mut set = Sha256::new();
         for record in records.values().flatten() {
             if record.spec.route.and_then(|route| route.backing) == Some(key) {
                 let usage = booted.client.usage(&record.spec.id)?;
                 boxes.memory = boxes.memory.saturating_add(usage.memory_bytes);
-                boxes.cpu_ns = boxes
-                    .cpu_ns
-                    .saturating_add(usage.cpu_usec.saturating_mul(1_000));
-                set.update(record.spec.id.as_str().as_bytes());
-                set.update([0]);
             }
         }
-        boxes.set = set
-            .finalize()
-            .first_chunk::<8>()
-            .map_or(0, |head| u64::from_le_bytes(*head));
         Ok((guest, boxes))
     }
 
@@ -2127,24 +2117,47 @@ pub(super) fn push_offer(
     Ok(())
 }
 
-/// What a shared backing's boxes held at one capacity answer, as their usage says (joint plan step 14, C7): memory and
-/// CPU time, and which boxes they were, a digest of their ids (`set`); their disk no usage reads, so none of the
-/// guest's used disk is taken as theirs.
+/// What a shared backing's boxes held at one capacity answer, as their usage says (joint plan step 14, C7): their memory;
+/// their disk no usage reads, so none of the guest's used disk is taken as theirs. Their CPU time is the guest's own
+/// count of it ([`hex_api::MachineTime::boxes_cpu_ns`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Boxes {
     pub(super) memory: u64,
-    pub(super) cpu_ns: u64,
-    pub(super) set: u64,
 }
 
-/// A guest's machine at one capacity answer, for the next answer's interval: its CPU time and uptime, and its boxes'
-/// CPU time and set then.
+/// A guest's machine at one capacity answer, where an interval starts or ends: its CPU time and uptime, and its boxes'
+/// CPU time together, ended boxes' among it, so an interval spans its boxes' coming and going (the review's A-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Reading {
     cpu_ns: u64,
     uptime_ns: u64,
     boxes_cpu_ns: u64,
-    boxes: u64,
+}
+
+/// A Linux guest's counters' step, as Linux states it (the review's A-8): `/proc/stat`'s CPU time is in USER_HZ ticks,
+/// 100 a second on every architecture Hex's guests run (x86_64 and arm64: `USER_HZ` in the kernel's
+/// include/asm-generic/param.h, its user ABI; proc(5)), and `/proc/uptime`'s uptime in hundredths of a second
+/// (fs/proc/uptime.c's `%lu.%02lu`).
+const GUEST_TICK_NS: u64 = 10_000_000;
+
+/// How many ticks short one reading of a guest's CPU time may be: its agent sums five fields of `/proc/stat` (user,
+/// nice, system, irq, softirq: `hex_sim::facts::machine_time`), each floored to its tick.
+const READING_TICKS: u64 = 5;
+
+/// How many ticks an interval's share may be off by for each of the guest's CPUs: the kernel charges a CPU's time a
+/// scheduler tick at a time (at least 100 a second, one USER_HZ tick or less), so each CPU's count may be a tick off at
+/// either end of the interval, and the uptime it is shared over a tick off, which counts once for each CPU busy over it.
+const TICKS_PER_CPU: u64 = 3;
+
+/// The span over which an interval's share is known to within one milli-CPU, the unit it is kept in, for a guest of
+/// `cpus` CPUs: its counters' error over the span, `READING_TICKS` and `TICKS_PER_CPU` for each CPU, a thousand times
+/// (the review's A-8). A shorter interval says less than its unit of the share, so none is taken from it.
+fn resolved_span_ns(cpus: u64) -> Option<u64> {
+    TICKS_PER_CPU
+        .checked_mul(cpus)?
+        .checked_add(READING_TICKS)?
+        .checked_mul(GUEST_TICK_NS)?
+        .checked_mul(1_000)
 }
 
 /// `cpu_ns` of CPU time over `span_ns`, in milli-CPU, rounded up: none over no time.
@@ -2156,25 +2169,40 @@ fn share(cpu_ns: u64, span_ns: u64) -> Option<u64> {
     u64::try_from(u128::from(cpu_ns).checked_mul(1_000)?.div_ceil(span)).ok()
 }
 
-/// The milli-CPU a guest ran of its own between two readings: its machine's CPU time past its boxes' over the uptime
-/// between. None where the interval says nothing of it: its uptime or CPU time fell (another boot of it) or its uptime
-/// didn't move on, or its boxes changed between (a box that ended took its last work's CPU time out of their sum).
-fn interval(last: Reading, now: Reading) -> Option<u64> {
-    if now.boxes != last.boxes {
-        return None;
-    }
-    let span = now.uptime_ns.checked_sub(last.uptime_ns)?;
-    let machine = now.cpu_ns.checked_sub(last.cpu_ns)?;
-    let boxes = now.boxes_cpu_ns.saturating_sub(last.boxes_cpu_ns);
-    share(machine.saturating_sub(boxes), span)
+/// An interval from a kept reading to this answer's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interval {
+    /// The milli-CPU the guest ran of its own over it: its machine's CPU time past its boxes' over the uptime between.
+    Resolved(u64),
+    /// Too short for its counters to say its share ([`resolved_span_ns`]): its start is kept for a longer one.
+    Unresolved,
+    /// One that says nothing of it, its start given up: the guest's uptime or CPU time fell (another boot of it), or its
+    /// boxes' count did (its node's box root made again).
+    Broken,
 }
 
-/// What a shared backing's runtime keeps of its guest (joint plan step 14, C7): its own overhead, its last reading, and
-/// whether its CPU is still the one reading since boot (ROOT's pin 2), which the first interval replaces.
+/// The interval from `start` to `now` of a guest of `cpus` CPUs.
+fn interval(start: Reading, now: Reading, cpus: u64) -> Interval {
+    let (Some(span), Some(machine), Some(boxes)) = (
+        now.uptime_ns.checked_sub(start.uptime_ns),
+        now.cpu_ns.checked_sub(start.cpu_ns),
+        now.boxes_cpu_ns.checked_sub(start.boxes_cpu_ns),
+    ) else {
+        return Interval::Broken;
+    };
+    if resolved_span_ns(cpus).is_none_or(|resolved| span < resolved) {
+        return Interval::Unresolved;
+    }
+    share(machine.saturating_sub(boxes), span).map_or(Interval::Broken, Interval::Resolved)
+}
+
+/// What a shared backing's runtime keeps of its guest (joint plan step 14, C7): its own overhead, the reading its next
+/// interval starts from, and whether its CPU is still the one reading since boot (ROOT's pin 2), which the first
+/// resolved interval replaces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Seen {
     pub(super) overhead: hex_api::LearnedOverhead,
-    last: Option<Reading>,
+    start: Option<Reading>,
     cpu_from_boot: bool,
 }
 
@@ -2194,8 +2222,8 @@ fn most(a: hex_api::LearnedOverhead, b: hex_api::LearnedOverhead) -> hex_api::Le
 
 /// What a shared backing keeps of its guest after an answer measured `measured` while another had kept `other`
 /// meanwhile (joint plan step 14, C7): its memory and disk, the most of the two; its CPU as pin 2 holds it whichever
-/// stored first, an interval's taking the place of a reading since boot and the intervals' most kept; and this
-/// answer's reading, the next interval's start.
+/// stored first, an interval's taking the place of a reading since boot and the intervals' most kept; and the reading
+/// the next interval starts from, this answer's.
 pub(super) fn merged(measured: Seen, other: Seen) -> Seen {
     let of_intervals = |seen: &Seen| seen.overhead.cpu_milli.filter(|_| !seen.cpu_from_boot);
     let both = most(measured.overhead, other.overhead);
@@ -2206,7 +2234,7 @@ pub(super) fn merged(measured: Seen, other: Seen) -> Seen {
     };
     Seen {
         overhead: hex_api::LearnedOverhead { cpu_milli, ..both },
-        last: measured.last.or(other.last),
+        start: measured.start.or(other.start),
         cpu_from_boot,
     }
 }
@@ -2214,10 +2242,11 @@ pub(super) fn merged(measured: Seen, other: Seen) -> Seen {
 /// A shared backing's guest's own overhead after one capacity answer (joint plan step 14, C7; ROOT, 2026-11-13), each
 /// dimension only rising from `kept`: its memory, what its agent says it uses (its total less its free) past what its
 /// boxes hold; its disk, what it has used of its disk, its boxes' disk no usage reads; and its CPU, its machine's CPU
-/// time past its boxes' over an interval between answers ([`interval`]). Its first answer's CPU is read since its boot,
-/// its boot's work among it, so it stands only until the first interval replaces it (ROOT's pin 2); then the most of
-/// the intervals. An answer that doesn't read its machine's time (an older agent's, or another platform's) leaves its
-/// CPU as kept.
+/// time past its boxes' over an interval its counters resolve ([`interval`], the review's A-8): from a kept reading to
+/// this answer's once the span between is long enough ([`resolved_span_ns`]), the kept one meanwhile. Its first
+/// answer's CPU is read since its boot, its boot's work among it, so it stands only until the first resolved interval
+/// replaces it (ROOT's pin 2); then the most of the resolved intervals. An answer that doesn't read its machine's or its
+/// boxes' time (an older agent's, or another platform's) leaves its CPU as kept.
 pub(super) fn guest_seen(kept: Seen, guest: &hex_api::Capacity, boxes: Boxes) -> Seen {
     let rise = |seen: Option<u64>, now: u64| Some(seen.map_or(now, |seen| seen.max(now)));
     let memory = guest
@@ -2226,26 +2255,29 @@ pub(super) fn guest_seen(kept: Seen, guest: &hex_api::Capacity, boxes: Boxes) ->
         .saturating_sub(guest.free.mem_bytes)
         .saturating_sub(boxes.memory);
     let disk = guest.total.disk_bytes.saturating_sub(guest.free.disk_bytes);
-    let reading = match (guest.own.cpu_ns, guest.own.uptime_ns) {
-        (Some(cpu_ns), Some(uptime_ns)) => Some(Reading {
+    let own = guest.own;
+    let reading = match (own.cpu_ns, own.uptime_ns, own.boxes_cpu_ns) {
+        (Some(cpu_ns), Some(uptime_ns), Some(boxes_cpu_ns)) => Some(Reading {
             cpu_ns,
             uptime_ns,
-            boxes_cpu_ns: boxes.cpu_ns,
-            boxes: boxes.set,
+            boxes_cpu_ns,
         }),
         _ => None,
     };
-    let (cpu_milli, cpu_from_boot) = match (kept.last, reading) {
-        (Some(last), Some(now)) => match interval(last, now) {
-            Some(milli) if kept.cpu_from_boot => (Some(milli), false),
-            Some(milli) => (rise(kept.overhead.cpu_milli, milli), false),
-            None => (kept.overhead.cpu_milli, kept.cpu_from_boot),
+    let cpus = guest.total.cpu_milli.div_ceil(1_000);
+    let kept_cpu = (kept.overhead.cpu_milli, kept.cpu_from_boot);
+    let ((cpu_milli, cpu_from_boot), start) = match (kept.start, reading) {
+        (Some(start), Some(now)) => match interval(start, now, cpus) {
+            Interval::Resolved(milli) if kept.cpu_from_boot => ((Some(milli), false), Some(now)),
+            Interval::Resolved(milli) => ((rise(kept.overhead.cpu_milli, milli), false), Some(now)),
+            Interval::Unresolved => (kept_cpu, Some(start)),
+            Interval::Broken => (kept_cpu, Some(now)),
         },
         (None, Some(now)) if kept.overhead.cpu_milli.is_none() => {
             let since_boot = share(now.cpu_ns.saturating_sub(now.boxes_cpu_ns), now.uptime_ns);
-            (since_boot, since_boot.is_some())
+            ((since_boot, since_boot.is_some()), Some(now))
         }
-        _ => (kept.overhead.cpu_milli, kept.cpu_from_boot),
+        (start, now) => (kept_cpu, now.or(start)),
     };
     Seen {
         overhead: hex_api::LearnedOverhead {
@@ -2253,7 +2285,7 @@ pub(super) fn guest_seen(kept: Seen, guest: &hex_api::Capacity, boxes: Boxes) ->
             mem_bytes: rise(kept.overhead.mem_bytes, memory),
             disk_bytes: rise(kept.overhead.disk_bytes, disk),
         },
-        last: reading.or(kept.last),
+        start,
         cpu_from_boot,
     }
 }

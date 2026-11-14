@@ -28,6 +28,10 @@ struct Ports {
 }
 
 impl Link for Ports {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let path = match port {
             stream::CONTROL_PORT => &self.control,
@@ -313,6 +317,10 @@ struct Held {
 }
 
 impl Link for Held {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port != stream::CONTROL_PORT {
             return hex_client::guest::own_duplex(UnixStream::connect(&self.stdio).unwrap());
@@ -661,6 +669,10 @@ struct LatePorts {
 }
 
 impl Link for LatePorts {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port == stream::CONTROL_PORT {
             return hex_client::guest::own_duplex(
@@ -2344,6 +2356,10 @@ impl Duplex for Muxed {
 struct MuxedPorts(PathBuf);
 
 impl Link for MuxedPorts {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         assert_eq!(port, hf::FILES_PORT);
         hex_client::guest::own_duplex(Muxed(UnixStream::connect(&self.0).unwrap()))
