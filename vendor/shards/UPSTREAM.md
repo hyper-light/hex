@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `ce80cbb37ee1183fae575511778f0ee29a5fe4f9` (main).
+Revision: `2737fc4ec561923e64f5be77612b4866ec6fc151` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -93,7 +93,13 @@ gone, a reader's most held by the host's memory, `shards_ipc::host_memory`), an 
 long as its owner says (30645fa69), the pause between looks learned where they run (2275e3829,
 `shards_abi::pace`, `shards_api::pause` its re-export) and its crates rustfmt-clean again (06388950f):
 at d91b5ce6b `crates/dns/src/lib.rs` was not, and Hex's `cargo fmt --all --check` holds its vendored
-crates to it, so Hex takes this revision rather than d91b5ce6b;
+crates to it, so Hex takes a later revision than d91b5ce6b; and past ce80cbb37, a run's stop
+returning released, as a boot's stop does (D231, c133bfb56: `ImageGuest::stop` returns once its end
+is told, its run host exited and reaped, and every process the host started, its VM, network and
+share processes, gone, their diagnostics closed; on Windows the host's group ended too, a failure
+there `ImageRefusal::Os`), so Hex's delete frees nothing a run still holds (the review's B-4), and the
+agent-control driver's waker and wake connected to each other, so the wake takes datagrams from the
+waker alone (b6727996c);
 a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its

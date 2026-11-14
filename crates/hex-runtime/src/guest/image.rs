@@ -1281,8 +1281,10 @@ impl ImageBoot {
         )
     }
 
-    /// Stops `guest` on a thread of its own: D231's stop returns once its run's end is told, its VM gone;
-    /// the guest goes with the thread, and its run host then exits on its own. Its answer is `seen`, the end its run
+    /// Stops `guest` on a thread of its own: D231's stop returns once its run is released (Shards 2737fc4ec): its end
+    /// told, its run host exited and reaped, and every process the host started, its VM, network and share processes,
+    /// gone, so a delete that follows it frees nothing the run still holds (the review's B-4); the guest goes with the
+    /// thread. Its answer is `seen`, the end its run
     /// reached on its own before the stop where one was seen ([`Self::settle_running`]'s, the stop then its host's
     /// reaping): shards-api's stop of a run host that exited without its run's end answers `Stopped`, where its end
     /// before was `Failed` in what the host said last. Else the end its stop leaves.
