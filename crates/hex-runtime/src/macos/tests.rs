@@ -991,3 +991,27 @@ fn a_process_box_bounded_where_macos_holds_no_bound_is_refused_typed() {
     drop((rootless, helped));
     drop(server);
 }
+
+/// Joint plan step 14 (D260; AC-T7.4.1): a process's life runs from its start, as `proc_pid_rusage` reads it, to now on
+/// the same clock. Do take this test process's start; note the time since this test began; read its life, then again;
+/// then read the life of a start past every now. Expect its life at least the time the test had run (the process began
+/// before it), no more than the machine has been up, never less on its second read; and the start past now refused,
+/// typed.
+#[test]
+fn w14_d260_a_process_life_runs_from_its_start_to_now_on_one_clock() {
+    let began = std::time::Instant::now();
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let started = super::sys::rusage(pid).unwrap().unwrap().started;
+    let ran = began.elapsed();
+    let life = super::process_life(started).unwrap();
+    assert!(life >= ran, "{life:?} against {ran:?}");
+    assert!(life <= super::sys::uptime_raw().unwrap(), "{life:?}");
+    assert!(super::process_life(started).unwrap() >= life);
+    assert!(matches!(
+        super::process_life(u64::MAX),
+        Err(Refusal::Invalid {
+            what: "a process's start",
+            ..
+        })
+    ));
+}

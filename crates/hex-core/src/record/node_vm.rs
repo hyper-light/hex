@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use hex_api::{Allocation, Exit, NodeRun, NodeVmPhase, Refusal};
+use hex_api::{Allocation, Exit, LearnedEnd, LearnedHolder, NodeRun, NodeVmPhase, Refusal};
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_RECORD_BYTES, RECORD_VERSION};
@@ -28,6 +28,16 @@ pub struct NodeVmRecord {
     /// Its run's end, once it has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
+    /// Why the charge learner's last resort ended or is ending its VM, written before its end (C5, intent first) and kept
+    /// across the node's restarts: a node VM is never a box, so its row is where its end is kept, and a node's start
+    /// reads it back into its learner's ends before it lets the row go (joint plan step 39).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resort: Option<LearnedEnd>,
+    /// Its place in its node's start order (C3), which its node's store gives it as its row is first written, so its
+    /// learner orders it among the host's VMs as it began: before every box its node makes after it boots. None in a
+    /// row a node wrote before it kept one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 fn damaged(why: &str) -> Refusal {
@@ -38,8 +48,8 @@ fn damaged(why: &str) -> Refusal {
 }
 
 impl NodeVmRecord {
-    /// A record whole: this format's version, an image named, its receipt whole, and an exit where and only where its
-    /// run ended. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
+    /// A record whole: this format's version, an image named, its receipt whole, an exit where and only where its run
+    /// ended, and a last-resort end of its own VM's alone. Its receipt is held to the VM it sizes ([`Allocation::vm_size`], within its cost profile's own bounds
     /// and units) and to booking no more than it charges: the node sized the VM, so no workload of a box's is kept
     /// for it to be rederived from.
     pub fn check(&self) -> Result<(), Refusal> {
@@ -56,6 +66,13 @@ impl NodeVmRecord {
             .is_some_and(|booked| !self.allocation.resources.holds(booked))
         {
             return Err(damaged("its receipt books past what it charges"));
+        }
+        if self
+            .last_resort
+            .as_ref()
+            .is_some_and(|end| end.id != LearnedHolder::Node(self.run))
+        {
+            return Err(damaged("its last-resort end names another holder"));
         }
         match (self.phase, self.exit.is_some()) {
             (NodeVmPhase::Ended, false) => Err(damaged("an ended run with no exit")),

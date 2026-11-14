@@ -338,3 +338,110 @@ fn w12_a_create_takes_its_reservation_as_shards_envelope_says_and_refuses_anothe
         .collect();
     assert_eq!(kept, vec!["kiln-r1-1".to_owned()]);
 }
+
+/// The placeholder kiln's broker gives a harness for its account's credential (Shards' D242): a visible marker, then 256
+/// random bits in hex.
+const PLACEHOLDER: &str =
+    "kiln-placeholder-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// An image VM whose harness `claude` is granted credential `anthropic/ada` toward its provider, which its egress reaches
+/// (joint plan step 33's example).
+fn credentialed(id: &str) -> BoxSpec {
+    use hex_api::{CredentialGrant, Destination, Grant, Member, MemberKind, Ports, Proto};
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    let mut spec = image_box(id);
+    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+        image.grants = vec![Grant::Egress {
+            member: claude.clone(),
+            to: Destination::Name("api.anthropic.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }];
+        image.credentials = vec![CredentialGrant {
+            member: claude,
+            reference: "anthropic/ada".to_owned(),
+            toward: vec!["api.anthropic.com".to_owned()],
+            placeholder: PLACEHOLDER.to_owned(),
+        }];
+    }
+    spec
+}
+
+/// AC-T7.7.2, joint plan step 33 (C3; Shards' D242; kiln's vendor patch 0005, taken upstream): an orchestrator linking
+/// hex-node gives its image runtime the lessors over its broker. Do: over a broker holding `anthropic/ada`, make a runtime
+/// with `ImageRuntime::new` and another with `ImageRuntime::leasing`, each over records of its own, and create a VM
+/// granting that credential in each; then, in a runtime built as `leasing` builds one but over the model's boot, create
+/// and start such a VM and lease the credential through the lessor its boot was given. Expect: `new`'s create refused
+/// `Unconfigured` before any record; `leasing`'s made, its record holding the grant; and the boot given the box's
+/// credential and a lessor whose lease is the broker's value, held there.
+#[test]
+fn w33_a_runtime_made_leasing_leases_its_vms_credentials_and_one_made_new_refuses_them() {
+    use hex_api::lease::sim::SimLessors;
+    let broker = SimLessors::new();
+    broker.hold("anthropic/ada", b"sk-ant-api03-real").unwrap();
+    let paths =
+        |dir: &Path| shards_api::RuntimePaths::new(dir.join("cache"), dir.join("home")).unwrap();
+
+    let plain = tempfile::tempdir().unwrap();
+    let unleased = ImageRuntime::new(
+        plain.path().join("shards"),
+        paths(plain.path()),
+        &plain.path().join("records"),
+    )
+    .unwrap();
+    assert!(matches!(
+        unleased.create(credentialed("kiln-r1-1")),
+        Err(Refusal::Unconfigured { what, .. }) if what.contains("credentials")
+    ));
+    assert!(Books::records(unleased.as_ref()).unwrap().is_empty());
+
+    let leased_dir = tempfile::tempdir().unwrap();
+    let leasing = ImageRuntime::leasing(
+        leased_dir.path().join("shards"),
+        paths(leased_dir.path()),
+        &leased_dir.path().join("records"),
+        Arc::new(broker.clone()),
+    )
+    .unwrap();
+    let spec = credentialed("kiln-r1-1");
+    let granted = match &spec.class {
+        ClassSpec::ShardsImage(image) => image.credentials.clone(),
+        other => panic!("an image VM's spec as {other:?}"),
+    };
+    let made = leasing.create(spec).unwrap().id;
+    assert_eq!(leasing.inspect(&made).unwrap().credentials, granted);
+
+    let booted = tempfile::tempdir().unwrap();
+    let model = Arc::new(Model::default());
+    let runtime = ImageRuntime::built(
+        booted.path().join("shards"),
+        paths(booted.path()),
+        &booted.path().join("records"),
+        Ok(Arc::clone(&model) as Arc<dyn Images>),
+        Ok(ImageWaits::new()),
+        Some(Arc::new(broker.clone())),
+    )
+    .unwrap();
+    let id = runtime.create(credentialed("kiln-r1-2")).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = model.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].credentials,
+        vec![shards_api::image::CredentialGrant {
+            reference: "anthropic/ada".to_owned(),
+            toward: vec!["api.anthropic.com".to_owned()],
+            placeholder: PLACEHOLDER.to_owned(),
+        }]
+    );
+    let lessor = asked[0].lessor.clone().expect("the boot's run lessor");
+    let leased = lessor.0.lease("anthropic/ada", None).unwrap();
+    assert_eq!(leased.value.0, b"sk-ant-api03-real");
+    assert!(broker.holds(&leased.lease).unwrap());
+}
