@@ -2476,8 +2476,13 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   bound), so a VM's boot alone, whose progress is continuous work at a scale its window sees, is judged so, by
   Shards' Part B. No time is picked and none is recorded.
 - **After a run-out**: a wait that ran out is no sample (Karn's point), and the tail it ran into is unknown, the cold
-  start's case: the next wait follows its party again (`Patience::ran_out`, which tells the census), its answer comes
-  in uncensored, and the bound rises to it.
+  start's case: the next wait follows its party again (`Patience::ran_out`), its answer comes in uncensored, and the
+  bound rises to it.
+- **Told** (the review's C-1, 2026-11-14): a run-out is told once, as W* passes, where a person sees it, in every
+  configuration: one structured line on the process's stderr, the node's log (`hex.wait event=ran_out wait=<name>
+  w_star_ns=<W*> waited_ns=<how long> party=<what it follows>`), and to the census where one runs. A party that stays
+  alive and never answers holds its wait, and that line says which wait, on what, and how long it had gone. Until then
+  a run-out reached the census alone, which a node installs only under `HEX_WAITS_CENSUS`.
   No factor: RFC 6298's back-off doubles by a cited number, and the following wait measures how long to wait instead.
   A host slower than any answer seen runs out once and is followed to its answer.
 - **The boundary: no per-host-class seed anywhere.** No production wait may read a record: not the waits census, not
@@ -2500,8 +2505,10 @@ and "citing a number doesn't count as derived; an estimator of what's seen does"
   2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
   the node busy initializing the guest's GPU with most of the boot's 60 s left, and the guest panicked; the relay's
   hello now carries the boot's deadline, `hex guest`.)
-- **Measuring**: every production wait is made `Patience::measuring` and follows its party until its first answer;
-  where the census runs, every wait follows (`patience::measure_all`), so the distribution it records keeps its tail.
+- **Measuring**: every production wait is made `Patience::measuring` and follows its party until its first answer.
+  The census disarms no wait (C-1: until 2026-11-14 installing it disarmed every one, `patience::measure_all`, so
+  under the census no wait ran out): a wait past its W* follows its party to its answer, which comes in uncensored,
+  so the distribution it records keeps its tail with every wait armed.
 
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded). Its back-off's factor
