@@ -3868,3 +3868,54 @@ fn measure_a_windows_record_reads() {
         eprintln!("WINDOW-READS records={n} all: {all}; all_node_vms: {rows}");
     }
 }
+
+/// The review's per-window reads, step 2 (batch 1114d's reads2; AC-T7.4.1): a charge window's reads of its node's records
+/// read no file, its node's store being their only writer. Do, at 10, 100 and 1000 of each: leave image VMs' records and
+/// Ended node VM rows as a node leaves them; open the store as the next node does; then read as a window does (every
+/// record and every row), as a VM's guest time does (each record by its id) and as a capacity answer's receipts do (each
+/// row by its run). Expect no record or row file read once the store is open.
+#[test]
+fn reads2_a_windows_reads_read_no_record_file_at_10_100_and_1000() {
+    for n in [10_usize, 100, 1000] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, run) = (dir.path().join("state"), dir.path().join("run"));
+        let ids: Vec<BoxId> = (0..n)
+            .map(|i| BoxId::new(&format!("img-{i}")).unwrap())
+            .collect();
+        {
+            let store = Store::open(&state, &run).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                store
+                    .put(&image_vm(id.as_str(), u64::try_from(i).unwrap()))
+                    .unwrap();
+            }
+        }
+        let rows = state.join(".node-vms");
+        std::fs::create_dir_all(&rows).unwrap();
+        let runs: Vec<hex_api::NodeRun> = (0..n)
+            .map(|i| {
+                let mut run = [0u8; 16];
+                run[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+                let row = hex_core::record::NodeVmRecord {
+                    run: hex_api::NodeRun::from_bytes(run),
+                    ..node_row(0, hex_api::NodeVmPhase::Ended)
+                };
+                let name: String = run.iter().map(|byte| format!("{byte:02x}")).collect();
+                std::fs::write(rows.join(format!("{name}.json")), row.encode().unwrap()).unwrap();
+                row.run
+            })
+            .collect();
+        let store = Store::open(&state, &run).unwrap();
+        let opened = store.reads();
+        assert_eq!(store.all().unwrap().len(), n);
+        assert_eq!(store.all_node_vms().unwrap().len(), n);
+        for id in &ids {
+            assert!(matches!(store.get(id).unwrap(), Some(Ok(_))));
+        }
+        for run in &runs {
+            assert!(store.node_vm(run).unwrap().is_some());
+        }
+        let read = store.reads() - opened;
+        assert_eq!(read, 0, "at {n} records and rows, a window's reads read {read} files");
+    }
+}

@@ -353,8 +353,8 @@ fn poisoned() -> Refusal {
     Refusal::Broken("the node VM owners' lock is poisoned".to_owned())
 }
 
-fn read_row(file: File, run: &NodeRun) -> Result<NodeVmRecord, Refusal> {
-    let record = NodeVmRecord::decode(&super::read_record_bytes(file)?)?;
+fn read_row(bytes: &[u8], run: &NodeRun) -> Result<NodeVmRecord, Refusal> {
+    let record = NodeVmRecord::decode(bytes)?;
     if record.run != *run {
         return Err(damaged("its row names another run"));
     }
@@ -470,7 +470,7 @@ impl Store {
     pub(crate) fn node_vm(&self, run: &NodeRun) -> Result<Option<NodeVmRecord>, Refusal> {
         let (_, path) = scoped_paths(&self.node_vm_directory(), &name(run)?)?;
         match File::open(path) {
-            Ok(file) => read_row(file, run).map(Some),
+            Ok(file) => read_row(&self.read_bytes(file)?, run).map(Some),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Refusal::os("opening a node VM's record", e)),
         }
@@ -502,7 +502,7 @@ impl Store {
             };
             let file = File::open(entry.path())
                 .map_err(|e| Refusal::os("opening a node VM's record", e))?;
-            let record = read_row(file, &run)?;
+            let record = read_row(&self.read_bytes(file)?, &run)?;
             records.try_reserve(1).map_err(|_| allocation(bound))?;
             records.push(record);
         }

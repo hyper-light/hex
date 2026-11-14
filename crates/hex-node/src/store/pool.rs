@@ -112,9 +112,8 @@ fn pool_from_name(name: &std::ffi::OsStr) -> Option<[u8; 32]> {
     Some(pool)
 }
 
-fn read_pool_file(file: File, pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
-    let bytes = super::read_record_bytes(file)?;
-    let record = PoolRecord::decode(&bytes)?;
+fn read_pool_file(bytes: &[u8], pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
+    let record = PoolRecord::decode(bytes)?;
     if record.key.pool != *pool {
         return Err(refused(record.key, "its pool file names another pool"));
     }
@@ -390,7 +389,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(Refusal::os("opening a native backing record", error)),
         };
-        read_pool_file(file, pool).map(Some)
+        read_pool_file(&self.read_bytes(file)?, pool).map(Some)
     }
 
     /// Same canonical source/generation/profile and sole consuming reference, never a fresh
@@ -577,7 +576,7 @@ impl Store {
             )?;
             let file = File::open(path)
                 .map_err(|error| Refusal::os("opening a retained native backing record", error))?;
-            let record = read_pool_file(file, &pool)?;
+            let record = read_pool_file(&self.read_bytes(file)?, &pool)?;
             records.try_reserve(1).map_err(|_| allocation(bound))?;
             records.push(record);
         }

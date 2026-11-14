@@ -198,6 +198,8 @@ struct Synced {
     pool_preparation: RwLock<()>,
     files: AtomicU64,
     dirs: AtomicU64,
+    /// Record files read: box records, node VM rows and pool rows.
+    reads: AtomicU64,
 }
 
 /// The fsyncs a store has made since it opened: of record files and of its directory, one of each per
@@ -346,6 +348,18 @@ impl Store {
             files: self.synced.files.load(Ordering::Relaxed),
             dirs: self.synced.dirs.load(Ordering::Relaxed),
         }
+    }
+
+    /// The record files the store has read since it opened, box records, node VM rows and pool rows alike: a
+    /// non-vacuity counter (CLAUDE.md §6) for the tests of what a read costs (the review's per-window reads).
+    pub fn reads(&self) -> u64 {
+        self.synced.reads.load(Ordering::Relaxed)
+    }
+
+    /// `file`, a record file, read by the one bounded reader, and counted ([`Store::reads`]).
+    fn read_bytes(&self, file: File) -> Result<Vec<u8>, Refusal> {
+        self.synced.reads.fetch_add(1, Ordering::Relaxed);
+        read_record_bytes(file)
     }
 
     /// Writes `record` whole, in its place: either the old file or the new one survives a crash of
@@ -798,7 +812,7 @@ impl Store {
     pub fn get(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
         for file in self.files(id) {
             match File::open(file) {
-                Ok(file) => return Ok(Some(BoxRecord::decode(&read_record_bytes(file)?))),
+                Ok(file) => return Ok(Some(BoxRecord::decode(&self.read_bytes(file)?))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Refusal::os("opening a record", e)),
             }
@@ -993,11 +1007,11 @@ impl Store {
                 let bytes = if retained {
                     let file = File::open(&path)
                         .map_err(|error| Refusal::os("opening a retained record", error))?;
-                    Ok(read_record_bytes(file)?)
+                    Ok(self.read_bytes(file)?)
                 } else {
                     File::open(&path)
                         .map_err(|error| Refusal::os("opening a record", error))
-                        .and_then(read_record_bytes)
+                        .and_then(|file| self.read_bytes(file))
                 };
                 let record = match bytes {
                     Ok(bytes) => BoxRecord::decode(&bytes),
@@ -2338,5 +2352,104 @@ mod tests {
         assert_eq!(places(&store), [Some(1), Some(2), Some(3)]);
         store.begin(&vm_record("vm-d")).unwrap();
         assert_eq!(started(&store, "vm-d"), Some(4));
+    }
+
+    /// One line of [`store_open_role`]'s: what a store's open over its directory said, in another process.
+    const ROLE_SAID: &str = "HEX_STORE_ROLE ";
+
+    /// Opens a store over `dir` in another process, this test binary run as [`store_open_role`], and says what its open
+    /// answered: `opened`, or `refused: ` and why.
+    fn store_opened_elsewhere(dir: &Path) -> String {
+        let full = concat!(module_path!(), "::", "store_open_role");
+        let test = full.split_once("::").map_or(full, |(_, test)| test);
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env("HEX_STORE_ROLE_DIR", dir)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+        String::from_utf8(ran.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix(ROLE_SAID).map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// [`store_opened_elsewhere`]'s other process, run alone where `HEX_STORE_ROLE_DIR` names a directory (an ordinary
+    /// run passes at once): it opens a store over that directory, says what the open answered, and ends.
+    #[test]
+    fn store_open_role() {
+        let Some(dir) = std::env::var_os("HEX_STORE_ROLE_DIR") else {
+            return;
+        };
+        let said = match Store::open(&Path::new(&dir).join("state"), &Path::new(&dir).join("run")) {
+            Ok(_) => "opened".to_owned(),
+            Err(why) => format!("refused: {why}"),
+        };
+        println!("{ROLE_SAID}{said}");
+    }
+
+    /// The review's per-window reads, step 2 (batch 1114d's reads2; AC-T7.4.1): a store is its directory's one writer,
+    /// so the records it holds in memory are its directory's. Do open a store over a directory; open another over the
+    /// same one in this process, and in another process; then let the first go and open one in each again. Expect each
+    /// open refused while the first is open, naming the directory, and each to open once the first is let go.
+    #[test]
+    fn reads2_a_second_store_over_one_directory_is_refused_until_the_first_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let first = store_in(dir.path());
+        let again = Store::open(&state, &dir.path().join("run"));
+        assert!(
+            matches!(&again, Err(Refusal::Broken(why)) if why.contains(&state.display().to_string())),
+            "a second store in this process: {again:?}"
+        );
+        let elsewhere = store_opened_elsewhere(dir.path());
+        assert!(
+            elsewhere.starts_with("refused: ") && elsewhere.contains(&state.display().to_string()),
+            "a second store in another process: {elsewhere}"
+        );
+        drop(again);
+        drop(first);
+        assert_eq!(store_opened_elsewhere(dir.path()), "opened");
+        drop(store_in(dir.path()));
+    }
+
+    /// The review's side finding on the boot session marker (batch 1114d's reads2; AC-T7.4.1): the marker is read no
+    /// further than its bound, whatever its file holds. Do make the marker a pipe whose writer offers 1 MiB, then take it
+    /// as a node's start does. Expect it taken as no marker, and its writer cut off before the reader took all it offered.
+    #[cfg(unix)]
+    #[test]
+    fn reads2_the_boot_marker_is_read_no_further_than_its_bound() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let marker = dir.path().join("state").join(BOOT_MARKER);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&marker)
+            .status()
+            .unwrap();
+        assert!(made.success(), "{made}");
+        let offered = 1 << 20;
+        let writer = {
+            let marker = marker.clone();
+            std::thread::spawn(move || {
+                let mut pipe = fs::OpenOptions::new().write(true).open(&marker).unwrap();
+                let chunk = [b'0'; 4096];
+                let mut written = 0usize;
+                while written < offered {
+                    match pipe.write(&chunk) {
+                        Ok(n) => written += n,
+                        Err(_) => break,
+                    }
+                }
+                written
+            })
+        };
+        assert_eq!(store.take_boot_marker().unwrap(), None);
+        let written = writer.join().unwrap();
+        assert!(
+            written < offered,
+            "the marker's read took all {written} bytes its writer offered"
+        );
     }
 }

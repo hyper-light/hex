@@ -109,6 +109,12 @@ impl ImageRuntime {
     pub fn class(&self) -> &ImageClass {
         &self.class
     }
+
+    /// Whether box `id`'s turn is free now, held by no transaction: what the tests of the runtime's turns read.
+    #[cfg(test)]
+    fn turn_free(&self, _: &BoxId) -> bool {
+        self.turn.try_lock().is_ok()
+    }
 }
 
 /// The recovery a node runs over its records (`Recorded::recover`; T-T7.1.2), as an image runtime opens its own (the

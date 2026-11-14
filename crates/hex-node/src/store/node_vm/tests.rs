@@ -699,3 +699,25 @@ fn c12_a_starts_settle_removes_the_strays_a_crash_left() {
     assert_eq!(store.settle_node_vms().unwrap().rows, []);
     assert!(!held.exists(), "an ended holder's lock file left");
 }
+
+/// The review's side finding on node VM rows (batch 1114d's reads2; AC-T7.4.1): a run's first row is counted against the
+/// rows' bound without reading any row, so writing N rows costs no row read, never N². Do write 100 node VM rows, each a
+/// new run's, Ended. Expect no row file read by those writes.
+#[test]
+fn reads2_a_runs_first_row_is_counted_without_reading_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let before = store.reads();
+    for i in 0..100_u64 {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&i.to_le_bytes());
+        store
+            .put_node_vm(&NodeVmRecord {
+                run: NodeRun::from_bytes(bytes),
+                ..record(0, NodeVmPhase::Ended)
+            })
+            .unwrap();
+    }
+    let read = store.reads() - before;
+    assert_eq!(read, 0, "writing 100 rows read {read} row files");
+}
