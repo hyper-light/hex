@@ -59,6 +59,7 @@ fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
             None
         },
         last_resort: None,
+        started: None,
     }
 }
 
@@ -447,4 +448,26 @@ fn w39_a_nodes_start_reads_back_each_let_go_rows_last_resort_end() {
     );
     assert_eq!(settled.ends, [end_of(&run(4)), end_of(&run(5))]);
     assert!(store.all_node_vms().unwrap().is_empty());
+}
+
+/// Joint plan step 39, place 3 (ROOT, 2026-11-13: a node VM's start place is its real start order among the host's
+/// holders): do write node VM 7's row Booting, then Ready; then reopen the store as a restarted node does. Expect its row
+/// to hold a place in the node's start order from its first write, the same place after its Ready write, and the next
+/// place given past it, before and after the reopening.
+#[test]
+fn w39_a_node_vm_rows_place_in_its_nodes_start_order_is_given_at_its_first_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    store.put_node_vm(&record(7, NodeVmPhase::Booting)).unwrap();
+    let place = store.node_vm(&run(7)).unwrap().unwrap().started;
+    assert!(place.is_some(), "no place given at its first write");
+    store.put_node_vm(&record(7, NodeVmPhase::Ready)).unwrap();
+    assert_eq!(store.node_vm(&run(7)).unwrap().unwrap().started, place);
+    assert!(Some(store.next_start().unwrap()) > place);
+    drop(store);
+    let reopened = store_in(dir.path());
+    assert!(
+        Some(reopened.next_start().unwrap()) > place,
+        "the order runs on past the node VM's place"
+    );
 }

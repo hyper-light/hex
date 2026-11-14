@@ -50,6 +50,15 @@ pub struct RecoverySummary {
     pub node_vm_ends: crate::store::NodeVmEnds,
 }
 
+/// Why a native owner that runs no node VM refuses `call` about node VM `run` (joint plan step 39).
+fn no_node_vm(run: hex_api::NodeRun, call: &str) -> Refusal {
+    let name: String = run.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+    Refusal::Invalid {
+        what: "node VM",
+        why: format!("run {name}: this native owner runs no node VM, so it has no {call} of one"),
+    }
+}
+
 /// Why recovery keeps a Shards image box's record and claim: its run is an earlier node process's, which
 /// Shards' image boot can neither take back nor prove ended (docs/design/shards-image-class.md §5).
 pub(crate) const IMAGE_HELD: &str = "a Shards image VM's run of an earlier node process: Shards' image \
@@ -288,6 +297,35 @@ pub trait Recover: Runtime {
                 record.spec.id
             ),
         })
+    }
+
+    /// Joint plan step 39 (place 3): what node VM `run` costs its host, its run's microVM part (D241), read as an image
+    /// VM's is. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<hex_api::HostUse, Refusal> {
+        Err(no_node_vm(run, "host_use"))
+    }
+
+    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D191, D247), its run's own
+    /// as its run host said it as the run started. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<std::time::Duration, Refusal> {
+        Err(no_node_vm(run, "rate_period"))
+    }
+
+    /// Joint plan step 39 (place 3): holds node VM `run`'s vCPUs together to `rate` milli-CPU through its run's rate
+    /// (D247), as an image VM's are held. Refused, typed, by a native owner that runs no node VM.
+    fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(no_node_vm(run, "rate"))
+    }
+
+    /// Joint plan step 39 (place 3): stops node VM `run`'s run, the charge learner's last resort (C5), its end kept in
+    /// its row. Refused, typed, by a native owner that runs no node VM.
+    fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
+        Err(no_node_vm(run, "stop"))
     }
 
     /// Joint plan step 14 (D255): asks the governor of managed VM `record` to hold its vCPUs to `rate` milli-CPU, through
@@ -2206,12 +2244,16 @@ struct Managed<'a, R> {
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
     fn usage(&self, holder: charges::Holder<'_>) -> Result<Usage, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         self.runtime.managed_usage(NativeRecord::Box(record))
     }
 
     fn host_use(&self, holder: charges::Holder<'_>) -> Result<hex_api::HostUse, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         self.runtime.host_use(&record.spec.id)
     }
 
@@ -2219,7 +2261,9 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         &self,
         holder: charges::Holder<'_>,
     ) -> Result<Option<std::time::Duration>, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         if charges::running_image(record) {
             return self.runtime.image_rate_period(record).map(Some);
         }
@@ -2235,7 +2279,9 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         holder: charges::Holder<'_>,
         rate: u64,
     ) -> Result<hex_api::RateHeld, Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         if charges::running_image(record) {
             return self
                 .runtime
@@ -2258,12 +2304,16 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
     }
 
     fn set_room(&self, holder: charges::Holder<'_>, room: i64) -> Result<(), Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         self.runtime.room(&record.spec.id, Some(room)).map(|_| ())
     }
 
     fn stop(&self, holder: charges::Holder<'_>) -> Result<(), Refusal> {
-        let charges::Holder::Box(record) = holder;
+        let charges::Holder::Box(record) = holder else {
+            return Err(broken("the charge learner holds no node VM yet"));
+        };
         if charges::running_image(record) {
             return self.runtime.signal(&record.spec.id, Signal::KILL);
         }
