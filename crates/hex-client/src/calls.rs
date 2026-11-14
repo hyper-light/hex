@@ -3222,6 +3222,31 @@ impl<T: Transport> Runtime for Core<T> {
         })
     }
 
+    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no host use, so a delete here
+    /// can't answer its VM's final use, and the trait's plain delete answering none would read as a run that never
+    /// started, which kiln charges nothing for.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "delete_with_host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet, so a delete can't answer its VM's final use; \
+                 delete it with delete, or in the node's own process"
+            ),
+        })
+    }
+
+    /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no call that follows a box's
+    /// start to its end, and the trait's inspect at once would answer a box still booting as made only.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        Err(Refusal::Invalid {
+            what: "started",
+            why: format!(
+                "box {id}: the node's wire carries no call that follows a start to its end yet; a box's start is \
+                 followed in the node's own process"
+            ),
+        })
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         match self.plain(Call::Usage(id.clone()))? {
             Answer::Usage(usage) => Ok(usage),

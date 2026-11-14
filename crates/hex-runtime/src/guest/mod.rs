@@ -2258,6 +2258,12 @@ impl<P: Runtime> Runtime for WithGuest<P> {
         self.holder(id)?.inspect(id)
     }
 
+    /// The runtime holding the box answers it, as it answers `host_use` (the review's B-6): an image VM's start
+    /// followed to its end, never the trait's inspect at once.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.holder(id)?.started(id)
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         self.holder(id)?.usage(id)
     }
@@ -2270,6 +2276,12 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         self.holder(id)?.delete(id)
+    }
+
+    /// The runtime holding the box deletes it and answers its VM's final use (the review's B-6), never the trait's
+    /// plain delete answering none, read as a run that never started.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        self.holder(id)?.delete_with_host_use(id)
     }
 }
 

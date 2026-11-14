@@ -2961,6 +2961,12 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.counted(self.runtime_at(id)?.inspect(id)?)
     }
 
+    /// The box's runtime answers it, counted as its inspect is (the review's B-6): an image VM's start followed to its
+    /// end, never the trait's inspect at once.
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.counted(self.runtime_at(id)?.started(id)?)
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         self.runtime_at(id)?.usage(id)
     }
@@ -2996,15 +3002,35 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// Records the box as being deleted, deletes it, then removes its record: a crash between leaves a
     /// record recovery finishes.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.delete_by(id, |runtime| runtime.delete(id), ())
+    }
+
+    /// Deletes the box as [`Runtime::delete`] does here, its runtime answering its VM's final use (the review's B-6),
+    /// never the trait's plain delete answering none, read as a run that never started; none where its runtime held no
+    /// such box while its record named devices, as the delete finds it gone then.
+    fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
+        self.delete_by(id, |runtime| runtime.delete_with_host_use(id), None)
+    }
+}
+
+impl<R: Recover> Recorded<R> {
+    /// [`Runtime::delete`]'s course, the box's runtime deleting it through `delete`, its answer this call's: `gone`
+    /// where that runtime held no such box while its record named devices.
+    fn delete_by<T>(
+        &self,
+        id: &BoxId,
+        delete: impl FnOnce(&dyn Runtime) -> Result<T, Refusal>,
+        gone: T,
+    ) -> Result<T, Refusal> {
         if let Some(record) = self.books.store.read_lifecycle(id)?
             && self.runtime.owns_records(&record.spec)?
         {
-            self.runtime.runtime_for(&record.spec)?.delete(id)?;
+            let answer = delete(self.runtime.runtime_for(&record.spec)?)?;
             self.books.abandoned.forget(id);
             if let Ok(mut adopted) = self.books.adopted.lock() {
                 adopted.remove(id);
             }
-            return Ok(());
+            return Ok(answer);
         }
         let _lifecycle = self.method_turn(id)?;
         let mut devices = false;
@@ -3013,17 +3039,17 @@ impl<R: Recover> Runtime for Recorded<R> {
             record.phase = Phase::Deleting;
             self.books.store.put(&record)?;
         }
-        match self.runtime_at(id)?.delete(id) {
-            Ok(()) => {}
-            Err(Refusal::NoSuchBox(_)) if devices => {}
+        let answer = match delete(self.runtime_at(id)?) {
+            Ok(answer) => answer,
+            Err(Refusal::NoSuchBox(_)) if devices => gone,
             Err(why) => return Err(why),
-        }
+        };
         self.books.store.remove(id)?;
         self.books.abandoned.forget(id);
         if let Ok(mut adopted) = self.books.adopted.lock() {
             adopted.remove(id);
         }
-        Ok(())
+        Ok(answer)
     }
 }
 
@@ -3969,6 +3995,9 @@ mod route_projection_tests;
 
 #[cfg(test)]
 mod shared_outer_original_tests;
+
+#[cfg(test)]
+mod answers_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod macos_unsubmitted_tests {

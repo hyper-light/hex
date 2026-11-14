@@ -144,8 +144,11 @@ pub trait Runtime: Send + Sync {
     /// whose boxes run no VM process of their own, naming the class.
     /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run, read as its
     /// run ended (goal 54's change 3: a Shards image VM's final [`HostUse`], its window the whole run): `None` where the
-    /// box has no VM process of its own, or where none could be read at its end (its run had ended before its delete, or
-    /// its last read failed). A box already gone is refused `NoSuchBox`, never answered with a use made up.
+    /// box has no VM process of its own or its run never started (docs/design/shards-image-class.md §3: kiln charges
+    /// nothing then). A run that started answers its use or is refused, typed, the box left as it was (the review's
+    /// B-5): its read's own refusal where that read is refused, and [`Refusal::NotRunning`] where its run had ended, or
+    /// was being stopped, before its delete, a run's use being read only as it runs. A box already gone is refused
+    /// `NoSuchBox`, never answered with a use made up.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
         self.delete(id).map(|()| None)
     }
