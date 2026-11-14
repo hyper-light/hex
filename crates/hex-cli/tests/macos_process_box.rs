@@ -49,11 +49,6 @@ fn life(p: &mut dyn hex_api::Proc) -> Party {
         Ok(Some(_)) | Err(_) => Party::Ended,
     }
 }
-/// How long the exec-to-exit measurement waits on one sample: twice (x 2) the slowest sample recorded, the
-/// hog's 465.469 ms (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt). A sample past it
-/// prints `None`, recorded as slower than every earlier run, never waited out (the lead's call #4, 2026-11-06).
-const SAMPLE_GUARD: Duration = Duration::from_micros(2 * 465_469);
-
 struct BinFixture {
     exe: String,
 }
@@ -474,13 +469,16 @@ fn hex_rt_6_one_process_tree_reports_its_bound_and_deletes() {
     deleted.expect("delete");
 }
 
-/// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1): do 60 programs killed at their box's bound, one after another, expect each wait
-/// to return when the program ends, its end the bound's kill. XNU posts a child's `NOTE_EXIT` before it is a zombie
-/// (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664), so a reap made on the event can find nothing
-/// yet; the native bench saw 3 of 60 such ends reported 60 s late (bench/native/RESULT.md). A wait now follows its
-/// program by its own events until its end (decision 9), so such a missed end leaves it waiting for an event that
-/// won't come: the test doesn't return, its own deadline the gate's. Sixty runs, from that measured rate: without the
-/// fix 3/60, 7/60 and 3/60 missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
+/// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1; the review's E-5): do 60 programs killed at their box's bound, one after another,
+/// expect each end seen on its own exit, never late, and each the bound's kill. XNU posts a child's `NOTE_EXIT` before
+/// it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664), so a reap made on the event can
+/// find nothing yet; the native bench saw 3 of 60 such ends reported 60 s late (bench/native/RESULT.md). Such an end
+/// is seen only on a later wakeup (its wait's slice, or another child's SIGCHLD), which the box counts
+/// (`Status::late_ends`), a fact and not a clock: the count is 0 over the runs, and each end's sighting after its exit
+/// (from the exit's own time on its zombie) is the test's trace. Sixty runs, from the rate measured then: without the
+/// fix 3/60, 7/60 and 3/60 missed, at least 5%, so sixty runs saw none with probability at most 0.95^60 = 4.6%. With
+/// the fix undone on 2026-11-14 (this laptop, e30189ea, a scratch mutation), 1 of 120 ends was late: one run of sixty
+/// caught it, the next didn't.
 #[test]
 fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let rt = runtime();
@@ -504,23 +502,33 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     const RUNS: usize = 60;
     // A refused exec's SIGKILL is no bound's end (bound_end): each end must be the bound's kill.
     let mut other = Vec::new();
+    let mut after_exit = Vec::with_capacity(RUNS);
     for i in 0..RUNS {
-        if let Err(why) = bound_end(&rt, &id, fx.act(&Act::Hog(GIB))) {
-            other.push((i, why));
+        match bound_end(&rt, &id, fx.act(&Act::Hog(GIB))) {
+            Ok(seen) => after_exit.push(seen),
+            Err(why) => other.push((i, why)),
         }
     }
+    let status = rt.status(&id).expect("status");
     rt.delete(&id).expect("delete");
+    println!("SEEN_AFTER_EXIT {after_exit:?}");
     assert!(
         other.is_empty(),
         "ends that weren't the bound's kill: {other:?}"
     );
+    assert_eq!(
+        status.late_ends, 0,
+        "ends seen only on a later wakeup, their exit event's reap having found nothing; each end seen after its exit: \
+         {after_exit:?}"
+    );
 }
 
-/// Ada's rule (2026-11-06): the waits in this file are 2 x the measured exec-to-exit of what each waits on,
-/// not picked budgets. This measures them, on this Mac, through the class's own path: 30 of each of a program
-/// that exits at once, a hog ended at its 256 MiB bound, a waiting program ended by TERM, and the shell that
-/// prints its limits; each line is one exec-to-exit in seconds. Ignored: a measurement, not a check; its
-/// output is the record (bench/native/macos/records/execexit-*.txt).
+/// The exec-to-exit of what this file's tests run, on this Mac, through the class's own path: 30 of each of a program
+/// that exits at once, a hog ended at its 256 MiB bound, a waiting program ended by TERM, and the shell that prints its
+/// limits; each line is one exec-to-exit in seconds, each sample followed to its end (decision 9: a sample is the
+/// quantity it measures, so none is cut at a time; it was cut at twice the slowest recorded, a picked multiple, and
+/// printed `None` past it). Ignored: a measurement, not a check; its output is the record
+/// (bench/native/macos/records/execexit-*.txt), evidence alone, since the file's waits follow their programs.
 #[test]
 #[ignore = "a measurement; run by hand and recorded in bench/native/macos/records"]
 fn measure_exec_to_exit() {
@@ -555,7 +563,7 @@ fn measure_exec_to_exit() {
             if term {
                 rt.signal(&id, Signal::TERM).expect("signal TERM");
             }
-            let exit = p.wait_for(SAMPLE_GUARD).expect("wait");
+            let exit = conformance::end_of(&mut *p).expect("a sample's end, followed to it");
             println!("EXEC_EXIT {what} {:.6} {exit:?}", t.elapsed().as_secs_f64());
         }
     }
@@ -999,7 +1007,10 @@ fn a_box_runs_at_the_qos_its_declared_weight_asks() {
 }
 
 /// The lead's call (2026-11-06): what a CPU-bound member gets, on a machine whose every core is busy with
-/// unclamped programs, in a box of the default weight: the CPU it was given over 2 s, in cores. Ignored: a
+/// unclamped programs, in a box of the default weight, in cores, beside what each of those programs gets. Its
+/// window follows what it measures (ROOT, 2026-11-14: no picked window, no multiple): it runs until the member and
+/// every load program have each risen in CPU since it opened, one scheduling round, the least that holds every
+/// share, read at the reads' own cadence, whose count and spacing it prints. It was 2 s, picked. Ignored: a
 /// measurement, run by hand before and after the clamp follows the declared weight.
 #[test]
 #[ignore = "a measurement; run by hand and recorded in bench/native/macos/records"]
@@ -1030,10 +1041,28 @@ fn measure_a_cpu_bound_members_work_rate() {
     let mut p = rt
         .exec(&id, Program::of(&["/usr/bin/yes"]), Stdio::null())
         .expect("exec yes");
-    let c0 = rt.usage(&id).expect("usage").cpu_usec;
+    let tb = hex_runtime::macos::sys::Timebase::get().expect("Mach absolute time's units");
+    // A load program's CPU so far, in nanoseconds (its rusage is Mach absolute time).
+    let load_cpu = |pid: u32| {
+        i32::try_from(pid)
+            .ok()
+            .and_then(|pid| hex_runtime::macos::sys::rusage(pid).ok().flatten())
+            .map_or(0, |r| tb.nanos(r.cpu))
+    };
+    let pids: Vec<u32> = load.iter().map(std::process::Child::id).collect();
+    let member0 = rt.usage(&id).expect("usage").cpu_usec;
+    let load0: Vec<u64> = pids.iter().map(|pid| load_cpu(*pid)).collect();
     let t0 = Instant::now();
-    std::thread::park_timeout(Duration::from_secs(2));
-    let used = rt.usage(&id).expect("usage").cpu_usec.saturating_sub(c0);
+    let mut reads = 0u64;
+    let (member, loads) = loop {
+        reads += 1;
+        let member = rt.usage(&id).expect("usage").cpu_usec;
+        let loads: Vec<u64> = pids.iter().map(|pid| load_cpu(*pid)).collect();
+        if member > member0 && loads.iter().zip(&load0).all(|(now, then)| now > then) {
+            break (member, loads);
+        }
+        std::thread::yield_now();
+    };
     let secs = t0.elapsed().as_secs_f64();
     rt.delete(&id).expect("delete");
     let _ = conformance::end_of(&mut *p);
@@ -1041,17 +1070,22 @@ fn measure_a_cpu_bound_members_work_rate() {
         let _ = l.kill();
         let _ = l.wait();
     }
+    let load_ns: u64 = loads.iter().zip(&load0).map(|(now, then)| now - then).sum();
     println!(
-        "CPU_BOUND cores={cores} member_cores={:.3}",
-        used as f64 / 1e6 / secs
+        "CPU_BOUND cores={cores} member_cores={:.3} load_cores_each={:.3} window_s={secs:.6} reads={reads} \
+         read_every_s={:.6}",
+        (member - member0) as f64 / 1e6 / secs,
+        load_ns as f64 / 1e9 / secs / pids.len() as f64,
+        secs / reads as f64
     );
 }
 
-/// Starts `program` in box `id` and follows it to its end ([`conformance::end_of`]); returns how long it took when its
-/// end was the box's bound's kill: a signal, with the box's memory kills risen by one. Anything else (a program
-/// that ended on its own, or one killed by another hand, as the kernel's AppleSystemPolicy kills a refused
-/// exec with SIGKILL before it runs) is an error saying so, so a refused spawn can't pass for a bound's kill.
-fn bound_end(rt: &MacRuntime, id: &BoxId, program: Program) -> Result<Duration, String> {
+/// Starts `program` in box `id` and follows it to its end ([`conformance::end_of`]); returns how long after its exit
+/// its end was seen (the box's `last_seen_after_exit`, from the exit's own time on its zombie) when its end was the
+/// box's bound's kill: a signal, with the box's memory kills risen by one. Anything else (a program that ended on its
+/// own, or one killed by another hand, as the kernel's AppleSystemPolicy kills a refused exec with SIGKILL before it
+/// runs) is an error saying so, so a refused spawn can't pass for a bound's kill.
+fn bound_end(rt: &MacRuntime, id: &BoxId, program: Program) -> Result<Option<Duration>, String> {
     let kills = |rt: &MacRuntime| {
         rt.usage(id)
             .map(|u| u.oom_kills)
@@ -1066,7 +1100,10 @@ fn bound_end(rt: &MacRuntime, id: &BoxId, program: Program) -> Result<Duration, 
     let took = t.elapsed();
     let after = kills(rt)?;
     match exit {
-        Exit::Signal(_) if after == before + 1 => Ok(took),
+        Exit::Signal(_) if after == before + 1 => rt
+            .status(id)
+            .map(|status| status.last_seen_after_exit)
+            .map_err(|e| format!("status: {e}")),
         other => {
             let pid = i32::try_from(p.pid()).map_err(|_| "pid past i32".to_owned())?;
             let run = hex_runtime::macos::sys::run_state(pid);
