@@ -4011,3 +4011,102 @@ fn s33_a_harness_vms_sign_in_reaches_its_boot_beside_its_lessor() {
     }
     runtime.delete(&id).unwrap();
 }
+
+/// V2 (ROOT, 2026-11-13: when the inner node refuses what the host-side pool admitted, tell it, with both numbers): a
+/// node VM's guest refusing room for a box its host's pool admitted is told with the pool's numbers beside the guest's
+/// own, never as the guest's words alone. Do tell a guest's Full and Exhausted refusals, its pool holding 1.5 CPUs and
+/// 3 GiB, 2 CPUs and 4 GiB booked with the box, the guest saying 1 CPU and 2 GiB free; then one of a guest whose free
+/// room can't be read. Expect each refusal typed Invalid, naming the pool's room, what it booked and the guest's free
+/// room, and the guest's own words; and the unread room said so.
+#[test]
+fn v2_a_node_vms_guest_refusing_what_its_hosts_pool_admitted_is_told_with_both_numbers() {
+    let gib = 1u64 << 30;
+    let pool = CapacityResources {
+        cpu_milli: 1_500,
+        mem_bytes: 3 * gib,
+        disk_bytes: 0,
+    };
+    let booked = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 4 * gib,
+        disk_bytes: 0,
+    };
+    let free = CapacityResources {
+        cpu_milli: 1_000,
+        mem_bytes: 2 * gib,
+        disk_bytes: 0,
+    };
+    for refusal in [
+        Refusal::Full(7),
+        Refusal::Exhausted {
+            what: "boxes",
+            bound: 7,
+        },
+    ] {
+        let words = refusal.to_string();
+        let told = GuestRuntime::guest_room_refusal(refusal, pool, booked, Some(free));
+        let Refusal::Invalid { why, .. } = &told else {
+            panic!("{told:?}");
+        };
+        for said in [
+            "1500".to_owned(),
+            (3 * gib).to_string(),
+            "2000".to_owned(),
+            (4 * gib).to_string(),
+            "1000".to_owned(),
+            (2 * gib).to_string(),
+            words,
+        ] {
+            assert!(why.contains(&said), "{said} in {why}");
+        }
+    }
+    let told = GuestRuntime::guest_room_refusal(Refusal::Full(7), pool, booked, None);
+    assert!(
+        matches!(&told, Refusal::Invalid { why, .. } if why.contains("unread")),
+        "{told:?}"
+    );
+}
+
+/// V2 (ROOT, 2026-11-13: on macOS, process boxes got no route once any class reported routes, its process class
+/// answering no pool of its own): a node whose host's process class answers no pool of its own answers it on its host's
+/// plane, the oci answer's, with its native process route, so its process boxes stay placeable beside its node VM's
+/// route. Do ask the process class's capacity of a node whose process side answers none and whose guest is a node VM.
+/// Expect the host's pool, the same plane its oci answer is on, its one route a native process route for its host's
+/// platform with no GPU.
+#[test]
+fn v2_a_host_whose_process_class_answers_no_pool_answers_its_hosts_plane_with_its_process_route() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path(), Some(guest_pool()));
+    let owner = Arc::new(Owner::new());
+    let (runtime, _) = image_form(&images, &owner);
+    runtime.boot().unwrap();
+    let node = super::super::WithGuest::configured(
+        hex_api::sim::SimRuntime::new(),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let process = node.capacity(hex_api::Class::Process).unwrap().unwrap();
+    let oci = node.capacity(hex_api::Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        (process.id.as_str(), process.total, process.free),
+        (oci.id.as_str(), oci.total, oci.free)
+    );
+    assert_eq!(
+        process.routes,
+        [hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: hex_api::Class::Process,
+                image: super::super::route::host_platform().unwrap(),
+                execution: hex_api::Execution::Native,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            cost: None,
+            backing: None,
+        }]
+    );
+    process.check().unwrap();
+    drop(node);
+    assert!(relay.join().unwrap());
+}

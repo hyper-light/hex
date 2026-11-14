@@ -1770,6 +1770,18 @@ impl GuestRuntime {
         }
     }
 
+    /// What a node VM's guest refusing room for a box its host's pool admitted is told as (V2; ROOT, 2026-11-13: a
+    /// basis to fix, never a retry): the guest's refusal, with the host's pool's numbers beside the guest's own.
+    fn guest_room_refusal(
+        refusal: Refusal,
+        pool: hex_api::CapacityResources,
+        booked: hex_api::CapacityResources,
+        free: Option<hex_api::CapacityResources>,
+    ) -> Refusal {
+        let _ = (pool, booked, free);
+        refusal
+    }
+
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
             return Err(Refusal::Broken(
