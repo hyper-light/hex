@@ -125,24 +125,34 @@ fn reached(armed: &[Armed], what: &str) -> bool {
     armed.iter().any(|armed| armed.what == what)
 }
 
-/// A [`BootstrapProbe`] whose learned waits are its own, its plain kinds' and every class's box kinds': what the calls
-/// [`measured`] makes teach no wait a capped call has, so an unarmed one stays unarmed.
-struct Apart(BootstrapProbe);
-impl Transport for Apart {
+/// A [`BootstrapProbe`] whose learned waits are its own, its plain kinds' and every class's box kinds'. The measured
+/// calls' ([`measured`], `SEAM` false): what they teach no wait a capped call has, so an unarmed one stays unarmed. The
+/// armed log's own test's (`SEAM` true): no other test's call touches them, so none's run-out, which has the next wait
+/// follow its party with no learned bound until an answer comes (decision 9), takes away the learned wait it reads.
+struct Apart<const SEAM: bool>(BootstrapProbe);
+impl<const SEAM: bool> Transport for Apart<SEAM> {
     type Reading = ();
     fn answers() -> &'static [Patience; KINDS] {
-        static WAITS: [Patience; KINDS] =
+        static MEASURED: [Patience; KINDS] =
             [const { Patience::measuring("test.client_measured") }; KINDS];
-        &WAITS
+        static SEAM_WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_seam") }; KINDS];
+        if SEAM { &SEAM_WAITS } else { &MEASURED }
     }
     fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
-        static WAITS: [[Patience; BOX_KINDS]; CLASSES] = [
+        static MEASURED: [[Patience; BOX_KINDS]; CLASSES] = [
             class_waits!("test.client_measured", "process", measuring),
             class_waits!("test.client_measured", "oci", measuring),
             class_waits!("test.client_measured", "firecracker", measuring),
             class_waits!("test.client_measured", "shards", measuring),
         ];
-        by_class(&WAITS, class)
+        static SEAM_WAITS: [[Patience; BOX_KINDS]; CLASSES] = [
+            class_waits!("test.client_seam", "process", measuring),
+            class_waits!("test.client_seam", "oci", measuring),
+            class_waits!("test.client_seam", "firecracker", measuring),
+            class_waits!("test.client_seam", "shards", measuring),
+        ];
+        by_class(if SEAM { &SEAM_WAITS } else { &MEASURED }, class)
     }
     fn reply_budget(&self) -> Option<Duration> {
         self.0.reply_budget()
@@ -164,7 +174,7 @@ impl Transport for Apart {
 
 /// A probe that answers one call with `reply` as it is asked, and gives each call `budget`, its learned waits apart
 /// ([`Apart`]): a measured call's transport.
-fn answering(reply: Answer, budget: Option<Duration>) -> Apart {
+fn answering(reply: Answer, budget: Option<Duration>) -> Apart<false> {
     let (io, _) = stalled(None);
     Apart(BootstrapProbe {
         io: Offers::unobserved(io),
@@ -3091,7 +3101,8 @@ impl BootstrapCall {
 /// the capped call's check, send, send lock and answer wait each armed at the one instant given, every other check of it
 /// too; the second call's learned wait, its kind answered by then, tagged learned and before that instant; the uncapped
 /// call's send and answer wait armed with none; and the other thread's log empty: what a call arms lands in its own
-/// thread's.
+/// thread's. Its calls' learned waits are its own ([`Apart`]): another test's capacity call that ran its wait out had
+/// the second call here follow its party, no learned wait armed (r378, the whole crate's tests side by side).
 #[test]
 fn the_armed_log_holds_each_deadline_an_operation_arms_in_its_own_thread() {
     const CAPPED: &[&str] = &[
@@ -3100,13 +3111,18 @@ fn the_armed_log_holds_each_deadline_an_operation_arms_in_its_own_thread() {
         "the send lock",
         "the answer",
     ];
-    let (client, _) = bootstrap_probe(Some(Answer::Capacity(None)));
+    let (io, _) = stalled(None);
+    let client = configured(Apart::<true>(BootstrapProbe {
+        io: Offers::unobserved(io),
+        reply: Mutex::new(Some(Answer::Capacity(None))),
+        budget: None,
+    }));
     let _ = armed();
     let at = answer_by(None);
     assert_eq!(client.capacity_before(Class::Oci, at), Ok(None));
     let first = armed();
     assert!(armed_at(&first, CAPPED, Some(at)), "{first:?}");
-    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Capacity(None));
+    *client.conn.shared.transport.0.reply.lock().unwrap() = Some(Answer::Capacity(None));
     assert_eq!(client.capacity_before(Class::Oci, at), Ok(None));
     let second = armed();
     assert!(armed_at(&second, CAPPED, Some(at)), "{second:?}");
@@ -3116,7 +3132,7 @@ fn the_armed_log_holds_each_deadline_an_operation_arms_in_its_own_thread() {
             && armed.at.is_some_and(|learned| learned < at)),
         "{second:?}"
     );
-    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Capacity(None));
+    *client.conn.shared.transport.0.reply.lock().unwrap() = Some(Answer::Capacity(None));
     assert_eq!(client.capacity(Class::Oci), Ok(None));
     let uncapped = armed();
     assert!(
