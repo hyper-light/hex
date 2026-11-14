@@ -282,19 +282,14 @@ impl Node {
             ManagedLaunch::Firecracker { memlock, .. } => *memlock,
             ManagedLaunch::Shards(_) => None,
         };
-        // The held child's gate stays finite on Linux (CLAUDE.md §12's "finite private pipe gate", Ada's to change): a
-        // launch that follows its guest gives it the slowest boot to ready on record, owed until a gate with no deadline
-        // is approved (the review's C-9; branch cp/t7-root-c9-gate).
-        let gate = match left {
-            Some(left) => left,
-            None => hex_runtime::guest::recorded_boot()?,
-        };
+        // The held child's gate is finite where its create has a deadline; a launch that follows its guest gives it
+        // none, its waits then ended by the peer's byte or EOF (the review's C-9; Ada's approval of 2026-11-14).
         self.supervisor.bind_managed(
             &native,
             program,
             stdio,
             process::HeldLaunch { report, memlock },
-            gate,
+            left,
             publish,
         )
     }
