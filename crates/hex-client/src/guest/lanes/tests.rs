@@ -520,10 +520,12 @@ fn a_link_either_end_of_which_took_another_suite_is_refused() {
 }
 
 /// The variable under which this test binary, run again for one test, counts that test's descriptors alone.
+#[cfg(unix)]
 const ALONE: &str = "HEX_CLIENT_LANES_COUNT_ALONE";
 
 /// Runs `test` of this module again in a process of its own with [`ALONE`] set, so no other test opens or closes a
 /// descriptor while it counts, and expects it to have run and passed.
+#[cfg(unix)]
 fn alone(test: &str) {
     let module = module_path!().split_once("::").unwrap().1;
     let out = std::process::Command::new(std::env::current_exe().unwrap())
@@ -546,7 +548,9 @@ fn alone(test: &str) {
 }
 
 /// The descriptors this process holds now: its descriptor table's entries (Linux's `/proc/self/fd`, macOS's
-/// `/dev/fd`), less the listing's own.
+/// `/dev/fd`), less the listing's own. Windows' count of a process's handles is a foreign call no crate of this test's
+/// wraps safely, so the count is Unix's.
+#[cfg(unix)]
 fn open_descriptors() -> u64 {
     #[cfg(target_os = "linux")]
     let table = "/proc/self/fd";
@@ -558,9 +562,10 @@ fn open_descriptors() -> u64 {
 /// The relay's side of a lane, set up whole before anything is counted: accepted, and a byte carried each way, which
 /// it echoes, so its run host's socket and the endpoint's hold of it are in place. It then sends `then` and keeps the
 /// connection until `done` ends.
-fn carried(listener: UnixListener, then: Vec<u8>, done: mpsc::Receiver<()>) -> JoinHandle<()> {
+#[cfg(unix)]
+fn carried(listener: Listener, then: Vec<u8>, done: mpsc::Receiver<()>) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
+        let mut conn = listener.accept();
         let mut one = [0u8];
         conn.read_exact(&mut one).unwrap();
         conn.write_all(&one).unwrap();
@@ -570,6 +575,7 @@ fn carried(listener: UnixListener, then: Vec<u8>, done: mpsc::Receiver<()>) -> J
 }
 
 /// A lane's socket carried a byte each way, as [`carried`]'s relay echoes it: past this, its relay's side is whole.
+#[cfg(unix)]
 fn carry(socket: &mut Socket) {
     socket.write_all(&[1]).unwrap();
     let mut one = [0u8];
@@ -578,11 +584,13 @@ fn carry(socket: &mut Socket) {
 
 /// A link through the run's lanes that carries each lane a byte each way before it bridges it ([`carry`]), and counts
 /// the process's descriptors there, so what the dial's caller holds of its own is counted from that moment.
+#[cfg(unix)]
 struct Counted {
     lanes: Lanes,
     before: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
+#[cfg(unix)]
 impl Link for Counted {
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let mut socket = self
@@ -601,6 +609,7 @@ impl Link for Counted {
 /// descriptor table. Do, alone in a process: open a lane to a relay and carry a byte each way, then bridge it as a dial
 /// does; and dial the control connection as the client does, through a link that counts from the moment its lane is
 /// carried. Expect: the descriptors each added, [`FDS_A_LANE`] and [`FDS_A_CONTROL_LANE`].
+#[cfg(unix)]
 #[test]
 fn a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts() {
     if std::env::var_os(ALONE).is_none() {
