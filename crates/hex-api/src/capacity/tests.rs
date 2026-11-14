@@ -801,8 +801,7 @@ fn hostile_records_are_refused_never_a_panic() {
         &[("holder-0", "1")],
         &[("holder-0", "1 has space")],
         &[("holder-0", "x kiln")],
-        &[("holder-1", "1 kiln")],
-        &[holder, ("holder-1", "1 b"), ("holder-2", "1 c")],
+        &[holder, ("holder-1", "1 a")],
         &[("res-0-1-0", "1 0 0 0")],
         &[holder, ("res-0-2-0", "1 0 0 0")],
         &[holder, ("res-0-1", "1 0 0 0")],
@@ -840,6 +839,18 @@ fn hostile_records_are_refused_never_a_panic() {
     let keeper = Keeper::boot(BUDGET, &mut records).unwrap();
     assert_eq!(keeper.epoch(), 5);
     assert_eq!(keeper.foreign(), Amounts::from_array([1, 2, 3, 0]));
+    // No damage either (the review's E-2): a number the person's release freed, and more holders recorded than a
+    // configuration that shrank authorizes.
+    let freed: &[(&str, &str)] = &[("holder-1", "1 kiln"), ("res-1-1-0", "1 0 0 0")];
+    let shrunk: &[(&str, &str)] = &[holder, ("holder-1", "1 b"), ("holder-2", "1 c")];
+    for case in [freed, shrunk] {
+        let records = case
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()));
+        let mut records = Mem(records.collect());
+        let booted = Keeper::boot(BUDGET, &mut records);
+        assert!(booted.is_ok(), "{case:?}: {booted:?}");
+    }
 }
 
 /// AC-T7.4.1, CV9: write every message as JSON and read it back; expect each the same, so the wire can
