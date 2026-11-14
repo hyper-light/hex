@@ -556,6 +556,7 @@ impl Learner {
             scope,
             cgroup,
             read,
+            file: _,
             met,
         } in reads.vms
         {
