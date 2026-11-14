@@ -643,3 +643,39 @@ fn cv8_a_node_with_no_runtime_class_of_its_own_keeps_a_holders_reservations() {
         vec![Event::Granted(run)]
     );
 }
+
+/// AC-T7.4.1, CV8 (R03: the bound pinned at its edge): a holder's name is held to a record's bytes less its epoch field,
+/// a u64 in decimal and one space. Do: open the view and say a hello naming a holder by the most bytes its bound takes, at
+/// the widest epoch; then one naming another holder a byte longer. Expect: the first welcomed, its record exactly a
+/// record's bytes; the second closed, its name invalid.
+#[test]
+fn a_holders_name_at_its_bound_fills_its_record_at_the_widest_epoch() {
+    use hex_api::capacity::{Close, Invalid};
+    let dir = tempfile::tempdir().unwrap();
+    let mut view = View::open(dir.path(), HOLDERS).unwrap();
+    view.set_room(conformance::ROOM);
+    let most = crate::records::MAX_BYTES - super::EPOCH_FIELD;
+    let hello = |name: String| ToKeeper::Hello {
+        holder: name,
+        epoch: u64::MAX,
+        scope: None,
+    };
+    let (welcome, _) = view
+        .hear(0, hello("h".repeat(most)), Amounts::ZERO)
+        .unwrap();
+    assert!(matches!(welcome, ToHolder::Welcome { .. }), "{welcome:?}");
+    let record = std::fs::metadata(dir.path().join("holder-0.rec"))
+        .unwrap()
+        .len();
+    assert_eq!(record, u64::try_from(crate::records::MAX_BYTES).unwrap());
+    let (closed, _) = view
+        .hear(1, hello("i".repeat(most + 1)), Amounts::ZERO)
+        .unwrap();
+    assert_eq!(
+        closed,
+        ToHolder::Closed {
+            rejected: None,
+            why: Close::Invalid(Invalid::Name),
+        }
+    );
+}
