@@ -31,13 +31,6 @@ pub struct Envelope {
     pub source: String,
 }
 
-/// A guest's boot's W* (decision 9): past it the boot's run-out is told, once, and the boot followed on to its answer,
-/// never ended at it; and its record.
-pub struct Patience {
-    pub bound: Duration,
-    pub source: String,
-}
-
 /// One reading of a guest's VMM's CPU, as its OS keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Use {
@@ -100,8 +93,6 @@ pub trait Driver {
     fn describe(&self) -> Result<Lines, String>;
     /// The envelope floor and ceiling hold.
     fn envelope(&self) -> Result<Envelope, String>;
-    /// A guest's boot's W* ([`Patience`]).
-    fn patience(&self) -> Result<Patience, String>;
     /// The folder the VMM's own files go on: its filesystem's block size is the disk quantum.
     fn runtime(&self) -> &Path;
     /// How its probes read the VMM's CPU, memory and disk (its OS's interfaces), for the evidence.
@@ -112,20 +103,18 @@ pub trait Driver {
     /// Starts one guest's VMM, its guest told no deadline (it keeps its learned bounds), and returns it with the probes
     /// that read it.
     fn launch(&mut self) -> Result<Launched<Self>, String>;
-    /// Follows the launched guest to its readiness (its agent answering): past the class's W* ([`Driver::patience`])
-    /// its run-out told once and the wait going on by the guest's life, never ended at a bound; refused at the
-    /// guest's end or its agent's refusal.
+    /// Follows the launched guest to its readiness (its agent answering): its link's dials each within their own W*, the
+    /// slowest dial this process has seen, and past it their run-out told once and the wait going on by the guest's life,
+    /// never ended at a bound; refused at the guest's end or its agent's refusal.
     fn ready(&mut self, guest: &mut Self::Guest) -> Result<(), String>;
     /// Holds the ready guest idle until `until`: its end in that time is a failure.
     fn idle(&mut self, guest: &Self::Guest, until: Instant) -> Result<(), String>;
-    /// The guest agent's own report of what it has free inside the envelope, until `deadline`.
-    fn report(
-        &mut self,
-        guest: &Self::Guest,
-        deadline: Instant,
-    ) -> Result<CapacityResources, String>;
-    /// Stops the guest and waits, until `deadline`, for its end.
-    fn tear_down(&mut self, guest: Self::Guest, deadline: Instant) -> Result<(), String>;
+    /// The guest agent's own report of what it has free inside the envelope: its answer, waited for as its connection
+    /// lives (decision 9: no deadline of the producer's).
+    fn report(&mut self, guest: &Self::Guest) -> Result<CapacityResources, String>;
+    /// Stops the guest and follows it to its end, and its place's removal: each within its W*, the slowest this run has
+    /// seen, past it told once and followed by its party, never given up at a bound (decision 9; the review's C-9).
+    fn tear_down(&mut self, guest: Self::Guest) -> Result<(), String>;
     #[cfg(any(windows, test))]
     /// The window the class's VMs are held to `rate` milli-CPU over where that hold is each VM's own governor
     /// (Shards' D191, D255): its period as a guest's VM process answers the rate. Every guest launched after is held

@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 
 use super::guest::guest_range;
 use super::run::{Window, walk};
-use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Patience, Probe, Use};
+use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Probe, Use};
 
 pub struct Managed {
     config: GuestConfig,
@@ -343,30 +343,16 @@ impl Managed {
         Ok(())
     }
 
-    /// Ends `vm` ([`Self::end`]) within the class's patience from now.
-    fn ended(&self, vm: &shards_api::ManagedGuest, scope: &Scope) -> Result<(), String> {
-        let patience = self.patience()?;
-        let at = Instant::now()
-            .checked_add(patience.bound)
-            .ok_or("the end's wait overflows")?;
-        Self::end(vm, scope, at)
-    }
-
-    /// Ends `vm` as a node deletes a backing (hex-runtime's shared release): drained, stopped and waited for until
-    /// `deadline`, its whole scope released, then finalized through its record while it drains, as a node's records
-    /// finalize a backing before they write its end (the producer writes no record).
-    fn end(vm: &shards_api::ManagedGuest, scope: &Scope, deadline: Instant) -> Result<(), String> {
+    /// Ends `vm` as a node deletes a backing (hex-runtime's shared release): drained, stopped and followed to its end
+    /// ([`super::guest::follow_end`]), its whole scope released, then finalized through its record while it drains, as
+    /// a node's records finalize a backing before they write its end (the producer writes no record).
+    fn end(vm: &shards_api::ManagedGuest, scope: &Scope) -> Result<(), String> {
         scope
             .moved(BackingPhase::Draining)
             .map_err(|e| e.to_string())?;
         let identity = shards_api::Guest::identity(vm).ok();
         shards_api::Guest::stop(vm).map_err(|e| format!("stopping the guest: {e}"))?;
-        let left = deadline.saturating_duration_since(Instant::now());
-        match shards_api::Guest::wait_for(vm, left) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(format!("the guest didn't end within {left:?} of its stop")),
-            Err(e) => return Err(format!("waiting for the guest's end: {e}")),
-        }
+        super::guest::follow_end(vm)?;
         match shards_api::Guest::terminal_scope(vm) {
             Ok(Some(shards_api::TerminalScope::Released)) => {}
             other => {
@@ -447,10 +433,6 @@ impl Driver for Managed {
         super::guest::envelope(&self.config)
     }
 
-    fn patience(&self) -> Result<Patience, String> {
-        super::guest::patience()
-    }
-
     fn runtime(&self) -> &Path {
         &self.home
     }
@@ -487,7 +469,7 @@ impl Driver for Managed {
                 holds,
             )),
             // Whatever kept it from being read, the guest is ended first: none is left running.
-            Err(why) => Err(match self.ended(&vm, &scope) {
+            Err(why) => Err(match Self::end(&vm, &scope) {
                 Ok(()) => why,
                 Err(end) => format!("{why}; then {end}"),
             }),
@@ -519,29 +501,24 @@ impl Driver for Managed {
         }
     }
 
-    fn report(&mut self, guest: &Guest, deadline: Instant) -> Result<CapacityResources, String> {
-        guest
+    fn report(&mut self, guest: &Guest) -> Result<CapacityResources, String> {
+        let client = guest
             .client
             .as_ref()
-            .ok_or("the guest's agent never answered")?
-            .capacity_before(Class::Oci, deadline)
+            .ok_or("the guest's agent never answered")?;
+        hex_api::Runtime::capacity(client, Class::Oci)
             .map_err(|e| format!("reading the guest agent's capacity: {e}"))?
             .map(|capacity| capacity.free)
             .ok_or_else(|| "the guest's agent reports no oci capacity".to_owned())
     }
 
-    fn tear_down(&mut self, guest: Guest, deadline: Instant) -> Result<(), String> {
+    fn tear_down(&mut self, guest: Guest) -> Result<(), String> {
         let Guest { vm, scope, client } = guest;
         drop(client);
-        Self::end(&vm, &scope, deadline)
+        Self::end(&vm, &scope)
     }
 
     fn governed_window(&mut self, rate: u64) -> Result<Window, String> {
-        let patience = self.patience()?;
-        let at = |from: Instant| {
-            from.checked_add(patience.bound)
-                .ok_or_else(|| "the window's boot overflows the clock".to_owned())
-        };
         let began = Instant::now();
         let (vm, scope) = self.boot()?;
         let mut guest = Guest {
@@ -556,7 +533,7 @@ impl Driver for Managed {
             let ready = began.elapsed();
             Self::hold(&guest.vm, rate).map(|period| (period, ready))
         });
-        let ended = at(Instant::now()).and_then(|deadline| self.tear_down(guest, deadline));
+        let ended = self.tear_down(guest);
         let (length, ready) = match (held, ended) {
             (Ok(held), Ok(())) => held,
             (Err(why), Ok(())) | (Ok(_), Err(why)) => return Err(why),

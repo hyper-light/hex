@@ -1,5 +1,5 @@
 //! The Shards guest the environment configures, as its node reads it (`GuestConfig`): what a run measures (its images
-//! and its size), its envelope, and its first boot's patience, alike for every OS's driver.
+//! and its size) and its envelope, alike for every OS's driver; and a stopped guest's end, followed.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -8,7 +8,7 @@ use hex_api::CapacityResources;
 use hex_runtime::guest::GuestConfig;
 use sha2::{Digest, Sha256};
 
-use super::seam::{Envelope, Lines, Patience};
+use super::seam::{Envelope, Lines};
 
 /// The SHA-256 of the file at `path`, read in SHA-256's own block multiple.
 pub fn digest(path: &Path) -> Result<String, String> {
@@ -74,17 +74,30 @@ pub fn envelope(config: &GuestConfig) -> Result<Envelope, String> {
     })
 }
 
-/// The bound of the producer's own waits (its guests' stop, place removal and end, a window's boot, the census): the
-/// slowest boot to ready on record. Owed: the producer's waits follow their parties (the review's C-9; ROOT's, after
-/// c9). Its guests' boots and link dials already follow, as a node's do.
-pub fn patience() -> Result<Patience, String> {
-    Ok(Patience {
-        bound: hex_runtime::guest::recorded_boot().map_err(|e| e.to_string())?,
-        source: format!(
-            "the slowest boot to ready on record, boot_ready of {} in bench/native/guest/records.tsv with no margin (hex_runtime::guest::recorded_boot); owed: the producer's waits follow their parties",
-            hex_runtime::guest::CLASS
-        ),
-    })
+/// A stopped guest's end, each one's wait measuring (decision 9; the review's C-9): within W*, the slowest end this run
+/// has seen, its answer; past it, its run-out told once and the wait following the guest's VM to its end, never given
+/// up at a bound. No record seeds it.
+static ENDED: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("guest_cost.ended");
+
+/// Follows `vm`, stopped, to its end ([`ENDED`]): its own end answers the wait, which nothing else ends.
+pub fn follow_end(vm: &dyn shards_api::Guest) -> Result<(), String> {
+    hex_testkit::waits::follow::within(
+        &ENDED,
+        "the guest's end after its stop",
+        || hex_testkit::waits::follow::Party::Live,
+        |by| {
+            let left = by.map_or(std::time::Duration::MAX, |at| {
+                at.saturating_duration_since(std::time::Instant::now())
+            });
+            match vm.wait_for(left) {
+                Ok(Some(_)) => Some(Ok(())),
+                Ok(None) => None,
+                Err(e) => Some(Err(format!("waiting for the guest's end: {e}"))),
+            }
+        },
+    )
+    .map_err(|unmet| unmet.to_string())?
 }
 
 /// The guest RAM's address range among a VMM's map entries (`(start, end, anonymous)`, in address order):

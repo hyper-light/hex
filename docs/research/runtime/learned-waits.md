@@ -133,10 +133,10 @@ change's one-host checks (macOS, arm64) can't compile, so each is the Hex lead's
    by its peer's byte or EOF, Ada's approval of 2026-11-14), and its first dial, hello and join take none. A GPU
    create follows too ((c2), 2026-11-14): Shards takes its GPU report with no clock (`Until::Released`, Shards
    b4a018090), so no production wait reads the record, and the create budget that once carried the record's deadline
-   (`managed::Budget`) is gone. Owed: hex-cli's measurement tools' own
-   waits (guest_cost's stop,
-   place removal, end, window boot and census; macos_cpu_response's top arm): the producer's waits follow their
-   parties.
+   (`managed::Budget`) is gone. Nor do hex-cli's measuring tools (2026-11-14): guest_cost's stop, place removal, end
+   and report follow their parties, and macos_cpu_response's arms reach the managed control's longest hold
+   (`hex_runtime::macos::cpu_control_longest_hold`) with its waits following. `RECORDS`, `recorded_boot`, `seed_in`
+   and `slowest_in` are gone: records.tsv is evidence alone.
 2. **hex-api's conformance suite** (compiled outside `#[cfg(test)]`), done 2026-11-13 (decision 9's follow-up 1;
    goal 12's macOS checks had failed hex_quic_20, HEX-RT-2 "still running after 939ms", macOS's record). The pure
    core moved down: `hex_api::patience`, with `pub use hex_api::patience;` in hex-core, so every `hex_core::patience`

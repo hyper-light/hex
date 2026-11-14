@@ -279,10 +279,10 @@ struct Booted {
 }
 
 /// Launches one guest, its guest told no deadline, reads it per window from its launch through its readiness, which it
-/// follows to its answer (decision 9: past the class's W* its run-out told once, never ended at it), and its idle hold,
-/// has its agent report within `bound`, and tears it down within it whatever came of the rest: no guest or sampling
-/// thread outlives this.
-fn measure<D: Driver>(driver: &mut D, bound: Duration, window: Duration) -> Result<Booted, String> {
+/// follows to its answer (decision 9: past its W* its run-out told once, never ended at it), and its idle hold, has its
+/// agent report, and tears it down whatever came of the rest, each followed by its party: no guest or sampling thread
+/// outlives this.
+fn measure<D: Driver>(driver: &mut D, window: Duration) -> Result<Booted, String> {
     let began = Instant::now();
     let (mut guest, cpu, holds) = driver.launch()?;
     let started = match sampler("guest-cost-cpu", cpu, began, window) {
@@ -299,7 +299,7 @@ fn measure<D: Driver>(driver: &mut D, bound: Duration, window: Duration) -> Resu
     let (cpu, holds) = match started {
         Ok(samplers) => samplers,
         Err(e) => {
-            let ended = after(Instant::now(), bound).and_then(|at| driver.tear_down(guest, at));
+            let ended = driver.tear_down(guest);
             return Err(format!(
                 "starting a sampling thread: {e}{}",
                 ended
@@ -329,12 +329,10 @@ fn measure<D: Driver>(driver: &mut D, bound: Duration, window: Duration) -> Resu
     let readings =
         joined(cpu).and_then(|cpu| joined(holds).map(|holdings| Readings { cpu, holdings }));
     let reported = match (&held, &readings) {
-        (Ok(_), Ok(_)) => {
-            Some(after(Instant::now(), bound).and_then(|at| driver.report(&guest, at)))
-        }
+        (Ok(_), Ok(_)) => Some(driver.report(&guest)),
         _ => None,
     };
-    let ended = after(Instant::now(), bound).and_then(|at| driver.tear_down(guest, at));
+    let ended = driver.tear_down(guest);
     let booted = match (held, readings, reported) {
         (Ok(ready), Ok(readings), Some(Ok(free))) => Ok(Booted {
             ready,
@@ -651,11 +649,10 @@ impl Record {
     }
 }
 
-/// A run's guests at one window: each that was ready, the W* past which its boot's run-out was told, and what its
-/// first guest left on disk after its end (the run's first census's alone may: what later guests found there
-/// and left as it was is the host's one-time caches, no one VM's).
+/// A run's guests at one window: each that was ready, and what its first guest left on disk after its end (the run's
+/// first census's alone may: what later guests found there and left as it was is the host's one-time caches, no one
+/// VM's).
 pub struct Census {
-    pub told_past: Duration,
     pub samples: Vec<Sample>,
     pub caches: Files,
 }
@@ -670,29 +667,27 @@ fn new_paths(before: &Files, after: &Files) -> Files {
 }
 
 /// Launches guests one at a time until `seedable` were ready. Each is booted with no deadline and followed to its
-/// answer, its boot-to-ready time its sample (decision 9: past `bound`, the class's W*, its run-out told once and the
-/// boot never ended at it; ROOT, 2026-11-14), read per window from its launch through its readiness and an idle hold,
-/// and reported on and torn down within `bound`. A guest that ends before it is ready, or any other failure, refuses
-/// the run. Only the run's first guest (`caches`: this census's first) may leave anything new on disk; any other that
+/// answer, its boot-to-ready time its sample (decision 9: past its W*, the slowest dial this process has seen, its
+/// run-out told once and the boot never ended at it; ROOT, 2026-11-14), read per window from its launch through its
+/// readiness and an idle hold, reported on and torn down, each followed by its party. A guest that ends before it is
+/// ready, or any other failure, refuses the run. Only the run's first guest (`caches`: this census's first) may leave anything new on disk; any other that
 /// does is refused: a VM's leftovers are no one-time cache.
 pub fn census<D: Driver>(
     driver: &mut D,
     seedable: usize,
-    bound: Duration,
     window: &Window,
     vcpus: u32,
     caches: bool,
     record: &mut Record,
 ) -> Result<Census, String> {
     let mut census = Census {
-        told_past: bound,
         samples: Vec::with_capacity(seedable),
         caches: Vec::new(),
     };
     let mut known = driver.held()?;
     let mut launched = 0usize;
     while census.samples.len() < seedable {
-        let booted = measure(driver, bound, window.length)?;
+        let booted = measure(driver, window.length)?;
         let after = driver.held()?;
         let n = launched;
         launched = launched.saturating_add(1);
@@ -820,7 +815,6 @@ pub fn produce<D: Driver>(
     let class = driver.class();
     let described = driver.describe()?;
     let envelope = driver.envelope()?;
-    let patience = driver.patience()?;
     let (page, block) = quanta(driver.runtime())?;
     let quantum = CapacityResources {
         cpu_milli: 1,
@@ -850,7 +844,6 @@ pub fn produce<D: Driver>(
         let census = census(
             driver,
             plan.seedable,
-            patience.bound,
             &window,
             envelope.vcpus,
             iterations.is_empty(),
@@ -924,11 +917,9 @@ pub fn produce<D: Driver>(
         ));
     }
     line(format!(
-        "census seedable={} (SEEDABLE, bench/competitive/probes/waits_census.py, decision 9) ready={}; each guest booted with no deadline told and followed to its agent's answer, its boot-to-ready time its sample, its run-out past W* {} ns ({}) told once and the boot never ended at it; each guest read at every window boundary from its VMM's launch through its readiness and an idle hold as long as its boot took and at least one whole window after it, to a whole window",
+        "census seedable={} (SEEDABLE, bench/competitive/probes/waits_census.py, decision 9) ready={}; each guest booted with no deadline told and followed to its agent's answer, its boot-to-ready time its sample, its link's dials each within their own W* (the slowest dial this process has seen, client.guest.link.dial) and past it their run-out told once and the boot never ended at it; its report and its teardown followed by their parties, no record read; each guest read at every window boundary from its VMM's launch through its readiness and an idle hold as long as its boot took and at least one whole window after it, to a whole window",
         plan.seedable,
-        census.samples.len(),
-        census.told_past.as_nanos(),
-        patience.source
+        census.samples.len()
     ));
     line(format!(
         "overhead {} at RAM {} bytes (the envelope's: a cost is per envelope) (the census maximum of each ready guest's: its VMM's own CPU in one window from its readiness on, its guest's left out, rounded up; its VMM's own memory, as the memory source says; the bytes held in its own folders at a reading, there during its life and neither before it nor after it) (evidence alone, not in the cost: a node learns a VM's overhead from its windows, decision 9)",
@@ -1031,7 +1022,7 @@ pub fn produce<D: Driver>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::seam::{Envelope, Launched, Lines, Patience};
+    use crate::seam::{Envelope, Launched, Lines};
 
     /// One scripted guest: its readings in turn (the last repeated), what its agent reports, what it
     /// leaves on disk after its end, and how long after its launch it is ready.
@@ -1113,12 +1104,6 @@ mod tests {
                 source: "scripted".to_owned(),
             })
         }
-        fn patience(&self) -> Result<Patience, String> {
-            Ok(Patience {
-                bound: Duration::from_secs(1),
-                source: "scripted".to_owned(),
-            })
-        }
         fn runtime(&self) -> &Path {
             &self.runtime
         }
@@ -1156,17 +1141,13 @@ mod tests {
             }
             Ok(())
         }
-        fn report(
-            &mut self,
-            guest: &Option<Script>,
-            _: Instant,
-        ) -> Result<CapacityResources, String> {
+        fn report(&mut self, guest: &Option<Script>) -> Result<CapacityResources, String> {
             guest
                 .as_ref()
                 .map(|s| s.free)
                 .ok_or("no guest to report".to_owned())
         }
-        fn tear_down(&mut self, guest: Option<Script>, _: Instant) -> Result<(), String> {
+        fn tear_down(&mut self, guest: Option<Script>) -> Result<(), String> {
             self.torn_down += 1;
             if let Some(script) = guest {
                 self.disk.extend(script.left);
@@ -1393,16 +1374,7 @@ mod tests {
             ],
         );
         let window = window(50);
-        let census = census(
-            &mut driver,
-            2,
-            Duration::from_secs(1),
-            &window,
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .unwrap();
+        let census = census(&mut driver, 2, &window, 2, true, &mut record(dir.path())).unwrap();
         for sample in &census.samples {
             assert!(sample.ready < window.length, "{sample:?}");
             assert!(
@@ -1433,16 +1405,7 @@ mod tests {
             ],
         );
         let window = window(5);
-        let census = census(
-            &mut driver,
-            2,
-            Duration::from_secs(1),
-            &window,
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .unwrap();
+        let census = census(&mut driver, 2, &window, 2, true, &mut record(dir.path())).unwrap();
         let (overhead, inside, _) = derive(envelope(), &census, 2).unwrap();
         assert_eq!(overhead.mem_bytes, 60 << 20);
         assert_eq!(inside.mem_bytes, (512 << 20) - (400 << 20));
@@ -1477,16 +1440,7 @@ mod tests {
         );
         let mut driver = Driven::new(dir.path(), vec![Some(first.clone()), Some(later.clone())]);
         let window = window(5);
-        let taken = census(
-            &mut driver,
-            2,
-            Duration::from_secs(1),
-            &window,
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .unwrap();
+        let taken = census(&mut driver, 2, &window, 2, true, &mut record(dir.path())).unwrap();
         let (overhead, _, _) = derive(envelope(), &taken, 2).unwrap();
         assert_eq!(overhead.disk_bytes, 4096);
         assert_eq!(taken.caches, vec![binary]);
@@ -1494,15 +1448,7 @@ mod tests {
         let mut leaving = later;
         leaving.left = vec![held("/runtime/home/guest-1.log", 11, 8192)];
         let mut driver = Driven::new(dir.path(), vec![Some(first), Some(leaving)]);
-        let refused = census(
-            &mut driver,
-            2,
-            Duration::from_secs(1),
-            &window,
-            2,
-            true,
-            &mut record(dir.path()),
-        );
+        let refused = census(&mut driver, 2, &window, 2, true, &mut record(dir.path()));
         assert!(refused.is_err());
         assert_eq!(driver.torn_down, 2);
     }
@@ -1514,45 +1460,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ready = Some(script(vec![reading(1, 0, 1, 1, Vec::new())], 400 << 20));
         let mut driver = Driven::new(dir.path(), vec![ready.clone(), None, ready]);
-        let refused = census(
-            &mut driver,
-            3,
-            Duration::from_secs(1),
-            &window(5),
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .err()
-        .unwrap();
+        let refused = census(&mut driver, 3, &window(5), 2, true, &mut record(dir.path()))
+            .err()
+            .unwrap();
         assert!(refused.contains("ended before it was ready"), "{refused}");
         assert_eq!((driver.launched, driver.torn_down), (2, 2));
     }
 
     /// AC-T7.4.1 (decision 9; ROOT, 2026-11-14: a boot bound that doubles at each run-out is a chosen multiple and a timer
-    /// verdict): guests that boot slower than the class's patience: expect each followed to its answer, its
-    /// boot-to-ready time its sample, and no guest launched that wasn't one.
+    /// verdict; the review's C-9: no record bounds a boot): guests that boot slowly: expect each followed to its answer,
+    /// its boot-to-ready time its sample, and no guest launched that wasn't one.
     #[test]
-    fn a_boot_slower_than_its_patience_is_followed_to_its_answer() {
+    fn a_slow_boot_is_followed_to_its_answer() {
         let dir = tempfile::tempdir().unwrap();
-        let patience = Duration::from_millis(40);
+        let boot = Duration::from_millis(80);
         let mut slow = script(vec![reading(1, 0, 1, 1, Vec::new())], 400 << 20);
-        slow.boots_in = patience * 2;
+        slow.boots_in = boot;
         let mut driver = Driven::new(dir.path(), vec![Some(slow); 4]);
-        let census = census(
-            &mut driver,
-            2,
-            patience,
-            &window(5),
-            2,
-            true,
-            &mut record(dir.path()),
-        )
-        .unwrap();
+        let census = census(&mut driver, 2, &window(5), 2, true, &mut record(dir.path())).unwrap();
         assert_eq!(census.samples.len(), 2);
         assert_eq!(driver.launched, 2, "a boot was ended and booted again");
         assert!(
-            census.samples.iter().all(|s| s.ready >= patience * 2),
+            census.samples.iter().all(|s| s.ready >= boot),
             "{:?}",
             census.samples.iter().map(|s| s.ready).collect::<Vec<_>>()
         );
