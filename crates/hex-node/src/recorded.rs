@@ -2943,9 +2943,9 @@ impl<R: Recover> Runtime for Recorded<R> {
         Ok(())
     }
 
-    /// Its runtime's to refuse: none this wraps makes a box for one program's life (macOS's and Windows' refuse a
-    /// run, naming their platform, and an `oci` spec's is refused everywhere; decision 7), so there is no run's box
-    /// to record.
+    /// Its runtime's: macOS's and Windows' `process` classes run the program in a box of its own life, which a thread
+    /// of the run's removes once the program ends (`hex_runtime::run`, decision 7), and an `oci` spec's run is refused
+    /// everywhere. No record is written for the box: it is held in its runtime's memory alone.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         spec.check_no_devices(std::env::consts::OS)?;
         self.runtime.run(spec, program, stdio)
