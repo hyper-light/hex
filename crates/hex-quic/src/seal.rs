@@ -40,6 +40,8 @@ pub struct Keys {
     sending: LessSafeKey,
     receiving: LessSafeKey,
     next: AtomicU64,
+    #[cfg(test)]
+    sealed: AtomicU64,
 }
 
 impl Keys {
@@ -57,7 +59,16 @@ impl Keys {
             sending: key(&mut export, mine)?,
             receiving: key(&mut export, theirs)?,
             next: AtomicU64::new(0),
+            #[cfg(test)]
+            sealed: AtomicU64::new(0),
         })
+    }
+
+    /// Keys that have sealed `blocks` AES blocks already: a test's of a key near its limit.
+    #[cfg(test)]
+    pub(crate) fn having_sealed(mut self, blocks: u64) -> Self {
+        self.sealed = AtomicU64::new(blocks);
+        self
     }
 
     /// Keys whose next nonce is `next`: a test's of a way near its last.

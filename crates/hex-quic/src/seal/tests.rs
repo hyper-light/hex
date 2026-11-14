@@ -198,3 +198,29 @@ fn q13_a_way_whose_nonces_are_spent_seals_nothing_more() {
         Err(wire::Fault::Seal(SealFault::Spent))
     );
 }
+
+/// Q13, RFC 8446 §5.5 (ROOT, 2026-11-14; AC-T7.4.1): a key seals no more than AES-GCM's limit there, 2^24.5 full records
+/// of 2^14 bytes, 2^34.5 AES blocks, for an AE margin of about 2^-57 (Luykx and Paterson's AEBounds analysis, on which
+/// §5.5 rests). Do seal at an end whose key has sealed the limit's floor less two blocks: a 16-byte body, one block and one
+/// more for its tag, which brings it to the limit; then a 1-byte body. Expect the first sealed and opened, and the second
+/// refused `Spent` with nothing sealed and no nonce taken, again on every later seal.
+#[test]
+fn q13_a_key_seals_no_more_than_aes_gcms_limit() {
+    // ⌊2^34.5⌋ = ⌊√(2^69)⌋: 2^24.5 records of 2^14 bytes, 2^10 blocks of 16 bytes each.
+    let limit = u64::try_from((1u128 << 69).isqrt()).unwrap();
+    let session = Exporter::new(6);
+    let dialer = session.keys(Side::Dialer).having_sealed(limit - 2);
+    let acceptor = session.keys(Side::Acceptor);
+    let first = sealed(&dialer, b"aad", &[7; 16]);
+    assert_eq!(opened(&acceptor, b"aad", &first).unwrap(), [7; 16]);
+    let mut out = [0u8; 1];
+    for _ in 0..3 {
+        assert_eq!(dialer.seal(b"aad", &[1], &mut out), Err(SealFault::Spent));
+    }
+    assert_eq!(out, [0], "nothing sealed");
+    assert_eq!(
+        dialer.next.load(Ordering::Relaxed),
+        1,
+        "the first seal's nonce alone taken"
+    );
+}
