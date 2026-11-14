@@ -188,6 +188,7 @@ mod kind {
     pub const REFRESH_ASK: u16 = 0x8016;
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
     pub const MEMBER_SIGNAL: u16 = 0x001e;
+    pub const START_FOLLOWED: u16 = 0x001f;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -320,6 +321,10 @@ pub enum Call {
         member: Member,
         signal: Signal,
     },
+    /// Box `id` once its start has come to its end (`Runtime::started`): a box still booting followed to its boot's
+    /// answer on the node, a wait on the fact (decision 9), so a remote caller of a start answered Pending never looks;
+    /// answered [`Answer::Info`], or refused by type. Appended (ROOT, 2026-11-14).
+    Started(BoxId),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1328,6 +1333,7 @@ fn parse_request(
                 .map_err(|e| bad(Fault::value("signal", e.to_string())))?;
             Request::Call(Call::MemberSignal { id, member, signal })
         }
+        kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1739,6 +1745,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::CAPTURED => "a captured",
         kind::REFRESHED => "a refreshed",
         kind::MEMBER_SIGNAL => "a member's signal",
+        kind::START_FOLLOWED => "a start followed",
         _ => "a request",
     }
 }
@@ -1792,6 +1799,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Start(b) => {
             w.header(kind::START, id);
+            w.string(b.as_str())
+        }
+        Call::Started(b) => {
+            w.header(kind::START_FOLLOWED, id);
             w.string(b.as_str())
         }
         Call::Exec {

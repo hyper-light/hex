@@ -300,6 +300,8 @@ D231's boot waits at most the patience its caller gives: past it, its run host i
 (`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and
 makes the boot on a thread of its own: the boot's W* is where a start answers `Lifecycle { Pending }` and tells the
 census its run-out, never where a boot ends, and the answer, when a later call takes it, is the sample W* rises to. A
+start answered so is followed through `Runtime::started` (`hex.image.started`), which the node's wire carries
+(`Call::Started`, kind `0x001f`, appended; ROOT, 2026-11-14), so a remote caller waits on the fact, never by looks. A
 stats ask is given `Duration::MAX` too and followed by its run's life alone, its W* where the census is told a run-out.
 D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
 past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's

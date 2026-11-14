@@ -2404,6 +2404,9 @@ impl<O: Os> Shared<O> {
                 .signal_member(&id, &member, signal)
                 .map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
+            // A start followed to its end on this worker, as decision 9 has a wait follow its party: a boot past its W*
+            // is followed to its answer here, so its remote caller waits on the fact (ROOT, 2026-11-14).
+            Call::Started(id) => host.started(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => {
                 let deleted = host.delete(&id);
