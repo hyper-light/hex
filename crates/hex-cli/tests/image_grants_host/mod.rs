@@ -140,7 +140,10 @@ fn sockets_of(run: &[Process]) -> Vec<Socket> {
                 format!("{pid} {name}")
             })
             .collect();
-        assert!(!holders.is_empty(), "a socket no process holds ({HOW}): {s:?}");
+        assert!(
+            !holders.is_empty(),
+            "a socket no process holds ({HOW}): {s:?}"
+        );
         eprintln!(
             "GRANTS-SOCKET {} {} -> {} {} held by {}",
             if s.tcp { "tcp" } else { "udp" },
