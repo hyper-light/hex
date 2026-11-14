@@ -1,7 +1,8 @@
 //! The Shards class's driver (macOS HVF, Linux KVM): its guest launched by the configured `shards`, as a
-//! node launches it (told its boot's deadline, `hex_runtime::guest::tell_ready`; on Linux in a cgroup of its
-//! own), with runtime folders of the run's own; ready when its agent answers (the relay's token and the
-//! node's hello, as `GuestRuntime`'s first dial is); its VMM read through its OS (its CPU and its guest's part
+//! node launches it (on Linux in a cgroup of its own) but told no deadline, so it keeps its learned bounds, with
+//! runtime folders of the run's own; followed to its readiness, its agent's answer (the relay's token and the
+//! node's hello, as `GuestRuntime`'s first dial is; past the class's W* its run-out told once, never ended at it,
+//! decision 9); its VMM read through its OS (its CPU and its guest's part
 //! of it, its footprint and its guest RAM's part of it, what its folders hold), and its own report read from
 //! its agent's `oci` capacity.
 
@@ -348,13 +349,8 @@ impl Driver for Shards {
         walk(&[self.cache.clone(), self.home.clone()])
     }
 
-    fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String> {
+    fn launch(&mut self) -> Result<Launched<Self>, String> {
         let mut spec = self.config.spec().map_err(|e| e.to_string())?;
-        hex_runtime::guest::tell_ready(
-            &mut spec.cmdline,
-            deadline.saturating_duration_since(Instant::now()),
-        )
-        .map_err(|e| format!("telling the guest its boot's deadline: {e}"))?;
         let places = match &mut self.places {
             Some(places) => places,
             None => self.places.insert(Places::delegated(&self.folder)?),
@@ -364,7 +360,13 @@ impl Driver for Shards {
             Ok(vm) => Arc::from(vm),
             Err(e) => {
                 let why = format!("launching the guest: {e}");
-                return Err(match place.remove(deadline) {
+                let removed = self.patience().and_then(|patience| {
+                    let at = Instant::now()
+                        .checked_add(patience.bound)
+                        .ok_or_else(|| "the removal's wait overflows".to_owned())?;
+                    place.remove(at)
+                });
+                return Err(match removed {
                     Ok(()) => why,
                     Err(remove) => format!("{why}; then {remove}"),
                 });
@@ -397,18 +399,15 @@ impl Driver for Shards {
         }
     }
 
-    fn ready(&mut self, guest: &mut Guest, deadline: Instant) -> Result<bool, String> {
-        let span = deadline.saturating_duration_since(Instant::now());
-        match own_link(ShardsLink::new(Arc::clone(&guest.vm), span))
-            .and_then(|link| Client::connect_before(link, deadline))
-        {
-            Ok(client) => {
-                guest.client = Some(client);
-                Ok(true)
-            }
-            Err(_) if Instant::now() >= deadline => Ok(false),
-            Err(why) => Err(format!("reaching the guest's agent: {why}")),
-        }
+    fn ready(&mut self, guest: &mut Guest) -> Result<(), String> {
+        // Followed to its answer: its link's dials past the class's W* tell the run-out once and follow the guest's VM by
+        // its life, and its hello waits on its connection (decision 9).
+        let bound = self.patience()?.bound;
+        let client = own_link(ShardsLink::new(Arc::clone(&guest.vm), bound))
+            .and_then(Client::connect)
+            .map_err(|why| format!("reaching the guest's agent: {why}"))?;
+        guest.client = Some(client);
+        Ok(())
     }
 
     fn idle(&mut self, guest: &Guest, until: Instant) -> Result<(), String> {
@@ -1259,8 +1258,8 @@ Swap:                  0 kB
 
     /// AC-T7.4.1 (light smoke, few boots): produce a pair over the configured Shards guest with SEEDABLE
     /// two, through the same census, evidence and output the measurement uses: expect it written and loaded
-    /// as a node loads it, its envelope the configured guest's, two guests in its evidence, and each with
-    /// its VMM's own memory. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
+    /// as a node loads it, its envelope the configured guest's, its cost carrying no VMM overhead and no guest
+    /// allowance, two guests in its evidence, and its VMM's own memory in its evidence. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
     /// HEX_GUEST_MEMORY_MIB, GUEST_COST_SMOKE_OUT (a folder under ~/.cache), on a Mac the window's
     /// CPU-response row file, GUEST_COST_SMOKE_ROW and GUEST_COST_SMOKE_ROW_SHA256, and on Linux a cgroup
     /// delegated to the test (`systemd-run --user --scope -p Delegate=yes <the test binary> ...`).
@@ -1288,10 +1287,28 @@ Swap:                  0 kB
         .unwrap();
         assert_eq!(rows.is_empty(), prefix.is_empty());
         assert_eq!((cost.floor, cost.ceiling), (envelope, envelope));
-        assert!(cost.overhead.mem_bytes > 0, "{cost:?}");
+        // The cost carries no VMM overhead and no guest allowance: a node learns both from its windows (joint plan
+        // step 14; ROOT, 2026-11-13, by decision 9's rule; fa865284b). What the census measured of them is evidence
+        // alone, its overhead line's.
+        let none = hex_api::CapacityResources::default();
+        assert_eq!(
+            (cost.overhead, cost.guest_overhead),
+            (none, none),
+            "{cost:?}"
+        );
         let evidence = std::fs::read(&made.evidence_file).unwrap();
         let text = String::from_utf8_lossy(&evidence[prefix.len()..]).into_owned();
         assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        let own_memory: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("overhead "))
+            .and_then(|l| {
+                l.split_whitespace()
+                    .find_map(|w| w.strip_prefix("mem_bytes="))
+            })
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("no overhead line naming its memory: {text}"));
+        assert!(own_memory > 0, "{text}");
         println!("{}\n{text}", made.summary);
     }
 }

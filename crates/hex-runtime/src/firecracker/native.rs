@@ -1432,6 +1432,7 @@ impl Runtime for FirecrackerRuntime {
                     abandoned: record.abandoned,
                     last_resort: None,
                     ended: None,
+                    control: None,
                     credentials: Vec::new(),
                 });
             }

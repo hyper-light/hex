@@ -19,6 +19,7 @@ use hyper_transport::{Authenticated, Directory, Event, PeerId};
 use crate::classes::{Hex, Role};
 use crate::conn::{Conn, Shared};
 use crate::limits::Derived;
+use crate::seal::{Keys, Side};
 use crate::{Admits, Negotiated, Refused};
 
 /// The endpoint the driver owns.
@@ -59,6 +60,11 @@ pub(crate) enum Command {
     Negotiated {
         peer: PeerId,
         reply: SyncSender<Option<(CipherSuite, Option<NamedGroup>)>>,
+    },
+    /// The seal of the connection to `peer` (Q13).
+    Keys {
+        peer: PeerId,
+        reply: SyncSender<Result<Arc<Keys>, Refused>>,
     },
     Links {
         reply: SyncSender<Vec<Negotiated>>,
@@ -221,6 +227,8 @@ struct PeerState {
     /// The peer admitted this side (its Welcome came), or this side accepted it.
     welcomed: bool,
     mux: Mux,
+    /// The connection's seal, which each connection on it seals and opens the node's wire's secrets with (Q13).
+    keys: Arc<Keys>,
     conns: BTreeMap<lanes::Conn, Arc<Shared>>,
     /// Frames each of this side's lanes holds back until the lane has room, in order, a connection's Credits one
     /// ([`hold_back`]), a control lane's wiped as it goes ([`control_frame`]).
@@ -620,6 +628,10 @@ impl Driver {
             Command::Negotiated { peer, reply } => {
                 let _ = reply.try_send(self.ep.negotiated(peer));
             }
+            Command::Keys { peer, reply } => {
+                let keys = self.peers.get(&peer).map(|state| Arc::clone(&state.keys));
+                let _ = reply.try_send(keys.ok_or(Refused::NotConnected));
+            }
             Command::Links { reply } => {
                 let links = self
                     .peers
@@ -650,7 +662,13 @@ impl Driver {
             .mux
             .connect(port)
             .map_err(|why| Refused::Conn { why })?;
-        let shared = Arc::new(Shared::new(peer, conn, port, self.sender.clone()));
+        let shared = Arc::new(Shared::new(
+            peer,
+            conn,
+            port,
+            self.sender.clone(),
+            Arc::clone(&state.keys),
+        ));
         state.conns.insert(conn, Arc::clone(&shared));
         self.apply(peer, vec![out]);
         Ok(shared)
@@ -720,6 +738,27 @@ impl Driver {
                 // its handshake verified, and is told so.
                 let dialed = self.ep.directory().dialing.contains_key(&peer);
                 let welcome = (!dialed).then(|| mux.welcome());
+                // Its seal's keys, from its TLS session, each way by which side dialed, as its Welcome goes (Q13). A
+                // connection that can't seal can't carry the node's wire's secrets: refused at once.
+                let side = if dialed { Side::Dialer } else { Side::Acceptor };
+                let ep = &self.ep;
+                let derived = Keys::derive(side, |label, context, out| {
+                    ep.export_keying_material(peer, label, context, out)
+                        .map(drop)
+                        .map_err(|refusal| Refused::Transport { refusal })
+                });
+                let keys = match derived {
+                    Ok(keys) => Arc::new(keys),
+                    Err(why) => {
+                        self.peer_gone(peer, why);
+                        self.ep.refuse(
+                            Instant::now(),
+                            peer,
+                            hyper_transport::Refusal::Configuration,
+                        );
+                        return;
+                    }
+                };
                 self.peers.insert(
                     peer,
                     PeerState {
@@ -727,6 +766,7 @@ impl Driver {
                         name,
                         welcomed: !dialed,
                         mux,
+                        keys,
                         conns: BTreeMap::new(),
                         waiting: BTreeMap::new(),
                         end_after: std::collections::BTreeSet::new(),
@@ -861,7 +901,13 @@ impl Driver {
                     let Some(state) = self.peers.get_mut(&peer) else {
                         continue;
                     };
-                    let shared = Arc::new(Shared::new(peer, conn, port, self.sender.clone()));
+                    let shared = Arc::new(Shared::new(
+                        peer,
+                        conn,
+                        port,
+                        self.sender.clone(),
+                        Arc::clone(&state.keys),
+                    ));
                     state.conns.insert(conn, Arc::clone(&shared));
                     self.accepts.put(port, peer, shared);
                 }

@@ -191,42 +191,44 @@ pub fn sockets(pids: &[u32]) -> Vec<Socket> {
     read_sockets(&tables, pids)
 }
 
-/// The sockets `tables` (the TCP and UDP rows, as [`sockets`] writes them) gives the owners `pids`.
+/// The sockets `tables` (the TCP and UDP rows, as [`sockets`] writes them) gives the owners `pids`, each held by its
+/// row's owner.
 fn read_sockets(tables: &serde_json::Value, pids: &[u32]) -> Vec<Socket> {
     let address = |ip: &serde_json::Value, port: &serde_json::Value| {
         let ip: IpAddr = ip.as_str().unwrap().parse().unwrap();
         SocketAddr::new(ip, u16::try_from(port.as_u64().unwrap()).unwrap())
     };
-    let owned = |row: &&serde_json::Value| {
-        u32::try_from(row["owner"].as_u64().unwrap()).is_ok_and(|owner| pids.contains(&owner))
-    };
+    let owner = |row: &serde_json::Value| u32::try_from(row["owner"].as_u64().unwrap()).unwrap();
+    let owned = |row: &&serde_json::Value| pids.contains(&owner(row));
     let mut out: Vec<Socket> = Vec::new();
     for row in tables["tcp"].as_array().unwrap().iter().filter(owned) {
         let remote = address(&row["remote"], &row["rport"]);
-        let socket = Socket {
-            tcp: true,
-            local: address(&row["local"], &row["lport"]),
-            remote: if remote.ip().is_unspecified() && remote.port() == 0 {
-                None
-            } else {
-                Some(remote)
+        super::add(
+            &mut out,
+            Socket {
+                tcp: true,
+                local: address(&row["local"], &row["lport"]),
+                remote: if remote.ip().is_unspecified() && remote.port() == 0 {
+                    None
+                } else {
+                    Some(remote)
+                },
+                listening: row["state"].as_str() == Some(LISTEN),
+                pids: vec![owner(row)],
             },
-            listening: row["state"].as_str() == Some(LISTEN),
-        };
-        if !out.contains(&socket) {
-            out.push(socket);
-        }
+        );
     }
     for row in tables["udp"].as_array().unwrap().iter().filter(owned) {
-        let socket = Socket {
-            tcp: false,
-            local: address(&row["local"], &row["lport"]),
-            remote: None,
-            listening: false,
-        };
-        if !out.contains(&socket) {
-            out.push(socket);
-        }
+        super::add(
+            &mut out,
+            Socket {
+                tcp: false,
+                local: address(&row["local"], &row["lport"]),
+                remote: None,
+                listening: false,
+                pids: vec![owner(row)],
+            },
+        );
     }
     out
 }
@@ -270,7 +272,7 @@ fn a_command_line_splits_as_the_c_runtime_splits_it() {
 
 /// The tables read (no VM): do read CIM's rows of a parent and child, a child whose parent pid was reused by a later
 /// process, and a socket table of a listener, a connection, a socket of another owner and a UDP endpoint; expect the
-/// tree and the sockets as they are, the reused parent no parent.
+/// tree and the sockets as they are, each held by its row's owner, the reused parent no parent.
 #[test]
 fn cims_and_nettcpips_rows_read_as_processes_and_sockets() {
     let listed = serde_json::json!([
@@ -302,18 +304,19 @@ fn cims_and_nettcpips_rows_read_as_processes_and_sockets() {
         ],
         "udp": [{"owner": 700, "local": "::", "lport": 5353}],
     });
-    let socket = |tcp, local: &str, remote: Option<&str>, listening| Socket {
+    let socket = |tcp, local: &str, remote: Option<&str>, listening, owner| Socket {
         tcp,
         local: local.parse().unwrap(),
         remote: remote.map(|r| r.parse().unwrap()),
         listening,
+        pids: vec![owner],
     };
     assert_eq!(
         read_sockets(&tables, &[700, 701]),
         [
-            socket(true, "127.0.0.1:7101", None, true),
-            socket(true, "10.0.0.2:50000", Some("192.0.2.1:443"), false),
-            socket(false, "[::]:5353", None, false),
+            socket(true, "127.0.0.1:7101", None, true, 701),
+            socket(true, "10.0.0.2:50000", Some("192.0.2.1:443"), false, 701),
+            socket(false, "[::]:5353", None, false, 700),
         ]
     );
 }

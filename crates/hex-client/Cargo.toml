@@ -45,6 +45,9 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 shards-afunix = { path = "../../vendor/shards/crates/afunix" }
+# src/guest/lanes/tests.rs on Windows: a lane's ends as Shards' run host makes them there, a plain pipe pair
+# (shards_ipc::Stream), the relay holding its VM's end.
+shards-ipc = { path = "../../vendor/shards/crates/ipc" }
 windows-sys.workspace = true
 
 [lints]

@@ -113,6 +113,8 @@ pub struct Report {
     pub runs_granted: u64,
     pub runs_refused: u64,
     pub runs_unanswered: u64,
+    /// Reserves a runner let go of before their answers came (CV5: the holder's own release of a waiting reserve).
+    pub runs_let_go: u64,
     pub link_drops: u64,
     pub keeper_crashes: u64,
     pub crashes_at_write: u64,
@@ -312,8 +314,9 @@ enum Fault {
     CrashBeforeWrite,
     /// The keeper's process ends at its next write, which lands.
     CrashAfterWrite,
-    /// A runner's wait for an answer runs out.
-    RanOut,
+    /// A runner lets go of a reserve before its answer: its run is no longer wanted (CV5), the one way a reserve is
+    /// abandoned with its link up, no wait of a holder's ending at a time (CV6; the review's E-8).
+    LetGo,
     /// The person releases a runner away with work still running (CV6's mistake).
     ForgetAway,
     /// A runner leaves for good, and the person releases what it held: a live runner, never the last.
@@ -324,7 +327,7 @@ const FAULTS: [Fault; 6] = [
     Fault::CrashKeeper,
     Fault::CrashBeforeWrite,
     Fault::CrashAfterWrite,
-    Fault::RanOut,
+    Fault::LetGo,
     Fault::ForgetAway,
     Fault::Retire,
 ];
@@ -463,6 +466,18 @@ fn oci_legs() -> &'static [Leg] {
             .filter_map(leg)
             .collect()
     })
+}
+
+/// What kiln's runs ask, one after another in recorded order ([`kiln_legs`], none below its resolution): a holder's runs
+/// in the capacity view's tests on real machines (hex-cli's `capacity_view`; ROOT's ruling 7, 2026-11-14).
+pub fn kiln_needs() -> impl Iterator<Item = Amounts> {
+    kiln_legs().iter().map(|leg| leg.need)
+}
+
+/// What Hex's own boxes ask, one after another in recorded order ([`oci_legs`]): Hex's boxes in those tests, as in this
+/// simulator's (ROOT's rulings 2 and 7, 2026-11-14).
+pub fn oci_needs() -> impl Iterator<Item = Amounts> {
+    oci_legs().iter().map(|leg| leg.need)
 }
 
 /// The most reservations one runner holds (CV8): runs of the smallest charge recorded ([`kiln_legs`]), as many as the
@@ -980,7 +995,7 @@ impl World {
         match fault {
             Fault::CrashKeeper => keeper,
             Fault::CrashBeforeWrite | Fault::CrashAfterWrite => keeper && self.disk.crash.is_none(),
-            Fault::RanOut => self
+            Fault::LetGo => self
                 .runners
                 .iter()
                 .any(|r| r.holder.is_some() && !r.asked.is_empty()),
@@ -1011,9 +1026,9 @@ impl World {
                 self.disk.crash = Some((self.disk.writes, true));
                 Ok(())
             }
-            Fault::RanOut => {
+            Fault::LetGo => {
                 let runner = self.pick_runner(|r| r.holder.is_some() && !r.asked.is_empty());
-                self.ran_out(runner)
+                self.let_go(runner)
             }
             Fault::ForgetAway => {
                 let runner = self.pick_runner(Self::away_with_work);
@@ -1544,7 +1559,9 @@ impl World {
         Ok(())
     }
 
-    fn ran_out(&mut self, runner: Option<usize>) -> Result<(), Violation> {
+    /// A runner lets go of its oldest reserve waiting for an answer: abandoned, never started, and released at once
+    /// where its link is up, else left out of its next sync (CV5).
+    fn let_go(&mut self, runner: Option<usize>) -> Result<(), Violation> {
         let Some(n) = runner else {
             return Ok(());
         };
@@ -1555,8 +1572,10 @@ impl World {
             return Ok(());
         };
         let mut out = Out::default();
-        holder.ran_out(id, &mut out);
+        holder.release(id, &mut out);
         r.link.to_keeper.extend(out.send);
+        r.unasked(&id);
+        self.report.runs_let_go = self.report.runs_let_go.saturating_add(1);
         self.events(n, out.events)
     }
 

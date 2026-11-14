@@ -89,10 +89,18 @@ struct Record {
     /// Each VM's guest time as its VM process answers its use (D260), as the test sets it, by its box: none apart for a
     /// VM it sets none for.
     guest: RefCell<BTreeMap<String, ManagedGuestTime>>,
+    /// The machine's memory and disk free, as the test sets it (A-10).
+    free: Cell<CapacityResources>,
+    /// Each read of a VM's use, of a cgroup's file and of what is free, in order: `usage <cgroup>`, `read <cgroup>
+    /// <file>`, `free`.
+    reads: RefCell<Vec<String>>,
 }
 
 impl Cgroups for Record {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal> {
+        self.reads
+            .borrow_mut()
+            .push(format!("usage {}", name_of(cgroup.dir())));
         self.usage
             .borrow()
             .get(cgroup.dir())
@@ -142,6 +150,9 @@ impl Cgroups for Record {
     }
 
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal> {
+        self.reads
+            .borrow_mut()
+            .push(format!("read {} {file}", name_of(dir)));
         Ok(self
             .files
             .borrow()
@@ -174,6 +185,19 @@ impl Cgroups for Record {
             None => Ok(false),
         }
     }
+
+    fn free(&self) -> Result<CapacityResources, Refusal> {
+        self.reads.borrow_mut().push("free".to_owned());
+        Ok(self.free.get())
+    }
+}
+
+/// A cgroup's name, the last part of its path.
+fn name_of(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_owned()
 }
 
 impl Record {
@@ -285,6 +309,179 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
         )
         .unwrap();
     assert_eq!(io.take(), Vec::new(), "nothing changed, nothing written");
+}
+
+/// `memory.stat`'s reclaimable file pages: `active_file` and `inactive_file` bytes, beside some anon.
+fn stat(active_file: u64, inactive_file: u64) -> String {
+    format!("anon 4096\nactive_file {active_file}\ninactive_file {inactive_file}\nshmem 0\n")
+}
+
+/// A process box's cgroup under the node's root, capped at 2 CPUs and `max` bytes, its memory `current` bytes of which
+/// `file` are reclaimable file pages.
+fn native(io: &Record, max: u64, current: u64, file: u64) {
+    io.dir(
+        &root().join("proc-1"),
+        &[
+            ("cpu.max", "200000 100000"),
+            ("memory.max", &max.to_string()),
+            ("memory.current", &current.to_string()),
+            ("memory.stat", &stat(file / 2, file - file / 2)),
+        ],
+    );
+}
+
+/// A Shards VM `vm-1`'s cgroup, its memory `current` bytes of which `file` are reclaimable file pages.
+fn vm_holding(
+    io: &Record,
+    current: u64,
+    file: u64,
+) -> Vec<(hex_api::LearnedHolder, Scope, BoxCgroup)> {
+    let vms = running(&[("vm-1", 1)]);
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, current);
+        io.dir(
+            cgroup.dir(),
+            &[("memory.stat", &stat(file / 2, file - file / 2))],
+        );
+    }
+    vms
+}
+
+/// The review's A-10 (AC-T7.4.1; C7): the fleet's budget was the machine's whole less the node's boxes' bookings, so the
+/// person's own work, kiln's runs and what nobody books went unseen. It is what the machine has free now plus what its VMs
+/// take of it, less what each box may still grow into, its booking past what it takes; a VM's and a box's reclaimable
+/// file pages, which `MemAvailable` counts free already, counted once. Do run a window, its budget measured on a 64 GiB
+/// machine with 20 GiB free, of one Shards VM whose cgroup holds 6 GiB, 4 GiB of it file pages, beside a process box
+/// capped at 8 GiB holding 5 GiB, 1 GiB of it file pages. Expect the VM's `memory.high`, its budget the fleet's whole:
+/// 20 + (6 - 4) - (8 - 4) = 18 GiB.
+#[test]
+fn a10_a_linux_fleets_budget_is_what_is_free_its_page_cache_counted_once() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    native(&io, 8 * GIB, 5 * GIB, GIB);
+    let vms = vm_holding(&io, 6 * GIB, 4 * GIB);
+    io.free.set(res(0, 20 * GIB));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    window(
+        &mut learner,
+        &io,
+        vms,
+        shards,
+        &[],
+        |reads| measured(machine(), CapacityResources::default(), reads),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-1"), "memory.high"),
+        Some((18 * GIB).to_string())
+    );
+}
+
+/// The review's A-10 (AC-T7.4.1; ROOT, 2026-11-14), on Linux: what the capacity view's holders reserve, as its keeper
+/// last said, comes off the fleet's budget. Do run the window of the page-cache case (20 GiB free, a VM holding 6 GiB, 4
+/// of it file pages, beside a process box capped at 8 GiB holding 5 GiB, 1 of it file pages) with 4 GiB reserved. Expect
+/// the VM's `memory.high` 18 - 4 = 14 GiB.
+#[test]
+fn a10_a_linux_keepers_word_comes_off_the_fleets_budget() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    native(&io, 8 * GIB, 5 * GIB, GIB);
+    let vms = vm_holding(&io, 6 * GIB, 4 * GIB);
+    io.free.set(res(0, 20 * GIB));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    window(
+        &mut learner,
+        &io,
+        vms,
+        shards,
+        &[],
+        |reads| measured(machine(), res(0, 4 * GIB), reads),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-1"), "memory.high"),
+        Some((14 * GIB).to_string())
+    );
+}
+
+/// The review's A-10 (ROOT, 2026-11-14: Hex's own boxes are never counted twice), on Linux: what a box takes is missing
+/// from the machine's free memory already, so the fleet loses what it may still grow into, never its whole booking beside
+/// its use; past its booking, the excess. Do run windows of one Shards VM holding 2 GiB beside a process box capped at 8
+/// GiB: while the box takes nothing, 30 GiB free; as it takes 6 GiB, 24 GiB free; as it takes 10 GiB, past its cap, 20
+/// GiB free. Expect the VM's `memory.high` 24 GiB, 24 GiB, then 22 GiB.
+#[test]
+fn a10_a_linux_nodes_own_boxes_are_never_counted_twice() {
+    let highs: Vec<Option<String>> = [(0, 30 * GIB), (6 * GIB, 24 * GIB), (10 * GIB, 20 * GIB)]
+        .into_iter()
+        .map(|(taken, free)| {
+            let io = Record::default();
+            io.dir(&fleet(), &[]);
+            native(&io, 8 * GIB, taken, 0);
+            let vms = vm_holding(&io, 2 * GIB, 0);
+            io.free.set(res(0, free));
+            let mut learner = Learner::new(&fleet(), machine()).unwrap();
+            window(
+                &mut learner,
+                &io,
+                vms,
+                shards,
+                &[],
+                |reads| measured(machine(), CapacityResources::default(), reads),
+                Instant::now(),
+            )
+            .unwrap();
+            io.file(&fleet().join("vm-1"), "memory.high")
+        })
+        .collect();
+    assert_eq!(
+        highs,
+        [24 * GIB, 24 * GIB, 22 * GIB].map(|bytes| Some(bytes.to_string()))
+    );
+}
+
+/// The review's A-10 (C7), on Linux: the machine's free memory is read after the window's VMs and the node's boxes, so a
+/// VM or box that grows between the reads shrinks the fleet's budget, never swells it. Do run a window of one Shards VM
+/// beside a process box, its budget measured. Expect what is free read once, after every other read.
+#[test]
+fn a10_a_linux_window_reads_what_is_free_after_its_vms_and_its_boxes() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    native(&io, 8 * GIB, 2 * GIB, 0);
+    let vms = vm_holding(&io, 2 * GIB, 0);
+    io.free.set(res(0, 30 * GIB));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    window(
+        &mut learner,
+        &io,
+        vms,
+        shards,
+        &[],
+        |reads| measured(machine(), CapacityResources::default(), reads),
+        Instant::now(),
+    )
+    .unwrap();
+    let reads = io.reads.borrow().clone();
+    assert_eq!(
+        reads.iter().filter(|read| *read == "free").count(),
+        1,
+        "{reads:?}"
+    );
+    let free = reads.iter().position(|read| read == "free").unwrap();
+    assert!(
+        reads[..free].iter().any(|read| read == "usage vm-1")
+            && reads[..free]
+                .iter()
+                .any(|read| read == "read proc-1 memory.current"),
+        "{reads:?}"
+    );
+    assert!(
+        !reads[free + 1..]
+            .iter()
+            .any(|read| read.starts_with("usage") || read.ends_with("memory.current")),
+        "{reads:?}"
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be told its room, though its ring pins keep within any
@@ -1163,6 +1360,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         published: Vec::new(),
         last_resort: None,
         ended: None,
+        control: None,
         credentials: Vec::new(),
     };
     with_last_resort(&mut info, &ended).unwrap();
@@ -1526,6 +1724,11 @@ impl Cgroups for Watched<'_> {
         self.ask("intend");
         self.io.intend(id, scope, end)
     }
+
+    fn free(&self) -> Result<CapacityResources, Refusal> {
+        self.ask("free");
+        self.io.free()
+    }
 }
 
 /// A-2 (the review's, 2026-11-14: a window held its learner's lock across every ask of its VMs, so one wedged VM process
@@ -1554,17 +1757,34 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         held: RefCell::default(),
     };
     let fleet_budget = res(32_000, 16 * GIB);
+    io.free.set(fleet_budget);
     let start = Instant::now();
     let record = |id: &hex_api::LearnedHolder| {
         watched.ask("record");
         booked_at_four(id)
     };
     let read = || Ok((vms.clone(), Vec::new(), fleet_budget));
-    one_window(&shared, &watched, &store, read, record, || start);
+    one_window(
+        &shared,
+        &watched,
+        &store,
+        read,
+        record,
+        CapacityResources::default(),
+        || start,
+    );
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(&fleet().join(name), 0, held);
     }
-    one_window(&shared, &watched, &store, read, record, || start + WINDOW);
+    one_window(
+        &shared,
+        &watched,
+        &store,
+        read,
+        record,
+        CapacityResources::default(),
+        || start + WINDOW,
+    );
     assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
     let asked = watched.asked.borrow().clone();
     for what in [

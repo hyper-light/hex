@@ -114,7 +114,7 @@ fn the_node_under_shards_init_boots_to_ready_with_hexs_own_init() {
         booted.guest.stop().unwrap();
         let end = booted.guest.wait_for(Duration::MAX).unwrap();
         let stopped = stopping.elapsed();
-        assert_eq!(end, Some(RunEnd::Stopped), "run {i}");
+        assert_eq!(end.map(|ended| ended.end), Some(RunEnd::Stopped), "run {i}");
         println!(
             "NODE-HOSTED {i} ready_us={} stop_us={} cpu_ns={:?} memory_bytes={:?} pids={:?}",
             booted.took.as_micros(),

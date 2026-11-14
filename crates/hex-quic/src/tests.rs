@@ -860,3 +860,55 @@ mod silent {
         drop((ended_there, open_there, sentinel_there));
     }
 }
+
+/// A lease's answer as the node's wire carries it, its value `value`: a message that carries a secret.
+fn leased(value: &[u8]) -> Vec<u8> {
+    hex_core::wire::request(
+        7,
+        &hex_core::wire::Request::Leased {
+            run: 3,
+            answer: Ok(hex_api::lease::Lease {
+                lease: "lease-32".to_owned(),
+                value: hex_api::lease::Value::new(value.to_vec()),
+                life: None,
+            }),
+        },
+        hex_core::wire::MAX_MESSAGE,
+    )
+    .unwrap()
+}
+
+/// HEX-QUIC-32 (Q13; the review's E-6; AC-T7.4.1): a connection's two ends derive its seal from their own TLS session.
+/// Do dial a node, take each end's seal of the connection, and seal a lease's message at each through the wire's seal;
+/// then dial the node from a second client. Expect each message sealed with none of its value in the clear and opened
+/// whole at the other end; neither end opening what it sealed itself, each way its own key; and the second client's
+/// connection opening neither, its seal its own session's.
+#[test]
+fn hex_quic_32_a_connections_ends_derive_its_seal_from_their_tls_session() {
+    use hex_core::wire::{Fault, SealFault, open, seal};
+    let ca = SimCa::new().unwrap();
+    let node = node(&ca, "node-32.test");
+    let first = client(enrolled(&ca, "client-32.test"));
+    let peer = dial(&DIAL, &first, "node-32.test", node.local_addr()).unwrap();
+    let here = first.keys(peer).unwrap();
+    let there = node.keys(peer_id("client-32.test")).unwrap();
+    let (up, down) = (leased(b"hex-32-lease-value"), leased(b"hex-32-tokens"));
+    let up_sealed = seal(&up, &*here).unwrap();
+    assert!(!up_sealed.windows(18).any(|w| w == b"hex-32-lease-value"));
+    assert_eq!(open(up_sealed.clone(), Some(&*there)).unwrap(), up);
+    let down_sealed = seal(&down, &*there).unwrap();
+    assert_eq!(open(down_sealed.clone(), Some(&*here)).unwrap(), down);
+    let broken = Err(Fault::Seal(SealFault::Broken));
+    assert_eq!(open(up_sealed.clone(), Some(&*here)), broken);
+    assert_eq!(open(down_sealed.clone(), Some(&*there)), broken);
+    let second = client(enrolled(&ca, "client-32b.test"));
+    let other = dial(&DIAL, &second, "node-32.test", node.local_addr()).unwrap();
+    let elsewhere = second.keys(other).unwrap();
+    assert_eq!(open(down_sealed, Some(&*elsewhere)), broken);
+    let theirs = node.keys(peer_id("client-32b.test")).unwrap();
+    assert_eq!(open(up_sealed, Some(&*theirs)), broken);
+    assert!(matches!(
+        node.keys(peer_id("nobody-32.test")),
+        Err(Refused::NotConnected)
+    ));
+}

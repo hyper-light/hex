@@ -207,6 +207,11 @@ As built (`a8f6bfe4`, `f2e6d8a2`, `28c57ba8`):
   client's event loop waits on an OS handle as it does on vsock's. A lane carries a half-close each way, and its reset
   or its connection's end is told after its bytes; a lane its socket cuts short is read to its cut, on Linux and macOS
   (`ce3ab706`). On Windows the lane's ends are the plain pipe pair Shards' run host makes there (`5cc5efbc`).
+- **An exec's streams on Windows** (the review's D-10). The run's endpoint lends no caller the lanes, and the Windows
+  node hands a caller in another process handles alone, so each stream an exec asks for is a lane carried on a pipe
+  whose end the caller gets (`Lanes::piped`; shards-guest.md's HEX-RT-17). One thread a stream: Shards' lanes block
+  per lane, with no try-read and no waker, so each stream's bridge holds a thread until Shards gives an evented lane
+  API; then one loop per node VM drives every lane and its pipes.
 - **The greeting.** The guest runtime dials the relay's control socket through a lane and greets its node
   (`Client::connect`), whose control connection then joins the node's loop as a direct boot's does. A node VM whose
   node won't greet it, or whose connection can't join, is stopped, and its boot refused in its words.
