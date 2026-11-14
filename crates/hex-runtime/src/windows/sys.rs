@@ -655,19 +655,26 @@ impl Job {
     /// (`ERROR_MORE_DATA`; jobobject_basic_process_id_list.md: "The number of process identifiers to be
     /// stored in ProcessIdList"), so one read with room for one id learns the job's whole count at any
     /// size (CLAUDE.md §2: bounded by the job's own count, not a picked one). An ended member leaves the
-    /// list though the node still holds its process handle, and this count agrees with the ids listed
-    /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
-    /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
+    /// list though the node still holds its process handle, before it leaves the count (HEX-WIN-1's lag), so a
+    /// read listing none counts none ([`live`]) and a box whose members have exited reads as empty. The job's
+    /// accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
-        self.process_list()
-            .map(|list| u64::from(list.NumberOfAssignedProcesses))
+        self.process_list().map(|list| {
+            live(
+                list.NumberOfAssignedProcesses,
+                list.NumberOfProcessIdsInList,
+            )
+        })
     }
 
     /// An event to wait on for this same nested scope, or positive emptiness. A recycled snapshot
     /// PID is checked against the held job before its observation handle can be used.
     pub(crate) fn member(&self) -> io::Result<Member> {
         let list = self.process_list()?;
-        if list.NumberOfAssignedProcesses == 0 {
+        if empty(
+            list.NumberOfAssignedProcesses,
+            list.NumberOfProcessIdsInList,
+        ) {
             return Ok(Member::Empty);
         }
         let pid = list
@@ -675,7 +682,7 @@ impl Job {
             .first()
             .copied()
             .and_then(|pid| u32::try_from(pid).ok())
-            .filter(|pid| *pid != 0 && list.NumberOfProcessIdsInList != 0)
+            .filter(|pid| *pid != 0)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         let process =
             process_with_rights(pid, PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)?;
@@ -726,6 +733,20 @@ impl Job {
 pub(crate) enum Member {
     Empty,
     Process(Handle),
+}
+
+/// A job's live members as one id-list read gives them, `assigned` its `NumberOfAssignedProcesses` and `listed` its
+/// `NumberOfProcessIdsInList` ([`Job::live_processes`]): none where it lists none, though its assigned count may still
+/// hold members that have ended (Windows drops an ended member from the list before its count: HEX-WIN-1's lag, 2
+/// assigned and 1 listed in one read); else its assigned count, every listed member live and the rest unlisted only
+/// past the read's room of one id.
+fn live(assigned: u32, listed: u32) -> u64 {
+    if listed == 0 { 0 } else { u64::from(assigned) }
+}
+
+/// Whether one id-list read says the job holds no live member ([`Job::member`]): none assigned, or none listed.
+fn empty(assigned: u32, listed: u32) -> bool {
+    assigned == 0 || listed == 0
 }
 
 /// A job's resource accounting, read whole.
@@ -1526,11 +1547,33 @@ mod tests {
         (assigned, listed, buf[1..=listed as usize].to_vec())
     }
 
+    /// HEX-WIN-1's lag (ROOT's native run of 2026-11-14 at 211292c80: 2 assigned, 1 listed in one read): Windows drops
+    /// an ended member from a job's id list before its assigned count, so the list is the live truth. Do read the
+    /// lagging counts as one read gives them. Expect: a read listing no member is empty and counts none live, whatever
+    /// its assigned count still holds; one listing any counts its assigned (each listed member live, the rest unlisted
+    /// only past the read's room); none of each, empty.
+    #[test]
+    fn a_job_listing_no_member_is_empty_though_its_assigned_count_lags() {
+        assert_eq!(
+            (live(2, 0), empty(2, 0)),
+            (0, true),
+            "lagging: ended members alone"
+        );
+        assert_eq!((live(1, 0), empty(1, 0)), (0, true));
+        assert_eq!(
+            (live(2, 1), empty(2, 1)),
+            (2, false),
+            "a live member listed"
+        );
+        assert_eq!((live(0, 0), empty(0, 0)), (0, true));
+    }
+
     /// HEX-WIN-1 (native plan step 3): a member that has ended leaves the job's id list, which
     /// `live_processes` counts, though the node still holds its process handle. Do: run `cmd /c exit 0`
     /// in a job, wait for its end, keep its handle, read the list with room for every id. Expect: the
-    /// member's id isn't listed, and the list's two counts agree in one read (so
-    /// `NumberOfAssignedProcesses`, the count `live_processes` returns, keeps no ended member either).
+    /// member's id isn't listed, and the read's assigned count is at least what it lists: Windows drops an ended
+    /// member from the list before its count (HEX-WIN-1's lag, seen natively), so `live_processes` counts from the
+    /// list ([`live`]).
     /// Another id may be listed: the console host Windows starts for a console program with no console,
     /// which ends after its client.
     #[test]
@@ -1555,7 +1598,8 @@ mod tests {
             "ended member {} still listed: {ids:?}",
             started.pid
         );
-        assert_eq!(assigned, listed);
+        // Its count may still hold it a moment (HEX-WIN-1's lag): the list is the live truth.
+        assert!(assigned >= listed, "{assigned} assigned, {listed} listed");
         drop(started);
     }
 
