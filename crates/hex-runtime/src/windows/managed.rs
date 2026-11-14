@@ -205,24 +205,48 @@ fn job_name(runtime: &WinRuntime, record: NativeRecord<'_>) -> Result<Option<Str
     Ok(Some(name))
 }
 
+/// What a managed VM process is given of the node's own environment beside its configured pair: what Shards' own
+/// spawner gives a child (its crates/ipc windows.rs `KEPT`, PM M208), so the VM process can give it the confined VM
+/// process it starts: `LOCALAPPDATA`, without which Windows makes no child in an AppContainer (ERROR_ENVVAR_NOT_FOUND),
+/// and `SystemRoot`, under which Winsock's providers are found as a socket is made.
+fn kept(name: &'static str, missing: &'static str) -> Result<std::ffi::OsString, Refusal> {
+    match std::env::var_os(name) {
+        Some(value) => Ok(value),
+        None => Err(Refusal::Invalid {
+            what: "a managed VM's environment",
+            why: copy_text(missing)?,
+        }),
+    }
+}
+
 fn runtime_environment(paths: &shards_api::RuntimePaths) -> Result<Vec<u16>, Refusal> {
-    // The exact configured provider pair, in Windows' case-insensitive environment order.
+    let local = kept(
+        "LOCALAPPDATA",
+        "the node's own environment has no LOCALAPPDATA, which Shards' VM process gives the confined VM process it starts (Shards PM M208)",
+    )?;
+    let root = kept(
+        "SystemRoot",
+        "the node's own environment has no SystemRoot, which Shards' VM process gives the confined VM process it starts (Shards PM M208)",
+    )?;
+    // The exact configured provider pair and the node's kept pair, in Windows' case-insensitive environment order.
     let values = [
-        ("SHARDS_CACHE", paths.cache()),
-        ("SHARDS_HOME", paths.home()),
+        ("LOCALAPPDATA", local.as_os_str()),
+        ("SHARDS_CACHE", paths.cache().as_os_str()),
+        ("SHARDS_HOME", paths.home().as_os_str()),
+        ("SystemRoot", root.as_os_str()),
     ];
     let mut size = 1usize;
     for (name, path) in values {
         let entry = name
             .len()
-            .checked_add(path.as_os_str().encode_wide().count())
+            .checked_add(path.encode_wide().count())
             .and_then(|count| count.checked_add(2))
             .ok_or_else(|| super::allocation(usize::MAX))?;
         if entry > hex_core::hcs::ENV_VAR_UNITS {
             return Err(Refusal::Invalid {
                 what: "configured native runtime environment",
                 why: copy_text(
-                    "a configured runtime path exceeds Windows' environment variable bound",
+                    "a configured runtime path or kept variable exceeds Windows' environment variable bound",
                 )?,
             });
         }
@@ -237,9 +261,11 @@ fn runtime_environment(paths: &shards_api::RuntimePaths) -> Result<Vec<u16>, Ref
     for (name, path) in values {
         environment.extend(name.encode_utf16());
         environment.push(u16::from(b'='));
-        for unit in path.as_os_str().encode_wide() {
+        for unit in path.encode_wide() {
             if unit == 0 {
-                return Err(pending("a configured runtime path contains NUL"));
+                return Err(pending(
+                    "a configured runtime path or kept variable contains NUL",
+                ));
             }
             environment.push(unit);
         }
@@ -1004,31 +1030,23 @@ mod runtime_environment_tests {
         assert_eq!(runtime_environment(&paths).unwrap(), expected);
     }
 
-    /// AC-T7.4.1: native and probe receive exactly the same explicitly configured runtime pair.
-    #[test]
-    fn runtime_environment_contains_only_the_explicit_provider_paths() {
-        let paths = shards_api::RuntimePaths::new(
-            std::path::PathBuf::from("C:\\cache\\雪"),
-            std::path::PathBuf::from("C:\\home"),
-        )
-        .unwrap();
-        let expected: Vec<u16> = "SHARDS_CACHE=C:\\cache\\雪\0SHARDS_HOME=C:\\home\0\0"
-            .encode_utf16()
-            .collect();
-        assert_eq!(runtime_environment(&paths).unwrap(), expected);
-    }
-
     /// AC-T7.4.1: native OS paths remain lossless; no Unicode replacement or display conversion.
     #[test]
     fn runtime_environment_preserves_native_unpaired_utf16() {
-        use std::os::windows::ffi::OsStringExt;
-        let mut wide: Vec<u16> = "C:\\cache\\".encode_utf16().collect();
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut wide: Vec<u16> = "C:\\cache\\雪".encode_utf16().collect();
         wide.push(0xd800);
         let cache = std::ffi::OsString::from_wide(&wide);
         let paths = shards_api::RuntimePaths::new(cache.into(), "C:\\home".into()).unwrap();
-        let mut expected: Vec<u16> = "SHARDS_CACHE=".encode_utf16().collect();
+        let ours =
+            |name: &str| -> Vec<u16> { std::env::var_os(name).unwrap().encode_wide().collect() };
+        let mut expected: Vec<u16> = "LOCALAPPDATA=".encode_utf16().collect();
+        expected.extend(ours("LOCALAPPDATA"));
+        expected.extend("\0SHARDS_CACHE=".encode_utf16());
         expected.extend(wide);
-        expected.extend("\0SHARDS_HOME=C:\\home\0\0".encode_utf16());
+        expected.extend("\0SHARDS_HOME=C:\\home\0SystemRoot=".encode_utf16());
+        expected.extend(ours("SystemRoot"));
+        expected.extend("\0\0".encode_utf16());
         assert_eq!(runtime_environment(&paths).unwrap(), expected);
     }
 }
