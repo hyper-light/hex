@@ -11,6 +11,14 @@ use hex_api::{Ask, Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usa
 use hex_client::Client;
 use hex_testkit::waits::follow::{self, Party};
 
+/// A server as the party of a wait on what it does: live while its I/O thread serves (the review's C-5).
+fn serving<O: Os>(server: &Server<O>) -> Party {
+    match &server.io {
+        Some(io) if !io.is_finished() => Party::Live,
+        _ => Party::Ended,
+    }
+}
+
 /// The probe's count of sends (HEX-GUEST-41, at 31d5b387): one end of a Unix socket pair sent 20,000 times while
 /// another thread made and closed Unix socket pairs (140,461 of them), on macOS 26.4 (XNU 25.4.0). With the sender
 /// closing its copy at once, 719 arrived dead; with it kept until received, 0.
@@ -519,7 +527,7 @@ fn s33_a_remote_harnesss_sign_in_is_captured_refreshed_and_revoked_through_the_w
     follow::until(
         &GIVEN_BACK,
         "the revocation told to the broker",
-        || Party::Live,
+        || serving(&server),
         || broker.state.revoked.lock().unwrap().len() == 1,
     )
     .unwrap();
@@ -621,7 +629,7 @@ fn s33_a_remote_harnesss_lease_is_answered_through_the_wire_and_given_back_at_it
     follow::until(
         &GIVEN_BACK,
         "the run's lease given back to its broker",
-        || Party::Live,
+        || serving(&server),
         || broker.held().is_ok_and(|held| held == 0),
     )
     .unwrap();
@@ -650,7 +658,7 @@ fn s33_a_connection_that_drops_gives_back_its_leases() {
     follow::until(
         &GIVEN_BACK,
         "the dropped connection's lease given back to its broker",
-        || Party::Live,
+        || serving(&server),
         || broker.held().is_ok_and(|held| held == 0),
     )
     .unwrap();
@@ -730,7 +738,7 @@ fn s33_a_leased_value_is_kept_nowhere_on_the_node() {
     follow::until(
         &GIVEN_BACK,
         "the run's lease given back to its broker",
-        || Party::Live,
+        || serving(&server),
         || broker.held().is_ok_and(|held| held == 0),
     )
     .unwrap();

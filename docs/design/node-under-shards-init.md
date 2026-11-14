@@ -26,9 +26,9 @@ Merged on Hex's main, the form whole; its real-VM runs are ROOT's (§9):
   charged once (`3eb841a2`).
 
 READY through shards-init against the direct boot: on Linux KVM at `8aa7c028`, n=23, p50 152.4 ms against 134.3 ms;
-on macOS HVF at `cf535152`, about 165 ms against 103 ms. Owed (§9): the conformance suite's test through a `hex node`
-in this form, next; then, ROOT's with Shards ROOT, its runs on HVF and WHP, the host VMM's memory both ways, and every
-WHP run.
+on macOS HVF at `cf535152`, about 165 ms against 103 ms. Owed, ROOT's with Shards ROOT (§9): `node_guest_real`'s runs,
+the suite through shards-init on HVF and WHP and the PID-1 path's own, and each form's starts, cold and restored apart,
+and its VM's memory on HVF, WHP and KVM; and every WHP run.
 
 The person, 2026-11-13: "we are not getting rid of Hex's PID1 which lets it work with basically anything non-Shards.
 We are to have init work *with* that." So Hex's PID-1 path (§8) is permanent, and this step adds a second host for the
@@ -329,19 +329,28 @@ path's tests, and ROOT's real-VM runs of it, pass on their own, which is the acc
 
 ## 9. Acceptance, and what ROOT runs
 
-- **The suite through shards-init.** Hex's oci class passes its conformance suite through shards-init on macOS (HVF)
-  and Windows (WHP) with Hex's PID 1 intact: a `hex node` whose guest is its image (`HEX_GUEST_IMAGE`), every case
-  through the node's socket. The channel it needs is built (§5). Its test is owed next (goal 6's item 4); its runs are
-  ROOT's.
-- **The PID-1 path on its own.** `crates/hex-cli/tests/guest_real.rs` (HEX-GUEST-19: the suite in process, and through
-  a macOS node's socket), in the direct boot's form (`HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`), on a real VM (ROOT's).
-- **Both forms measured.** ROOT measures start latency and memory per node VM in both forms. Start latency is boot to
-  READY, then to the first create. Memory is STATS' `memory_bytes` and the host's VM process. Under shards-init, the
-  first run of an image at its shape saves its template and later ones restore it (D253), so the two are told apart by
-  how each started (`ImageGuest::started_from`).
-  - `crates/hex-cli/tests/node_hosted_real.rs` (`--ignored`, ROOT's) boots the node image through shards-init to READY,
-    reads `stats(Run)` and stops it, n times, with n, p50, p90, p99 and max.
-  - `crates/hex-cli/tests/guest_boot_record.rs` is the direct boot's counterpart.
+`crates/hex-cli/tests/node_guest_real.rs` (`--ignored`, ROOT's to run, once a form) takes the node's guest in either
+form, `HEX_NODE_GUEST_FORM`, through production code alone (ROOT, 2026-11-13: never `guest::hosted::Hosted`):
+- **The suite through shards-init, and the PID-1 path on its own** (macOS HVF, Windows WHP). A live `hex node`, every
+  case of the oci class's conformance suite through its socket. In the image form its guest is Hex's node image,
+  built into the node's Shards home as `node-image.sh` builds it, Hex's PID 1 intact by construction (§4), and its oci
+  answer books one node VM, Ready, with its route. In the kernel form its guest is Hex's own direct boot, its managed
+  shared guest granted through the node's socket as the scheduler's Index grants it, and it books no node VM.
+  `crates/hex-cli/tests/guest_real.rs` (HEX-GUEST-19, in process) stays the PID-1 path's own suite too.
+- **Linux (KVM), decided** (ROOT, 2026-11-13). The node VM exists because macOS and Windows can't run Linux containers
+  natively. Linux's oci class is native by design, so no Linux node boots a node VM, and an image form there would be
+  a feature with no need: step 39's acceptance is macOS's and Windows'. KVM gives the third OS's numbers for the
+  both-ways comparison through each form's production class, with no suite: the image form through
+  `ImageClass::boot_node`, as a node's guest runtime boots its node VM (hex-node's image runtime its record authority),
+  and the kernel form through a live `hex node`'s managed shared guest, granted as above.
+- **Both forms measured, the same way.** Start latency is the node's spawn to its ready line, then its first create
+  (macOS, Windows), the kernel form's grant to Live between them; on Linux, `boot_node`'s READY time and the grant's.
+  Memory is the VM's processes as their OS counts them (macOS's physical footprint, Windows' private working set,
+  Linux's anonymous resident pages, each with its peak), beside Hex's own reading: the node VM's host use (Shards'
+  D241 reading) and the shared guest's backing usage. Cold and restored starts are never one figure. The image form's
+  run hosts boot the guest its Shards home keeps (`shards guest use`, timed on its own line, so no boot fetches a
+  kernel), never one given them, so D253's templates engage. Its first start saves its template, and its restarts on
+  the same state restore it. A kernel-form start is a fresh run, a direct boot having no template.
 - **On every OS, with no VM.** The image form's w39 cases in hex-runtime's `guest::image` and `guest` tests (its read,
   boot, lanes, greeting, record, rate, room and stop, through a run host of the test's) run in each OS's `cargo test`,
   Windows' through the lane ends its run host makes there (`5cc5efbc`). Their native Windows run is ROOT's.

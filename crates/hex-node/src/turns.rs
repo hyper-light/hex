@@ -423,7 +423,16 @@ impl Turns {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_testkit::waits::until;
+    use hex_testkit::waits::follow::{self, Party};
+
+    /// A thread a test spawned, as the party of a wait on what it makes: ended once it has finished.
+    fn spawned<T>(thread: &std::thread::ScopedJoinHandle<'_, T>) -> Party {
+        if thread.is_finished() {
+            Party::Ended
+        } else {
+            Party::Live
+        }
+    }
 
     fn id(n: &str) -> BoxId {
         BoxId::new(n).unwrap()
@@ -482,29 +491,33 @@ mod tests {
     }
 
     /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn past the slowest hold seen refuses nothing:
-    /// the hold is a run-out (no sample, Karn's point; the census told), and the wait follows the holder, this
+    /// the hold is a run-out (no sample, Karn's point; the run-out told), and the wait follows the holder, this
     /// process's own thread, until it lets go, that hold the uncensored answer the patience rises to (HEX-SOCK-6: the
-    /// changes of one box made at once all land). Do: start the turns as they are once a hold of 25 ms has been seen
-    /// (test-only `Patience::seeded`); hold box a's turn while another thread takes it, until that take has run out
-    /// (the turns following, with no bound); then let go. Expect: the take given the turn, the wait counted once, and
-    /// a bound after it of at least the hold it followed.
+    /// changes of one box made at once all land). Do: take box a's turn and let it go, so the turns have seen that hold;
+    /// hold it again while another thread takes it, until that take has run out (the turns following, with no bound);
+    /// then let go. Expect: the take given the turn, the wait counted once, and a bound after it of at least the hold it
+    /// followed.
     #[test]
     fn a_wait_past_the_slowest_hold_follows_the_holder_and_learns_its_hold() {
         let turns = Turns::new(
             "op",
             "turns under way",
             2,
-            Patience::seeded("test.turns", Duration::from_millis(25)),
+            Patience::measuring("test.turns"),
         );
+        drop(turns.take(&id("a")).unwrap());
         let held = turns.take(&id("a")).unwrap();
         let took = Instant::now();
         let hold = std::thread::scope(|s| {
             let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
-            // The take's run-out comes within its own wait for the turn, which the node's turn record bounds.
-            let waits = Patience::seeded("test.turns.take_runs_out", hex_testkit::waits::NODE_TURN);
-            until(&waits, "the second take running out", || {
-                turns.patience().is_none()
-            })
+            // A look: the turns tell no event as a take runs out, their patience read.
+            let waits = Patience::measuring("test.turns.take_runs_out");
+            follow::until(
+                &waits,
+                "the second take running out",
+                || spawned(&waiter),
+                || turns.patience().is_none(),
+            )
             .unwrap();
             let hold = took.elapsed();
             drop(held);
@@ -539,16 +552,10 @@ mod tests {
             std::thread::scope(|s| {
                 let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
                 let waits = Patience::measuring("test.turns.told.runs_out");
-                hex_testkit::waits::follow::until(
+                follow::until(
                     &waits,
                     "the second take running out",
-                    || {
-                        if waiter.is_finished() {
-                            hex_testkit::waits::follow::Party::Ended
-                        } else {
-                            hex_testkit::waits::follow::Party::Live
-                        }
-                    },
+                    || spawned(&waiter),
                     || turns.patience().is_none(),
                 )
                 .unwrap();
@@ -648,8 +655,8 @@ mod tests {
 
     /// Decision 9's cold start (T-T7.1.2): before any turn has been let go, a wait for a turn has no bound and follows
     /// its holder until it lets go, and the hold it waited on then bounds the next. Do: on new turns, hold box a's turn
-    /// while another thread takes it, until that take waits; hold on for at least 30 ms and let go. Expect: no bound
-    /// before; the waiting take given the turn; then a bound of at least the 30 ms hold, the slowest seen.
+    /// while another thread takes it, until that take waits, then let go. Expect: no bound before; the waiting take given
+    /// the turn; then a bound of at least the hold, the slowest seen.
     #[test]
     fn a_cold_wait_follows_the_holder_until_it_lets_go_and_learns_the_hold() {
         let turns = Turns::new(
@@ -661,22 +668,26 @@ mod tests {
         assert_eq!(turns.patience(), None);
         let held = turns.take(&id("a")).unwrap();
         let took = Instant::now();
-        std::thread::scope(|s| {
+        let hold = std::thread::scope(|s| {
             let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
-            // No record times a take's wait starting on turns of their own (the census's row is to come, from the
-            // suites run under it): measuring, for the fact alone.
+            // A look: the turns tell no event as a take starts waiting, their count read.
             let waits = Patience::measuring("test.turns.second_take_waits");
-            until(&waits, "the second take waiting", || turns.waited() > 0).unwrap();
-            while took.elapsed() < Duration::from_millis(30) {
-                std::thread::yield_now();
-            }
+            follow::until(
+                &waits,
+                "the second take waiting",
+                || spawned(&waiter),
+                || turns.waited() > 0,
+            )
+            .unwrap();
+            let hold = took.elapsed();
             drop(held);
             waiter.join().unwrap().unwrap();
+            hold
         });
         let bound = turns.patience();
         assert!(
-            bound.is_some_and(|b| b >= Duration::from_millis(30)),
-            "the hold waited on bounds the next wait: {bound:?}"
+            bound.is_some_and(|b| b >= hold),
+            "the hold waited on bounds the next wait: {bound:?}, held at least {hold:?}"
         );
     }
 }
