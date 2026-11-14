@@ -198,10 +198,17 @@ impl Patience {
         if self.deadline().is_some() {
             return false;
         }
+        self.follows(party);
+        true
+    }
+
+    /// Tells the line [`Patience::following`] tells, at a site whose W* is its own rather than this wait's learned one
+    /// (a guest's boot, bounded by the slowest boot its node has seen; the review's C-9): its site knows it starts with
+    /// none, whatever this wait has learned elsewhere.
+    pub fn follows(&self, party: &[Piece<'_>]) {
         let line = following_line(self.name, party);
         // A process with no stderr to write has no log of its own to tell.
         let _ = std::io::stderr().lock().write_all(line.as_bytes());
-        true
     }
 
     /// The wait's name.

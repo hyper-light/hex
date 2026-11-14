@@ -771,13 +771,10 @@ fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows()
 enum Boots {
     /// Its relay answers: the token, then the node's hello.
     Ready,
-    /// Alive, its relay never listening: the dial's patience runs out (the hung-guest tests, which need a
-    /// Shards backend: macOS and Windows).
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Hung,
-    /// Its relay unanswered within any bound a dial gives, answering a dial that follows the guest with no clock
-    /// (`connect(port, Duration::MAX)`, Shards' `connect_while_runs` for a guest with no VM process of its own): a boot
-    /// slower than the slowest seen (the review's C-9).
+    /// Its relay unanswered within any bound a dial gives, refused at a dial's deadline as Shards' connector refuses one
+    /// it asked again until then, and answering a dial that follows the guest with no clock (`connect(port,
+    /// Duration::MAX)`, Shards' `connect_while_runs` for a guest with no VM process of its own): a boot slower than the
+    /// slowest seen (the review's C-9; tests that need a Shards backend: macOS and Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     Late,
 }
@@ -812,20 +809,15 @@ impl Planned {
     }
 }
 
-/// The boot's deadline `cmdline`, a guest's kernel command line, names, once (`hex.ready-ms=`).
-pub(super) fn ready_ms(cmdline: &str) -> Duration {
-    let named: Vec<u64> = cmdline
-        .split_whitespace()
-        .filter_map(|word| word.strip_prefix("hex.ready-ms="))
-        .map(|ms| ms.parse().unwrap())
-        .collect();
-    let [ms] = named.as_slice() else {
-        panic!(
-            "{cmdline:?} names the boot's deadline (hex.ready-ms) {} times, not once",
-            named.len()
-        )
-    };
-    Duration::from_millis(*ms)
+/// The word a Shards host once told its guest its boot's deadline by, which no host tells now (the review's C-9).
+pub(super) const READY_MS: &str = "hex.ready-ms";
+
+/// W* as a node learns it (decision 9): a boot to ready of the stand-in's ready guest, measured by a runtime that booted
+/// it, none before.
+fn learned_boot() -> Duration {
+    let rt = GuestRuntime::new(Arc::new(Planned::new(&[Boots::Ready])), config());
+    rt.guest().unwrap();
+    rt.boot_bound().unwrap().unwrap()
 }
 
 struct PlannedGuest {
@@ -985,7 +977,7 @@ impl shards_api::Guest for PlannedGuest {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             Boots::Late if patience == Duration::MAX => Ok(Box::new(Looped(ready_relay()))),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            Boots::Hung | Boots::Late => Err(shards_api::Refusal::Channel {
+            Boots::Late => Err(shards_api::Refusal::Channel {
                 port: _port,
                 why: format!("unanswered in {patience:?}"),
             }),
@@ -998,6 +990,17 @@ impl shards_api::Guest for PlannedGuest {
         at: std::time::Instant,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
         self.deadlines.lock().unwrap().push(at);
+        // Unanswered by its deadline: refused at it, as Shards' connector refuses a guest it asked again until then.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if self.boots == Boots::Late {
+            hex_wait::rest_until(at).unwrap();
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            });
+        }
         let left = at
             .checked_duration_since(std::time::Instant::now())
             .filter(|left| !left.is_zero())
@@ -1080,10 +1083,9 @@ impl shards_api::Guests for Planned {
     }
 }
 
-/// HEX-GUEST-34, AC-T7.4.1 (CLAUDE.md §2): boot a guest: expect its first dial to reach Shards as
-/// `connect_before` with the boot's own deadline, its bound counted from before the boot, so a boot that spends
-/// the bound is refused by type at that dial; never a patience counted down after the boot, which such a boot
-/// leaves at zero and Shards' client then awaits without a bound.
+/// HEX-GUEST-34, AC-T7.4.1 (CLAUDE.md §2; decision 9): learn a boot, then boot a guest: expect its first dial to reach
+/// Shards as `connect_before` with the boot's own W*, counted from before the boot; never a patience counted down after
+/// the boot, which a boot that spent its W* leaves at zero and Shards' client then awaits without a bound.
 #[test]
 fn the_first_dial_spends_the_boots_own_deadline() {
     if shards_api::backend().is_err() {
@@ -1091,7 +1093,8 @@ fn the_first_dial_spends_the_boots_own_deadline() {
     }
     let guests = Arc::new(Planned::new(&[Boots::Ready]));
     let rt = GuestRuntime::new(guests.clone(), config());
-    let bound = rt.first_dial_bound().unwrap();
+    let bound = learned_boot();
+    rt.learn(bound);
     let asked = Instant::now();
     rt.guest().unwrap();
     let booted = guests.booted.lock().unwrap().clone();
@@ -1112,38 +1115,6 @@ fn the_first_dial_spends_the_boots_own_deadline() {
         deadlines[0],
         asked + bound,
         booted[0] + bound
-    );
-}
-
-/// AC-T7.4.1 (original): on 00aad a guest's relay was refused its node's hello at the hello's learned bound, the node
-/// busy initializing the guest's GPU, while the boot had most of its deadline left, and the guest panicked. A
-/// Firecracker guest is told its boot's deadline (`hex.firecracker-ready-ms`), which its relay's hello takes as its
-/// caller's; a Shards guest is told none. Do: boot a guest. Expect its kernel command line to name the boot's deadline
-/// once (`hex.ready-ms=`): what is left of the first dial's bound as it boots, in milliseconds rounded up, so that,
-/// counted from the boot, it ends no sooner than the host's.
-#[test]
-fn original_a_shards_boot_tells_its_guest_the_boots_deadline() {
-    if shards_api::backend().is_err() {
-        eprintln!("SKIP: no Shards backend on this host");
-        return;
-    }
-    let guests = Arc::new(Planned::new(&[Boots::Ready]));
-    let rt = GuestRuntime::new(guests.clone(), config());
-    let bound = rt.first_dial_bound().unwrap();
-    let asked = Instant::now();
-    rt.guest().unwrap();
-    let cmdlines = guests.cmdlines.lock().unwrap().clone();
-    let booted = guests.booted.lock().unwrap().clone();
-    eprintln!("hex_guest_ready_word boot=cpu bound={bound:?} cmdlines={cmdlines:?}");
-    assert_eq!(cmdlines.len(), 1);
-    let given = ready_ms(&cmdlines[0]);
-    assert!(
-        given <= bound + Duration::from_millis(1),
-        "{given:?} is past the boot's bound {bound:?}"
-    );
-    assert!(
-        booted[0] + given >= asked + bound,
-        "{given:?} from the boot ends before the host's deadline, {bound:?} from before it"
     );
 }
 
@@ -1183,32 +1154,28 @@ fn a_boot_bound_past_any_deadline_is_refused_before_a_boot() {
     );
 }
 
-/// HEX-GUEST-34 (decision 9: a bound is the slowest answer on record, with no margin): boot a guest before any boot
-/// is seen: expect its first dial bounded by the record's slowest boot to ready, what is left of it after the boot
-/// call's own time, never unbounded.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// The review's C-9 (decision 9: before its first answer a wait has no bound and follows its party): boot a guest before
+/// any boot is seen. Expect one dial, Shards' `connect_while_runs` from its start (a stand-in's with no VM process of its
+/// own follows with no clock, `connect(port, Duration::MAX)`), never a deadline, the record's or any; and the boot then
+/// learned as the node's W*.
 #[test]
-fn the_first_boot_is_bounded_by_the_record() {
+fn c9_a_first_boot_before_any_is_seen_follows_its_guest_from_its_start() {
     if shards_api::backend().is_err() {
         return;
     }
     let guests = Arc::new(Planned::new(&[Boots::Ready]));
     let rt = GuestRuntime::new(guests.clone(), config());
-    let bound = rt.first_dial_bound().unwrap();
-    assert_eq!(bound, recorded_boot().unwrap());
-    let asked = Instant::now();
+    assert_eq!(rt.boot_bound().unwrap(), None);
     rt.guest().unwrap();
-    let spent = asked.elapsed();
-    let given = guests.patience.lock().unwrap()[0];
-    assert!(
-        given <= bound && given + spent >= bound,
-        "{given:?} of {bound:?}, {spent:?} spent"
-    );
+    let deadlines = guests.deadlines.lock().unwrap().clone();
+    let patience = guests.patience.lock().unwrap().clone();
+    assert!(deadlines.is_empty(), "{deadlines:?}");
+    assert_eq!(patience, [Duration::MAX]);
+    assert!(rt.boot_bound().unwrap().is_some());
 }
 
-/// HEX-GUEST-34: tell the runtime of a boot slower than the record, then a faster one, and boot: expect
-/// the first dial bounded by the slowest seen, the bound only rising.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// HEX-GUEST-34 (decision 9: W* is the slowest boot seen, only rising): tell the runtime of two boots, the slower
+/// first, and boot. Expect its W* the slower, and the first dial's deadline that W* from before the boot.
 #[test]
 fn the_bound_rises_with_a_slow_boot_and_never_falls() {
     if shards_api::backend().is_err() {
@@ -1216,34 +1183,50 @@ fn the_bound_rises_with_a_slow_boot_and_never_falls() {
     }
     let guests = Arc::new(Planned::new(&[Boots::Ready]));
     let rt = GuestRuntime::new(guests.clone(), config());
-    let slow = 3 * recorded_boot().unwrap();
+    let (one, two) = (learned_boot(), learned_boot());
+    let (slow, fast) = (one.max(two), one.min(two));
     rt.learn(slow);
-    rt.learn(recorded_boot().unwrap() / 2);
-    assert_eq!(rt.first_dial_bound().unwrap(), slow);
+    rt.learn(fast);
+    assert_eq!(rt.boot_bound().unwrap(), Some(slow));
     let asked = Instant::now();
     rt.guest().unwrap();
-    let spent = asked.elapsed();
-    let given = guests.patience.lock().unwrap()[0];
+    let booted = guests.booted.lock().unwrap()[0];
+    let deadlines = guests.deadlines.lock().unwrap().clone();
     assert!(
-        given <= slow && given + spent >= slow,
-        "{given:?} of {slow:?}, {spent:?} spent"
+        matches!(deadlines.as_slice(), [at] if asked + slow <= *at && *at <= booted + slow),
+        "{deadlines:?}, {slow:?} from [{asked:?}, {booted:?}]"
     );
 }
 
-/// HEX-GUEST-34 (no caller fails where an alternative exists): boot a guest that stays alive and never
-/// listens, then one that does: expect the first stopped and counted, the second booted and used.
+/// The review's C-9 (1) (decision 9: past W* the run-out is told and the wait follows its party, never a verdict at the
+/// bound): learn a boot, then boot a guest whose relay answers no dial within its deadline, only one that follows it.
+/// Expect one boot, never stopped: its first dial within W* from the boot's start, refused at it, then one dial that
+/// follows the guest (`Duration::MAX`) to its answer; and W* risen to that boot, its answer uncensored.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
-fn a_hung_guest_is_retired_and_booted_again() {
+fn c9_a_boot_past_w_star_is_followed_to_its_answer_and_w_star_rises_to_it() {
     if shards_api::backend().is_err() {
         return;
     }
-    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Ready]));
+    let guests = Arc::new(Planned::new(&[Boots::Late]));
     let rt = GuestRuntime::new(guests.clone(), config());
+    let w_star = learned_boot();
+    rt.learn(w_star);
     rt.guest().unwrap();
-    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
-    assert_eq!(guests.stops.load(Ordering::SeqCst), 1);
-    assert_eq!(rt.retired(), 1);
+    let (boots, stops) = (
+        guests.boots.load(Ordering::SeqCst),
+        guests.stops.load(Ordering::SeqCst),
+    );
+    let deadlines = guests.deadlines.lock().unwrap().clone();
+    let patience = guests.patience.lock().unwrap().clone();
+    assert_eq!((boots, stops), (1, 0), "boots and stops");
+    assert_eq!(deadlines.len(), 1, "{deadlines:?}");
+    assert_eq!(patience, [Duration::MAX]);
+    assert!(
+        rt.boot_bound().unwrap().is_some_and(|risen| risen > w_star),
+        "{:?} past {w_star:?}",
+        rt.boot_bound()
+    );
 }
 
 /// The review's C-9 (1) (AC-T7.4.1; decision 9: past W* the run-out is told and the wait follows its party, never a
@@ -1272,26 +1255,6 @@ fn c9_a_first_boot_slower_than_w_star_is_followed_never_stopped_and_booted_again
         cmdlines.iter().all(|line| !line.contains(READY_MS)),
         "{cmdlines:?}"
     );
-}
-
-/// HEX-GUEST-34: boot two guests that both hang: expect the caller refused by type, naming the boot and
-/// its bound, after exactly two boots, both stopped.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[test]
-fn a_second_hang_is_refused_by_type() {
-    if shards_api::backend().is_err() {
-        return;
-    }
-    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Hung]));
-    let rt = GuestRuntime::new(guests.clone(), config());
-    let Err(Refusal::Os { op, why }) = rt.guest().map(|_| ()) else {
-        panic!("expected the boot refused");
-    };
-    assert_eq!(op, "booting the node's guest");
-    assert!(why.contains("ready"), "{why}");
-    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
-    assert_eq!(guests.stops.load(Ordering::SeqCst), 2);
-    assert_eq!(rt.retired(), 2);
 }
 
 /// HEX-GUEST-34 (decision 9: a host class with no record seeds from the slowest record of any class, every class's

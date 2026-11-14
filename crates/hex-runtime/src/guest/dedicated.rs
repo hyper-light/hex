@@ -1487,7 +1487,7 @@ impl GuestRuntime {
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
             // HEX-GUEST-33: a later dial without its caller's deadline spends the whole learned bound,
             // not what this create had left; the create's own dials carry its deadline.
-            budget.remaining().and_then(|_| self.first_dial_bound())?,
+            Some(budget.remaining().and_then(|_| self.first_dial_bound())?),
         ))?;
         let client = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline())?;
         let booted = booted_owner(Booted {
@@ -1682,7 +1682,7 @@ impl GuestRuntime {
                 report,
             )?;
         }
-        let plan = self.managed_plan(&spec, &identity.vsock, budget)?;
+        let plan = self.managed_plan(&spec, &identity.vsock)?;
         self.check_selected_observer(&receipt)?;
         let guest = managed::attach(transaction, plan, identity, budget)?;
         let booted = self.booted(guest, &receipt, record, budget)?;
@@ -1692,27 +1692,18 @@ impl GuestRuntime {
         Ok(Some(booted))
     }
 
-    /// The managed plan of `spec` on `socket`, its guest told what is left of the create's `budget`, its boot's deadline
-    /// (AC-T7.4.1, [`super::READY_MS`]); an attach's plan launches nothing, so its guest hears nothing of it.
+    /// The managed plan of `spec` on `socket`, its guest told no boot deadline (the review's C-9).
     pub(super) fn managed_plan(
         &self,
         spec: &shards_api::GuestSpec,
         socket: &std::path::Path,
-        budget: managed::Budget,
     ) -> Result<shards_api::PreparedBoot, Refusal> {
         let paths = self.native_paths.as_ref().ok_or_else(|| Refusal::Invalid {
             what: "managed Shards runtime paths",
             why: "the node's configured probe and native launch require the same explicit paths"
                 .into(),
         })?;
-        super::managed_plan(
-            spec,
-            &self.config.binary,
-            socket,
-            paths,
-            self.native_images,
-            Some(budget.remaining()?),
-        )
+        super::managed_plan(spec, &self.config.binary, socket, paths, self.native_images)
     }
 
     pub(super) fn prepare_selected_create(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -1850,7 +1841,7 @@ impl GuestRuntime {
                 .map_err(|e| Refusal::os("syncing selected guest receipt directory", e))?;
         }
         let socket = self.selected_socket(&receipt.id)?;
-        let mut plan = self.managed_plan(&guest_spec, &socket, budget)?;
+        let mut plan = self.managed_plan(&guest_spec, &socket)?;
         if !receipt.physical.is_empty() {
             self.check_current_luids(
                 &receipt.devices,
