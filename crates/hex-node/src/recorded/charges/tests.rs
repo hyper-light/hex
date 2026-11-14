@@ -1223,9 +1223,10 @@ struct Imaging {
     reads: std::sync::atomic::AtomicUsize,
     /// Each node VM's run's rate period, as the test sets it (D247): none for one it doesn't run.
     node_periods: std::sync::Mutex<BTreeMap<hex_api::NodeRun, Duration>>,
-    /// Each node VM's host use read, and each rate its run was held to, in order.
+    /// Each node VM's host use read, and each rate its run was held to and room its guest was told, in order.
     node_reads: std::sync::atomic::AtomicUsize,
     node_rates: std::sync::Mutex<Vec<(hex_api::NodeRun, u64)>>,
+    node_rooms: std::sync::Mutex<Vec<(hex_api::NodeRun, i64)>>,
 }
 
 #[derive(Clone, Default)]
@@ -1344,6 +1345,10 @@ impl crate::recorded::Recover for Images {
             .unwrap()
             .push((run, rate.map_or(0, std::num::NonZeroU64::get)));
         Ok(rate)
+    }
+    fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.0.node_rooms.lock().unwrap().push((run, room));
+        Ok(())
     }
     fn image_rate_period(&self, record: &BoxRecord) -> Result<Duration, Refusal> {
         self.0
@@ -2127,4 +2132,84 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
             held: hex_api::RateHeld::Governor,
         }]
     );
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13: a node VM's guest needs its room told like any guest's, D188): a node VM's guest is
+/// told its room as an image VM's guest is, everything it holds coming out of it. Do run a window of a node VM of 16
+/// vCPUs, booked at 4 CPUs and 4 GiB, in a 24-CPU fleet budget; then one in which its VM process ran 3.2 s of CPU in 300
+/// ms, holding 3 GiB. Expect its guest told its room, its budget less what it holds, as it moves: 64 GiB, then 61 GiB.
+#[test]
+fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
+    let io = Record::default();
+    let mut row = node_row(7, hex_api::NodeVmPhase::Ready);
+    row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+    row.started = Some(1);
+    let held = |cpu_ns: u64, each_ns: u64, bytes: u64| HostUse {
+        cpu_ns,
+        footprint_bytes: bytes,
+        resident_bytes: bytes,
+        guest_ns: vec![each_ns; 16],
+        window: Duration::ZERO,
+    };
+    io.host
+        .borrow_mut()
+        .insert("node-7".to_owned(), held(0, 0, GIB));
+    let node = [Holder::Node { row: &row, band: 0 }];
+    let budget = res(24_000, 64 * GIB);
+    let mut learner = Learner::new(Some(WINDOW), res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &node, budget, start).unwrap();
+    io.host.borrow_mut().insert(
+        "node-7".to_owned(),
+        held(3_200_000_000, 150_000_000, 3 * GIB),
+    );
+    learner.window(&io, &node, budget, start + WINDOW).unwrap();
+    assert_eq!(
+        *io.rooms.borrow(),
+        vec![
+            ("node-7".to_owned(), i64::try_from(64 * GIB).unwrap()),
+            ("node-7".to_owned(), i64::try_from(61 * GIB).unwrap()),
+        ]
+    );
+}
+
+/// Joint plan step 39 (ROOT, 2026-11-13; D188): a node whose guest is a node VM under shards-init tells that VM's guest its
+/// room through its run, as it tells an image VM's. Do open a node whose platform holds no window, keep its node VM's row
+/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, start its charge learner and run a window.
+/// Expect its guest told a room through its run, and only its.
+#[test]
+fn w39_a_nodes_node_vm_guest_is_told_its_room_through_its_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = Images::default();
+    images
+        .0
+        .node_periods
+        .lock()
+        .unwrap()
+        .insert(node_run(7), Duration::from_millis(70));
+    let node =
+        std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
+    let booked = |phase| {
+        let mut row = node_row(7, phase);
+        row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+        row
+    };
+    let store = &node.books.store;
+    store
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Booting))
+        .unwrap();
+    store
+        .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
+        .unwrap();
+    node.start_charges().unwrap();
+    node.learn_window();
+    let told: Vec<hex_api::NodeRun> = images
+        .0
+        .node_rooms
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(run, _)| *run)
+        .collect();
+    assert_eq!(told, [node_run(7)]);
 }

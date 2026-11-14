@@ -250,7 +250,8 @@ pub(crate) trait Managed {
     /// [`Cap::governor`], an image VM's through its rate (D247), a managed VM's through its VM process (D255), on
     /// Windows its job at the share beside; or its platform's cap at the share where its VM process takes no rate.
     fn set_rate(&self, holder: Holder<'_>, cap: Cap<'_>) -> Result<hex_api::RateHeld, Refusal>;
-    /// Tells an image VM's guest its room, `room` bytes past what it holds (`Runtime::room`, D188).
+    /// Tells an image VM's guest its room, `room` bytes past what it holds (`Runtime::room`, D188); a node VM's through its
+    /// run, as an image VM's.
     fn set_room(&self, holder: Holder<'_>, room: i64) -> Result<(), Refusal>;
     /// Ends the VM: a managed VM through its receipt, an image VM's run stopped (the last resort, C5).
     fn stop(&self, holder: Holder<'_>) -> Result<(), Refusal>;
@@ -1353,14 +1354,15 @@ impl Learner {
             vm.rate = rate;
             vm.told = told;
         }
-        // Each image VM's guest told its room as it moves (C5, C7; D188): its budget less what it holds, everything it
-        // holds coming out of it, negative where its budget is short of that.
+        // Each image VM's guest told its room as it moves (C5, C7; D188), a node VM's as an image VM's (joint plan step
+        // 39): its budget less what it holds, everything it holds coming out of it, negative where its budget is short
+        // of that.
         for (lifetime, budget) in self.node.budgets().map_err(refused)? {
             let scope = lifetime.scope;
             let Some(vm) = self.vms.get_mut(&scope) else {
                 continue;
             };
-            if !matches!(scope, Scope::Started(_)) || vm.room == Some(budget.room) {
+            if !matches!(scope, Scope::Started(_) | Scope::Run(_)) || vm.room == Some(budget.room) {
                 continue;
             }
             let record = running
