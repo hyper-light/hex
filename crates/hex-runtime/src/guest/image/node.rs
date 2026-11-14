@@ -4,6 +4,7 @@
 //! use of its host go through the class's own runs (ROOT, 2026-11-13: one code path, not a third); and it is never a
 //! box: its record is a node VM's, named by its run, which no box call reads.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,6 +84,7 @@ impl ImageClass {
             diagnostics: Some(diagnostics.clone()),
             exit: None,
             last_resort: None,
+            started: None,
         };
         // The boot's intent, durable before any effect.
         books.put_node_vm(&record)?;
@@ -258,6 +260,45 @@ impl ImageClass {
             .map(|at| at.elapsed())
             .ok_or_else(|| not_running(&run))?;
         host_use_of(&stats, vcpus, window)
+    }
+
+    /// Holds node VM `run`'s vCPUs together to `rate` milli-CPU (joint plan step 39, place 3; D247), as an image box's
+    /// are held: its answer waited for while its run lives, its end refusing it, never a timer.
+    pub fn rate_node(
+        &self,
+        run: NodeRun,
+        rate: Option<NonZeroU64>,
+    ) -> Result<Option<NonZeroU64>, Refusal> {
+        match self.node_guest(run)?.rate(rate, Duration::MAX) {
+            Ok(held) => Ok(held),
+            Err(ImageRefusal::Ended(_)) => Err(not_running(&run)),
+            Err(why) => Err(refused("holding the node VM to its rate", why)),
+        }
+    }
+
+    /// The period node VM `run`'s governor holds its rate over (joint plan step 39, place 3; D191, D247), as its run host
+    /// said it as the run started: the window its node's learner caps it over, never a number of Hex's.
+    pub fn rate_period_node(&self, run: NodeRun) -> Result<Duration, Refusal> {
+        Ok(self.node_guest(run)?.rate_period())
+    }
+
+    /// Tells node VM `run`'s guest its room (D188; joint plan step 39), `room` bytes past what it holds, as an image box's
+    /// guest is told: its answer waited for while its run lives, its end refusing it, never a timer. What it holds then.
+    pub fn room_node(&self, run: NodeRun, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        match self.node_guest(run)?.room(room, Duration::MAX) {
+            Ok(held) => Ok(held),
+            Err(ImageRefusal::Ended(_)) => Err(not_running(&run)),
+            Err(why) => Err(refused("telling the node VM's guest its room", why)),
+        }
+    }
+
+    /// Node VM `run`'s guest while its run runs here; refused, typed, where it doesn't.
+    fn node_guest(&self, run: NodeRun) -> Result<Arc<dyn ImageGuest>, Refusal> {
+        let image = self.image()?;
+        match image.runs.settle(run, Some(image.waits()?))? {
+            Settled::Started(guest) | Settled::Running(guest) => Ok(guest),
+            _ => Err(not_running(&run)),
+        }
     }
 
     /// Node VM `run`'s end, `end`, kept in its record where it lacks one, and its run let go: the end its record holds.

@@ -1646,6 +1646,41 @@ impl GuestRuntime {
         })
     }
 
+    /// Joint plan step 39 (place 3): what node VM `run` costs its host (D241), its node's charge learner's read of it.
+    pub fn node_vm_host_use(&self, run: hex_api::NodeRun) -> Result<hex_api::HostUse, Refusal> {
+        self.images.host_use_node(run)
+    }
+
+    /// Joint plan step 39 (place 3): the period node VM `run`'s governor holds its rate over (D247), its run's own.
+    pub fn node_vm_rate_period(
+        &self,
+        run: hex_api::NodeRun,
+    ) -> Result<std::time::Duration, Refusal> {
+        self.images.rate_period_node(run)
+    }
+
+    /// Joint plan step 39 (place 3): holds node VM `run`'s vCPUs together to `rate` milli-CPU through its run's rate
+    /// (D247), its node's charge learner's cap.
+    pub fn node_vm_rate(
+        &self,
+        run: hex_api::NodeRun,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        self.images.rate_node(run, rate)
+    }
+
+    /// Joint plan step 39 (place 3): stops node VM `run`'s run, its node's charge learner's last resort (C5), its end kept
+    /// in its row; the guest it was is booted again at the next ask, its run ended.
+    pub fn stop_node_vm(&self, run: hex_api::NodeRun) -> Result<(), Refusal> {
+        self.images.stop_node(run).map(|_| ())
+    }
+
+    /// Joint plan step 39: tells node VM `run`'s guest its room, `room` bytes past what it holds (D188), its node's charge
+    /// learner's word, as an image box's guest is told.
+    pub fn node_vm_room(&self, run: hex_api::NodeRun, room: i64) -> Result<(), Refusal> {
+        self.images.room_node(run, Some(room)).map(|_| ())
+    }
+
     /// Joint plan step 14 (C1): the period running image box `id`'s VM's governor holds its rate over, its run's own as
     /// its run host said it as the run started (D191, D247's `ImageGuest::rate_period`): the window the node's charge
     /// learner caps it over. Any other box's refused as `Runtime::rate` refuses it.
