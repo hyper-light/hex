@@ -46,7 +46,7 @@ use crate::abandoned::Abandoned;
 use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::{CreatePool, Prune};
 use crate::devfs::Devfs;
-use crate::emptying::{EMPTYING, follow_kill};
+use crate::emptying::{EMPTYING, Emptying as _, Within, follow_rest, wait_killed, within_kill};
 use crate::ipcuts::IpcUtsPool;
 use crate::netns::{Netns, Pools};
 use crate::recorded::{RecoverySummary, why_text};
@@ -65,37 +65,42 @@ mod charges;
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 
-/// Waits for `cg`, killed at `killed`, to empty, as [`follow_kill`] waits on the learned wait ([`EMPTYING`]), which
+/// Waits for `cg`, killed at `killed`, to empty, as [`wait_empty_with`] waits on the learned wait ([`EMPTYING`]), which
 /// it teaches when it empties: the time from its kill. Says whether it emptied, and how long it waited from the kill.
 pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
     wait_empty_with(cg, killed, &EMPTYING)
 }
 
-/// [`wait_empty`] on any box that empties ([`crate::emptying::Emptying`]), its wait as `wait` has learned it. Past W*
-/// the census is told the run-out, once and with no sample, and the box is waited for by its life alone; its
-/// emptying, however late, is the sample W* rises to.
+/// [`wait_empty`]'s bounded half, for a thread other boxes share ([`within_kill`]): `cg`, killed at `killed`, waited for
+/// within W* alone.
+pub(crate) fn empties_within_bound(cg: &BoxCgroup, killed: Instant) -> Result<Within, Refusal> {
+    within_kill(&EMPTYING, killed, |slice| cg.empties_within(slice))
+}
+
+/// [`wait_empty`]'s following half, on a thread of the box's own ([`follow_rest`]): whether `cg` emptied.
+pub(crate) fn follow_to_empty(cg: &BoxCgroup, killed: Instant) -> Result<bool, Refusal> {
+    follow_rest(&EMPTYING, killed, |slice| cg.empties_within(slice))
+}
+
+/// [`wait_empty`] on any box that empties ([`crate::emptying::Emptying`]), its wait as `wait` has learned it, on the
+/// caller's own thread ([`wait_killed`]): within W*; past it, the census told the run-out as W* passes, once and with
+/// no sample, never only once the follow ends, which a box that never empties never reaches (the review's E-3), and the
+/// box waited for by its life alone; its emptying, however late, is the sample W* rises to.
 fn wait_empty_with(
     cg: &impl crate::emptying::Emptying,
     killed: Instant,
     wait: &Patience,
 ) -> Result<(bool, Duration), Refusal> {
-    let followed = follow_kill(wait, killed, |slice| cg.empties_within(slice))?;
-    if let Some(window) = followed.past {
-        wait.ran_out(window);
-    }
-    if followed.came {
-        wait.answered(killed.elapsed());
-    }
-    Ok((followed.came, killed.elapsed()))
+    let came = wait_killed(wait, killed, |slice| cg.empties_within(slice))?;
+    Ok((came, killed.elapsed()))
 }
 
-/// Whether a program of a box killed at `killed` has ended, its pidfd `pidfd`: waited for as [`follow_kill`] waits on
+/// Whether a program of a box killed at `killed` has ended, its pidfd `pidfd`: waited for as [`wait_killed`] waits on
 /// the learned wait for a box to empty ([`EMPTYING`]), by its life alone past it.
 fn ended_after_kill(killed: Instant, pidfd: std::os::fd::BorrowedFd<'_>) -> Result<bool, Refusal> {
-    Ok(follow_kill(&EMPTYING, killed, |slice| {
+    wait_killed(&EMPTYING, killed, |slice| {
         supervise::pidfd_ends_within(pidfd, slice)
-    })?
-    .came)
+    })
 }
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
@@ -1373,8 +1378,8 @@ impl Node {
             init.kill()?;
             self.supervisor
                 .reap_programs(id, &mut |pidfd| ended_after_kill(killed, pidfd))?;
-            let ended = follow_kill(&EMPTYING, killed, |slice| init.ended_within(slice))?;
-            if !ended.came {
+            let ended = wait_killed(&EMPTYING, killed, |slice| init.ended_within(slice))?;
+            if !ended {
                 return Err(Refusal::Os {
                     op: "emptying a box",
                     why: format!(
@@ -2911,6 +2916,29 @@ mod tests {
         assert!(emptied, "refused at W*");
         assert_eq!(killed.looks.get(), 2);
         assert!(wait.slowest().is_some_and(|slowest| slowest > learned));
+    }
+
+    /// The review's E-3 (decision 9: a wait follows its party by its life, never on a thread other parties share): a
+    /// shared thread's wait for a killed box's emptying ends at W*, the box then its caller's to hand to a thread of its
+    /// own. Do: a wait whose W* is 1 ns, then one with no W*; a killed box slower to empty than any wait of a time.
+    /// Expect: with W*, one look bounded by a time, never one until the box empties, the run-out told, and the box to
+    /// follow; with none, no look at all, and the box to follow.
+    #[test]
+    fn e3_a_shared_threads_wait_for_an_emptying_ends_at_w_star() {
+        use crate::emptying::Emptying;
+        let wait = Patience::measuring("test.node.emptying.shared");
+        wait.answered(Duration::from_nanos(1));
+        let killed = Killed {
+            looks: std::cell::Cell::new(0),
+        };
+        let within = within_kill(&wait, Instant::now(), |slice| killed.empties_within(slice));
+        assert_eq!(within, Ok(Within::Follow));
+        assert_eq!(killed.looks.get(), 1, "looked until the box emptied");
+        assert_eq!(wait.deadline(), None, "the run-out untold");
+        let cold = Patience::measuring("test.node.emptying.shared_cold");
+        let within = within_kill(&cold, Instant::now(), |slice| killed.empties_within(slice));
+        assert_eq!(within, Ok(Within::Follow));
+        assert_eq!(killed.looks.get(), 1, "a wait with no W* looked");
     }
 
     /// A killed box slower to empty than W*, as [`Killed`] is, that looks at its follow (`Duration::MAX`) whether its
