@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::record::ProcId;
 use hex_runtime::linux::cgroup::{BoxCgroup, Names};
 use rustix::event::epoll::{self, EventData, EventFlags};
@@ -118,7 +118,15 @@ impl Run {
                 .map_err(poisoned)?;
             end = within;
             if end.is_none() {
-                SAID.ran_out(window);
+                SAID.ran_out(
+                    window,
+                    asked.elapsed(),
+                    &[
+                        Piece::Kind("the claimer removing the box of program pid "),
+                        Piece::Pid(i64::from(self.program.pid)),
+                        Piece::Kind(", its word"),
+                    ],
+                );
             }
         }
         let end = self
