@@ -198,6 +198,10 @@ impl Control {
 impl Steering {
     /// `signal` to member `index` of box `id`'s run, on the member's own lane (D238): `true` where it took it, `false`
     /// where the member had ended, which takes none; a lane refused or lost refused in its words.
+    ///
+    /// Its two waits, for the lane and for the signal's answer, follow the run's connection by its life alone:
+    /// decision 9's follow, but untold, with no W* to tell a run-out by, since Shards' `Execs::member` and
+    /// `MemberSteering::signal` take no patience (Hex's ask of Shards, through ROOT, 2026-11-14).
     fn signal(&self, id: &BoxId, index: u32, signal: u32) -> Result<bool, Refusal> {
         let refused = |fault: Fault| Refusal::Os {
             op: "signalling a member of a Shards image VM",

@@ -2183,7 +2183,9 @@ impl<O: Os> Shared<O> {
                     let _ = self.list(&conn, header, &infos);
                 }
                 // A member that no longer runs has nothing to end, as in process (the image class's `MemberProc`):
-                // its end is told as it comes.
+                // its end is told as it comes. The worker follows the member's lane as long as its answer takes, as
+                // the image class's `Steering::signal` waits: decision 9's follow, untold until Shards' lane asks take
+                // a patience (Hex's ask of Shards, through ROOT, 2026-11-14).
                 Job::MemberKill { id, member, done } => {
                     done(
                         match self.host.signal_member(&id, &member, hex_api::Signal::KILL) {
