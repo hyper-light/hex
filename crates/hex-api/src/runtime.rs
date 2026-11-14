@@ -216,6 +216,17 @@ pub trait Runtime: Send + Sync {
             ),
         })
     }
+
+    /// The machine's capacity view's word, what every holder has reserved through its keeper (joint plan steps 13 and
+    /// 14, C7; the review's A-10), which a node's charge learner takes off its fleet's budget: a node keeps the latest
+    /// keeper's, refusing an older keeper's, typed. A runtime that runs no charge learner refuses it, naming why.
+    fn reserved(&self, word: Reserved) -> Result<(), Refusal> {
+        let _ = word;
+        Err(Refusal::Invalid {
+            what: "reserved",
+            why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
+        })
+    }
 }
 
 /// What a box's VM costs its host beside its guest (Shards' D241, `Stats::microvm`; joint plan steps 12 and 14), each
@@ -1504,6 +1515,42 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_unacted"
     )]
     pub unacted: Vec<LearnedUnacted>,
+    /// What its node's learner takes off its fleet's budget for the holders the machine's capacity view serves (C7; the
+    /// review's A-10), as its node's configuration and its keeper's word say. Added after the unacted VMs, so absent
+    /// means none told (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservations: Option<LearnedReservations>,
+}
+
+/// The machine's capacity view's word to its node (joint plan steps 13 and 14, C7; the review's A-10): what every holder
+/// has reserved through its keeper (`capacity::Keeper::foreign`), as the keeper of epoch `keeper` holds it, which the
+/// node's charge learner takes off its fleet's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reserved {
+    /// The keeper's epoch, which grows at each of its boots (CV2, CV11): a node keeps the latest keeper's word.
+    pub keeper: u64,
+    pub reserved: CapacityResources,
+}
+
+/// What a node's charge learner takes off its fleet's budget for the holders the machine's capacity view serves (C7;
+/// the review's A-10), each state told, never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LearnedReservations {
+    /// No capacity view serves its machine, as its node's configuration says (no `--capacity-view`): no holder reserves
+    /// room there, so none is counted.
+    Unserved,
+    /// A capacity view serves its machine, and its keeper hasn't spoken since its node started: kiln's reservations not
+    /// yet heard, so its VMs are booked whole, at their receipts, and none is learned until it speaks.
+    Unheard,
+    /// Its keeper's word, counted: `reserved` as the keeper of epoch `keeper` holds it, `unconfigured` where its node's
+    /// configuration names no capacity view though a keeper spoke (`--capacity-view` missing).
+    Heard {
+        keeper: u64,
+        reserved: CapacityResources,
+        unconfigured: bool,
+    },
 }
 
 /// Joint plan step 14 (C1; ROOT, 2026-11-13): the window a node's learner reads its VMs over, and the VM whose platform
@@ -1796,6 +1843,7 @@ impl Learned {
                 "learned unacted VMs",
                 LearnedUnacted::try_clone,
             )?,
+            reservations: self.reservations,
         })
     }
 }
@@ -2347,7 +2395,18 @@ pub trait Proc: Send {
     /// The caller's ends of the streams its exec asked for ([`crate::Stdio::ask`]), once: a later call gives
     /// none.
     fn streams(&mut self) -> Result<crate::Given, Refusal>;
+
+    /// Its kill, apart from it (goal 2's item 3; ROOT, 2026-11-14): a `Proc` whose [`Proc::wait_for`] holds `&mut` gives
+    /// a killer that another thread can call while the wait goes on, as a node holding it for a remote caller needs (its
+    /// end waited for on a thread of its own; its caller's kill and the disconnect rule from others). Given once. None
+    /// means the `Proc` ends only by its own end or its stdin's close.
+    fn killer(&mut self) -> Option<Killer> {
+        None
+    }
 }
+
+/// [`Proc::killer`]'s kill: [`Proc::kill`] once, from another thread, `Ok` once sent or where it had ended.
+pub type Killer = Box<dyn FnOnce() -> Result<(), Refusal> + Send>;
 
 /// A program and the caller's ends of the streams its exec asked for ([`crate::Stdio::make_asked`]), held
 /// until [`Proc::streams`] takes them: a runtime whose programs take pipes wraps its own `Proc` in it.
@@ -2545,6 +2604,30 @@ pub struct BoxInfo {
     /// (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<std::net::SocketAddr>,
+    /// The two other UDP sockets that endpoint holds beside `control` (Shards' D252 amended, image channel v30): its
+    /// driver's waker and wake, loopback sockets connected to each other, which no grant makes either. With `control`,
+    /// every socket the endpoint holds ([`BoxInfo::control_sockets`]), which a host's table may show with no peer
+    /// (Windows'). Told with `control` alone, so none where it is none. After `control`, so absent means none
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_wake: Option<ControlWake>,
+}
+
+/// The waker and the wake of a run's agent-control endpoint ([`BoxInfo::control_wake`]; Shards' `ControlAt::waker` and
+/// `ControlAt::wake`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlWake {
+    pub waker: std::net::SocketAddr,
+    pub wake: std::net::SocketAddr,
+}
+
+impl BoxInfo {
+    /// Every socket its run's agent-control endpoint holds: its served address, its waker's and its wake's (Shards'
+    /// `ControlAt::sockets`), where it told all three.
+    pub fn control_sockets(&self) -> Option<[std::net::SocketAddr; 3]> {
+        let (address, held) = (self.control?, self.control_wake?);
+        Some([address, held.waker, held.wake])
+    }
 }
 
 fn is_zero(n: &u64) -> bool {

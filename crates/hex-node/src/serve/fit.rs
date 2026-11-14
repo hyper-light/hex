@@ -17,10 +17,6 @@ use super::{KEPT, Limits, Platform};
 /// guest, each stream's connection to the guest and the passed pipe copied through it.
 pub const FDS_A_PLACE_STREAM: u64 = 2;
 
-/// A lane's on the node's side: its local socket pair's two ends, the owner's and its copier's
-/// (`hex_client::guest::bridge`).
-pub const FDS_A_LANE: u64 = 2;
-
 /// A hosted VM's controller's own (Shards' `control::Controller`): its QUIC driver's socket and its waker's.
 pub const FDS_A_CONTROLLER: u64 = 2;
 
@@ -37,15 +33,15 @@ pub fn lanes(places: usize) -> usize {
         .saturating_add(CONTROL_LANES)
 }
 
-/// The descriptors `hosted` VMs hold at `places` program places: each one's lanes ([`lanes`]) and its controller.
+/// The descriptors `hosted` VMs hold at `places` program places: each one's lanes ([`lanes`]),
+/// [`hex_client::guest::lanes::FDS_A_LANE`] each, and its controller.
 pub fn hosted_descriptors(hosted: usize, places: usize) -> u64 {
-    let each = u64::try_from(lanes(places))
-        .unwrap_or(u64::MAX)
-        .saturating_mul(FDS_A_LANE)
-        .saturating_add(FDS_A_CONTROLLER);
-    u64::try_from(hosted)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(each)
+    use hex_client::guest::lanes::FDS_A_LANE;
+    let of = |n: usize, each: u64| u64::try_from(n).unwrap_or(u64::MAX).saturating_mul(each);
+    of(
+        hosted,
+        of(lanes(places), FDS_A_LANE).saturating_add(FDS_A_CONTROLLER),
+    )
 }
 
 /// The descriptors the program places hold: each place's streams ([`FDS_A_PLACE_STREAM`] for each of the

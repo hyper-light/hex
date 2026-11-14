@@ -334,6 +334,39 @@ fn a_lane_its_socket_cuts_short_reads_its_bytes_then_the_cut() {
     assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
 }
 
+/// The review's D-4 (D251; AC-T7.4.1), on every OS: a lane its socket cuts short while Hex still sends, Hex reading
+/// only once a write of its has failed. Do: the relay writes a line, reads a byte of what Hex sends, and closes; Hex
+/// writes a lane's window at a time until a write fails, then reads. Expect the line, then the cut, a reset: no byte
+/// that came before the cut lost to how the bridge ends Hex's socket. (On Windows that socket is one end of a loopback
+/// TCP pair, where a shutdown of receiving resets the connection if bytes wait or come, Winsock's documented
+/// contract for `shutdown(SD_RECEIVE)`.)
+#[test]
+fn a_lane_cut_while_its_owner_sends_keeps_the_bytes_before_the_cut_for_a_later_read() {
+    let dir = socket_dir();
+    let listener = listen(dir.path(), stream::CONTROL_PORT);
+    let relay = std::thread::spawn(move || {
+        let mut conn = listener.accept();
+        conn.write_all(b"before the cut\n").unwrap();
+        let mut one = [0u8];
+        conn.read_exact(&mut one).unwrap();
+    });
+    let run = Run::new(dir, admission(4));
+    let mut conn = run.link.dial(stream::CONTROL_PORT).unwrap();
+    let window = vec![0x5a; stream::MAX_FRAME];
+    let refused = loop {
+        if let Err(e) = conn.write_all(&window) {
+            break e;
+        }
+    };
+    relay.join().unwrap();
+    let mut got = Vec::new();
+    let end = conn.read_to_end(&mut got);
+    eprintln!("d_4_cut_while_sending refused={refused:?} got={got:?} end={end:?}");
+    assert_eq!(got, b"before the cut\n", "the bytes before the cut");
+    let cut = end.expect_err("a cut read as the lane's end in order");
+    assert_eq!(cut.kind(), std::io::ErrorKind::ConnectionReset, "{cut}");
+}
+
 /// The relay's token on its control connection for these cases.
 const TOKEN: u64 = 0x6c61_6e65;
 
@@ -517,4 +550,153 @@ fn a_link_either_end_of_which_took_another_suite_is_refused() {
             got => panic!("{link:?}: {got:?}"),
         }
     }
+}
+
+/// The variable under which this test binary, run again for one test, counts that test's descriptors alone.
+#[cfg(unix)]
+const ALONE: &str = "HEX_CLIENT_LANES_COUNT_ALONE";
+
+/// Runs `test` of this module again in a process of its own with [`ALONE`] set, so no other test opens or closes a
+/// descriptor while it counts, and expects it to have run and passed.
+#[cfg(unix)]
+fn alone(test: &str) {
+    let module = module_path!().split_once("::").unwrap().1;
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            &format!("{module}::{test}"),
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(ALONE, "1")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("test result: ok. 1 passed"), "{said}");
+}
+
+/// The descriptors this process holds now: its descriptor table's entries (Linux's `/proc/self/fd`, macOS's
+/// `/dev/fd`), less the listing's own. Windows' count of a process's handles is a foreign call no crate of this test's
+/// wraps safely, so the count is Unix's.
+#[cfg(unix)]
+fn open_descriptors() -> u64 {
+    #[cfg(target_os = "linux")]
+    let table = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    let table = "/dev/fd";
+    u64::try_from(std::fs::read_dir(table).unwrap().count()).unwrap() - 1
+}
+
+/// The relay's side of a lane, set up whole before anything is counted: accepted, and a byte carried each way, which
+/// it echoes, so its run host's socket and the endpoint's hold of it are in place. It then sends `then` and keeps the
+/// connection until `done` ends.
+#[cfg(unix)]
+fn carried(listener: Listener, then: Vec<u8>, done: mpsc::Receiver<()>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut conn = listener.accept();
+        let mut one = [0u8];
+        conn.read_exact(&mut one).unwrap();
+        conn.write_all(&one).unwrap();
+        conn.write_all(&then).unwrap();
+        let _ = done.recv();
+    })
+}
+
+/// A lane's socket carried a byte each way, as [`carried`]'s relay echoes it: past this, its relay's side is whole.
+#[cfg(unix)]
+fn carry(socket: &mut Socket) {
+    socket.write_all(&[1]).unwrap();
+    let mut one = [0u8];
+    socket.read_exact(&mut one).unwrap();
+}
+
+/// A link through the run's lanes that carries each lane a byte each way before it bridges it ([`carry`]), and counts
+/// the process's descriptors there, so what the dial's caller holds of its own is counted from that moment.
+#[cfg(unix)]
+struct Counted {
+    lanes: Lanes,
+    before: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+}
+
+#[cfg(unix)]
+impl Link for Counted {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
+        let mut socket = self.lanes.connect(port, None)?;
+        carry(&mut socket);
+        *self.before.lock().unwrap() = Some(open_descriptors());
+        own_duplex(bridge(socket).map_err(|e| Refusal::os("bridging a counted lane", e))?)
+    }
+
+    fn lends_identity(&self) -> bool {
+        false
+    }
+}
+
+/// The review's D-6 (AC-T7.4.1; ROOT's one accounting of 2026-11-13): what the node's descriptor fit counts for a
+/// hosted VM's lanes is what a lane and a control connection hold on the node's side, counted in the process's own
+/// descriptor table. Do, alone in a process: open a lane to a relay and carry a byte each way, then bridge it as a dial
+/// does; and dial the control connection as the client does, through a link that counts from the moment its lane is
+/// carried. Expect: the descriptors each added, [`FDS_A_LANE`] each; and each its socket pair's two ends alone, its
+/// copiers and the client's handles sharing them: no duplicate, which Windows makes inheritable (the review's D-5).
+#[cfg(unix)]
+#[test]
+fn a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts() {
+    if std::env::var_os(ALONE).is_none() {
+        return alone("a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts");
+    }
+    let dir = socket_dir();
+    let (done, until) = mpsc::channel::<()>();
+    let (control_done, control_until) = mpsc::channel::<()>();
+    let data_relay = carried(listen(dir.path(), stream::STDIO_PORT), Vec::new(), until);
+    let token = 7u64.to_le_bytes().to_vec();
+    let control_relay = carried(
+        listen(dir.path(), stream::CONTROL_PORT),
+        token,
+        control_until,
+    );
+    let Run {
+        link,
+        host,
+        revoke,
+        _dir,
+    } = Run::new(dir, admission(4));
+
+    let mut socket = link.connect(stream::STDIO_PORT, None).unwrap();
+    carry(&mut socket);
+    let before = open_descriptors();
+    let lane = bridge(socket).unwrap();
+    let a_lane = open_descriptors() - before;
+
+    let before = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let counted = Counted {
+        lanes: link,
+        before: std::sync::Arc::clone(&before),
+    };
+    let control =
+        crate::guest::Stream::<crate::guest::Guest>::dial(crate::guest::own_link(counted).unwrap())
+            .unwrap();
+    let a_control = open_descriptors() - before.lock().unwrap().unwrap();
+
+    assert_eq!(
+        a_lane, FDS_A_LANE,
+        "a lane's descriptors on the node's side"
+    );
+    assert_eq!(
+        a_control, FDS_A_LANE,
+        "a control connection's descriptors on the node's side"
+    );
+    assert_eq!(
+        (a_lane, a_control),
+        (2, 2),
+        "a lane's and a control connection's descriptors beyond their socket pair's two ends: duplicates"
+    );
+    drop((lane, control, done, control_done, revoke));
+    data_relay.join().unwrap();
+    control_relay.join().unwrap();
+    host.join().unwrap();
 }

@@ -232,6 +232,118 @@ fn the_nodes_admission_and_a_holders_reserve_check_one_view() {
     assert_eq!(driver.view().unwrap().held.cpu_milli, 1000);
 }
 
+/// A node's runtime that keeps each word of the machine's capacity view's keeper it is told (the review's A-10), its boxes
+/// the simulator's.
+#[derive(Default)]
+struct Keeping {
+    sim: hex_api::sim::SimRuntime,
+    words: std::sync::Mutex<Vec<hex_api::Reserved>>,
+}
+
+impl Runtime for Keeping {
+    fn classes(&self) -> Vec<hex_api::Class> {
+        self.sim.classes()
+    }
+    fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
+        self.sim.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.sim.start(id)
+    }
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.sim.exec(id, program, stdio)
+    }
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: hex_api::Program,
+        stdio: hex_api::Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.sim.run(spec, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
+        self.sim.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<hex_api::BoxInfo, Refusal> {
+        self.sim.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<hex_api::Usage, Refusal> {
+        self.sim.usage(id)
+    }
+    fn list(&self) -> Result<Vec<hex_api::BoxInfo>, Refusal> {
+        self.sim.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.sim.delete(id)
+    }
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        self.words.lock().unwrap().push(word);
+        Ok(())
+    }
+}
+
+/// The review's A-10 (AC-T7.4.1; ROOT, 2026-11-14): what the machine's capacity view's holders reserve reaches the node's
+/// charge learner, its keeper's word woken at each change of it, off the holders' path. Do boot a node whose runtime keeps
+/// each word it is told, its view open, kiln's holder joined and its word's wake set; have the holder reserve 1.5 CPUs,
+/// granted; then tell the word. Expect the grant to wake it, and the runtime told the keeper's epoch and the 1.5 CPUs
+/// reserved, once, and nothing refused.
+#[test]
+fn a10_a_holders_reserve_wakes_and_tells_the_node_its_keepers_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Resources {
+        cpu_milli: 2000,
+        mem_bytes: 8 * hex_api::MIN_MEMORY,
+        ..Resources::default()
+    };
+    let keeping = Arc::new(Keeping::default());
+    let runtime: Arc<dyn Runtime> = keeping.clone();
+    let driver = Driver::boot(
+        NodeId(0),
+        &[NodeSpec::new(NodeId(0), room)],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+    )
+    .unwrap();
+    driver.refresh_node(NodeSpec::new(NodeId(0), room)).unwrap();
+    driver.open_view(&dir.path().join("capacity"), 1).unwrap();
+    let (wake, woken) = hex_wait::mpsc::sync_channel(1).unwrap();
+    driver.on_reserved(wake).unwrap();
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let hello = kiln.connect().unwrap();
+    talk(&driver, &mut kiln, vec![hello]);
+    let _ = woken.try_recv();
+    let (run, msg) = kiln.reserve(cpu(1500)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(run)]
+    );
+    assert!(
+        matches!(woken.try_recv(), Ok(())),
+        "a grant wakes its word's thread"
+    );
+    assert_eq!(driver.tell_reserved().unwrap(), Vec::new());
+    let keeper = driver.reserved_word().unwrap().unwrap().keeper;
+    assert_eq!(
+        *keeping.words.lock().unwrap(),
+        [hex_api::Reserved {
+            keeper,
+            reserved: hex_api::CapacityResources {
+                cpu_milli: 1500,
+                mem_bytes: 0,
+                disk_bytes: 0,
+            },
+        }]
+    );
+}
+
 /// A node whose facts say `room`, its capacity view open for one holder, and that holder joined.
 fn booted(dir: &std::path::Path, room: Resources) -> (Driver, Holder) {
     let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());

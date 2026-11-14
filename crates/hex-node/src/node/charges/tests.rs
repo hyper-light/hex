@@ -368,13 +368,41 @@ fn a10_a_linux_fleets_budget_is_what_is_free_its_page_cache_counted_once() {
         vms,
         shards,
         &[],
-        |reads| measured(machine(), reads),
+        |reads| measured(machine(), CapacityResources::default(), reads),
         Instant::now(),
     )
     .unwrap();
     assert_eq!(
         io.file(&fleet().join("vm-1"), "memory.high"),
         Some((18 * GIB).to_string())
+    );
+}
+
+/// The review's A-10 (AC-T7.4.1; ROOT, 2026-11-14), on Linux: what the capacity view's holders reserve, as its keeper
+/// last said, comes off the fleet's budget. Do run the window of the page-cache case (20 GiB free, a VM holding 6 GiB, 4
+/// of it file pages, beside a process box capped at 8 GiB holding 5 GiB, 1 of it file pages) with 4 GiB reserved. Expect
+/// the VM's `memory.high` 18 - 4 = 14 GiB.
+#[test]
+fn a10_a_linux_keepers_word_comes_off_the_fleets_budget() {
+    let io = Record::default();
+    io.dir(&fleet(), &[]);
+    native(&io, 8 * GIB, 5 * GIB, GIB);
+    let vms = vm_holding(&io, 6 * GIB, 4 * GIB);
+    io.free.set(res(0, 20 * GIB));
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    window(
+        &mut learner,
+        &io,
+        vms,
+        shards,
+        &[],
+        |reads| measured(machine(), res(0, 4 * GIB), reads),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        io.file(&fleet().join("vm-1"), "memory.high"),
+        Some((14 * GIB).to_string())
     );
 }
 
@@ -400,7 +428,7 @@ fn a10_a_linux_nodes_own_boxes_are_never_counted_twice() {
                 vms,
                 shards,
                 &[],
-                |reads| measured(machine(), reads),
+                |reads| measured(machine(), CapacityResources::default(), reads),
                 Instant::now(),
             )
             .unwrap();
@@ -430,7 +458,7 @@ fn a10_a_linux_window_reads_what_is_free_after_its_vms_and_its_boxes() {
         vms,
         shards,
         &[],
-        |reads| measured(machine(), reads),
+        |reads| measured(machine(), CapacityResources::default(), reads),
         Instant::now(),
     )
     .unwrap();
@@ -1333,6 +1361,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         last_resort: None,
         ended: None,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     };
     with_last_resort(&mut info, &ended).unwrap();
@@ -1736,11 +1765,27 @@ fn a2_a_window_asks_its_vms_with_the_capacity_answers_lock_let_go() {
         booked_at_four(id)
     };
     let read = || Ok((vms.clone(), Vec::new(), fleet_budget));
-    one_window(&shared, &watched, &store, read, record, || start);
+    one_window(
+        &shared,
+        &watched,
+        &store,
+        read,
+        record,
+        CapacityResources::default(),
+        || start,
+    );
     for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(&fleet().join(name), 0, held);
     }
-    one_window(&shared, &watched, &store, read, record, || start + WINDOW);
+    one_window(
+        &shared,
+        &watched,
+        &store,
+        read,
+        record,
+        CapacityResources::default(),
+        || start + WINDOW,
+    );
     assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
     let asked = watched.asked.borrow().clone();
     for what in [

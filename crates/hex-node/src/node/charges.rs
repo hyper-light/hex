@@ -222,6 +222,9 @@ pub(super) struct Learner {
     last: LastResort,
     /// The VMs its last window couldn't read and why, each counted whole against the fleet's budget (ROOT, 2026-11-13).
     unread: Vec<(LearnedHolder, Option<Class>, Refusal)>,
+    /// What it takes off its fleet's budget for the capacity view's holders, as its node last said (C7; the review's
+    /// A-10): none before its first window.
+    reservations: Option<hex_api::LearnedReservations>,
 }
 
 /// A VM's vCPUs: its admitted guest's CPU in whole CPUs, rounded up.
@@ -465,7 +468,14 @@ impl Learner {
             fault: None,
             last: LastResort::new(bounds.vms.min(MAX_LEARNED_HOLDINGS)),
             unread: Vec::new(),
+            reservations: None,
         })
+    }
+
+    /// What it takes off its fleet's budget for the capacity view's holders, as its node says it each window (C7; the
+    /// review's A-10), told on its classes' capacity answers.
+    pub(super) fn told_reservations(&mut self, reservations: hex_api::LearnedReservations) {
+        self.reservations = Some(reservations);
     }
 
     /// The VMs its last window couldn't read, and why: each counted whole, at its receipt, against the fleet's budget
@@ -994,6 +1004,7 @@ impl Learner {
                 ),
             });
         }
+        learned.reservations = self.reservations;
         Ok(Some(learned))
     }
 
@@ -1140,9 +1151,15 @@ fn window(
 /// past its booking takes the excess from the fleet. A VM's and a box's reclaimable file pages, which `MemAvailable`
 /// counts free already, are counted there alone: a VM gives back its memory less them, a box takes its use less them;
 /// one whose file pages can't be read gives back nothing, or takes off its whole booking. A VM whose read failed gives
-/// back nothing, its receipt counted whole instead ([`Learner::learn`]). The budget is so never more than what is free and
-/// what its VMs take.
-fn measured(machine: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
+/// back nothing, its receipt counted whole instead ([`Learner::learn`]). What the capacity view's holders have reserved, as
+/// its keeper last said (`reserved`, none where none is counted), comes off every dimension: kiln's runs' use is missing
+/// from what is free too, so it is counted twice, an under-count and never a credit, until kiln's holder reports what its
+/// runs use (C7). The budget is so never more than what is free and what its VMs take.
+fn measured(
+    machine: CapacityResources,
+    reserved: CapacityResources,
+    reads: &Reads,
+) -> Result<CapacityResources, Refusal> {
     let natives = reads.natives.as_ref().map_err(Clone::clone)?;
     let free = reads.free.as_ref().map_err(Clone::clone)?;
     let overflow = || Refusal::Invalid {
@@ -1171,9 +1188,17 @@ fn measured(machine: CapacityResources, reads: &Reads) -> Result<CapacityResourc
     }
     let memory = free.mem_bytes.checked_add(held).ok_or_else(overflow)?;
     Ok(CapacityResources {
-        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
-        mem_bytes: memory.saturating_sub(off.mem_bytes),
-        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
+        cpu_milli: machine
+            .cpu_milli
+            .saturating_sub(off.cpu_milli)
+            .saturating_sub(reserved.cpu_milli),
+        mem_bytes: memory
+            .saturating_sub(off.mem_bytes)
+            .saturating_sub(reserved.mem_bytes),
+        disk_bytes: free
+            .disk_bytes
+            .saturating_sub(off.disk_bytes)
+            .saturating_sub(reserved.disk_bytes),
     })
 }
 
@@ -1388,14 +1413,16 @@ pub(super) type Running = (
 /// One window of `shared`, the node's charge learner (joint plan step 14): what it reads first (`read`), each VM it
 /// meets found by `record`, its cgroups read and written through `io` at the instant `now` gives once those are read,
 /// and each end its last resort made written into its box's record in `store` after the window. Its learner is taken for
-/// each pure step and let go while anything is read or written (A-2), so a capacity answer never waits on them. Its
-/// failure is kept for the capacity answers.
+/// each pure step and let go while anything is read or written (A-2), so a capacity answer never waits on them; its
+/// fleet's budget less what the capacity view's holders have `reserved`, as its keeper last said (A-10). Its failure is
+/// kept for the capacity answers.
 pub(super) fn one_window(
     shared: &Shared,
     io: &impl Cgroups,
     store: &crate::store::Store,
     read: impl FnOnce() -> Result<Running, Refusal>,
     record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
+    reserved: CapacityResources,
     now: impl FnOnce() -> Instant,
 ) {
     let (running, held, machine) = match read() {
@@ -1414,7 +1441,7 @@ pub(super) fn one_window(
         running,
         record,
         &held,
-        |reads| measured(machine, reads),
+        |reads| measured(machine, reserved, reads),
         now(),
     );
     // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
@@ -1436,6 +1463,29 @@ impl Node {
     fn learn_window(&self) {
         let Some(shared) = self.backends.get().and_then(|b| b.learner.as_ref()) else {
             return;
+        };
+        // What the capacity view's holders have reserved, as the node's configuration and its keeper's word say (A-10):
+        // until the keeper of a view that serves its machine has spoken since the node started, its VMs are booked whole,
+        // none learned, told so.
+        let reservations = match self.reservations() {
+            Ok(reservations) => reservations,
+            Err(why) => {
+                if let Ok(mut learner) = shared.lock() {
+                    learner.failed(why);
+                }
+                return;
+            }
+        };
+        let reserved = {
+            let Ok(mut learner) = shared.lock() else {
+                return;
+            };
+            learner.told_reservations(reservations);
+            match reservations {
+                hex_api::LearnedReservations::Unheard => return,
+                hex_api::LearnedReservations::Heard { reserved, .. } => reserved,
+                hex_api::LearnedReservations::Unserved => CapacityResources::default(),
+            }
         };
         let read = || -> Result<Running, Refusal> {
             let running = self.supervisor.running_vms()?;
@@ -1479,7 +1529,15 @@ impl Node {
             guest: self.backends.get().and_then(|b| b.shards.as_deref()),
             node: self,
         };
-        one_window(shared, &io, &self.store, read, record, Instant::now);
+        one_window(
+            shared,
+            &io,
+            &self.store,
+            read,
+            record,
+            reserved,
+            Instant::now,
+        );
     }
 
     /// The window the node's charge learner reads over, where one runs (C1): its VM backends' learner's.

@@ -1495,6 +1495,9 @@ pub(crate) struct Learner {
     governors: BTreeMap<Scope, Governed>,
     /// The last resort (C5).
     last: LastResort,
+    /// What it takes off its fleet's budget for the capacity view's holders, as its node last said (C7; the review's
+    /// A-10): none before its first window.
+    reservations: Option<hex_api::LearnedReservations>,
 }
 
 /// The most a learner on a machine of `machine` holds (CLAUDE.md §2), every OS's alike. VMs: the machine's population,
@@ -1555,6 +1558,7 @@ impl Learner {
             machine,
             unrecorded: Vec::new(),
             governors: BTreeMap::new(),
+            reservations: None,
             unheld: Refusal::Platform {
                 what: "memory_high",
                 platform: std::env::consts::OS,
@@ -1563,6 +1567,12 @@ impl Learner {
                     .to_owned(),
             },
         })
+    }
+
+    /// What it takes off its fleet's budget for the capacity view's holders, as its node says it each window (C7; the
+    /// review's A-10), told on its classes' capacity answers.
+    pub(crate) fn told_reservations(&mut self, reservations: hex_api::LearnedReservations) {
+        self.reservations = Some(reservations);
     }
 
     /// Whether it learns managed VMs: where their platform's cap holds them over a cycle it derives (C1).
@@ -2138,6 +2148,7 @@ impl Learner {
         learned.ranked = ranked(class, running)?;
         learned.unrecorded = self.unrecorded_of()?;
         learned.unacted = self.unacted_of(class, running)?;
+        learned.reservations = self.reservations;
         Ok(Some(learned))
     }
 
@@ -2408,6 +2419,46 @@ pub(crate) fn window(
     learner.take()?.acted(acted)
 }
 
+/// What a node's learner takes off its fleet's budget for the capacity view's holders (C7; the review's A-10; ROOT,
+/// 2026-11-14), from whether its configuration says a view serves its machine (`served`, `--capacity-view`) and its
+/// keeper's latest word (`word`): that word where one came, whatever its configuration says, told unconfigured where it
+/// names none; else unheard where a view serves it; else none, no holder reserving there.
+pub(crate) fn reservations(
+    served: bool,
+    word: Option<hex_api::Reserved>,
+) -> hex_api::LearnedReservations {
+    match word {
+        Some(word) => hex_api::LearnedReservations::Heard {
+            keeper: word.keeper,
+            reserved: word.reserved,
+            unconfigured: !served,
+        },
+        None if served => hex_api::LearnedReservations::Unheard,
+        None => hex_api::LearnedReservations::Unserved,
+    }
+}
+
+/// Keeps `word` as a node's keeper's latest (the review's A-10): a word of the keeper it holds, or of a later one, its
+/// epoch grown at that keeper's boot (CV2), replaces it; an older keeper's is refused, typed, nothing kept.
+pub(crate) fn keep_word(
+    kept: &mut Option<hex_api::Reserved>,
+    word: hex_api::Reserved,
+) -> Result<(), Refusal> {
+    if let Some(latest) = kept
+        && word.keeper < latest.keeper
+    {
+        return Err(Refusal::Invalid {
+            what: "reserved",
+            why: format!(
+                "the word of keeper {} came after keeper {}'s: an older keeper's word changes nothing",
+                word.keeper, latest.keeper
+            ),
+        });
+    }
+    *kept = Some(word);
+    Ok(())
+}
+
 /// The memory the VMs a window read hold, as each read says it (C7; the review's A-10): none of a VM whose read failed,
 /// whose receipt counts whole instead ([`Learner::learn`]).
 fn held(answers: &[Answer<'_>]) -> Result<u64, Refusal> {
@@ -2427,12 +2478,16 @@ fn held(answers: &[Answer<'_>]) -> Result<u64, Refusal> {
 /// booking past what it takes ([`Managed::taken`]). What a holder takes is missing from what is free already, so only
 /// that headroom comes off, never its booking beside its use (ROOT, 2026-11-14), and one past its booking takes the
 /// excess from the fleet; one whose use can't be read takes off its whole booking, nothing reading it lower. No disk use
-/// is read, so a booking's disk comes off whole. The budget is so never more than what is free and what its VMs hold.
+/// is read, so a booking's disk comes off whole. What the capacity view's holders have reserved, as its keeper last said
+/// (`reserved`, none where none is counted), comes off every dimension: kiln's runs' use is missing from what is free too,
+/// so it is counted twice, an under-count and never a credit, until kiln's holder reports what its runs use (C7). The
+/// budget is so never more than what is free and what its VMs hold.
 pub(crate) fn measured(
     io: &impl Managed,
     machine: CapacityResources,
     booked: &[(Holder<'_>, CapacityResources)],
     held: u64,
+    reserved: CapacityResources,
 ) -> Result<CapacityResources, Refusal> {
     let overflow = || Refusal::Invalid {
         what: "a node's boxes' bookings",
@@ -2457,9 +2512,17 @@ pub(crate) fn measured(
             why: "what is free and what its VMs hold overflow".into(),
         })?;
     Ok(CapacityResources {
-        cpu_milli: machine.cpu_milli.saturating_sub(off.cpu_milli),
-        mem_bytes: memory.saturating_sub(off.mem_bytes),
-        disk_bytes: free.disk_bytes.saturating_sub(off.disk_bytes),
+        cpu_milli: machine
+            .cpu_milli
+            .saturating_sub(off.cpu_milli)
+            .saturating_sub(reserved.cpu_milli),
+        mem_bytes: memory
+            .saturating_sub(off.mem_bytes)
+            .saturating_sub(reserved.mem_bytes),
+        disk_bytes: free
+            .disk_bytes
+            .saturating_sub(off.disk_bytes)
+            .saturating_sub(reserved.disk_bytes),
     })
 }
 
@@ -2676,6 +2739,7 @@ pub(crate) fn learned(
         ranked: Vec::new(),
         unrecorded: Vec::new(),
         unacted: Vec::new(),
+        reservations: None,
     })
 }
 

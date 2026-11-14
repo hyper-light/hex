@@ -288,13 +288,15 @@ holds it. While the VM runs, `inspect` also reports what its boot bound, `BoxInf
 the grant's host address, on its host port or on the one the OS picked. A run doesn't outlive its owner in
 D231's first version (`Awaits(AttachAfterCrash)`), so this report is the live run's, not the durable record's.
 
-While it runs, `inspect` also says where its run's agent-control endpoint is bound, `BoxInfo.control`, as the run host
-told it (`ImageGuest::control()`; Shards' D238, D252). That is Hex's own control endpoint, which every run's host
-binds on the host's loopback for Hex's key alone. It is no published port and no grant makes it. It is told so that a
-reading of the host can tell it from a socket no grant made: `image_grants_real` requires every socket a run's
-processes hold that takes what comes in to be at that one address (goal 5, 2026-11-14). Shards' QUIC driver holds two
-more peerless loopback sockets beside it, its waker and its wake, which Shards is to connect to each other (g121's
-ruling, 2026-11-14). Until Hex vendors that change, the check fails on those two.
+While it runs, `inspect` also says every socket its run's agent-control endpoint holds, as the run host told it
+(`ImageGuest::control()`; Shards' D238, D252, amended at `d3950c7d1`, image channel v30): `BoxInfo.control`, where it
+serves, and `BoxInfo.control_wake`, its QUIC driver's waker and wake, loopback sockets connected to each other
+(`BoxInfo::control_sockets` gives all three). That is Hex's own control endpoint, which every run's host binds on the
+host's loopback for Hex's key alone. It is no published port and no grant makes any of its sockets. They are told so
+that a reading of the host can tell them from a socket no grant made: `image_grants_real` requires the run to hold all
+three, and no other socket its processes hold to take what comes in (a listening TCP socket, or a UDP socket the
+host's table shows with no peer), on every OS. Windows' table shows no UDP socket's peer, so there the waker and the
+wake show peerless too (goal 5, 2026-11-14).
 
 As its boot's answer is taken, Hex holds the run's own report to the grants (`hex_runtime::grants::bound`), by
 whichever call takes it: the start, or, where the boot outlasts its W* and the start answers `Lifecycle { Pending }`

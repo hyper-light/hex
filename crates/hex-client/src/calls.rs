@@ -63,7 +63,7 @@ impl PlainKind {
 const SCHEDULED: usize = WaitKind::Forget as usize;
 
 /// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
-pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 7;
+pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 8;
 
 /// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
 /// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
@@ -88,10 +88,13 @@ pub enum BoxKind {
     /// A start followed to its end (`Call::Started`; ROOT, 2026-11-14): the rest of a boot its start answered Pending
     /// for, timed apart from a start's own answer.
     Started,
+    /// A member's next MCP connection (`Call::Mcp`; goal 2's item 3): answered as its harness connects, which may be
+    /// never, so past W* its wait follows the connection.
+    Mcp,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Started as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Mcp as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -149,6 +152,7 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".capacity.", $class), $capacity),
             $crate::calls::class_wait!(concat!($prefix, ".member.", $class), measuring),
             $crate::calls::class_wait!(concat!($prefix, ".started.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".mcp.", $class), measuring),
         ]
     };
 }
@@ -184,6 +188,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::BackingUsage(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(3)?,
             Call::Links => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(5)?,
             Call::Lessors => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(6)?,
+            Call::Reserved(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(7)?,
             Call::Create(_)
             | Call::Start(_)
             | Call::Exec { .. }
@@ -197,7 +202,8 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Capacity(_)
             | Call::Member { .. }
             | Call::MemberSignal { .. }
-            | Call::Started(_) => return None,
+            | Call::Started(_)
+            | Call::Mcp { .. } => return None,
         },
         Request::Release
         | Request::Taken
@@ -238,6 +244,7 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::Member { id, .. } => (BoxKind::Member, Timed::Box(id)),
         Call::MemberSignal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
         Call::Started(id) => (BoxKind::Started, Timed::Box(id)),
+        Call::Mcp { id, .. } => (BoxKind::Mcp, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -246,7 +253,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         | Call::ReleaseBacking(_)
         | Call::BackingUsage(_)
         | Call::Links
-        | Call::Lessors => return None,
+        | Call::Lessors
+        | Call::Reserved(_) => return None,
     })
 }
 
@@ -326,7 +334,8 @@ impl Known {
             (
                 Call::Exec { id: of, .. }
                 | Call::ExecStreams { id: of, .. }
-                | Call::Member { id: of, .. },
+                | Call::Member { id: of, .. }
+                | Call::Mcp { id: of, .. },
                 Answer::Started { .. } | Answer::Given { .. },
             ) => {
                 if let Some(class) = self.boxes.get(of).copied() {
@@ -2281,6 +2290,7 @@ impl<T: Transport> Core<T> {
             }
             Call::Run { spec, program, .. } => Launch::Run(spec, program),
             Call::Member { id, member, .. } => Launch::Member(id, member),
+            Call::Mcp { id, member, .. } => Launch::Mcp(id, member),
             call => {
                 return self.begun(&Request::Call(call), |_| Ok(NONE), then, None, deadline);
             }
@@ -2319,7 +2329,11 @@ impl<T: Transport> Core<T> {
     pub fn defer(&self, call: Call, then: Then, ended: Ended) -> Result<Deferred<T>, Refusal> {
         let program = matches!(
             call,
-            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } | Call::Member { .. }
+            Call::Exec { .. }
+                | Call::ExecStreams { .. }
+                | Call::Run { .. }
+                | Call::Member { .. }
+                | Call::Mcp { .. }
         )
         .then(|| Watching::Then(ended));
         self.deferred(&Request::Call(call), then, program)
@@ -2864,6 +2878,8 @@ enum Launch {
     Exec(BoxId, Program),
     Run(Box<BoxSpec>, Program),
     Member(BoxId, hex_api::Member),
+    /// A member's next MCP connection (goal 2's item 3).
+    Mcp(BoxId, hex_api::Member),
 }
 
 impl Launch {
@@ -2893,6 +2909,12 @@ impl Launch {
                 streams,
                 ask,
             },
+            Self::Mcp(id, member) => Call::Mcp {
+                id,
+                member,
+                streams,
+                ask,
+            },
         }
     }
 
@@ -2900,7 +2922,7 @@ impl Launch {
     fn fits(&self) -> Result<(), Refusal> {
         match self {
             Self::Exec(_, program) | Self::Run(_, program) => program.fits(&WIRE_EXEC_LIMIT),
-            Self::Member(..) => Ok(()),
+            Self::Member(..) | Self::Mcp(..) => Ok(()),
         }
     }
 
@@ -2910,13 +2932,14 @@ impl Launch {
             Self::Exec(..) => "exec",
             Self::Run(..) => "run",
             Self::Member(..) => "member",
+            Self::Mcp(..) => "mcp",
         }
     }
 
     /// The box it starts its program in.
     fn id(&self) -> &BoxId {
         match self {
-            Self::Exec(id, _) | Self::Member(id, _) => id,
+            Self::Exec(id, _) | Self::Member(id, _) | Self::Mcp(id, _) => id,
             Self::Run(spec, _) => &spec.id,
         }
     }
@@ -3218,6 +3241,24 @@ impl<T: Transport> Runtime for Core<T> {
         self.info(Call::Inspect(id.clone()), "inspect")
     }
 
+    /// [`Call::Mcp`] (goal 2's item 3): a member's next MCP connection, its stdin and stdout asked for as a member's
+    /// streams are (an MCP connection has no stderr), answered once its harness connects; its end comes later as a
+    /// program's, and its kill rides [`Call::Kill`] as any program's does.
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        let both = hex_api::Ask {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        };
+        self.spawn(
+            Launch::Mcp(id.clone(), member.clone()),
+            Stdio {
+                ask: both,
+                ..Stdio::null()
+            },
+        )
+    }
+
     /// [`Call::Member`] (joint plan step 17): the member's stdin, stdout and stderr asked for as an exec's streams
     /// are, the node giving the member's own ends with its answer, or, where the transport makes the connections
     /// (a QUIC client's lanes), those carried for the node to join to them; its end comes later as a program's.
@@ -3309,6 +3350,12 @@ impl<T: Transport> Runtime for Core<T> {
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         self.done(Call::Delete(id.clone()), "delete")
+    }
+
+    /// The machine's capacity view's word to its node (`Call::Reserved`, appended; the review's A-10), which the node's
+    /// charge learner takes off its fleet's budget.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        self.done(Call::Reserved(word), "reserved")
     }
 }
 

@@ -196,6 +196,12 @@ pub struct Runs {
 pub struct Node {
     /// Its lessors over its wire, where its image VMs lease through them ([`Node::lease_over_wire`]).
     wire_lessors: OnceLock<Arc<crate::serve::WireLessors>>,
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10): its keeper's word is then awaited before its charge learner learns ([`Node::with_capacity_view`]).
+    capacity_view: bool,
+    /// The machine's capacity view's latest word, what every holder has reserved through its keeper (the review's A-10),
+    /// kept for its charge learner: none until its keeper speaks ([`Runtime::reserved`]).
+    reserved: Mutex<Option<hex_api::Reserved>>,
     attachments: hex_runtime::devices::SharedCatalog,
     attachment_turns: Turns,
     backends: OnceLock<backends::Backends>,
@@ -443,6 +449,8 @@ impl Node {
         let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
             wire_lessors: OnceLock::new(),
+            capacity_view: false,
+            reserved: Mutex::new(None),
             attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
                 |_| Refusal::Exhausted {
                     what: "shared runtime device catalog owners",
@@ -623,6 +631,27 @@ impl Node {
     pub fn with_lsm(mut self, policy: hex_runtime::linux::oci::lsm::Policy) -> Self {
         self.lsm = policy;
         self
+    }
+
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10, CV10's configured form): where one does, its charge learner learns nothing until its keeper has
+    /// spoken since the node started, its VMs booked whole meanwhile, told; where none does, no holder reserves room there.
+    pub fn with_capacity_view(mut self, served: bool) -> Self {
+        self.capacity_view = served;
+        self
+    }
+
+    /// What its charge learner takes off its fleet's budget for the capacity view's holders now (the review's A-10), as
+    /// its configuration and its keeper's latest word say.
+    fn reservations(&self) -> Result<hex_api::LearnedReservations, Refusal> {
+        let word = *self
+            .reserved
+            .lock()
+            .map_err(|_| Refusal::Broken("the keeper's word's lock was poisoned".into()))?;
+        Ok(crate::recorded::charges::reservations(
+            self.capacity_view,
+            word,
+        ))
     }
 
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
@@ -1125,6 +1154,7 @@ impl Node {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
     }
@@ -1649,6 +1679,7 @@ impl Node {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         })
     }
@@ -2337,6 +2368,7 @@ impl Runtime for Node {
                         last_resort: None,
                         ended: None,
                         control: None,
+                        control_wake: None,
                         credentials: Vec::new(),
                     }),
                     Err(why) => return Err(why),
@@ -2360,6 +2392,7 @@ impl Runtime for Node {
                     last_resort: None,
                     ended: None,
                     control: None,
+                    control_wake: None,
                     credentials: Vec::new(),
                 });
             }
@@ -2409,6 +2442,18 @@ impl Runtime for Node {
             }
             supervise::Taken::NoRun => self.delete_box(id),
         }
+    }
+
+    /// The machine's capacity view's word, kept for its charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed. Its learner reads it at its next window, each `cpu.max` period.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        crate::recorded::charges::keep_word(
+            &mut *self
+                .reserved
+                .lock()
+                .map_err(|_| Refusal::Broken("the keeper's word's lock was poisoned".into()))?,
+            word,
+        )
     }
 }
 
