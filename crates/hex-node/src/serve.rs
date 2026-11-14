@@ -832,10 +832,17 @@ impl<O: Os> MemberEnd<O> {
     }
 }
 
+/// Tells a kill's `done` whether it went, where no one has yet.
+fn killed(done: &Mutex<Option<Killed>>, sent: Result<(), Refusal>) {
+    if let Some(done) = done.lock().ok().and_then(|mut done| done.take()) {
+        done(sent);
+    }
+}
+
 impl<O: Os> Remote for MemberEnd<O> {
     /// KILL to the member alone, on its own lane of its run's agent-control endpoint (goal 2's item 2), as the `Proc`
     /// `Runtime::member` gives kills it in process: its host's `signal_member`, run on a worker as every call is
-    /// ([`Job::MemberKill`]), which tells `done` the lane's answer.
+    /// ([`Job::MemberKill`]), which tells `done` the lane's answer; or here, refused, where the queue takes no job.
     fn kill(&self, done: Killed) {
         let Some(shared) = self.shared.upgrade() else {
             return done(Err(Refusal::Broken(
@@ -846,12 +853,17 @@ impl<O: Os> Remote for MemberEnd<O> {
             Ok(id) => id,
             Err(why) => return done(Err(why)),
         };
-        // Refused only where the queue's lock was poisoned, every job then lost alike, this one's `done` with it.
-        let _ = shared.enqueue(Job::MemberKill {
+        // A queue that refuses the job (its lock poisoned) drops it, and the worker's telling with it.
+        let done = Arc::new(Mutex::new(Some(done)));
+        let telling = Arc::clone(&done);
+        let queued = shared.enqueue(Job::MemberKill {
             id,
             member: self.member.clone(),
-            done,
+            done: Box::new(move |sent| killed(&telling, sent)),
         });
+        if let Err(why) = queued {
+            killed(&done, Err(why));
+        }
     }
 
     /// No one waits for its end any longer: it runs on, its end told no one, and an end told before its start was
