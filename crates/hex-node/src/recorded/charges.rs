@@ -284,19 +284,33 @@ fn ranked(class: Class, running: &[Holder<'_>]) -> Result<Vec<hex_api::LearnedRa
     Ok(told)
 }
 
-/// What the node VMs among `rows` that boot (Booting, their runs not ended) book (ROOT, 2026-11-13): each its receipt's
-/// booking, as the scheduler books it from its row's first write, off the fleet's budget until it is Ready and learned,
-/// so no room or rate hands out what its boot is using.
-pub(crate) fn booting(rows: &[NodeVmRecord]) -> Result<CapacityResources, Refusal> {
-    rows.iter()
-        .filter(|row| row.phase == hex_api::NodeVmPhase::Booting && row.exit.is_none())
-        .try_fold(CapacityResources::default(), |sum, row| {
-            sum.checked_add(row.allocation.booking())
-        })
-        .ok_or_else(|| Refusal::Invalid {
-            what: "a node's booting node VMs' bookings",
-            why: "they overflow".into(),
-        })
+/// The node VMs among `rows` that boot (Booting, their runs not ended), each of `band`, and what each books (ROOT,
+/// 2026-11-13): its receipt's booking, as the scheduler books it from its row's first write, off the fleet's budget until
+/// it is Ready and learned, so no room or rate hands out what its boot is using.
+pub(crate) fn booting<'a>(
+    rows: &'a [NodeVmRecord],
+    band: &'a NodeBand,
+) -> Result<Vec<(Holder<'a>, CapacityResources)>, Refusal> {
+    let mut booting = Vec::new();
+    booting
+        .try_reserve_exact(rows.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "a node's booting node VMs",
+            bound: rows.len(),
+        })?;
+    booting.extend(
+        rows.iter()
+            .filter(|row| row.phase == hex_api::NodeVmPhase::Booting && row.exit.is_none())
+            .map(|row| {
+                let holder = Holder::Node {
+                    row,
+                    band: band.band,
+                    unknown: band.unknown.as_deref(),
+                };
+                (holder, row.allocation.booking())
+            }),
+    );
+    Ok(booting)
 }
 
 /// The node VMs among `rows` that run (Ready, their runs not ended), as the holders a learner reads, each of `band`.
@@ -386,6 +400,13 @@ pub(crate) trait Managed {
     fn cap_cycle(&self, rate: u64) -> Result<Option<Duration>, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal>;
+    /// The memory a holder its window doesn't learn takes now of what the machine reads free (C7; the review's A-10): a
+    /// VM booked whole's use through its native owner, a native box's through its runtime, a booting node VM's through
+    /// its run's host use.
+    fn taken(&self, holder: Holder<'_>) -> Result<u64, Refusal>;
+    /// The machine's memory and disk free now, as its facts read them (C7; the review's A-10), read after a window's VMs
+    /// and boxes: a VM's or a box's growth between the reads shrinks the fleet's budget, never swells it.
+    fn free(&self) -> Result<CapacityResources, Refusal>;
     /// The period the VM's rate holds over: a Shards image VM's its run's own (D247's `ImageGuest::rate_period`); a
     /// managed VM's its governor's, as its VM process last answered (D255), none before its first answer or while its
     /// platform's cap holds it.
@@ -489,14 +510,13 @@ pub(crate) fn running_image(record: &BoxRecord) -> bool {
         && record.exit.is_none()
 }
 
-/// A window's view of the node's records (C3, C4): the VMs it learns; what each VM it doesn't books, whole, its
-/// receipt's allocation, as no cap holds it below; and what the native boxes book, their caps: its process boxes', and
-/// its oci boxes' where no node VM runs them (A-5).
+/// A window's view of the node's records (C3, C4): the VMs it learns; and each holder it doesn't, with what it books
+/// off the fleet's budget: a VM of a kind it doesn't learn, whole, its receipt's allocation, as no cap holds it below; a
+/// native box its caps: its process boxes', and its oci boxes' where no node VM runs them (A-5).
 #[derive(Debug, Default)]
 pub(crate) struct Sorted<'a> {
     pub(crate) learned: Vec<Holder<'a>>,
-    pub(crate) whole: CapacityResources,
-    pub(crate) native: CapacityResources,
+    pub(crate) booked: Vec<(Holder<'a>, CapacityResources)>,
 }
 
 /// Sorts `records` for a window of a learner ([`Sorted`]): it learns each VM whose cap's period it reads over (C1), a
@@ -506,13 +526,13 @@ pub(crate) struct Sorted<'a> {
 /// footprint while it runs and its booking while it boots, and nothing holds them once it has ended, so their caps are
 /// never counted beside it.
 pub(crate) fn sort<'a>(
-    records: impl IntoIterator<Item = &'a BoxRecord>,
+    records: &'a [BoxRecord],
     rows: &[NodeVmRecord],
     learns: impl Fn(Holder<'_>) -> bool,
 ) -> Result<Sorted<'a>, Refusal> {
-    let overflow = || Refusal::Invalid {
-        what: "a node's boxes' bookings",
-        why: "they overflow".into(),
+    let full = || Refusal::Exhausted {
+        what: "a window's holders",
+        bound: records.len(),
     };
     // A node VM on record runs the node's oci class: its guest is the one that serves it (`Store::put_node_vm`).
     let hosted = !rows.is_empty();
@@ -525,14 +545,13 @@ pub(crate) fn sort<'a>(
         } else {
             None
         };
-        match (kind, record.spec.allocation) {
-            (Some(true), _) => sorted.learned.push(Holder::Box(record)),
-            (Some(false), Some(allocation)) => {
-                sorted.whole = sorted
-                    .whole
-                    .checked_add(allocation.resources)
-                    .ok_or_else(overflow)?;
+        let booking = match (kind, record.spec.allocation) {
+            (Some(true), _) => {
+                sorted.learned.try_reserve(1).map_err(|_| full())?;
+                sorted.learned.push(Holder::Box(record));
+                continue;
             }
+            (Some(false), Some(allocation)) => allocation.resources,
             _ if record.phase == Phase::Ready
                 && match record.spec.class.class() {
                     hex_api::Class::Process => true,
@@ -540,15 +559,16 @@ pub(crate) fn sort<'a>(
                     hex_api::Class::Shards | hex_api::Class::Firecracker => false,
                 } =>
             {
-                let caps = CapacityResources {
+                CapacityResources {
                     cpu_milli: record.spec.bounds.cpu_max_milli.map_or(0, u64::from),
                     mem_bytes: record.spec.bounds.memory_max.unwrap_or(0),
                     disk_bytes: 0,
-                };
-                sorted.native = sorted.native.checked_add(caps).ok_or_else(overflow)?;
+                }
             }
-            _ => {}
-        }
+            _ => continue,
+        };
+        sorted.booked.try_reserve(1).map_err(|_| full())?;
+        sorted.booked.push((Holder::Box(record), booking));
     }
     Ok(sorted)
 }
@@ -1674,7 +1694,8 @@ impl Learner {
             .transpose()
     }
 
-    /// Runs a window as a node does ([`window`]), the learner held alone, every record read.
+    /// Runs a window as a node does ([`window`]), the learner held alone, every record read, within the fleet's
+    /// `budget` as given.
     #[cfg(test)]
     pub(crate) fn window(
         &mut self,
@@ -1683,7 +1704,7 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        window(self, io, running, Vec::new(), budget, now)
+        window(self, io, running, Vec::new(), |_| Ok(budget), now)
     }
 
     /// What a window asks of the VMs it learns among `running` (A-2): each one's reading, its life too where it holds no
@@ -2368,18 +2389,60 @@ pub(crate) fn window(
     io: &impl Managed,
     running: &[Holder<'_>],
     unreadable: Unreadable,
-    budget: CapacityResources,
+    budget: impl FnOnce(u64) -> Result<CapacityResources, Refusal>,
     now: Instant,
 ) -> Result<(), Refusal> {
     let asks = learner.take()?.asks(running);
-    let learned = match asks.and_then(|asks| ask(io, asks)) {
-        Ok(answers) => learner
+    // The fleet's budget once its VMs are read (C7; the review's A-10), given what they hold ([`measured`]).
+    let read = asks
+        .and_then(|asks| ask(io, asks))
+        .and_then(|answers| Ok((budget(held(&answers)?)?, answers)));
+    let learned = match read {
+        Ok((budget, answers)) => learner
             .take()?
             .learn(running, unreadable, answers, budget, now),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, running, acts));
     learner.take()?.acted(acted)
+}
+
+/// The memory the VMs a window read hold, as each read says it (C7; the review's A-10): none of a VM whose read failed,
+/// whose receipt counts whole instead ([`Learner::learn`]).
+fn held(answers: &[Answer<'_>]) -> Result<u64, Refusal> {
+    answers
+        .iter()
+        .filter_map(|answer| answer.read.as_ref().ok())
+        .try_fold(0u64, |sum, (_, read)| sum.checked_add(read.memory_bytes))
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a microVM's learned charge",
+            why: "what a window's VMs hold overflows".into(),
+        })
+}
+
+/// The fleet's budget a window measures (C4, C7; the review's A-10), its VMs holding `held` as just read: the
+/// `machine`'s, less what each holder it doesn't learn books (`booked`).
+pub(crate) fn measured(
+    io: &impl Managed,
+    machine: CapacityResources,
+    booked: &[(Holder<'_>, CapacityResources)],
+    held: u64,
+) -> Result<CapacityResources, Refusal> {
+    let _ = (io, held);
+    let booking = booked
+        .iter()
+        .try_fold(CapacityResources::default(), |sum, (_, booking)| {
+            sum.checked_add(*booking)
+        })
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a node's boxes' bookings",
+            why: "they overflow".into(),
+        })?;
+    Ok(CapacityResources {
+        cpu_milli: machine.cpu_milli.saturating_sub(booking.cpu_milli),
+        mem_bytes: machine.mem_bytes.saturating_sub(booking.mem_bytes),
+        disk_bytes: machine.disk_bytes,
+    })
 }
 
 /// Asks each VM of `asks` its reading (outside its learner's lock; A-2): the period its cap holds over and its use, an

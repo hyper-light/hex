@@ -54,15 +54,20 @@ pub(super) trait Cgroups {
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
     /// Kills every process in a VM's cgroup (C5's last resort), through the descriptor its native owner pinned.
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
+    /// The machine's memory and disk free now, as the node's facts read them (C7; the review's A-10), read after a
+    /// window's VMs and boxes: a VM's or a box's growth between the reads shrinks the fleet's budget, never swells it.
+    fn free(&self) -> Result<CapacityResources, Refusal>;
     /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
     /// lifetime, before its end (C5, intent first): whether it was written.
     fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
-/// The kernel's cgroups, the node's records, and its Shards guest runtime, where it runs one.
+/// The kernel's cgroups, the node's records, its Shards guest runtime, where it runs one, and the node, whose facts say
+/// what the machine has free.
 pub(super) struct Kernel<'a> {
     pub(super) store: &'a crate::store::Store,
     pub(super) guest: Option<&'a GuestRuntime>,
+    pub(super) node: &'a Node,
 }
 
 impl Cgroups for Kernel<'_> {
@@ -119,6 +124,10 @@ impl Cgroups for Kernel<'_> {
 
     fn intend(&self, id: &LearnedHolder, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
         record_last_resort(self.store, id, scope, Some(end))
+    }
+
+    fn free(&self) -> Result<CapacityResources, Refusal> {
+        self.node.native_capacity().map(|capacity| capacity.free)
     }
 }
 
@@ -297,6 +306,9 @@ fn room_awaits(class: Class) -> &'static [Upstream] {
 struct Native {
     dir: PathBuf,
     booked: CapacityResources,
+    /// What it takes of the machine's free memory (C7; the review's A-10), its `memory.current` less its reclaimable file
+    /// pages ([`taken`]): none where either can't be read.
+    taken: Option<u64>,
     /// Whether it is under `.oci`.
     oci: bool,
     /// A reuse slot no box holds: it runs nothing, so it books nothing and takes none of the scale.
@@ -388,6 +400,27 @@ fn booked_bytes(max: Option<&str>) -> Result<u64, Refusal> {
     }
 }
 
+/// A cgroup's reclaimable file pages, its `memory.stat`'s `active_file` and `inactive_file`, which the machine's
+/// `MemAvailable` counts free already (`Documentation/filesystems/proc.rst`; cgroup-v2.rst, `memory.stat`): none where
+/// `stat` names either not, or not as a count.
+fn file_pages(stat: Option<&str>) -> Option<u64> {
+    let field = |name: &str| {
+        stat?.lines().find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            (key == name).then(|| value.trim().parse::<u64>().ok())?
+        })
+    };
+    field("active_file")?.checked_add(field("inactive_file")?)
+}
+
+/// What a cgroup takes of the machine's free memory (C7; the review's A-10): its `memory.current` less its reclaimable
+/// file pages ([`file_pages`]), counted free already; none where either can't be read, so a box whose use is unknown
+/// keeps its whole booking off the fleet's budget.
+fn taken(current: Option<&str>, stat: Option<&str>) -> Option<u64> {
+    let current = current?.trim().parse::<u64>().ok()?;
+    Some(current.saturating_sub(file_pages(stat)?))
+}
+
 /// Gives the cgroup at `dir` `weight` as its `cpu.weight` where it holds another: read first, as a box's own create or
 /// reuse writes its owner's weight. A cgroup gone before the write is passed over.
 fn weigh(io: &impl Cgroups, dir: &Path, weight: u16) -> Result<(), Refusal> {
@@ -442,7 +475,8 @@ impl Learner {
         &self.unread
     }
 
-    /// Runs a window as the node does ([`window`]), the learner held alone.
+    /// Runs a window as the node does ([`window`]), the learner held alone, within the fleet's `budget` as given, less
+    /// what the node's boxes book ([`given`]).
     #[cfg(test)]
     pub(super) fn window(
         &mut self,
@@ -453,7 +487,15 @@ impl Learner {
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        window(self, io, running, record, held, budget, now)
+        window(
+            self,
+            io,
+            running,
+            record,
+            held,
+            |reads| given(budget, reads),
+            now,
+        )
     }
 
     /// What a window asks of the node over the VMs `running` (A-2): each VM's guest time and its cgroup's use, and its
@@ -653,34 +695,18 @@ impl Learner {
             );
             self.last.met(class, scope, intent)?;
         }
-        // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget, and its CPU
-        // is at most what the units the boxes leave carry.
+        // Every child of the node's root on one scale (C4): its CPU is at most what the units the boxes leave carry, the
+        // boxes' bookings off its `budget` already ([`measured`]).
         let natives = reads.natives?;
         let scale = Scale::of(&natives, self.machine)?;
-        let booked = natives
-            .iter()
-            .try_fold(CapacityResources::default(), |sum, native| {
-                sum.checked_add(native.booked)
-            })
-            .ok_or_else(|| Refusal::Invalid {
-                what: "a node's boxes' bookings",
-                why: "they overflow".into(),
-            })?;
-        // The fleet's budget this window, less what its unread VMs hold past their bookings and the boxes' bookings.
+        // The fleet's budget this window, less what its unread VMs hold past their bookings.
         self.node.set_budget(CapacityResources {
             cpu_milli: budget
                 .cpu_milli
                 .saturating_sub(unread.cpu_milli)
-                .saturating_sub(booked.cpu_milli)
                 .min(scale.carried),
-            mem_bytes: budget
-                .mem_bytes
-                .saturating_sub(unread.mem_bytes)
-                .saturating_sub(booked.mem_bytes),
-            disk_bytes: budget
-                .disk_bytes
-                .saturating_sub(unread.disk_bytes)
-                .saturating_sub(booked.disk_bytes),
+            mem_bytes: budget.mem_bytes.saturating_sub(unread.mem_bytes),
+            disk_bytes: budget.disk_bytes.saturating_sub(unread.disk_bytes),
         });
         // A VM whose cgroup its last window couldn't write is held at what was last written (A-7; ROOT, 2026-11-14,
         // ruling (ii)): counted at the memory its cgroup holds it at, the others' budgets shared from what it leaves,
@@ -1012,6 +1038,9 @@ struct Answer {
     scope: Scope,
     cgroup: BoxCgroup,
     read: Result<(ManagedGuestTime, Usage), Refusal>,
+    /// Its reclaimable file pages, which the machine's free memory counts already ([`file_pages`]): none where its
+    /// `memory.stat` can't be read (the review's A-10).
+    file: Option<u64>,
     met: Option<Result<Option<Met>, Refusal>>,
 }
 
@@ -1022,12 +1051,13 @@ struct Fleets {
     others: Vec<Option<String>>,
 }
 
-/// What a window read with its learner let go (A-2): each VM's answer, the node's boxes at their caps, and the fleets
-/// under `.vm`.
+/// What a window read with its learner let go (A-2): each VM's answer, the node's boxes at their caps, the fleets under
+/// `.vm`, and the machine's memory and disk free, read last (the review's A-10).
 struct Reads {
     vms: Vec<Answer>,
     natives: Result<Vec<Native>, Refusal>,
     fleets: Result<Fleets, Refusal>,
+    free: Result<CapacityResources, Refusal>,
 }
 
 /// A VM's cgroup the placement rewrites (C4, C5), and the CPU cap and memory it holds the VM at once its writes are
@@ -1076,27 +1106,66 @@ struct Acted {
 
 /// One window of the node's learner (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record`
 /// (its class, receipt, band and any intent; none for a box that isn't a VM with a receipt), the reuse slots live boxes
-/// hold (`held`, in order), within the fleet's `budget`. Its learner is taken for each of the window's pure steps and let
-/// go while the node's cgroups and records are read and written and its VMs asked and ended (A-2; the review's,
-/// 2026-11-14), so a capacity answer, which takes it, never waits on them. Its node runs one window at a time, on its
-/// learner's thread, so nothing but the window moves its learner between its steps. A failure is kept until a window
-/// passes.
-pub(super) fn window(
+/// hold (`held`, in order), within the fleet's budget, which `budget` gives from what the window read ([`measured`]). Its
+/// learner is taken for each of the window's pure steps and let go while the node's cgroups and records are read and
+/// written and its VMs asked and ended (A-2; the review's, 2026-11-14), so a capacity answer, which takes it, never waits
+/// on them. Its node runs one window at a time, on its learner's thread, so nothing but the window moves its learner
+/// between its steps. A failure is kept until a window passes.
+fn window(
     mut learner: impl Lease<Learner>,
     io: &impl Cgroups,
     running: Vec<(LearnedHolder, Scope, BoxCgroup)>,
     record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
     held: &[u64],
-    budget: CapacityResources,
+    budget: impl FnOnce(&Reads) -> Result<CapacityResources, Refusal>,
     now: Instant,
 ) -> Result<(), Refusal> {
     let asks = learner.take()?.asks(running);
-    let learned = match asks.and_then(|asks| ask(io, asks, &record, held)) {
-        Ok(reads) => learner.take()?.learn(reads, budget, now),
+    let read = asks
+        .and_then(|asks| ask(io, asks, &record, held))
+        .and_then(|reads| Ok((budget(&reads)?, reads)));
+    let learned = match read {
+        Ok((budget, reads)) => learner.take()?.learn(reads, budget, now),
         Err(why) => Err(why),
     };
     let acted = learned.and_then(|acts| act(io, acts));
     learner.take()?.acted(acted)
+}
+
+/// What the node's boxes book (C4), each at its caps.
+fn booked(natives: &[Native]) -> Result<CapacityResources, Refusal> {
+    natives
+        .iter()
+        .try_fold(CapacityResources::default(), |sum, native| {
+            sum.checked_add(native.booked)
+        })
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a node's boxes' bookings",
+            why: "they overflow".into(),
+        })
+}
+
+/// `a` less `b` in each dimension, none below nothing.
+fn less(a: CapacityResources, b: CapacityResources) -> CapacityResources {
+    CapacityResources {
+        cpu_milli: a.cpu_milli.saturating_sub(b.cpu_milli),
+        mem_bytes: a.mem_bytes.saturating_sub(b.mem_bytes),
+        disk_bytes: a.disk_bytes.saturating_sub(b.disk_bytes),
+    }
+}
+
+/// The fleet's budget a window measures (C4, C7; the review's A-10), from what it read (`reads`): the `machine`'s, less
+/// what the node's boxes book.
+fn measured(machine: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
+    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
+    Ok(less(machine, booked(natives)?))
+}
+
+/// A window's fleet budget as a test gives it, `budget`, less what the node's boxes book.
+#[cfg(test)]
+fn given(budget: CapacityResources, reads: &Reads) -> Result<CapacityResources, Refusal> {
+    let natives = reads.natives.as_ref().map_err(Clone::clone)?;
+    Ok(less(budget, booked(natives)?))
 }
 
 /// Asks each VM of `asks` its guest time and its cgroup its use, and its record from `record` where its learner meets
@@ -1126,6 +1195,11 @@ fn ask(
         let read = io
             .guest_time(&id)
             .and_then(|guest| Ok((guest, io.usage(&cgroup)?)));
+        // Its reclaimable file pages, which the machine's free memory counts already (the review's A-10).
+        let file = io
+            .read(cgroup.dir(), "memory.stat")
+            .ok()
+            .and_then(|stat| file_pages(stat.as_deref()));
         // Its record where its learner meets it, or where its read failed, so its receipt is counted whole (C8).
         let met = if known && read.is_ok() {
             None
@@ -1137,13 +1211,18 @@ fn ask(
             scope,
             cgroup,
             read,
+            file,
             met,
         });
     }
+    let natives = natives(io, &asks.root, &asks.oci, &asks.vm, held);
+    let fleets = fleets(io, &asks.vm, &asks.fleet);
     Ok(Reads {
         vms,
-        natives: natives(io, &asks.root, &asks.oci, &asks.vm, held),
-        fleets: fleets(io, &asks.vm, &asks.fleet),
+        natives,
+        fleets,
+        // Last: a VM's or a box's growth since its read shrinks the fleet's budget, never swells it (A-10).
+        free: io.free(),
     })
 }
 
@@ -1187,18 +1266,22 @@ fn natives(
                     .and_then(|name| name.to_str())
                     .and_then(hex_core::reuse::slot_of)
                     .is_some_and(|slot| held.binary_search(&slot).is_err());
-            let booked = if idle {
-                CapacityResources::default()
+            let (booked, taken) = if idle {
+                (CapacityResources::default(), None)
             } else {
-                CapacityResources {
+                let booked = CapacityResources {
                     cpu_milli: booked_cpu(io.read(&child, "cpu.max")?.as_deref())?,
                     mem_bytes: booked_bytes(io.read(&child, "memory.max")?.as_deref())?,
                     disk_bytes: 0,
-                }
+                };
+                let current = io.read(&child, "memory.current")?;
+                let stat = io.read(&child, "memory.stat")?;
+                (booked, taken(current.as_deref(), stat.as_deref()))
             };
             out.push(Native {
                 dir: child,
                 booked,
+                taken,
                 oci: under_oci,
                 idle,
             });
@@ -1264,7 +1347,8 @@ fn place(io: &impl Cgroups, acts: Acts, acted: &mut Acted) -> Result<(), Refusal
 }
 
 /// What a window of the node's learner reads first (C1, C4, C7): the VMs running, each by its holder, its lifetime and
-/// its cgroup; the reuse slots live boxes hold, in order; and the fleet's budget.
+/// its cgroup; the reuse slots live boxes hold, in order; and the machine's resources, which its fleet's budget is
+/// measured within ([`measured`]).
 pub(super) type Running = (
     Vec<(LearnedHolder, Scope, BoxCgroup)>,
     Vec<u64>,
@@ -1284,7 +1368,7 @@ pub(super) fn one_window(
     record: impl Fn(&LearnedHolder) -> Result<Option<Met>, Refusal>,
     now: impl FnOnce() -> Instant,
 ) {
-    let (running, held, budget) = match read() {
+    let (running, held, machine) = match read() {
         Ok(read) => read,
         Err(why) => {
             if let Ok(mut learner) = shared.lock() {
@@ -1294,7 +1378,15 @@ pub(super) fn one_window(
         }
     };
     // Its outcome is kept as the learner's fault, which the capacity answers read.
-    let _ = window(shared, io, running, record, &held, budget, now());
+    let _ = window(
+        shared,
+        io,
+        running,
+        record,
+        &held,
+        |reads| measured(machine, reads),
+        now(),
+    );
     // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
     // is kept for the next window and fails this one.
     let Ok(ends) = shared.lock().map(|mut learner| learner.unrecorded()) else {
@@ -1355,6 +1447,7 @@ impl Node {
         let io = Kernel {
             store: &self.store,
             guest: self.backends.get().and_then(|b| b.shards.as_deref()),
+            node: self,
         };
         one_window(shared, &io, &self.store, read, record, Instant::now);
     }
