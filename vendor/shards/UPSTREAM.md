@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `2737fc4ec561923e64f5be77612b4866ec6fc151` (main).
+Revision: `2246a88294a1df85e63fae9ef2e1c59ec41ea7e9` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -22,7 +22,7 @@ own CPU, `Refusal::HostUse` an answer none of the protocol's; Hex reads it nowhe
 through a client's native owner (D233); GPU selection
 by exact identity (D232), a VM process's refusal of its selection typed in place of a receipt
 (`GpuProbeError::Refused`, `Unreported`; 18f59d497); and an image booted under shards-init for an
-orchestrator (D231, `shards_api::image`, image channel version 29), with its nesting grant (D234)
+orchestrator (D231, `shards_api::image`, image channel version 30), with its nesting grant (D234)
 and, under it, the run's GPUs by identity (`ImageSpec::gpu_devices`, `gpus=`, version 16, e46299c07;
 its workload's cgroup sized by its microVM's CPUs, a853a8138), plugs (D235), destinations by name
 and the receivers a published port reaches (D236), a member's stdin, the room its orchestrator's
@@ -99,7 +99,15 @@ is told, its run host exited and reaped, and every process the host started, its
 share processes, gone, their diagnostics closed; on Windows the host's group ended too, a failure
 there `ImageRefusal::Os`), so Hex's delete frees nothing a run still holds (the review's B-4), and the
 agent-control driver's waker and wake connected to each other, so the wake takes datagrams from the
-waker alone (b6727996c);
+waker alone (b6727996c); and past 2737fc4ec, a run's endpoint telling every socket it holds (D252
+amended, d3950c7d1, image channel version 30: `ControlAt::waker`, `wake` and `sockets`), which Hex's
+inspect carries (`BoxInfo::control_wake`) and its grants check holds a run's sockets to, Windows' UDP
+table showing no socket's peer; a controller's socket lanes driven from one thread on one wake (Hex's
+D-10, 9f5b1f75); a killed managed VM's AppContainer profiles released (D141, 16bbdf34:
+`release_app_containers`, `Refusal::Release`), which Hex calls nowhere yet; and a stream shared without
+an inheritable duplicate (D215, Hex's D-5, a168c2a3: `Stream::read_shared`, `write_shared` and
+`into_socket`, `&dyn Stream`'s `Read` and `Write`, a `try_clone` no child inherits), which Hex's test
+streams implement;
 a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its

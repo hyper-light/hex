@@ -397,6 +397,21 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
+    fn read_shared(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut &self.0, buf)
+    }
+
+    fn write_shared(&self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut &self.0, buf)
+    }
+
+    fn into_socket(self: Box<Self>) -> shards_api::OwnedSocket {
+        #[cfg(unix)]
+        return std::os::fd::OwnedFd::from(self.0);
+        #[cfg(windows)]
+        std::os::windows::io::OwnedSocket::from(self.0)
+    }
+
     fn handle(&self) -> shards_api::Handle<'_> {
         #[cfg(unix)]
         return std::os::fd::AsFd::as_fd(&self.0);
