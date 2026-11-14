@@ -507,19 +507,23 @@ pub fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
 }
 
 /// The managed plan of guest `spec` booted with `binary` on `socket`, its guest told `left`, what remains of its boot's
-/// deadline ([`tell_ready`]): the native plan where `images` declare its images (its cost evidence's), else Shards' own
-/// plan with the runtime folders `paths`. A node's guests prepare theirs here, and so does the guest-cost producer
-/// (crates/hex-cli/examples/guest_cost), so it measures what a node runs (AC-T7.4.1).
+/// deadline ([`tell_ready`]), where it has one, and told none where it has none, so it keeps its learned bounds: the
+/// native plan where `images` declare its images (its cost evidence's), else Shards' own plan with the runtime folders
+/// `paths`. A node's guests prepare theirs here, each told its boot's deadline, and so does the guest-cost producer
+/// (crates/hex-cli/examples/guest_cost), whose guests are told none and followed to their answer (decision 9), so it
+/// measures what a node runs (AC-T7.4.1).
 pub fn managed_plan(
     spec: &shards_api::GuestSpec,
     binary: &std::path::Path,
     socket: &std::path::Path,
     paths: &shards_api::RuntimePaths,
     images: Option<shards_api::NativeImages>,
-    left: Duration,
+    left: Option<Duration>,
 ) -> Result<shards_api::PreparedBoot, Refusal> {
     let mut spec = spec.clone();
-    tell_ready(&mut spec.cmdline, left)?;
+    if let Some(left) = left {
+        tell_ready(&mut spec.cmdline, left)?;
+    }
     let spec = &spec;
     let plan = if let Some(images) = images {
         shards_api::prepare_native_boot(
