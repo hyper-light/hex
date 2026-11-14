@@ -2513,6 +2513,13 @@ pub struct BoxInfo {
     /// C4): a Shards image VM's, none for any other class. After `ended`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<crate::CredentialGrant>,
+    /// Where its run's agent-control endpoint is bound, while it runs (Shards' D238, D252), as its run host told it:
+    /// Hex's own control endpoint on the host's loopback, a QUIC endpoint on a UDP socket that takes Hex's key alone. It
+    /// is never a published port and no grant makes it (joint plan step 15, docs/design/network-grants.md N6). A Shards
+    /// image VM's; none for any other class, and none once its run has ended. After `credentials`, so absent means none
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<std::net::SocketAddr>,
 }
 
 fn is_zero(n: &u64) -> bool {

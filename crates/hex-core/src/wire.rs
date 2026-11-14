@@ -3811,6 +3811,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         })?,
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
+        control: None,
         credentials: Vec::new(),
     };
     info.credentials = credentials(r, &info.grants)?;

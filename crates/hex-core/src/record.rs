@@ -256,6 +256,7 @@ impl BoxRecord {
             published: Vec::new(),
             last_resort: None,
             ended: self.ended.clone(),
+            control: None,
             credentials: Vec::new(),
         })
     }

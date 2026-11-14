@@ -855,6 +855,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         },
         last_resort: None,
         ended: None,
+        control: None,
         // Every credential grant as the record holds it (joint plan step 33, docs/design/credential-grants.md C4).
         credentials: match &spec.class {
             ClassSpec::ShardsImage(image) => image.credentials.clone(),

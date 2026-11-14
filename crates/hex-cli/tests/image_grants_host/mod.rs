@@ -154,6 +154,12 @@ fn sockets_of(run: &[Process]) -> Vec<Socket> {
     sockets
 }
 
+/// The sockets of `sockets` that take what comes in past the run's agent-control endpoint at `control`.
+fn listening_past(sockets: &[Socket], control: SocketAddr) -> Vec<&Socket> {
+    let _ = control;
+    sockets.iter().filter(|s| s.listens()).collect()
+}
+
 /// How many of the run's processes are named `name`.
 fn named(run: &[Process], name: &str) -> usize {
     run.iter().filter(|p| p.name == name).count()
@@ -317,4 +323,31 @@ fn only_a_flow_past_the_loopback_leaves() {
     };
     assert!(udp(None).listens() && !udp(None).leaves());
     assert!(udp(Some("192.0.2.53:53")).leaves());
+}
+
+/// What takes what comes in past a run's agent-control endpoint, judged alike on every OS (no VM; joint plan step 15,
+/// AC-T7.7.2): do judge, beside the endpoint at 127.0.0.1:43471 (`BoxInfo.control`), its own UDP socket there, another
+/// peerless UDP socket on the loopback (its QUIC driver's wake, which Shards connects to its waker past g121's fix), a
+/// TCP listener at the endpoint's own address and port, a UDP socket with a loopback peer and a TCP connection on the
+/// loopback. Expect the other peerless UDP socket and the TCP listener alone to take what comes in past it.
+#[test]
+fn a_runs_agent_control_endpoint_alone_takes_what_comes_in_past_its_grants() {
+    let control: SocketAddr = "127.0.0.1:43471".parse().unwrap();
+    let socket = |tcp, local: &str, remote: Option<&str>, listening| Socket {
+        tcp,
+        local: local.parse().unwrap(),
+        remote: remote.map(|r| r.parse().unwrap()),
+        listening,
+        pids: vec![1],
+    };
+    let wake = socket(false, "127.0.0.1:45708", None, false);
+    let listener = socket(true, "127.0.0.1:43471", None, true);
+    let sockets = [
+        socket(false, "127.0.0.1:43471", None, false),
+        wake.clone(),
+        listener.clone(),
+        socket(false, "127.0.0.1:46144", Some("127.0.0.1:45708"), false),
+        socket(true, "127.0.0.1:50000", Some("127.0.0.1:7101"), false),
+    ];
+    assert_eq!(listening_past(&sockets, control), [&wake, &listener]);
 }

@@ -653,6 +653,7 @@ fn info() -> BoxInfo {
         abandoned: 2,
         last_resort: None,
         ended: None,
+        control: None,
         credentials: Vec::new(),
     }
 }
@@ -1215,6 +1216,7 @@ fn answers() -> Vec<(u64, Answer)> {
                         abandoned: 0,
                         last_resort: None,
                         ended: None,
+                        control: None,
                         credentials: Vec::new(),
                     },
                 ],
@@ -2525,6 +2527,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 abandoned,
                 last_resort: None,
                 ended: None,
+                control: None,
                 credentials: Vec::new(),
             },
         )
@@ -6028,6 +6031,52 @@ fn w33_an_inspect_carries_its_credential_grants_last() {
             ..
         })
     ));
+}
+
+/// What ends an info whose run told no agent-control endpoint (joint plan step 15, N6): its none tag, after its
+/// credentials.
+const NO_CONTROL: usize = 1;
+
+/// Joint plan step 15 (N6; AC-T7.7.2): do answer an inspect of a running Shards image VM with its run's agent-control
+/// endpoint, at an IPv4 loopback address and at IPv6's, and one with none; read each back, and write each as JSON. Expect
+/// each back exactly, the endpoint its info's last bytes (tag 1, its address as a grant's is written, its port), none a
+/// 0 last and refused once cut, as every truncation is, and JSON without the field reading as none.
+#[test]
+fn an_inspect_carries_its_runs_agent_control_endpoint_last() {
+    for (at, address) in [
+        ("127.0.0.1:43471", [&[4u8][..], &[127, 0, 0, 1]].concat()),
+        (
+            "[::1]:43471",
+            [&[6u8][..], &std::net::Ipv6Addr::LOCALHOST.octets()].concat(),
+        ),
+    ] {
+        let shown = BoxInfo {
+            class: Class::Shards,
+            control: Some(at.parse().unwrap()),
+            ..info()
+        };
+        let bytes = answer(99, &Answer::Info(shown.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            Answer::Info(shown.clone()),
+            "{at}"
+        );
+        let tail = [&[1u8][..], &address, &43471u16.to_le_bytes()].concat();
+        assert!(bytes.ends_with(&tail), "{at}");
+        let json = serde_json::to_value(&shown).unwrap();
+        assert_eq!(serde_json::from_value::<BoxInfo>(json).unwrap(), shown);
+    }
+    let plain = info();
+    let mut cut = answer(99, &Answer::Info(plain.clone()), MAX_MESSAGE).unwrap();
+    assert_eq!(cut.last(), Some(&0), "no endpoint's tag ends it");
+    cut.truncate(cut.len() - NO_CONTROL);
+    assert!(matches!(
+        read_answer(&received(&cut, 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let older = serde_json::to_value(&plain).unwrap();
+    assert!(older.get("control").is_none(), "skipped when none");
+    assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
 }
 
 /// docs/design/credential-grants.md C7: a lease's value crosses the wire in its own message alone, which says it carries

@@ -1071,6 +1071,25 @@ fn kill_stops_the_run_and_records_signal_9() {
     assert!(matches!(runtime.inspect(&id), Err(Refusal::NoSuchBox(_))));
 }
 
+/// Joint plan step 15 (AC-T7.7.2; N6): do start an image VM and inspect it, then KILL it and inspect it again. Expect the
+/// running VM's inspect to say where its run's agent-control endpoint is bound, as its run host told it (the model's, on
+/// the host's loopback), with no port published; and the ended VM's to say none.
+#[test]
+fn an_inspect_says_where_its_runs_agent_control_endpoint_is_bound_while_it_runs() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-control", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.control, shown.published.len()),
+        (BoxState::Running, Some(model_control().address), 0)
+    );
+    runtime.signal(&id, Signal::KILL).unwrap();
+    let ended = runtime.inspect(&id).unwrap();
+    assert_eq!((ended.state, ended.control), (BoxState::Empty, None));
+}
+
 /// Joint plan step 12: do end a running VM's run on its own, its command exiting 3. Expect: its run
 /// host reaped through its stop, its end recorded as Code(3) and shown Empty.
 #[test]
