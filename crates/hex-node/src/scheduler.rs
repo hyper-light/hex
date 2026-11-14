@@ -183,7 +183,7 @@ impl Lane {
             .name("hex-capacity".into())
             .spawn(move || match serving.serve(acceptor) {
                 hex_quic::Refused::Ended => {}
-                why => ended(&format!("hex.capacity event=lane_ended why={why:?}")),
+                why => ended(&lane_ended_line(&why)),
             })
             .map_err(|e| Refusal::os("starting the capacity lane", e))?;
         Ok(Self {
@@ -193,12 +193,51 @@ impl Lane {
         })
     }
 
-    /// Says every hint owed to the holders; a failure is logged, the holders' next hello telling them the view.
+    /// Hands every hint owed to its holder's link, whose own writer says it (CV7), never waiting for a holder; a failure
+    /// is logged, the holders' next hello telling them the view.
     fn hint(&self) {
         if let Err(why) = self.server.hint() {
-            (self.log)(&format!("hex.capacity event=hint_failed why={why:?}"));
+            (self.log)(&hint_failed_line(&why));
         }
     }
+}
+
+/// The capacity lane's end, but for the endpoint's own close: `hex.capacity event=lane_ended why=<a JSON string>`.
+fn lane_ended_line(why: &hex_quic::Refused) -> String {
+    hex_api::event::line(
+        "hex.capacity",
+        "lane_ended",
+        &[("why", hex_api::event::Value::Text(&why.to_string()))],
+    )
+}
+
+/// A hint owed to the holders that failed: `hex.capacity event=hint_failed why=<a JSON string>`.
+fn hint_failed_line(why: &hex_quic::Refused) -> String {
+    hex_api::event::line(
+        "hex.capacity",
+        "hint_failed",
+        &[("why", hex_api::event::Value::Text(&why.to_string()))],
+    )
+}
+
+/// The person's release of `holder`'s reservations: `hex.capacity event=forgotten holder=<a JSON string> epoch=<n>
+/// count=<n> cpu_milli=<n> mem_bytes=<n> disk_bytes=<n> gpus=<n>`.
+fn forgotten_line(holder: &str, released: &hex_api::capacity::Forgotten) -> String {
+    use hex_api::event::Value::{Number, Text};
+    let sum = released.sum;
+    hex_api::event::line(
+        "hex.capacity",
+        "forgotten",
+        &[
+            ("holder", Text(holder)),
+            ("epoch", Number(u128::from(released.epoch))),
+            ("count", Number(u128::from(released.count))),
+            ("cpu_milli", Number(u128::from(sum.cpu_milli))),
+            ("mem_bytes", Number(u128::from(sum.mem_bytes))),
+            ("disk_bytes", Number(u128::from(sum.disk_bytes))),
+            ("gpus", Number(u128::from(sum.gpus))),
+        ],
+    )
 }
 
 fn failed(error: Error) -> Refusal {
@@ -344,6 +383,7 @@ fn cleanup_report(why: &Refusal) -> Result<String, Refusal> {
         hex_api::LifecycleCause::Busy => "busy",
         hex_api::LifecycleCause::Uncertain => "uncertain",
         hex_api::LifecycleCause::Retired => "retired",
+        hex_api::LifecycleCause::NodeVmEnded => "node-vm-ended",
     };
     let prefix = "retained native backing cleanup pool=";
     let generation = " generation=";
@@ -1378,16 +1418,7 @@ impl Service {
         let forget = match self.driver.view_forget(holder).map_err(failed)? {
             Ok(released) => {
                 let sum = released.sum;
-                (lane.log)(&format!(
-                    "hex.capacity event=forgotten holder={holder:?} epoch={} count={} cpu_milli={} mem_bytes={} \
-                     disk_bytes={} gpus={}",
-                    released.epoch,
-                    released.count,
-                    sum.cpu_milli,
-                    sum.mem_bytes,
-                    sum.disk_bytes,
-                    sum.gpus
-                ));
+                (lane.log)(&forgotten_line(holder, &released));
                 dto::Forget::Released {
                     holder: holder.to_owned(),
                     epoch: released.epoch,

@@ -222,7 +222,7 @@ def census_environment(runtime, environment, label):
     mode = runtime.get("wait_mode", "measuring")
     require(mode in ("armed", "measuring"), "unknown harness wait mode")
     if mode == "armed":
-        # Installing the census calls measure_all; seeded validation must not install it.
+        # Armed runs write no census file. The census disarms no wait (decision 9, C-1), so one could record it too.
         for name in ("HEX_WAITS_CENSUS", "HEX_WAITS_CENSUS_MAX"):
             environment.pop(name, None)
         return environment, None

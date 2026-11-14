@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
@@ -612,8 +612,9 @@ struct Out {
     /// At most one per reserved program; no stream handle has been exported to another process.
     offered: BTreeMap<u64, PendingOffer>,
     /// Answers waiting for room in the socket, oldest first, each with the descriptors riding with it and, for a given
-    /// answer, its exec's id, whose client is to say it took them.
-    backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>, Option<u64>)>,
+    /// answer, its exec's id, whose client is to say it took them. One that carries a lease's value or a sign-in's
+    /// tokens is wiped as it goes, sent or let go (docs/design/credential-grants.md C7, C8; the review's E-6).
+    backlog: VecDeque<(hex_api::lease::Wiped, Vec<hex_api::End>, Option<u64>)>,
     /// Its given answers whose client hasn't yet said it took their ends ([`Request::Taken`]), by their exec's id, each
     /// with the node's own copies of the ends once the answer has gone: kept from its send until the word, or until
     /// the connection closes, so none is ever in flight alone, as XNU's collector of descriptors in flight flushes a
@@ -1547,6 +1548,10 @@ impl<O: Os> Shared<O> {
         given: Option<u64>,
         after_read: bool,
     ) -> Result<(), Refusal> {
+        // A sign-in's tokens or a lease's value cross in their message alone: its bytes here are wiped as they go,
+        // sent, queued and sent, or let go (docs/design/credential-grants.md C7, C8; the review's E-6).
+        let secret = wire::carries_secret(&bytes);
+        let bytes = hex_api::lease::Wiped::new(bytes, secret);
         let mut out = conn.out.lock().map_err(poisoned)?;
         if after_read {
             out = self.drained(conn, out)?;
@@ -1558,15 +1563,9 @@ impl<O: Os> Shared<O> {
             out.given.insert(exec, Vec::new());
         }
         if out.backlog.is_empty() {
-            match self.os.send(&conn.sock, &bytes, &fds) {
+            match self.os.send(&conn.sock, bytes.bytes(), &fds) {
                 Sent::Sent => {
                     out.sent(fds, given);
-                    // A sign-in's tokens cross in their message alone: its bytes here are wiped once it has gone
-                    // (docs/design/credential-grants.md C8).
-                    if wire::carries_secret(&bytes) {
-                        let mut bytes = bytes;
-                        hex_api::lease::wipe(&mut bytes);
-                    }
                     return Ok(());
                 }
                 // Its client is gone, and the I/O thread sees the hang-up and closes it.
@@ -1611,7 +1610,15 @@ impl<O: Os> Shared<O> {
                 && now >= within
             {
                 // Past W*: no sample (Karn's point), the run-out told once, and the wait goes on.
-                self.reads.ran_out(within);
+                self.reads.ran_out(
+                    within,
+                    now,
+                    &[
+                        Piece::Kind("the client of connection "),
+                        Piece::Number(conn.token),
+                        Piece::Kind(", reading its waiting answers"),
+                    ],
+                );
                 bound = None;
             }
             out = match bound {
@@ -1635,13 +1642,10 @@ impl<O: Os> Shared<O> {
     fn flush(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         while let Some((front, fds, _)) = out.backlog.front() {
-            match self.os.send(&conn.sock, front, fds) {
+            match self.os.send(&conn.sock, front.bytes(), fds) {
                 Sent::Sent => {
-                    if let Some((mut bytes, fds, given)) = out.backlog.pop_front() {
+                    if let Some((_, fds, given)) = out.backlog.pop_front() {
                         out.sent(fds, given);
-                        if wire::carries_secret(&bytes) {
-                            hex_api::lease::wipe(&mut bytes);
-                        }
                     }
                 }
                 Sent::WouldBlock => return Ok(()),
@@ -1678,12 +1682,8 @@ impl<O: Os> Shared<O> {
             if out.places() == 0 {
                 self.idle_programs.fetch_sub(1, Ordering::AcqRel);
             }
-            // What waited to go goes nowhere now: any that carried a sign-in's tokens wiped.
-            for (mut bytes, ..) in std::mem::take(&mut out.backlog) {
-                if wire::carries_secret(&bytes) {
-                    hex_api::lease::wipe(&mut bytes);
-                }
-            }
+            // What waited to go goes nowhere now: any that carried a sign-in's tokens wiped as it drops.
+            out.backlog.clear();
             // Its lease asks hear its end, and its boxes' runs lease from no one here from now.
             for slot in std::mem::take(&mut out.asks).into_values() {
                 slot.fill(leases::Reply::Ended);
@@ -2817,7 +2817,13 @@ impl<O: Os> Shared<O> {
             if let (Some(window), Some(Duration::ZERO)) = (bound, left) {
                 // Past W*: no sample (Karn's point), the run-out told once, and the drain goes on by the programs'
                 // lives alone.
-                crate::emptying::EMPTYING.ran_out(window);
+                crate::emptying::EMPTYING.ran_out(
+                    window,
+                    killed.elapsed(),
+                    &[Piece::Kind(
+                        "the programs a stopping server's closes ended, by their own events",
+                    )],
+                );
                 past = true;
                 left = None;
             }

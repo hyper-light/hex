@@ -90,6 +90,16 @@ pub struct Status {
     /// take, or a continue from elsewhere, which would run a member past its charge on its neighbours' CPU. Counted here
     /// so none goes unseen.
     pub restops: u64,
+    /// Members' ends their waiters saw late: found only on a later wakeup, after the reap made on the member's own
+    /// exit event found nothing (HEX-RT-3, HEX-DIFF-5; the review's E-5). XNU posts `NOTE_EXIT` before it makes the
+    /// child a zombie and posts it once, so such an end waits for whatever wakes its waiter next (in the native bench,
+    /// its wait's whole budget). 0 while every end is seen on its own exit, which the waiter's reap on that event
+    /// waits for; any other count says ends are being seen late. Counted here so none goes unseen.
+    pub late_ends: u64,
+    /// From the exit of the member its waiter last reaped, the exit's own time on its zombie (`ri_proc_exit_abstime`),
+    /// to that reap: how long after its end its end was seen. `None` before the first, or where its zombie couldn't be
+    /// read.
+    pub last_seen_after_exit: Option<std::time::Duration>,
 }
 
 /// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
@@ -984,6 +994,18 @@ impl Members {
         }
     }
 
+    /// A member's waiter reaped it, `after_exit` after its exit (`None` where its zombie couldn't be read), and `late`
+    /// where it found the end only on a later wakeup, the reap on its exit event having found nothing
+    /// ([`Status::late_ends`]).
+    pub fn seen(&self, after_exit: Option<std::time::Duration>, late: bool) -> Result<(), Refusal> {
+        let mut status = self.0.status()?;
+        if late {
+            status.late_ends = status.late_ends.saturating_add(1);
+        }
+        status.last_seen_after_exit = after_exit;
+        Ok(())
+    }
+
     /// Member `pid` is about to be sent KILL by its node (`Proc::kill`): its death is not the kernel's cap,
     /// so it leaves the armed set, which is where a cap kill is counted once ([`State::killed_by_cap`]).
     pub fn killing(&self, pid: i32) -> Result<(), Refusal> {
@@ -1007,6 +1029,8 @@ pub struct ProcessBox {
     pub(super) controller: Mutex<super::managed::Controller>,
     pub(super) identity: OnceLock<shards_api::Identity>,
     pub(super) scope_pids: Mutex<Vec<i32>>,
+    /// A run's box's claim on its removal, carried from its making ([`crate::run::Claim`]); none for any other box.
+    run: OnceLock<std::sync::Arc<crate::run::Claim>>,
 }
 
 impl ProcessBox {
@@ -1083,7 +1107,20 @@ impl ProcessBox {
             controller: Mutex::new(super::managed::Controller::Unsubmitted),
             identity: OnceLock::new(),
             scope_pids: Mutex::new(scope_pids),
+            run: OnceLock::new(),
         })
+    }
+
+    /// Makes this box a run's, carrying `claim` from before anything else holds it.
+    pub(super) fn carry(&self, claim: &std::sync::Arc<crate::run::Claim>) -> Result<(), Refusal> {
+        self.run
+            .set(std::sync::Arc::clone(claim))
+            .map_err(|_| self.state.uncertain("it carries a run's claim already"))
+    }
+
+    /// The claim it carries as a run's box; none for any other box.
+    pub(super) fn claim(&self) -> Option<&std::sync::Arc<crate::run::Claim>> {
+        self.run.get()
     }
 
     fn start_watcher(&self, shared: &Shared) -> Result<(), Refusal> {

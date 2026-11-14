@@ -1248,6 +1248,7 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
         unavailable: Vec::new(),
         learned: None,
         node_vms: Vec::new(),
+        unlearned: None,
     };
     report.check().unwrap();
     let reports = vec![(hex_sim::model::Class::Firecracker, Some(report))];
@@ -1272,5 +1273,40 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
             kind: hex_api::DeviceKind::Gpu,
             key: 7
         }]
+    );
+}
+
+/// The capacity lane's event lines (CLAUDE.md §10; ROOT, 2026-11-14): each value a JSON string or a whole number, through
+/// `hex_api::event`. Do: form the lane's end and a failed hint with words holding a quote, a backslash and a newline,
+/// and a release for such a holder's name. Expect: each one line, its words JSON strings, its counts whole numbers.
+#[test]
+fn the_capacity_lanes_event_lines_are_one_line_their_values_json() {
+    let why = hex_quic::Refused::Os {
+        op: "reading",
+        why: "a \"b\" \\ c\nd".into(),
+    };
+    let words = "why=\"reading failed: a \\\"b\\\" \\\\ c\\nd\"";
+    assert_eq!(
+        lane_ended_line(&why),
+        format!("hex.capacity event=lane_ended {words}")
+    );
+    assert_eq!(
+        hint_failed_line(&why),
+        format!("hex.capacity event=hint_failed {words}")
+    );
+    let released = hex_api::capacity::Forgotten {
+        epoch: 3,
+        count: 2,
+        sum: hex_api::capacity::Amounts {
+            cpu_milli: 1500,
+            mem_bytes: 1 << 20,
+            disk_bytes: 7,
+            gpus: 1,
+        },
+    };
+    assert_eq!(
+        forgotten_line("kiln \"a\"\n", &released),
+        "hex.capacity event=forgotten holder=\"kiln \\\"a\\\"\\n\" epoch=3 count=2 cpu_milli=1500 \
+         mem_bytes=1048576 disk_bytes=7 gpus=1"
     );
 }

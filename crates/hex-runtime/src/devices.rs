@@ -1697,6 +1697,7 @@ mod native_route_tests {
                 unavailable: Vec::new(),
                 learned: None,
                 node_vms: Vec::new(),
+                unlearned: None,
             };
             native_routes(&mut capacity, hex_api::Class::Oci, image).unwrap();
             assert_eq!(capacity.device_routes, vec![2]);

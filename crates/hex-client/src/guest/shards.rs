@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
@@ -218,8 +218,16 @@ impl ShardsLink {
                 }
                 Err(_) => {
                     if !told {
-                        // No sample (Karn's point): the census is told, and the dial goes on.
-                        FOLLOWED.ran_out(self.bound);
+                        // No sample (Karn's point): the run-out is told, and the dial goes on.
+                        FOLLOWED.ran_out(
+                            self.bound,
+                            began.elapsed(),
+                            &[
+                                Piece::Kind("the guest's VM, its port "),
+                                Piece::Number(u64::from(port)),
+                                Piece::Kind("'s answer to a dial"),
+                            ],
+                        );
                         told = true;
                     }
                 }

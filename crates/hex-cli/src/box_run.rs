@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::Proc;
 use hex_api::{Bounds, BoxId, IoRates, Refusal};
-use hex_core::patience::Patience;
+use hex_core::patience::{Patience, Piece};
 use hex_runtime::linux::cgroup::{self, BoxCgroup, BoxRoot};
 use hex_runtime::linux::{disks, proc, process, sys};
 
@@ -81,10 +81,11 @@ fn go(args: &[String]) -> Result<u8, Refusal> {
         }
     };
     let mut watched = proc::PidfdProc::of_child(child.id())?;
-    // Wait without a real deadline: the program runs as long as it needs; the caller ends it by
-    // signal (which reaches the boxed child). wait_for polls the pidfd; a long slice loops rarely.
+    // Followed to its end by its pidfd (`Duration::MAX`: until it), with no deadline: the program runs as long as it
+    // needs, and its caller ends it by signal (which reaches the boxed child). It was an hour's slice, picked
+    // (decision 9; ROOT, 2026-11-14).
     let exit = loop {
-        if let Some(e) = watched.wait_for(std::time::Duration::from_secs(3600))? {
+        if let Some(e) = watched.wait_for(Duration::MAX)? {
             break e;
         }
     };
@@ -128,7 +129,15 @@ fn emptied(cg: &BoxCgroup, killed: Instant) -> Result<bool, Refusal> {
             CLEANUP.answered(killed.elapsed());
             return Ok(true);
         }
-        CLEANUP.ran_out(window);
+        CLEANUP.ran_out(
+            window,
+            killed.elapsed(),
+            &[
+                Piece::Kind("box cgroup "),
+                Piece::Path(cg.dir()),
+                Piece::Kind(", by its cgroup.events"),
+            ],
+        );
     }
     let came = cg.wait_empty(Duration::MAX)?;
     if came {
