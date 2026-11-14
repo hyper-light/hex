@@ -124,6 +124,7 @@ pub trait Driver {
     ) -> Result<CapacityResources, String>;
     /// Stops the guest and waits, until `deadline`, for its end.
     fn tear_down(&mut self, guest: Self::Guest, deadline: Instant) -> Result<(), String>;
+    #[cfg(any(windows, test))]
     /// The window the class's VMs are held to `rate` milli-CPU over where that hold is each VM's own governor
     /// (Shards' D191, D255): its period as a guest's VM process answers the rate. Every guest launched after is held
     /// to `rate` as it is launched, and its own answer held to this window. Refused by a class whose node holds its

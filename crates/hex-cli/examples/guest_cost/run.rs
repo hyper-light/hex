@@ -70,9 +70,13 @@ impl Windows {
             #[cfg(any(target_os = "macos", test))]
             Self::AtRate(at) => at(rate),
             #[cfg(any(windows, test))]
-            Self::Governed => Err(
-                "a governor's window is its guest's answer, asked of one, never derived".to_owned(),
-            ),
+            Self::Governed => {
+                let _ = rate;
+                Err(
+                    "a governor's window is its guest's answer, asked of one, never derived"
+                        .to_owned(),
+                )
+            }
         }
     }
 
@@ -400,8 +404,12 @@ fn milli(used: Duration, span: Duration) -> Result<u64, String> {
 /// The file `path` names and its allocated bytes, `meta` its metadata: on unix its device and inode and `st_blocks` x
 /// 512; on Windows its volume's serial and its file index and `FileStandardInfo`'s `AllocationSize`
 /// (`hex_runtime::windows::sys::file_held`), none where it went since its listing.
+/// A file as [`walk`] counts it: the file it names (its device and inode, or volume and index) and its allocated
+/// bytes.
+type FileHeld = ((u64, u64), u64);
+
 #[cfg(unix)]
-fn file_of(_: &Path, meta: &std::fs::Metadata) -> Result<Option<((u64, u64), u64)>, String> {
+fn file_of(_: &Path, meta: &std::fs::Metadata) -> Result<Option<FileHeld>, String> {
     use std::os::unix::fs::MetadataExt as _;
     Ok(Some((
         (meta.dev(), meta.ino()),
@@ -410,7 +418,7 @@ fn file_of(_: &Path, meta: &std::fs::Metadata) -> Result<Option<((u64, u64), u64
 }
 
 #[cfg(windows)]
-fn file_of(path: &Path, _: &std::fs::Metadata) -> Result<Option<((u64, u64), u64)>, String> {
+fn file_of(path: &Path, _: &std::fs::Metadata) -> Result<Option<FileHeld>, String> {
     hex_runtime::windows::sys::file_held(path)
         .map_err(|e| format!("reading {}: {e}", path.display()))
 }
@@ -1095,6 +1103,8 @@ mod tests {
         torn_down: usize,
         bounds: Vec<Duration>,
         disk: Files,
+        /// The rates its governed window was asked at.
+        governed: Vec<u64>,
     }
 
     impl Driven {
@@ -1106,6 +1116,7 @@ mod tests {
                 torn_down: 0,
                 bounds: Vec::new(),
                 disk: Vec::new(),
+                governed: Vec::new(),
             }
         }
     }
@@ -1183,6 +1194,13 @@ mod tests {
                 self.disk.sort();
             }
             Ok(())
+        }
+        fn governed_window(&mut self, rate: u64) -> Result<Window, String> {
+            self.governed.push(rate);
+            Ok(Window {
+                length: Duration::from_millis(20),
+                source: format!("governed at {rate}"),
+            })
         }
     }
 
@@ -1564,6 +1582,34 @@ mod tests {
             .is_err()
         );
         assert_eq!(driver.launched, 2);
+    }
+
+    /// AC-T7.4.1 (ROOT, 2026-11-14: a Windows node holds a managed VM's rate with its own governor, Shards' D255): a
+    /// class whose window is its guests' governor's period: expect the window asked of the class once, at the
+    /// envelope's rate, one census taken at it, and the evidence naming its window by the class's answer.
+    #[test]
+    fn a_governed_window_is_asked_of_the_class_once_at_the_envelopes_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let steady: Vec<(Use, Holding)> = (0..64)
+            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
+            .collect();
+        let mut driver = Driven::new(dir.path(), vec![Some(script(steady, 400 << 20)); 64]);
+        let out = dir.path().join("out");
+        let made = produce(
+            &mut driver,
+            &Plan { seedable: 2 },
+            &out,
+            &Windows::Governed,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(driver.governed, vec![2000]);
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        assert!(
+            text.contains("\nwindow 20000000 ns (governed at 2000)\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches("\nwindow_census ").count(), 1, "{text}");
     }
 
     /// AC-T7.4.1 (ROOT, the Mac window's fixed point): a window that the rate sets, over guests whose VMM uses

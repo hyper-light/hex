@@ -101,7 +101,11 @@ impl Transaction for Scope {
     }
     fn read_pool(&self, key: &BackingKey) -> Result<Option<PoolRecord>, Refusal> {
         let record = self.snapshot()?;
-        Ok((record.key == *key).then_some(record))
+        Ok(if record.key == *key {
+            Some(record)
+        } else {
+            None
+        })
     }
     fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
         let mut held = self.lock()?;
