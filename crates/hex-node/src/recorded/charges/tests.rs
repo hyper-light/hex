@@ -46,6 +46,18 @@ fn cost() -> RuntimeCost {
     }
 }
 
+/// [`cost`]'s profile sized to `machine`, the host a test runs on (`Recorded::machine`): as many CPUs as it has, and
+/// 8 GiB where it has them, so a class answered over the real machine names a VM that machine can hold. [`cost`]'s 16 CPUs
+/// passed the 12 of ROOT's Windows test VM ("minimum initialized runtime charge exceeds its physical pool").
+fn machine_cost(machine: CapacityResources) -> RuntimeCost {
+    let envelope = res(machine.cpu_milli, (8 * GIB).min(machine.mem_bytes));
+    RuntimeCost {
+        floor: envelope,
+        ceiling: envelope,
+        ..cost()
+    }
+}
+
 /// A running Shards VM's record, booked at 4 CPUs and 4 GiB (its class's prior), its lifetime `n`.
 fn vm(name: &str, n: u8) -> BoxRecord {
     let allocation: Allocation = cost()
@@ -2342,10 +2354,10 @@ fn w39_a_node_vms_band_is_the_highest_of_the_boxes_it_runs() {
 /// Joint plan step 39, place 3 (AC-T7.4.1; ROOT, 2026-11-13: the node VM is capped through its run's rate, D247, told
 /// Governor): a node whose guest is a node VM under shards-init learns that VM as it learns an image VM, over its run's
 /// period, and holds it through its run's rate. Do open a node whose platform holds no window, keep its node VM's row
-/// Ready, its 16-CPU receipt booked at 4 CPUs and its run saying 70 ms, and a process box capped at all but 6 CPUs of the
-/// machine; start its charge learner, run a window, and answer the Shards class. Expect the node VM's host use read, its
-/// run held to a rate below its 16-CPU ceiling, the window its run's 70 ms, and the answer naming its holding and its
-/// rate held by its governor, by its run.
+/// Ready, its receipt as large as the machine ([`machine_cost`]) booked at 4 CPUs and its run saying 70 ms, and a process
+/// box capped at all but 6 CPUs of the machine; start its charge learner, run a window, and answer the Shards class.
+/// Expect the node VM's host use read, its run held to a rate below its ceiling, the window its run's 70 ms, and the
+/// answer naming its holding and its rate held by its governor, by its run.
 #[test]
 fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rate() {
     let dir = tempfile::tempdir().unwrap();
@@ -2359,9 +2371,14 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     let node =
         std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     let store = &node.books.store;
+    let machine = node.machine().unwrap();
+    let sized = machine_cost(machine);
     let booked = |phase| {
         let mut row = node_row(7, phase);
-        row.allocation = row.allocation.booked_at(res(4_000, 4 * GIB));
+        row.allocation = sized
+            .allocate(CapacityResources::default())
+            .unwrap()
+            .booked_at(res(4_000, 4 * GIB));
         row
     };
     store
@@ -2370,7 +2387,6 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     store
         .put_node_vm(&booked(hex_api::NodeVmPhase::Ready))
         .unwrap();
-    let machine = node.machine().unwrap();
     let cap = u32::try_from(machine.cpu_milli.saturating_sub(6_000)).unwrap();
     let capped = BoxRecord::new(
         BoxSpec {
@@ -2402,7 +2418,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
     );
     let rates = images.0.node_rates.lock().unwrap().clone();
     assert!(
-        matches!(rates.as_slice(), [(run, rate)] if *run == node_run(7) && *rate < 16_000),
+        matches!(rates.as_slice(), [(run, rate)] if *run == node_run(7) && *rate < sized.ceiling.cpu_milli),
         "{rates:?}"
     );
     let mut capacity = hex_api::Capacity {
@@ -2411,7 +2427,7 @@ fn w39_a_node_vm_is_learned_over_its_runs_period_and_capped_through_its_runs_rat
         total: machine,
         free: CapacityResources::default(),
         devices: Vec::new(),
-        cost: Some(cost()),
+        cost: Some(sized),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
@@ -2588,8 +2604,8 @@ fn w39_a_booting_node_vms_booking_comes_off_the_fleets_budget() {
 /// counts it there, leaving the fleet only the bookings it reads, and every VM class's answer names it and why, never
 /// dropping it. Interim, pinned here: once A-10 (goal 4) sources the fleet's budget from what is measured free, what such
 /// a box holds is outside that budget already, and this count gives way to it. Do keep, on a node whose platform holds
-/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM of 16 vCPUs booked at 2 CPUs
-/// whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
+/// no window, a process box capped at all but 8 CPUs of the machine and a Shards image VM as large as the machine
+/// ([`machine_cost`]) booked at 2 CPUs whose run says 70 ms, and run a window; then end that VM, make the process box's record unreadable, keep a second such
 /// image VM, run another window and answer the Shards class. Expect the first VM capped at the 8 CPUs the process box
 /// leaves; then the second held at its 2-CPU booking though it asks its ceiling, as the box whose record can't be read
 /// may hold all the rest; and the answer naming that box among the unrecorded, with its record's words and its count.
@@ -2609,6 +2625,7 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         std::sync::Arc::new(crate::recorded::Recorded::open(images.clone(), dir.path()).unwrap());
     let store = &node.books.store;
     let machine = node.machine().unwrap();
+    let sized = machine_cost(machine);
     let left = 8_000;
     let capped = BoxRecord::new(
         BoxSpec {
@@ -2631,10 +2648,12 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
     let booking = res(2_000, 2 * GIB);
     let booked = |name: &str, started: u64| {
         let mut image = image_vm(name, started);
-        image.spec.allocation = image
-            .spec
-            .allocation
-            .map(|allocation| allocation.booked_at(booking));
+        image.spec.allocation = Some(
+            sized
+                .allocate(CapacityResources::default())
+                .unwrap()
+                .booked_at(booking),
+        );
         image
     };
     store.put(&booked("img-1", 1)).unwrap();
@@ -2658,7 +2677,7 @@ fn w14_dropped_a_box_whose_record_cant_be_read_is_counted_at_its_machine_and_tol
         total: machine,
         free: CapacityResources::default(),
         devices: Vec::new(),
-        cost: Some(cost()),
+        cost: Some(sized),
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
