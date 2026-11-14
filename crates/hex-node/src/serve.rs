@@ -511,6 +511,23 @@ pub struct Server<O: Os = Native> {
     io: Option<JoinHandle<()>>,
 }
 
+/// Ends a [`Server`] from another thread ([`Server::stopper`]).
+pub struct Stopper<O: Os = Native> {
+    shared: Arc<Shared<O>>,
+}
+
+impl<O: Os> Stopper<O> {
+    /// Ends the server, `why` its fault, the first one kept: its I/O thread stops at its next wake, every connection
+    /// then closing as a failure closes them, and its wait returns `why` ([`Server::wait`]).
+    pub fn stop(&self, why: String) {
+        if let Ok(mut fault) = self.shared.fault.lock() {
+            fault.get_or_insert(why);
+        }
+        self.shared.stopping.store(true, Ordering::SeqCst);
+        let _ = self.shared.os.wake();
+    }
+}
+
 struct Shared<O: Os> {
     os: O,
     host: Arc<dyn Host>,
@@ -1056,6 +1073,14 @@ impl<O: Os> Server<O> {
     /// Why its I/O thread stopped, if it failed: it then serves nothing more.
     pub fn fault(&self) -> Option<String> {
         self.shared.fault.lock().ok().and_then(|f| f.clone())
+    }
+
+    /// What ends it from another thread, as a failure ends it ([`Stopper::stop`]): its host's, where the host can't go on
+    /// (the scheduler's placement core stopped: the review's E-10).
+    pub fn stopper(&self) -> Stopper<O> {
+        Stopper {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Serves until the I/O thread stops, which it does only when it fails; returns why.

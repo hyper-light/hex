@@ -631,6 +631,49 @@ fn advertise_capacity(service: &Service, peer: &NodeSpec) -> Result<dto::Reply, 
     })
 }
 
+/// The review's E-10 (AC-T7.4.1; crash-only, capacity-view.md CV11): a scheduler whose placement core stops ends its
+/// server, its wait saying why, so `hex schedule serve` exits naming the stop and its next start recovers from the
+/// records. Do serve a scheduler on its socket, its server ended by its shell on a stop ([`Service::end_with`]); then fail
+/// a record write of its core (its epoch's temp file a directory). Expect the write refused by the stop, and the server's
+/// wait to return, naming the stop.
+#[test]
+fn e10_a_scheduler_whose_core_stops_ends_its_server_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _runtime, _receiver, _peer) = capacity_budget_service(dir.path());
+    #[cfg(target_os = "linux")]
+    let platform = crate::sizes::Sizes::now().unwrap().platform();
+    #[cfg(target_os = "macos")]
+    let platform = crate::serve::macos::platform().unwrap();
+    #[cfg(windows)]
+    let platform = crate::serve::windows::platform().unwrap();
+    let mut server = crate::serve::Server::bind(
+        &dir.path().join("scheduler.sock"),
+        service.clone() as Arc<dyn Host>,
+        crate::serve::limits(&platform),
+        platform.threads,
+    )
+    .unwrap();
+    let stopper = server.stopper();
+    service.end_with(move |why| stopper.stop(why)).unwrap();
+    std::fs::create_dir(dir.path().join("placements").join("epoch.tmp")).unwrap();
+    let stopped = service.driver.set_budget(Budget {
+        owned: hex_runtime::MAX_BOXES,
+        ran: hex_runtime::MAX_BOXES,
+    });
+    assert!(
+        matches!(
+            stopped,
+            Err(crate::placement::Error::Core(peer::Stop::Io(_)))
+        ),
+        "{stopped:?}"
+    );
+    let fault = server.wait().unwrap_or_default();
+    assert!(
+        fault.contains("its placement core stopped") && fault.contains("Io("),
+        "{fault}"
+    );
+}
+
 fn capacity_budget_service(
     dir: &Path,
 ) -> (
