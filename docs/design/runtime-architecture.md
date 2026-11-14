@@ -456,9 +456,9 @@ A hosted VM, a node VM under shards-init (`node-under-shards-init.md` §5), is r
 local socket pair on the node's side; its run admits as many as its guest client may hold open at once at the node's
 fitted places, its two control connections and four for each place (a program's three streams and its box's staging
 connection; `serve::fit::lanes`), counted among the node's own with its controller's two descriptors. A lane holds
-three on the node's side (its socket pair's two ends and its copiers' clone), a control connection five (a lane's and
-the client's two clones of its end): `hex_client::guest::lanes::FDS_A_LANE` and `FDS_A_CONTROL_LANE`, which its tests
-hold to the descriptors the process's own table shows (the review's D-6).
+two on the node's side, its socket pair's ends, which its two copiers share, as a control connection's handles share
+the owner's end: no duplicate, which Windows makes inheritable (the review's D-5). `hex_client::guest::lanes::FDS_A_LANE`
+counts them, and its tests hold it to the descriptors the process's own table shows (the review's D-6).
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of

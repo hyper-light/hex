@@ -1449,6 +1449,7 @@ impl Runtime for FirecrackerRuntime {
                     last_resort: None,
                     ended: None,
                     control: None,
+                    control_wake: None,
                     credentials: Vec::new(),
                 });
             }

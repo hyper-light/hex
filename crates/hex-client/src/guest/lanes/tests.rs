@@ -641,7 +641,8 @@ impl Link for Counted {
 /// hosted VM's lanes is what a lane and a control connection hold on the node's side, counted in the process's own
 /// descriptor table. Do, alone in a process: open a lane to a relay and carry a byte each way, then bridge it as a dial
 /// does; and dial the control connection as the client does, through a link that counts from the moment its lane is
-/// carried. Expect: the descriptors each added, [`FDS_A_LANE`] and [`FDS_A_CONTROL_LANE`].
+/// carried. Expect: the descriptors each added, [`FDS_A_LANE`] each; and each its socket pair's two ends alone, its
+/// copiers and the client's handles sharing them: no duplicate, which Windows makes inheritable (the review's D-5).
 #[cfg(unix)]
 #[test]
 fn a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts() {
@@ -686,8 +687,13 @@ fn a_lanes_and_a_control_connections_descriptors_are_what_the_fit_counts() {
         "a lane's descriptors on the node's side"
     );
     assert_eq!(
-        a_control, FDS_A_CONTROL_LANE,
+        a_control, FDS_A_LANE,
         "a control connection's descriptors on the node's side"
+    );
+    assert_eq!(
+        (a_lane, a_control),
+        (2, 2),
+        "a lane's and a control connection's descriptors beyond their socket pair's two ends: duplicates"
     );
     drop((lane, control, done, control_done, revoke));
     data_relay.join().unwrap();
