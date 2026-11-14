@@ -318,6 +318,30 @@ pub trait Recover: Runtime {
         Ok(None)
     }
 
+    /// Joint plan step 14 (D260): managed VM `record`'s vCPUs' guest time, as its VM process answers its use, through
+    /// the guest this owner boots it in (`GuestRuntime::managed_guest_time`). An owner that boots no managed guest reads
+    /// none apart, told why.
+    fn managed_guest_time(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        let _ = record;
+        Ok(hex_runtime::guest::ManagedGuestTime::Unheld(
+            "this native owner boots no managed guest whose use it asks".to_owned(),
+        ))
+    }
+
+    /// Joint plan step 14 (D260): how long managed VM `record`'s VM process has run, from its start as its record names
+    /// it (`init`, on its OS's own clock) to now. Refused, typed, by an owner that holds no managed VM.
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        let _ = record;
+        Err(Refusal::Platform {
+            what: "a managed VM's life",
+            platform: std::env::consts::OS,
+            why: "this native owner holds no managed VM".to_owned(),
+        })
+    }
+
     /// Joint plan step 14 (C4): caps the managed VM's CPU at `rate` milli-CPU, its share as the charge learner
     /// water-fills it, where this owner caps CPU rather than weighs it; refused, typed, by an owner that holds no rate.
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
@@ -509,6 +533,19 @@ fn uncertain(id: &BoxId, why: &str) -> Refusal {
         },
         Err(error) => error,
     }
+}
+
+/// Joint plan step 14 (D260): the start of managed VM `record`'s VM process, as its record names it (`init`, on its OS's
+/// own clock, Shards' `Identity::started`): refused, typed, for a record that names none.
+#[cfg(any(target_os = "macos", windows))]
+fn started(record: &BoxRecord) -> Result<u64, Refusal> {
+    record
+        .init
+        .map(|init| init.start_ticks)
+        .ok_or_else(|| Refusal::Invalid {
+            what: "a managed VM's life",
+            why: format!("box {}'s record names no VM process", record.spec.id),
+        })
 }
 
 fn broken(message: &'static str) -> Refusal {
@@ -2210,6 +2247,19 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         self.runtime.managed_usage(NativeRecord::Box(record))
     }
 
+    fn guest_time(
+        &self,
+        holder: charges::Holder<'_>,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        let charges::Holder::Box(record) = holder;
+        self.runtime.managed_guest_time(record)
+    }
+
+    fn life(&self, holder: charges::Holder<'_>) -> Result<std::time::Duration, Refusal> {
+        let charges::Holder::Box(record) = holder;
+        self.runtime.managed_life(record)
+    }
+
     fn host_use(&self, holder: charges::Holder<'_>) -> Result<hex_api::HostUse, Refusal> {
         let charges::Holder::Box(record) = holder;
         self.runtime.host_use(&record.spec.id)
@@ -2226,32 +2276,34 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         self.runtime.managed_rate_period(record)
     }
 
-    /// D255: a managed VM's governor first, through the guest its node boots it in. Where its VM process takes no rate,
-    /// its platform's cap holds it, told why. On Windows its job's CPU rate is set at the same rate besides, the hard
-    /// ceiling: the job covers the VMM's own CPU too, so it binds first, the learner holding none apart (owed on
-    /// Shards: a managed guest's per-vCPU guest time). On macOS the CPU control stays at the VM's ceiling, a backstop.
+    /// D255, D260: the VM's governor holds its vCPUs to its share less its VMM's own (`Cap::governor`): an image VM's
+    /// through its rate (D247), a managed VM's through the guest its node boots it in. On Windows a managed VM's job's
+    /// CPU rate is set at the share beside, the hard ceiling over its VMM's own and its vCPUs' together, which binds
+    /// only while its VMM's own isn't read apart; on macOS the CPU control stays at the VM's ceiling, a backstop. Where
+    /// its VM process takes no rate, its platform's cap holds it at the share, told why.
     fn set_rate(
         &self,
         holder: charges::Holder<'_>,
-        rate: u64,
+        cap: charges::Cap<'_>,
     ) -> Result<hex_api::RateHeld, Refusal> {
         let charges::Holder::Box(record) = holder;
         if charges::running_image(record) {
             return self
                 .runtime
-                .rate(&record.spec.id, std::num::NonZeroU64::new(rate))
-                .map(|_| hex_api::RateHeld::Governor);
+                .rate(&record.spec.id, Some(cap.governor()))
+                .map(|_| cap.held(false));
         }
-        match self.runtime.managed_rate(record, rate)? {
-            hex_runtime::guest::ManagedRate::Governor { .. } if cfg!(windows) => {
-                self.runtime
-                    .set_managed_rate(NativeRecord::Box(record), rate)?;
-                Ok(hex_api::RateHeld::GovernorUnderJob)
+        match self.runtime.managed_rate(record, cap.governor().get())? {
+            hex_runtime::guest::ManagedRate::Governor { .. } => {
+                if cfg!(windows) {
+                    self.runtime
+                        .set_managed_rate(NativeRecord::Box(record), cap.share)?;
+                }
+                Ok(cap.held(cfg!(windows)))
             }
-            hex_runtime::guest::ManagedRate::Governor { .. } => Ok(hex_api::RateHeld::Governor),
             hex_runtime::guest::ManagedRate::Platform(why) => {
                 self.runtime
-                    .set_managed_rate(NativeRecord::Box(record), rate)?;
+                    .set_managed_rate(NativeRecord::Box(record), cap.share)?;
                 Ok(hex_api::RateHeld::Platform(why.to_string()))
             }
         }
@@ -2935,6 +2987,10 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::set_managed_rate(self, record, rate)
     }
 
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        hex_runtime::macos::MacRuntime::managed_life(self, started(record)?)
+    }
+
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::stop_managed(self, record)
     }
@@ -3043,6 +3099,10 @@ impl Recover for hex_runtime::windows::WinRuntime {
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         hex_runtime::windows::WinRuntime::set_managed_rate(self, record, rate)
+    }
+
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        hex_runtime::windows::WinRuntime::managed_life(self, started(record)?)
     }
 
     fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
@@ -3250,6 +3310,18 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         record: &BoxRecord,
     ) -> Result<Option<std::time::Duration>, Refusal> {
         self.guest().managed_rate_period(record)
+    }
+
+    /// D260: the box's managed VM is booted in its guest runtime, whose use ask it is.
+    fn managed_guest_time(
+        &self,
+        record: &BoxRecord,
+    ) -> Result<hex_runtime::guest::ManagedGuestTime, Refusal> {
+        self.guest().managed_guest_time(record)
+    }
+
+    fn managed_life(&self, record: &BoxRecord) -> Result<std::time::Duration, Refusal> {
+        self.host().managed_life(record)
     }
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
