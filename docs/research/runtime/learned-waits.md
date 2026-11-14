@@ -60,7 +60,11 @@ it.
 Each production wait is `Patience::measuring`; where it has no bound it follows its party. Its name is the `wait=` of
 the line its run-out is told by on the process's log, `hex.wait event=ran_out wait=<name> w_star_ns=<W*>
 waited_ns=<how long> party=<a JSON string>`, integers in nanoseconds, which kiln counts by wait (ROOT and kiln's metrics
-owner, 2026-11-14): the names below are stable. What each follows, and what is wired:
+owner, 2026-11-14): the names below are stable. A wait that starts with no W* to bound it and whose party could hang
+alive tells so, once as it starts, by its name too: `hex.wait event=following wait=<name> party=<a JSON string>`
+(`Patience::following`, a wait site's to opt into; the review's C-10, ROOT 2026-11-14), so a cold wait on a party that
+never answers is never silent. The node VM's READY at its process's first boot does (`guest.hosted.ready`). What each
+follows, and what is wired:
 
 | wait | party | liveness, as the shell reads it | progress count | wired |
 | --- | --- | --- | --- | --- |
