@@ -20,6 +20,10 @@ struct Loopback {
 }
 
 impl Link for Loopback {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = match port {
             stream::CONTROL_PORT => self.control,
@@ -56,6 +60,10 @@ fn link_owner_retains_one_instance_without_dial_effects() {
         drops: Arc<AtomicUsize>,
     }
     impl Link for Counted {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
             self.dials.fetch_add(1, Ordering::SeqCst);
             Err(Refusal::Broken("owned test dial".into()))
@@ -418,6 +426,10 @@ struct Recording {
 }
 
 impl Link for Recording {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
@@ -510,6 +522,21 @@ impl Write for Looped {
 impl shards_api::Stream for Looped {
     fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
         Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn read_shared(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut &self.0, buf)
+    }
+
+    fn write_shared(&self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut &self.0, buf)
+    }
+
+    fn into_socket(self: Box<Self>) -> shards_api::OwnedSocket {
+        #[cfg(unix)]
+        return std::os::fd::OwnedFd::from(self.0);
+        #[cfg(windows)]
+        std::os::windows::io::OwnedSocket::from(self.0)
     }
 
     fn handle(&self) -> shards_api::Handle<'_> {
@@ -1413,26 +1440,22 @@ fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
     drop(held);
 }
 
-/// HEX-RT-17, decision 9 (AC-T7.4.1): open an offered guest exec's stdin and stdout as a Windows caller does for an
-/// exec with no deadline of its own (a plain exec, which HEX-RT-17 holds), the offer carrying its guest link's setup
-/// bound, as a node's does. The muxer never answers the first CONNECT and answers each after it at once. Expect the
-/// streams opened: the first CONNECT given up at its deadline and made again, the wait following the VM past it, never
-/// refused there; then each stream named for the exec in its turn.
+/// HEX-RT-17, decision 9 (AC-T7.4.1; the review's D-3): open an offered guest exec's stdin and stdout as a Windows
+/// caller does for an exec with no deadline of its own (a plain exec, which HEX-RT-17 holds), its link with no setup
+/// bound, so each CONNECT follows its VM from its start. The muxer answers each CONNECT at once. Expect the streams
+/// opened, each on one CONNECT and named for the exec in its turn.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
+fn an_offered_streams_connect_with_no_deadline_is_one_connect_each_named() {
     use std::os::unix::net::{UnixListener, UnixStream};
 
     let dir = tempfile::tempdir().unwrap();
     let (mut vm, started) = offered_vm();
     let path = dir.path().join("m");
-    let muxer = offered_muxer(UnixListener::bind(&path).unwrap(), |n| n == 0, drop);
-    let opened = open_offered(
-        &offered(&vm, started, path.clone(), Some(CONNECT_CAP)),
-        None,
-    );
+    let muxer = offered_muxer(UnixListener::bind(&path).unwrap(), |_| false, drop);
+    let opened = open_offered(&offered(&vm, started, path.clone(), None), None);
     eprintln!("hex_rt_17_offered_following opened={opened:?}");
-    let given = opened.expect("an offer's streams, opened past its first CONNECT's deadline");
+    let given = opened.expect("an offer's streams, each on one CONNECT");
     UnixStream::connect(&path)
         .unwrap()
         .write_all(b"STOP\n")
@@ -1442,11 +1465,9 @@ fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
     let reaped = vm.wait();
     eprintln!("hex_rt_17_offered_following did={did:?} reaped={reaped:?}");
     assert!(given.stdin.is_some() && given.stdout.is_some() && given.stderr.is_none());
-    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
     assert_eq!(
         did,
         [
-            Muxed::GivenUp(connect),
             Muxed::Named(offered_named(stream::Stdio::In)),
             Muxed::Named(offered_named(stream::Stdio::Out)),
         ]
@@ -1454,10 +1475,9 @@ fn an_offered_streams_connect_with_no_deadline_follows_its_vm_past_its_bound() {
     drop(held);
 }
 
-/// HEX-RT-17, decision 9 (AC-T7.4.1): an offered stream's CONNECT for an exec with no deadline, its muxer never
-/// answering, the VM killed as its second CONNECT comes: the first was given up at its deadline and made again while
-/// the VM lived. Expect the open refused by type at the VM's end (its process, never a CONNECT's deadline), once the
-/// CONNECT under way is given up, and no CONNECT made after it.
+/// HEX-RT-17, decision 9 (AC-T7.4.1; the review's D-3): an offered stream's CONNECT for an exec with no deadline, its
+/// muxer never answering, the VM killed as its CONNECT comes. Expect the open refused by type at the VM's end (its
+/// process, which the dial waits on beside its socket, never a deadline), and no CONNECT made after it.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
@@ -1467,14 +1487,14 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
     let dir = tempfile::tempdir().unwrap();
     let (vm, started) = offered_vm();
     let path = dir.path().join("m");
-    let offer = offered(&vm, started, path.clone(), Some(CONNECT_CAP));
+    let offer = offered(&vm, started, path.clone(), None);
     let vm = Arc::new(Mutex::new(vm));
     let killed = Arc::clone(&vm);
     let muxer = offered_muxer(
         UnixListener::bind(&path).unwrap(),
         |_| true,
         move |n| {
-            if n == 1 {
+            if n == 0 {
                 killed.lock().unwrap().kill().unwrap();
             }
         },
@@ -1499,10 +1519,99 @@ fn an_offered_streams_connect_with_no_deadline_is_refused_at_its_vms_end() {
     let reaped = vm.lock().unwrap().wait();
     eprintln!("hex_rt_17_offered_vm_end did={did:?} reaped={reaped:?}");
     let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
-    assert_eq!(
-        did,
-        [Muxed::GivenUp(connect.clone()), Muxed::GivenUp(connect)]
+    assert_eq!(did, [Muxed::GivenUp(connect)]);
+}
+
+/// The review's D-3 (decision 9; AC-T7.4.1): an offered stream's CONNECT with no deadline is one dial, its OK taken
+/// however late. Past W*, the guest link's setup bound the offer carries, the run-out is told once, and the dial goes on
+/// with no clock of its own, ending at its OK, its connection's end or its VM's: it is never given up and made again,
+/// which would drop an answer coming late and redial a slow guest forever. Do measure one CONNECT and its OK against a
+/// stand-in VM's muxer, the W* the offer then carries; open a stream for that offer, the muxer answering its first
+/// CONNECT only once the run-out has been told, and killing the stand-in VM at any CONNECT after it. Expect the stream
+/// opened on its one CONNECT, none made after it, and its late OK the wait's sample.
+#[cfg(target_os = "linux")]
+#[test]
+fn d3_an_offered_connect_with_no_deadline_is_one_dial_its_late_ok_taken() {
+    use hex_testkit::waits::follow::{self, Party};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::Mutex;
+
+    static TOLD: Patience = Patience::measuring("test.hex_client.guest.offered_run_out_told");
+    let dir = tempfile::tempdir().unwrap();
+    let (vm, started) = offered_vm();
+    let path = dir.path().join("m");
+    let identity = shards_api::Identity {
+        pid: vm.id(),
+        started,
+        vsock: path.clone(),
+    };
+    let vm = Arc::new(Mutex::new(vm));
+    let listener = UnixListener::bind(&path).unwrap();
+    // Set once W* is measured: the wait whose run-out the muxer waits to see told.
+    let wait: Arc<std::sync::OnceLock<Patience>> = Arc::default();
+    let (told, killed) = (Arc::clone(&wait), Arc::clone(&vm));
+    let muxer = std::thread::spawn(move || {
+        let (mut did, mut held) = (Vec::new(), Vec::new());
+        for n in 0.. {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            while line.last() != Some(&b'\n') && conn.read(&mut byte).unwrap_or(0) == 1 {
+                line.push(byte[0]);
+            }
+            if line == b"STOP\n" {
+                break;
+            }
+            if n > 1 {
+                // A CONNECT after the open's first: that one was given up. Its VM ends, which ends the dial.
+                killed.lock().unwrap().kill().unwrap();
+                did.push(Muxed::GivenUp(line));
+                continue;
+            }
+            if n == 1 {
+                // The open's first CONNECT: its OK only once the run-out has been told, past W*.
+                follow::until(
+                    &TOLD,
+                    "the offered CONNECT's run-out, told",
+                    || Party::Live,
+                    || told.get().is_some_and(|wait| wait.deadline().is_none()),
+                )
+                .unwrap();
+            }
+            // Answered (the test names nothing after an OK).
+            if conn.write_all(b"OK 1\n").is_ok() {
+                did.push(Muxed::Named(line));
+                held.push(conn);
+            } else {
+                did.push(Muxed::GivenUp(line));
+            }
+        }
+        (did, held)
+    });
+    // W*: one CONNECT and its OK, answered at once, measured as the link learns its setup bound.
+    let began = std::time::Instant::now();
+    drop(shards_api::connect_borrowed_before(&identity, stream::STDIO_PORT, None).unwrap());
+    let w_star = began.elapsed();
+    let wait =
+        wait.get_or_init(|| Patience::seeded("test.hex_client.guest.offered_connect", w_star));
+    let opened = connect_following(&identity, Some(w_star), wait);
+    eprintln!(
+        "d3_offered_one_dial w_star={w_star:?} opened={:?}",
+        opened.as_ref().map(|_| ())
     );
+    UnixStream::connect(&path)
+        .unwrap()
+        .write_all(b"STOP\n")
+        .unwrap();
+    let (did, held) = muxer.join().unwrap();
+    drop(vm.lock().unwrap().stdin.take());
+    let reaped = vm.lock().unwrap().wait();
+    eprintln!("d3_offered_one_dial did={did:?} reaped={reaped:?}");
+    assert!(opened.is_ok(), "{:?}", opened.map(|_| ()));
+    let connect = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+    assert_eq!(did, [Muxed::Named(connect.clone()), Muxed::Named(connect)]);
+    assert!(wait.slowest() >= Some(w_star), "its late OK learned");
+    drop(held);
 }
 
 /// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
@@ -2015,6 +2124,10 @@ struct ConnectLink {
 }
 
 impl Link for ConnectLink {
+    fn lends_identity(&self) -> bool {
+        false
+    }
+
     fn reply_budget(&self) -> Option<Duration> {
         self.budget
     }
@@ -2727,6 +2840,10 @@ mod token_end {
     struct Paired(Mutex<Option<UnixStream>>);
 
     impl Link for Paired {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             assert_eq!(port, stream::CONTROL_PORT);
             own_duplex(self.0.lock().unwrap().take().expect("dialed once"))
@@ -2961,6 +3078,10 @@ mod cut_short {
     }
 
     impl Link for Cuttables {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
             if port == stream::CONTROL_PORT {
                 return own_duplex(TcpStream::connect(self.control).unwrap());

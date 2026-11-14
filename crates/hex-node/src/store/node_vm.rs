@@ -33,6 +33,14 @@ use hex_core::record::NodeVmRecord;
 
 use super::{Store, TURNS, scoped_paths};
 
+#[cfg(test)]
+thread_local! {
+    /// What a test does once a node's start on this thread has read the node VM rows, before it takes any row's lock: an
+    /// earlier node process ending a row meanwhile, as one may (the review's C-11).
+    static SETTLE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `store.node_vm_owner`, W*: the slowest end of a node VM's owner this process has followed, from its start's look at
 /// its row (decision 9): past it the run-out is told, and the wait follows the owner by its life to its end.
 static OWNER_END: Patience = Patience::measuring("store.node_vm_owner");
@@ -166,7 +174,31 @@ fn name(run: &NodeRun) -> Result<String, Refusal> {
 
 /// The run a row's file is named for: its 16 bytes in lowercase hex, then `.json`. None for any other name.
 fn run_of(name: &std::ffi::OsStr) -> Option<NodeRun> {
-    let text = name.to_str()?.strip_suffix(".json")?;
+    run_named(name.to_str()?.strip_suffix(".json")?)
+}
+
+/// The run a stray of a crash's is named for, where `name` is one ([`Store::remove_node_vm_strays`]): a row write's
+/// temporary file, `.<run>.tmp` ([`scoped_paths`]), or a lock file, `<run>.lock`, its row's name aside.
+fn stray_of(name: &std::ffi::OsStr) -> Option<(NodeRun, Stray)> {
+    let name = name.to_str()?;
+    if let Some(run) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+    {
+        return run_named(run).map(|run| (run, Stray::Temporary));
+    }
+    run_named(name.strip_suffix(".lock")?).map(|run| (run, Stray::Lock))
+}
+
+/// A file a crash may leave in the node VM rows' directory ([`stray_of`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stray {
+    Temporary,
+    Lock,
+}
+
+/// The run `text` names: its 16 bytes in lowercase hex. None for any other text.
+fn run_named(text: &str) -> Option<NodeRun> {
     let (pairs, tail) = text.as_bytes().as_chunks::<2>();
     if text.len() != 32 || !tail.is_empty() {
         return None;
@@ -499,7 +531,12 @@ impl Store {
     /// lock's and its W*'s, one follow a row, so at most [`TURNS`] of them. Says what it did with each, and the last-resort
     /// end each row it let go kept, read back before the row went (place 1).
     pub(crate) fn settle_node_vms(&self) -> Result<NodeVmsSettled, Refusal> {
+        self.remove_node_vm_strays()?;
         let records = self.all_node_vms()?;
+        #[cfg(test)]
+        if let Some(then) = SETTLE_READ.with(|then| then.borrow_mut().take()) {
+            then();
+        }
         let mut settled = Vec::new();
         settled
             .try_reserve_exact(records.len())
@@ -526,9 +563,23 @@ impl Store {
             }
             let file = open_lock(&directory, &record.run)?;
             if try_own(&file)? {
-                let end = record.last_resort.take();
-                self.let_go(&record)?;
-                settled.push((record.run, NodeVmSettled::OwnerEnded));
+                // Its row read again under its lock (the review's C-11), as the follow path reads it: its owner may have
+                // kept its end and written it Ended since the read above, then let the lock go as it ended.
+                let Some(mut row) = self.node_vm(&record.run)? else {
+                    remove_if_there(
+                        &lock_path(&directory, &record.run)?,
+                        "a node VM's lock file",
+                    )?;
+                    continue;
+                };
+                let end = row.last_resort.take();
+                let settled_as = if row.phase == NodeVmPhase::Ended {
+                    NodeVmSettled::Ended
+                } else {
+                    NodeVmSettled::OwnerEnded
+                };
+                self.let_go(&row)?;
+                settled.push((row.run, settled_as));
                 ends.extend(end);
             } else {
                 self.follow(record.run, file)?;
@@ -539,6 +590,71 @@ impl Store {
             rows: settled,
             ends,
         })
+    }
+
+    /// Removes what a crash left in the node VM rows' directory and no row needs, as a node starts (the review's C-12), so
+    /// none counts against [`Store::all_node_vms`]' scan bound for good: a row write's temporary file (`.<run>.tmp`), cut
+    /// before its rename, and a lock file (`<run>.lock`) whose run has no row, cut between its first write's lock and its
+    /// row. Each goes under its run's lock alone, so a write under way, whose writer holds that lock, keeps its own, and
+    /// none of a run this process holds is touched, its lock file never opened again. Bounded as the rows' scan is, by
+    /// the entries it keeps: a stray removed is no entry. How many it removed.
+    fn remove_node_vm_strays(&self) -> Result<usize, Refusal> {
+        let directory = self.node_vm_directory();
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(Refusal::os("listing the node VM records", e)),
+        };
+        let bound = TURNS.checked_mul(3).ok_or_else(|| allocation(usize::MAX))?;
+        let (mut kept, mut removed) = (0usize, 0usize);
+        for entry in entries {
+            let entry = entry.map_err(|e| Refusal::os("listing a node VM record", e))?;
+            let stray = match stray_of(&entry.file_name()) {
+                Some((run, Stray::Temporary)) => Some(run),
+                Some((run, Stray::Lock)) => {
+                    let (_, row) = scoped_paths(&directory, &name(&run)?)?;
+                    if path_exists(&row)? { None } else { Some(run) }
+                }
+                None => None,
+            };
+            let gone = match stray {
+                Some(run) => self.remove_stray(&directory, &run, &entry.path())?,
+                None => false,
+            };
+            if gone {
+                removed = removed.saturating_add(1);
+            } else {
+                kept = kept.saturating_add(1);
+                if kept > bound {
+                    return Err(allocation(bound));
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Removes run `run`'s stray `path` under the run's lock, where no process holds it and this one doesn't run it, and
+    /// with it the lock file where the run has no row; whether it did.
+    fn remove_stray(&self, directory: &Path, run: &NodeRun, path: &Path) -> Result<bool, Refusal> {
+        if self
+            .node_vm_owners
+            .lock()
+            .map_err(|_| poisoned())?
+            .contains_key(run)
+        {
+            return Ok(false);
+        }
+        let lock = open_lock(directory, run)?;
+        if !try_own(&lock)? {
+            return Ok(false);
+        }
+        remove_if_there(path, "a node VM's stray file")?;
+        let (_, row) = scoped_paths(directory, &name(run)?)?;
+        if !path_exists(&row)? {
+            remove_if_there(&lock_path(directory, run)?, "a node VM's lock file")?;
+        }
+        drop(lock);
+        Ok(true)
     }
 
     /// Follows run `run`'s owner, a live node process, to its end on a thread of its own, its row booked meanwhile, then
@@ -579,9 +695,10 @@ impl Store {
         self.remove_node_vm(&record.run)
     }
 
-    /// The handle of node VM `run`'s lock this process holds, a second descriptor of its one open file description:
-    /// for a test's child to share it as a forked child would, Unix's case.
-    #[cfg(all(test, unix))]
+    /// The handle of node VM `run`'s lock this process holds, a second one of its lock file: on Unix a descriptor of its
+    /// one open file description, which a child forked without an exec shares; on Windows a handle of its one file
+    /// object, which a child that inherited it holds (the review's C-13). For a test's child to hold it so.
+    #[cfg(test)]
     fn node_vm_lock(&self, run: &NodeRun) -> Option<File> {
         self.node_vm_owners
             .lock()

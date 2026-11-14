@@ -95,6 +95,53 @@ pub struct CapacityHolder {
     pub name: String,
 }
 
+/// Starts the thread that tells the node what the capacity view's holders have reserved ([`Driver::tell_reserved`]; the
+/// review's A-10): woken at each change of what they hold and after each refresh ([`Driver::wake_reserved`]), and once
+/// now; it ends once its driver has gone. Each refusal is said through `report`.
+fn tell_reserved(driver: &Arc<Driver>, report: Report, id: NodeId) -> Result<(), Refusal> {
+    let (wake, waits) = hex_wait::mpsc::sync_channel(1)
+        .map_err(|why| Refusal::os("making the keeper's word's wake", why))?;
+    driver.on_reserved(wake).map_err(failed)?;
+    let driven = Arc::downgrade(driver);
+    std::thread::Builder::new()
+        .name("hex-reserved".to_owned())
+        .spawn(move || {
+            loop {
+                match waits.recv() {
+                    Ok(()) => {}
+                    Err(hex_wait::mpsc::RecvError::Disconnected) => return,
+                    Err(hex_wait::mpsc::RecvError::Failed(why)) => {
+                        report(
+                            id,
+                            &format!(
+                                "the keeper's word's thread can't wait ({why}): its node is told what the capacity \
+                                 view's holders reserve no more"
+                            ),
+                        );
+                        return;
+                    }
+                }
+                let Some(driver) = driven.upgrade() else {
+                    return;
+                };
+                let told = driver.tell_reserved().map_err(failed);
+                let said = |why: &Refusal| {
+                    report(
+                        id,
+                        &format!("telling the node what the capacity view's holders reserve: {why}"),
+                    );
+                };
+                match told {
+                    Ok(refused) => refused.iter().for_each(said),
+                    Err(why) => said(&why),
+                }
+            }
+        })
+        .map_err(|e| Refusal::os("starting the keeper's word's thread", e))?;
+    driver.wake_reserved();
+    Ok(())
+}
+
 /// The capacity view's lane, where the configuration asks for one: its server, the endpoint it is served on, and the
 /// log its events go to.
 struct Lane {
@@ -969,6 +1016,11 @@ impl Service {
             }
             None => None,
         };
+        // Its node is told what the view's holders have reserved, by a thread of its own, now and at each change of it
+        // and after each refresh (the review's A-10), off the holders' path.
+        if lane.is_some() {
+            tell_reserved(&driver, Arc::clone(&report), id)?;
+        }
         let control_limit =
             control_bound(driver.control_bound().map_err(failed)?, config.peers.len())?;
         let mut senders = BTreeMap::new();
@@ -1062,6 +1114,21 @@ impl Service {
     /// Where the capacity view's lane is bound, where the configuration asks for one.
     pub fn capacity_address(&self) -> Option<std::net::SocketAddr> {
         self.lane.as_ref().map(|lane| lane.endpoint.local_addr())
+    }
+
+    /// Ends this scheduler crash-only where its placement core stops (the review's E-10): `end` is told why, once, as
+    /// the core stops (a record it couldn't write, a record no core wrote), and its shell ends its process with it, so
+    /// the process exits naming the stop and its next start recovers from the records (capacity-view.md CV11), where
+    /// until now it refused every placement for its life.
+    pub fn end_with(&self, end: impl Fn(String) + Send + Sync + 'static) -> Result<(), Refusal> {
+        self.driver
+            .on_stop(Arc::new(move |stop: &peer::Stop| {
+                end(format!(
+                    "its placement core stopped, so the scheduler ends; its next start recovers from its records: \
+                     {stop:?}"
+                ))
+            }))
+            .map_err(failed)
     }
 
     /// Cancels and reaps only this service's authenticated peer children.
@@ -1403,6 +1470,8 @@ impl Service {
             *node = local;
         }
         self.rebudget(&cluster)?;
+        // Its node told again what the view's holders have reserved, which the refresh measured beside (A-10).
+        self.driver.wake_reserved();
         Ok(actions)
     }
 

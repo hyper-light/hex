@@ -154,6 +154,21 @@ impl Runtimes {
             .ok_or_else(|| invalid("no registered runtime for placement class").into())
     }
 
+    /// Each runtime it holds once, however many classes it is registered for.
+    fn distinct(&self) -> impl Iterator<Item = &Arc<dyn Runtime>> {
+        self.by_class
+            .values()
+            .enumerate()
+            .filter_map(|(at, runtime)| {
+                let earlier = self
+                    .by_class
+                    .values()
+                    .take(at)
+                    .any(|other| Arc::ptr_eq(other, runtime));
+                if earlier { None } else { Some(runtime) }
+            })
+    }
+
     /// Query each configured backend without holding any placement or record lock.
     pub fn capacities(&self) -> Result<Vec<(Class, Option<hex_api::Capacity>)>, Error> {
         let snapshot = self.capacity_snapshot()?;
@@ -569,10 +584,16 @@ fn name(kind: &str, key: Key) -> String {
     format!("{kind}-{}-{}-{}", key.owner, key.epoch, key.seq)
 }
 
+/// What a driver's shell is told, once, as its core stops (the review's E-10): it ends its process, crash-only, and its
+/// next start recovers from the records (capacity-view.md CV11).
+pub type OnStop = Arc<dyn Fn(&Stop) + Send + Sync>;
+
 struct State {
     node: peer::Node,
     rows: Rows,
     stopped: Option<Stop>,
+    /// The shell's ear for the core's stop ([`Driver::on_stop`]).
+    on_stop: Option<OnStop>,
     admission: Option<Refusal>,
     /// The machine's capacity view, once opened (joint plan step 13).
     view: Option<view::View>,
@@ -607,6 +628,9 @@ pub struct Driver {
     runtimes: Runtimes,
     peers: Vec<NodeId>,
     namespace: String,
+    /// What wakes the thread that tells its node what every holder has reserved ([`Driver::on_reserved`]; the review's
+    /// A-10): told each time that changes, so the word reaches the node off the holders' path.
+    reserved_wake: std::sync::OnceLock<hex_wait::mpsc::SyncSender<()>>,
 }
 
 impl Driver {
@@ -790,6 +814,7 @@ impl Driver {
                 node,
                 rows,
                 stopped: None,
+                on_stop: None,
                 view: None,
                 facts: None,
                 admitted: None,
@@ -803,6 +828,7 @@ impl Driver {
             runtimes,
             peers: nodes.iter().map(|n| n.id).collect(),
             namespace,
+            reserved_wake: std::sync::OnceLock::new(),
         })
     }
 
@@ -812,6 +838,20 @@ impl Driver {
 
     pub fn physical_id(&self, key: Key) -> Result<BoxId, Refusal> {
         physical_id(&self.namespace, key)
+    }
+
+    /// Tells `tell` as the core stops, once (the review's E-10), its shell's way to end its process crash-only; told at
+    /// once where the core has stopped already.
+    pub fn on_stop(&self, tell: OnStop) -> Result<(), Error> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Refusal::Broken("placement mutex poisoned".into()))?;
+        if let Some(why) = &state.stopped {
+            tell(why);
+        }
+        state.on_stop = Some(tell);
+        Ok(())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> {
@@ -1129,6 +1169,7 @@ impl Driver {
         let (answer, changed) = finish(&mut state, heard, false)?;
         if changed {
             readmit(&mut state)?;
+            self.wake_reserved();
         }
         Ok(answer)
     }
@@ -1163,8 +1204,67 @@ impl Driver {
         let (forgotten, changed) = finish(&mut state, forgotten, false)?;
         if changed {
             readmit(&mut state)?;
+            self.wake_reserved();
         }
         Ok(forgotten)
+    }
+
+    /// Wakes, where one is waiting, the thread that tells its node what every holder has reserved
+    /// ([`Driver::on_reserved`]): a wake already told is the same word, and one whose thread has ended tells nothing.
+    pub fn wake_reserved(&self) {
+        if let Some(wake) = self.reserved_wake.get() {
+            let _ = wake.try_send(());
+        }
+    }
+
+    /// The wake of the thread that tells its node what every holder has reserved (the review's A-10): told at each change
+    /// of what the holders hold and at each wake its caller makes ([`Driver::wake_reserved`]). Set once.
+    pub fn on_reserved(&self, wake: hex_wait::mpsc::SyncSender<()>) -> Result<(), Error> {
+        self.reserved_wake.set(wake).map_err(|_| {
+            Refusal::Invalid {
+                what: "capacity view",
+                why: "its word's wake is set already".into(),
+            }
+            .into()
+        })
+    }
+
+    /// The machine's capacity view's word to its node (joint plan steps 13 and 14, C7; the review's A-10): what every
+    /// holder has reserved through its keeper, as the keeper of this boot holds it; none where no view is open. It reads
+    /// only state under the core lock, as rebook does.
+    pub fn reserved_word(&self) -> Result<Option<hex_api::Reserved>, Error> {
+        let state = self.lock()?;
+        Ok(state.view.as_ref().map(|view| {
+            let foreign = view.foreign();
+            hex_api::Reserved {
+                keeper: view.epoch(),
+                reserved: hex_api::CapacityResources {
+                    cpu_milli: foreign.cpu_milli,
+                    mem_bytes: foreign.mem_bytes,
+                    disk_bytes: foreign.disk_bytes,
+                },
+            }
+        }))
+    }
+
+    /// Tells each of its runtimes the machine's capacity view's word ([`Driver::reserved_word`]) with its lock let go, as
+    /// its node's charge learner takes it off its fleet's budget (the review's A-10): each runtime's refusal is answered,
+    /// for its caller to tell. Nothing where no view is open.
+    pub fn tell_reserved(&self) -> Result<Vec<Refusal>, Error> {
+        let Some(word) = self.reserved_word()? else {
+            return Ok(Vec::new());
+        };
+        let mut refused = Vec::new();
+        for runtime in self.runtimes.distinct() {
+            if let Err(why) = runtime.reserved(word) {
+                refused.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                    what: "a keeper's word's refusals",
+                    bound: self.runtimes.by_class.len(),
+                })?;
+                refused.push(why);
+            }
+        }
+        Ok(refused)
     }
 
     /// The machine's view as the keeper would answer it now.
@@ -1585,7 +1685,7 @@ impl Driver {
         let out = finish(&mut state, result, false)?;
         let (mut next, create) = collect(&mut state, out)?;
         if !create.is_empty() {
-            state.stopped = Some(bad("create recursively requested creation"));
+            stop(&mut state, bad("create recursively requested creation"));
             return Err(bad("unexpected nested creation").into());
         }
         if let Some(why) = refusal {
@@ -1854,12 +1954,23 @@ fn validate_backend(payload: &Payload, runtime: &Arc<dyn Runtime>) -> Result<(),
 }
 
 fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result<T, Error> {
-    result.map_err(|stop| {
-        if !(submit && matches!(stop, Stop::Full { .. })) {
-            state.stopped = Some(stop.clone());
+    result.map_err(|why| {
+        if !(submit && matches!(why, Stop::Full { .. })) {
+            stop(state, why.clone());
         }
-        Error::Core(stop)
+        Error::Core(why)
     })
+}
+
+/// The core stops, `why`: every operation refused from here, and its shell told, once, where it listens ([`OnStop`]).
+fn stop(state: &mut State, why: Stop) {
+    if state.stopped.is_some() {
+        return;
+    }
+    if let Some(tell) = &state.on_stop {
+        tell(&why);
+    }
+    state.stopped = Some(why);
 }
 
 /// The node's capacity view as its lane serves it (`hex_quic::capacity::Server`; joint plan step 13, CV9): this

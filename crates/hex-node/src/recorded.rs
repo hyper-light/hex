@@ -534,6 +534,12 @@ struct Books {
     /// Joint plan step 39, place 1: the last-resort ends a recovery read back from the node VM rows it let go, kept for
     /// the charge learner, which starts after it ([`Recorded::start_charges`]); at most the rows a store scans.
     node_vm_ends: Mutex<Vec<hex_api::LearnedEnd>>,
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10): its keeper's word is then awaited before its charge learner learns ([`Recorded::set_capacity_view`]).
+    capacity_view: std::sync::atomic::AtomicBool,
+    /// The machine's capacity view's latest word, what every holder has reserved through its keeper (the review's A-10),
+    /// kept for the charge learner: none until its keeper speaks ([`Runtime::reserved`]).
+    reserved: Mutex<Option<hex_api::Reserved>>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -696,7 +702,7 @@ pub(crate) fn check_single_consumer(
     for (other, row) in records {
         let row = row
             .as_ref()
-            .map_err(|_| uncertain(other, "a record beside it can't be read"))?;
+            .map_err(|why| uncertain(other, &format!("a record beside it can't be read: {why}")))?;
         if row.version != hex_core::record::RECORD_VERSION || row.spec.id != *other {
             return Err(uncertain(
                 other,
@@ -851,7 +857,7 @@ pub(crate) fn preflight_records(
     for (id, result) in records {
         let record = result
             .as_ref()
-            .map_err(|_| uncertain(id, "its record can't be read"))?;
+            .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
         if record.version != hex_core::record::RECORD_VERSION || record.spec.id != *id {
             return Err(uncertain(
                 id,
@@ -1445,7 +1451,7 @@ pub(crate) fn handoff_transaction(
         check_backing_reference(
             current
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?,
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?,
             &pool,
         )?;
     }
@@ -1600,7 +1606,7 @@ impl<R: Recover> Recorded<R> {
         for (id, record) in &records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             let handoff = preflight_handoff_turns(
                 &self.books.lifecycle,
                 &self.books.store,
@@ -1928,6 +1934,7 @@ mod projection_tests {
             last_resort: None,
             ended: None,
             control: None,
+            control_wake: None,
             credentials: Vec::new(),
         }
     }
@@ -1976,6 +1983,16 @@ impl Drop for ForwardTurn {
 }
 
 impl<R: Recover> Recorded<R> {
+    /// Whether the machine's capacity view serves this node's machine, as its configuration says (`--capacity-view`; the
+    /// review's A-10, CV10's configured form): where one does, the charge learner learns nothing until its keeper has
+    /// spoken since the node started, its VMs booked whole meanwhile, told; where none does, no holder reserves room
+    /// there. Set before the learner starts.
+    pub fn set_capacity_view(&self, served: bool) {
+        self.books
+            .capacity_view
+            .store(served, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Tells the charge learner a box has begun, or a node VM has booted (joint plan step 14, C1; A-9): one holding no
     /// cap runs a window at once; one waiting out its window reads it at the window's end. Nothing where no learner
     /// runs.
@@ -2059,6 +2076,8 @@ impl<R: Recover> Recorded<R> {
                 last_boot,
                 charges: std::sync::OnceLock::new(),
                 node_vm_ends: Mutex::new(Vec::new()),
+                capacity_view: std::sync::atomic::AtomicBool::new(false),
+                reserved: Mutex::new(None),
             }),
         })
     }
@@ -2323,7 +2342,7 @@ impl<R: Recover> Recorded<R> {
 /// The charge learner's reads and writes of the node's managed VMs, through their native owner, and of their records.
 struct Managed<'a, R> {
     runtime: &'a R,
-    store: &'a Store,
+    books: &'a Books,
 }
 
 impl<R: Recover> charges::Managed for Managed<'_, R> {
@@ -2383,6 +2402,27 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
             charges::Holder::Box(record) => self.runtime.host_use(&record.spec.id),
             charges::Holder::Node { row, .. } => self.runtime.node_vm_host_use(row.run),
         }
+    }
+
+    fn taken(&self, holder: charges::Holder<'_>) -> Result<u64, Refusal> {
+        match holder {
+            charges::Holder::Box(record) if charges::running(record) => self
+                .runtime
+                .managed_usage(NativeRecord::Box(record))
+                .map(|usage| usage.memory_bytes),
+            charges::Holder::Box(record) => self
+                .runtime
+                .usage(&record.spec.id)
+                .map(|usage| usage.memory_bytes),
+            charges::Holder::Node { row, .. } => self
+                .runtime
+                .node_vm_host_use(row.run)
+                .map(|host| host.footprint_bytes),
+        }
+    }
+
+    fn free(&self) -> Result<hex_api::CapacityResources, Refusal> {
+        Ok(crate::facts::capacity(self.books.store.directory(), self.books.authority_id()?)?.free)
     }
 
     fn rate_period(
@@ -2470,7 +2510,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         scope: charges::Scope,
         end: &hex_api::LearnedEnd,
     ) -> Result<bool, Refusal> {
-        charges::record_last_resort(self.store, id, scope, Some(end))
+        charges::record_last_resort(&self.books.store, id, scope, Some(end))
     }
 }
 
@@ -2568,6 +2608,24 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             learner.failed(why);
             learner.next_window()
         };
+        // What the capacity view's holders have reserved, as the node's configuration and its keeper's word say (A-10):
+        // until the keeper of a view that serves its machine has spoken since the node started, its VMs are booked whole,
+        // none learned, told so, and its keeper's word wakes it.
+        let reservations = match self.books.reservations() {
+            Ok(reservations) => reservations,
+            Err(why) => return fail(why),
+        };
+        let reserved = {
+            let Ok(mut learner) = shared.lock() else {
+                return None;
+            };
+            learner.told_reservations(reservations);
+            match reservations {
+                hex_api::LearnedReservations::Unheard => return learner.next_window(),
+                hex_api::LearnedReservations::Heard { reserved, .. } => reserved,
+                hex_api::LearnedReservations::Unserved => hex_api::CapacityResources::default(),
+            }
+        };
         let read = self.books.store.all().and_then(|records| {
             let rows = self.books.store.all_node_vms()?;
             // Each oci box a node VM's last-resort end ended, retired with it once its run has ended (A-6), off the
@@ -2588,7 +2646,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
         };
         let io = Managed {
             runtime: &self.runtime,
-            store: &self.books.store,
+            books: &self.books,
         };
         // Each managed VM it hasn't seen is asked its governor's period first, where the platform has no window (D255).
         if let Err(why) =
@@ -2609,14 +2667,15 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             Err(why) => return fail(why),
         };
         // Each node VM that boots, its booking off the fleet's budget until it is Ready and learned (step 39).
-        if let Err(why) = charges::booting(&rows).and_then(|booking| {
-            sorted.whole = sorted
-                .whole
-                .checked_add(booking)
-                .ok_or_else(|| Refusal::Invalid {
-                    what: "a node's boxes' bookings",
-                    why: "they overflow".into(),
+        if let Err(why) = charges::booting(&rows, &band).and_then(|booting| {
+            sorted
+                .booked
+                .try_reserve(booting.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "a window's holders",
+                    bound: booting.len(),
                 })?;
+            sorted.booked.extend(booting);
             Ok(())
         }) {
             return fail(why);
@@ -2636,21 +2695,13 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             Ok(nodes) => sorted.learned.extend(nodes),
             Err(why) => return fail(why),
         }
-        let booked = |dim: fn(&hex_api::CapacityResources) -> u64| {
-            dim(&sorted.native).saturating_add(dim(&sorted.whole))
-        };
-        let budget = hex_api::CapacityResources {
-            cpu_milli: machine.cpu_milli.saturating_sub(booked(|c| c.cpu_milli)),
-            mem_bytes: machine.mem_bytes.saturating_sub(booked(|c| c.mem_bytes)),
-            disk_bytes: machine.disk_bytes,
-        };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
         let _ = charges::window(
             shared,
             &io,
             &sorted.learned,
             unreadable,
-            budget,
+            |held| charges::measured(&io, machine, &sorted.booked, held, reserved),
             std::time::Instant::now(),
         );
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
@@ -2715,6 +2766,19 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
 }
 
 impl Books {
+    /// What the charge learner takes off its fleet's budget for the capacity view's holders now (the review's A-10), as
+    /// the node's configuration and its keeper's latest word say ([`charges::reservations`]).
+    fn reservations(&self) -> Result<hex_api::LearnedReservations, Refusal> {
+        let word = *self
+            .reserved
+            .lock()
+            .map_err(|_| broken("the keeper's word's lock was poisoned"))?;
+        Ok(charges::reservations(
+            self.capacity_view.load(std::sync::atomic::Ordering::SeqCst),
+            word,
+        ))
+    }
+
     /// What a VM class's capacity answer carries of the charge learner (joint plan step 14, C8), fitted to one message:
     /// nothing where no learner runs.
     fn attach_learned(
@@ -2809,7 +2873,12 @@ impl Books {
                 project_info(&mut info, &projection(record.spec)?)?;
                 abandoned
             }
-            Some(Err(_)) => return Err(uncertain(&info.id, "its record can't be read")),
+            Some(Err(why)) => {
+                return Err(uncertain(
+                    &info.id,
+                    &format!("its record can't be read: {why}"),
+                ));
+            }
             None => 0,
         };
         info.abandoned = recorded.saturating_add(self.abandoned.unrecorded(&info.id)?);
@@ -3016,6 +3085,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.member(id, member)
     }
 
+    fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.mcp(id, member)
+    }
+
     fn signal_member(
         &self,
         id: &BoxId,
@@ -3060,6 +3133,21 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// such box while its record named devices, as the delete finds it gone then.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<hex_api::HostUse>, Refusal> {
         self.delete_by(id, |runtime| runtime.delete_with_host_use(id), None)
+    }
+
+    /// The machine's capacity view's word, kept for the charge learner (the review's A-10): the latest keeper's, an older
+    /// keeper's refused, typed; the learner then told, so one waiting for its keeper's first word runs a window now.
+    fn reserved(&self, word: hex_api::Reserved) -> Result<(), Refusal> {
+        charges::keep_word(
+            &mut *self
+                .books
+                .reserved
+                .lock()
+                .map_err(|_| broken("the keeper's word's lock was poisoned"))?,
+            word,
+        )?;
+        self.begun();
+        Ok(())
     }
 }
 
@@ -3831,6 +3919,9 @@ fn forward_guest(
         Call::Signal { id, .. } | Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
         _ => return Forward::Back(Box::new((call, stdio))),
     };
+    // HEX-RT-17: a Windows node hands its caller handles alone, never sockets, so it offers an exec's streams to the
+    // caller to open itself, where its guest's link lends the VM's identity; a node VM's lanes lend none, and their
+    // exec's streams are made here on pipes whose ends it hands on (the review's D-10).
     let offer = cfg!(windows)
         && matches!(&call, Call::Exec { .. } | Call::ExecStreams { .. })
         && (stdio.ask.stdin
@@ -3839,19 +3930,14 @@ fn forward_guest(
             || stdio.stdin.is_some()
             || stdio.stdout.is_some()
             || stdio.stderr.is_some());
-    let connected = if offer {
-        guest.program_client_for(id)
-    } else {
-        guest.evented_for(id)
-    };
-    let client = match connected {
-        Ok(Some(client)) => client,
+    let client = match guest.exec_client_for(id, offer) {
+        Ok(Some(hex_runtime::guest::ExecClient::Offered(client))) => client,
+        Ok(Some(hex_runtime::guest::ExecClient::Evented(client))) => {
+            return forward_evented(client, call, stdio, reply, ended);
+        }
         Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
         Err(why) => return Forward::Refused(why),
     };
-    if !offer {
-        return forward_evented(client, call, stdio, reply, ended);
-    }
     let (call, stdio) = match guest_call(call, stdio) {
         Ok(prepared) => prepared,
         Err(why) => return Forward::Refused(why),

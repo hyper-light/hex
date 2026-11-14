@@ -11,8 +11,12 @@
 //! |---|---|
 //! | 0..4 | `HEXW` |
 //! | 4..12 | the sender's wire identity ([`IDENTITY`]) |
-//! | 12..14 | kind: a request below `0x8000`, an answer from it |
+//! | 12..14 | kind: a request below `0x8000`, an answer from it; [`SEALED`] marks a sealed body |
 //! | 14..22 | id: a request's, chosen by its client; its answer, and an exec'd program's end, carry it |
+//!
+//! A message that carries a secret ([`carries_secret`]) goes sealed on a connection that seals ([`seal`], [`open`]: a
+//! node's over QUIC, docs/design/hex-quic.md Q13): its header, its kind marked, then its nonce, its body sealed and its
+//! tag, the header bound to the body.
 //!
 //! Integers are little-endian. A string or a path is a `u32` length and its bytes, an option a byte
 //! (0 none, 1 some) before the value, a list a `u32` count before its items, and an enum a byte naming
@@ -45,17 +49,17 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
-    DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
-    GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind,
-    IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding,
-    LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate, LearnedUnacted, LearnedUnread,
-    LearnedUnrecorded, LearnedUse, LearnedWindow, LifecycleCause, MAX_DEVICES,
-    MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount,
-    Network, NodeVmPhase, NodeVmReceipt, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, RateHeld, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials,
-    check_grants, check_published, check_sign_ins,
+    ConnectFailure, ConnectPhase, ConnectReply, ControlWake, CredentialGrant, Destination,
+    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit,
+    GpuEligibility, Grant, GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs,
+    ImagePlatform, IoKind, IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
+    LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
+    LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
+    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
+    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
+    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -195,6 +199,8 @@ mod kind {
     pub const SIGN_IN_REVOKED: u16 = 0x8017;
     pub const MEMBER_SIGNAL: u16 = 0x001e;
     pub const START_FOLLOWED: u16 = 0x001f;
+    pub const RESERVED: u16 = 0x0020;
+    pub const MCP: u16 = 0x0021;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -331,6 +337,21 @@ pub enum Call {
     /// answer on the node, a wait on the fact (decision 9), so a remote caller of a start answered Pending never looks;
     /// answered [`Answer::Info`], or refused by type. Appended (ROOT, 2026-11-14).
     Started(BoxId),
+    /// The machine's capacity view's word to its node (`Runtime::reserved`; the review's A-10): what every holder has
+    /// reserved through its keeper, which the node's charge learner takes off its fleet's budget; answered
+    /// [`Answer::Done`], or refused by type. Appended (ROOT, 2026-11-14).
+    Reserved(hex_api::Reserved),
+    /// The next connection member `member`'s harness makes to its MCP bridge in running Shards image box `id`
+    /// (`Runtime::mcp`; goal 2's item 3, D254), handed over as [`Call::Member`] hands its member: the streams `streams`
+    /// names travel with it, each joined to the connection's own, and those `ask` names the node gives with its answer.
+    /// Answered once the harness connects, as an exec is ([`Answer::Started`] or [`Answer::Given`]), then
+    /// [`Answer::Exited`] with its end; or refused by type. Appended (ROOT, 2026-11-14).
+    Mcp {
+        id: BoxId,
+        member: Member,
+        streams: Streams,
+        ask: Streams,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -573,6 +594,33 @@ pub enum Fault {
     DescriptorsCut,
     #[error("{what} storage for {bound} bytes is unavailable")]
     Storage { what: &'static str, bound: usize },
+    /// Its seal ([`seal`], [`open`]): docs/design/hex-quic.md Q13.
+    #[error("its seal: {0}")]
+    Seal(SealFault),
+}
+
+/// Why a message wasn't sealed or opened, typed (docs/design/hex-quic.md Q13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SealFault {
+    /// Its kind carries a secret, and it came unsealed on a connection that seals every message that does.
+    #[error("kind {kind:#06x} carries a secret, and came unsealed on a connection that seals it")]
+    Unsealed { kind: u16 },
+    /// It came sealed, or was given to be sealed, yet its kind carries no secret: a connection seals only those that do.
+    #[error("kind {kind:#06x} carries no secret, and only a message that does is sealed")]
+    NoSecret { kind: u16 },
+    /// It came sealed on a connection that seals nothing.
+    #[error("kind {kind:#06x} came sealed on a connection that seals nothing")]
+    Unsealing { kind: u16 },
+    /// Its seal doesn't open under the peer's key: its header, nonce, body or tag isn't what was sealed.
+    #[error("its seal doesn't open under the peer's key")]
+    Broken,
+    /// This side's key has sealed all it may: its nonces, one more of which would repeat one, or AES-GCM's limit on what
+    /// one key seals (RFC 8446 §5.5). Nothing more is sealed under it; a new connection's key seals on.
+    #[error("this side's key has sealed all it may")]
+    Spent,
+    /// The cipher refused what it was given.
+    #[error("the cipher refused {what}")]
+    Cipher { what: &'static str },
 }
 
 impl Fault {
@@ -601,6 +649,7 @@ impl From<Fault> for Refusal {
             fault => {
                 let what = match &fault {
                     Fault::Wire { .. } => "wire",
+                    Fault::Seal(_) => "seal",
                     _ => "message",
                 };
                 Refusal::Invalid {
@@ -706,19 +755,171 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
     w.done()
 }
 
-/// Whether `message` carries a lease's value ([`Request::Leased`]), so whoever held its bytes wipes them as it lets them
-/// go (docs/design/credential-grants.md C7): read from its kind alone, before or without reading the rest.
+/// Whether `message` carries a secret, a lease's value ([`Request::Leased`]) or a sign-in's tokens, so whoever holds its
+/// bytes in the clear wipes them as it lets them go (docs/design/credential-grants.md C7, C8), and a connection that
+/// seals seals it ([`seal`]): read from its kind alone, before or without reading the rest. A sealed one's kind says
+/// none: it holds its secret sealed.
 pub fn carries_secret(message: &[u8]) -> bool {
-    message.get(12..14).is_some_and(|got| {
-        [
-            kind::LEASED,
-            kind::CAPTURED,
-            kind::REFRESHED,
-            kind::CAPTURE_ASK,
-        ]
-        .iter()
-        .any(|secret| got == &secret.to_le_bytes()[..])
-    })
+    kind_of(message).is_some_and(secret_kind)
+}
+
+/// Whether a message of kind `of` carries a secret.
+fn secret_kind(of: u16) -> bool {
+    matches!(
+        of,
+        kind::LEASED | kind::CAPTURED | kind::REFRESHED | kind::CAPTURE_ASK
+    )
+}
+
+/// `message`'s kind as its header has it, its [`SEALED`] mark among it; none for one too short to name one.
+fn kind_of(message: &[u8]) -> Option<u16> {
+    message
+        .get(12..14)
+        .and_then(|got| <[u8; 2]>::try_from(got).ok())
+        .map(u16::from_le_bytes)
+}
+
+/// The mark of a sealed message's kind ([`seal`]; docs/design/hex-quic.md Q13): bit 14, which no kind this wire defines
+/// has (its requests run up from `0x0001` and its answers from `0x8001`, each far short of it), so a sealed kind is
+/// never another kind.
+pub const SEALED: u16 = 0x4000;
+/// A sealed body's nonce: AES-GCM's 96 bits, the length NIST SP 800-38D §5.2.1.1 recommends, which needs no hash of its
+/// own to make a counter.
+pub const NONCE_BYTES: usize = 12;
+/// A sealed body's tag: AES-GCM's whole 128 bits (NIST SP 800-38D §5.2.1.2).
+pub const TAG_BYTES: usize = 16;
+/// What sealing adds to a message: its nonce and its tag.
+pub const SEAL_BYTES: usize = NONCE_BYTES + TAG_BYTES;
+
+/// What seals and opens the bodies of the messages a connection carries that carry a secret (docs/design/hex-quic.md
+/// Q13): AES-256-GCM, a key each way, hex-quic's from the connection's TLS session. The seal keeps a secret out of the
+/// buffers beneath Hex's lanes in the clear, which Hex can't wipe; it is no second channel security, the connection's TLS
+/// being that.
+pub trait Seal: Send + Sync {
+    /// Seals `body` into `sealed`, as long as it, under this side's key with `aad` bound to it: the nonce it took, this
+    /// side's next, never one taken before, and its tag.
+    fn seal(
+        &self,
+        aad: &[u8],
+        body: &[u8],
+        sealed: &mut [u8],
+    ) -> Result<([u8; NONCE_BYTES], [u8; TAG_BYTES]), SealFault>;
+    /// Opens `sealed`, which the peer sealed under its key with `nonce` and `aad` bound to it, into `body`, as long as
+    /// it, checked against `tag`.
+    fn open(
+        &self,
+        aad: &[u8],
+        nonce: &[u8; NONCE_BYTES],
+        sealed: &[u8],
+        tag: &[u8; TAG_BYTES],
+        body: &mut [u8],
+    ) -> Result<(), SealFault>;
+}
+
+/// Whether `message` came sealed: its kind marked [`SEALED`].
+pub fn sealed(message: &[u8]) -> bool {
+    kind_of(message).is_some_and(|marked| marked & SEALED != 0)
+}
+
+/// `message`, which carries a secret, as a connection that seals sends it (docs/design/hex-quic.md Q13): its header,
+/// its kind marked [`SEALED`], then its nonce, its body sealed under `seal` with that header bound to it, and its tag, at
+/// most [`MAX_MESSAGE`] in all. `message` stays its holder's to wipe; the sealed copy holds none of its body in the
+/// clear. One whose kind carries no secret is refused ([`SealFault::NoSecret`]): it goes as it is.
+pub fn seal(message: &[u8], seal: &dyn Seal) -> Result<Vec<u8>, Fault> {
+    let short = || Fault::Truncated {
+        need: HEADER_BYTES,
+        have: message.len(),
+    };
+    let kind = kind_of(message).ok_or_else(short)?;
+    if !secret_kind(kind) {
+        return Err(Fault::Seal(SealFault::NoSecret { kind }));
+    }
+    let (header, body) = message.split_at_checked(HEADER_BYTES).ok_or_else(short)?;
+    let size = [NONCE_BYTES, body.len(), TAG_BYTES]
+        .into_iter()
+        .try_fold(HEADER_BYTES, usize::checked_add)
+        .filter(|size| *size <= MAX_MESSAGE)
+        .ok_or(Fault::Oversized {
+            bytes: message.len().saturating_add(SEAL_BYTES),
+            bound: MAX_MESSAGE,
+        })?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(size).map_err(|_| Fault::Storage {
+        what: "a sealed message",
+        bound: size,
+    })?;
+    out.extend_from_slice(header);
+    out.resize(size, 0);
+    let laid = || Fault::value("a sealed message", "its parts don't fit its length");
+    let (head, rest) = out.split_at_mut_checked(HEADER_BYTES).ok_or_else(laid)?;
+    if let Some(at) = head.get_mut(12..14) {
+        at.copy_from_slice(&(kind | SEALED).to_le_bytes());
+    }
+    let (nonce_at, rest) = rest
+        .split_first_chunk_mut::<NONCE_BYTES>()
+        .ok_or_else(laid)?;
+    let (body_at, tag_at) = rest.split_last_chunk_mut::<TAG_BYTES>().ok_or_else(laid)?;
+    let (nonce, tag) = seal.seal(head, body, body_at).map_err(Fault::Seal)?;
+    *nonce_at = nonce;
+    *tag_at = tag;
+    Ok(out)
+}
+
+/// `message` as it came on a connection that seals under `seal`, or seals nothing (none; docs/design/hex-quic.md Q13):
+/// one that came sealed opened, its header back as it was before its kind was marked; any other as it came. Refused,
+/// typed: one whose kind carries a secret and that came unsealed where the connection seals ([`SealFault::Unsealed`]),
+/// wiped as it goes; one sealed where the connection seals nothing ([`SealFault::Unsealing`]) or whose kind carries no
+/// secret ([`SealFault::NoSecret`]); one whose seal doesn't open under the peer's key ([`SealFault::Broken`]), its
+/// header, nonce, body or tag not what was sealed. A message too short to name its kind comes back as it came, for its
+/// reader to refuse.
+pub fn open(mut message: Vec<u8>, seal: Option<&dyn Seal>) -> Result<Vec<u8>, Fault> {
+    let Some(marked) = kind_of(&message) else {
+        return Ok(message);
+    };
+    let kind = marked & !SEALED;
+    let Some(seal) = seal else {
+        if marked == kind {
+            return Ok(message);
+        }
+        return Err(Fault::Seal(SealFault::Unsealing { kind }));
+    };
+    if marked == kind {
+        if secret_kind(kind) {
+            hex_api::lease::wipe(&mut message);
+            return Err(Fault::Seal(SealFault::Unsealed { kind }));
+        }
+        return Ok(message);
+    }
+    if !secret_kind(kind) {
+        return Err(Fault::Seal(SealFault::NoSecret { kind }));
+    }
+    let short = || Fault::Truncated {
+        need: HEADER_BYTES.saturating_add(SEAL_BYTES),
+        have: message.len(),
+    };
+    let (header, rest) = message.split_at_checked(HEADER_BYTES).ok_or_else(short)?;
+    let (nonce, rest) = rest.split_first_chunk::<NONCE_BYTES>().ok_or_else(short)?;
+    let (sealed, tag) = rest.split_last_chunk::<TAG_BYTES>().ok_or_else(short)?;
+    let size = HEADER_BYTES.saturating_add(sealed.len());
+    let mut opened = Vec::new();
+    opened.try_reserve_exact(size).map_err(|_| Fault::Storage {
+        what: "an opened message",
+        bound: size,
+    })?;
+    opened.extend_from_slice(header);
+    if let Some(at) = opened.get_mut(12..14) {
+        at.copy_from_slice(&kind.to_le_bytes());
+    }
+    opened.resize(size, 0);
+    let read = match opened.get_mut(HEADER_BYTES..) {
+        Some(body) => seal.open(header, nonce, sealed, tag, body),
+        None => Err(SealFault::Broken),
+    };
+    if let Err(why) = read {
+        hex_api::lease::wipe(&mut opened);
+        return Err(Fault::Seal(why));
+    }
+    Ok(opened)
 }
 
 /// A lease as [`Request::Leased`] carries it: given (0), its name, its life, then its value last, so nothing can refuse
@@ -983,9 +1184,13 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 for receipt in &capacity.node_vms {
                     put_node_vm_receipt(w, receipt)?;
                 }
-                // Last (A-3; ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
+                // A-3 (ROOT, 2026-11-13): why its learner learned nothing for the class, after its node VMs.
                 w.reserve_fixed(1)?;
-                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))
+                w.option_with(capacity.unlearned.as_deref(), |w, why| w.string(why))?;
+                // Last (the review's A-8): its boxes' CPU time together, after `unlearned`.
+                w.reserve_fixed(1)?;
+                w.option(capacity.own.boxes_cpu_ns, Writer::u64);
+                Ok(())
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -1340,6 +1545,22 @@ fn parse_request(
             Request::Call(Call::MemberSignal { id, member, signal })
         }
         kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
+        kind::RESERVED => Request::Call(Call::Reserved(hex_api::Reserved {
+            keeper: r.u64().map_err(bad)?,
+            reserved: resources(&mut r).map_err(bad)?,
+        })),
+        kind::MCP => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let member = member(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::Mcp {
+                id,
+                member,
+                streams,
+                ask,
+            })
+        }
         kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
             0 => Ok(()),
             1 => Err(refusal(&mut r).map_err(bad)?),
@@ -1431,7 +1652,8 @@ fn parse_request(
             Call::Exec { streams, .. }
             | Call::ExecStreams { streams, .. }
             | Call::Run { streams, .. }
-            | Call::Member { streams, .. },
+            | Call::Member { streams, .. }
+            | Call::Mcp { streams, .. },
         ) if carried => streams.count(),
         _ => 0,
     };
@@ -1504,7 +1726,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         kind::BACKING_OFFER => Answer::BackingOffer(backing_offer(&mut r)?),
         kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
             let id = r.string("capacity pool")?;
-            let capacity = Capacity {
+            let mut capacity = Capacity {
                 id,
                 total: resources(r)?,
                 free: resources(r)?,
@@ -1545,10 +1767,11 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 })?,
                 // Then (joint plan step 14).
                 learned: r.option(learned)?,
-                // Then (joint plan step 14, C7).
+                // Then (joint plan step 14, C7); its boxes' CPU time is the last field, read below.
                 own: hex_api::MachineTime {
                     cpu_ns: r.option(Reader::u64)?,
                     uptime_ns: r.option(Reader::u64)?,
+                    boxes_cpu_ns: None,
                 },
                 // Then (joint plan step 39).
                 node_vms: r.bounded_list(
@@ -1557,9 +1780,11 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "node VM receipts",
                     node_vm_receipt,
                 )?,
-                // Last (A-3).
+                // Then (A-3).
                 unlearned: r.option(|r| r.string("why a learner learned nothing"))?,
             };
+            // Last (the review's A-8).
+            capacity.own.boxes_cpu_ns = r.option(Reader::u64)?;
             check_capacity(&capacity)?;
             Ok(capacity)
         })?),
@@ -1752,6 +1977,8 @@ fn request_name(kind: u16) -> &'static str {
         kind::REFRESHED => "a refreshed",
         kind::MEMBER_SIGNAL => "a member's signal",
         kind::START_FOLLOWED => "a start followed",
+        kind::RESERVED => "a keeper's word",
+        kind::MCP => "an MCP connection",
         _ => "a request",
     }
 }
@@ -1777,6 +2004,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             ask,
         } => {
             w.header(kind::MEMBER, id);
+            w.string(b.as_str())?;
+            put_member(w, member)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
+            Ok(())
+        }
+        Call::Mcp {
+            id: b,
+            member,
+            streams,
+            ask,
+        } => {
+            w.header(kind::MCP, id);
             w.string(b.as_str())?;
             put_member(w, member)?;
             w.u8(streams.bits());
@@ -1810,6 +2050,13 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         Call::Started(b) => {
             w.header(kind::START_FOLLOWED, id);
             w.string(b.as_str())
+        }
+        Call::Reserved(word) => {
+            w.header(kind::RESERVED, id);
+            w.reserve_fixed(size_of::<u64>().saturating_add(RESOURCE_BYTES))?;
+            w.u64(word.keeper);
+            put_resources(w, word.reserved);
+            Ok(())
         }
         Call::Exec {
             id: b,
@@ -2579,7 +2826,32 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
         put_holder(w, &told.id)?;
         w.string(&told.why)?;
     }
-    Ok(())
+    // Last (the review's A-10; ROOT, 2026-11-14): what the learner takes off its fleet's budget for the capacity view's
+    // holders, where told: 0 none served, 1 unheard, 2 heard, its keeper, what is reserved and whether unconfigured.
+    w.reserve_fixed(1)?;
+    w.option_with(learned.reservations.as_ref(), |w, reservations| {
+        w.reserve_fixed(1)?;
+        match reservations {
+            LearnedReservations::Unserved => w.u8(0),
+            LearnedReservations::Unheard => w.u8(1),
+            LearnedReservations::Heard {
+                keeper,
+                reserved,
+                unconfigured,
+            } => {
+                w.u8(2);
+                w.reserve_fixed(
+                    size_of::<u64>()
+                        .saturating_add(RESOURCE_BYTES)
+                        .saturating_add(1),
+                )?;
+                w.u64(*keeper);
+                put_resources(w, *reserved);
+                w.u8(u8::from(*unconfigured));
+            }
+        }
+        Ok(())
+    })
 }
 
 /// One learned rate (D255, D260): its holder, then 0 its governor, 1 its governor under its job, 2 and why its
@@ -2881,6 +3153,35 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
                 })
             },
         )?,
+        reservations: r.option(learned_reservations)?,
+    })
+}
+
+/// What a learner takes off its fleet's budget for the capacity view's holders ([`put_learned`]'s last field).
+fn learned_reservations(r: &mut Reader<'_>) -> Result<LearnedReservations, Fault> {
+    Ok(match r.u8()? {
+        0 => LearnedReservations::Unserved,
+        1 => LearnedReservations::Unheard,
+        2 => LearnedReservations::Heard {
+            keeper: r.u64()?,
+            reserved: resources(r)?,
+            unconfigured: match r.u8()? {
+                0 => false,
+                1 => true,
+                other => {
+                    return Err(Fault::value(
+                        "learned reservations",
+                        format!("{other} is neither of a flag's values"),
+                    ));
+                }
+            },
+        },
+        other => {
+            return Err(Fault::value(
+                "learned reservations",
+                format!("{other} names no state of kiln's reservations"),
+            ));
+        }
     })
 }
 
@@ -3773,6 +4074,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         put_address(w, at.ip());
         w.u16(at.port());
     });
+    // Shards' D252 amended (image channel v30): that endpoint's waker and wake, after every older field.
+    w.option(info.control_wake, |w, held| {
+        for at in [held.waker, held.wake] {
+            put_address(w, at.ip());
+            w.u16(at.port());
+        }
+    });
     Ok(())
 }
 
@@ -3818,10 +4126,23 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         last_resort: r.option(learned_end)?,
         ended: r.option(|r| r.string("ended"))?,
         control: None,
+        control_wake: None,
         credentials: Vec::new(),
     };
     info.credentials = credentials(r, &info.grants)?;
     info.control = r.option(|r| Ok(SocketAddr::new(address(r)?, r.u16()?)))?;
+    info.control_wake = r.option(|r| {
+        Ok(ControlWake {
+            waker: SocketAddr::new(address(r)?, r.u16()?),
+            wake: SocketAddr::new(address(r)?, r.u16()?),
+        })
+    })?;
+    if info.control.is_none() && info.control_wake.is_some() {
+        return Err(Fault::value(
+            "control_wake",
+            "an agent-control endpoint's waker and wake told without the endpoint",
+        ));
+    }
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)
         .map_err(|e| Fault::value("published", e.to_string()))?;

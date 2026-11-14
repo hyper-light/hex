@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `16451e19f172cfb29882efcab6502cc43b8bd061` (main).
+Revision: `d7ff8a094c872f2a64479e86948a15ba8404e2c7` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -22,7 +22,7 @@ own CPU, `Refusal::HostUse` an answer none of the protocol's; Hex reads it nowhe
 through a client's native owner (D233); GPU selection
 by exact identity (D232), a VM process's refusal of its selection typed in place of a receipt
 (`GpuProbeError::Refused`, `Unreported`; 18f59d497); and an image booted under shards-init for an
-orchestrator (D231, `shards_api::image`, image channel version 27), with its nesting grant (D234)
+orchestrator (D231, `shards_api::image`, image channel version 30), with its nesting grant (D234)
 and, under it, the run's GPUs by identity (`ImageSpec::gpu_devices`, `gpus=`, version 16, e46299c07;
 its workload's cgroup sized by its microVM's CPUs, a853a8138), plugs (D235), destinations by name
 and the receivers a published port reaches (D236), a member's stdin, the room its orchestrator's
@@ -74,6 +74,43 @@ a member's end typed, `Signaled(n)` beside its exit, from its namespace's reaper
 `exec::End`, `Member::Ended` and `MemberEnd::wait`), which Hex maps to `Exit::Signal(n)`, never
 folded into the status `docker run` reports; a member's MCP connections' handles re-exported by
 `shards_api::control` (`McpConnection`, `Output`, `Input`, `Got`, `ExecControl`; D254);
+a run's end carrying what its microVM used in all (D260 amended, 1e2d403ec, version 28:
+`ImageGuest::wait_for` and `ImageRefusal::Ended` give a `RunEnded`, its `FinalUse` read or why not,
+`Unused`), of which Hex reads the end alone yet; a member's channel's end told typed
+(`ImageGuest::wait_channel`, `ChannelEnd`; control-01, a3352f573), which Hex calls nowhere; a managed
+guest's final use recorded beside its vsock socket (D260 amended, 4d86af2c4: `ManagedGuest::host_use`
+answering `ManagedUsed`, its end with its final use once it has ended, `wait_ended`, `final_use_file`),
+which Hex reads as it read that end before; the agent-control lanes' asks sent once, each answer waited
+for within its caller's patience on a handle (155b5ee2e: `PendingMember`, `PendingExec`, `PendingMcp`,
+`PendingLog`, `PendingSocket`, `MemberSteering::signal`'s patience and `steered`, `Fault::Awaiting` and
+`Unawaited`), on which Hex's member signals wait within their W* and follow on past it, told, and its
+lanes' dials within their deadlines; an image run's GPU report (D233, fad757af4, 925434277, version 29:
+`ImageSpec::gpu_report`, `ImageGuest::take_gpu_report`, `ImageRefusal::GpuProbe`), which Hex asks of no
+run; and a borrowed connect with no clock, ending at its OK, its connection's end or its VM process's
+(9156058fb: `connect_borrowed_before`), Shards' answer to the review's D-3; and, past d91b5ce6b,
+each lane's reader holding its frames to its own grammar's bound (remote-08, 37b1b165e: `MAX_FRAME`
+gone, a reader's most held by the host's memory, `shards_ipc::host_memory`), an invitation living as
+long as its owner says (30645fa69), the pause between looks learned where they run (2275e3829,
+`shards_abi::pace`, `shards_api::pause` its re-export) and its crates rustfmt-clean again (06388950f):
+at d91b5ce6b `crates/dns/src/lib.rs` was not, and Hex's `cargo fmt --all --check` holds its vendored
+crates to it, so Hex takes a later revision than d91b5ce6b; and past ce80cbb37, a run's stop
+returning released, as a boot's stop does (D231, c133bfb56: `ImageGuest::stop` returns once its end
+is told, its run host exited and reaped, and every process the host started, its VM, network and
+share processes, gone, their diagnostics closed; on Windows the host's group ended too, a failure
+there `ImageRefusal::Os`), so Hex's delete frees nothing a run still holds (the review's B-4), and the
+agent-control driver's waker and wake connected to each other, so the wake takes datagrams from the
+waker alone (b6727996c); and past 2737fc4ec, a run's endpoint telling every socket it holds (D252
+amended, d3950c7d1, image channel version 30: `ControlAt::waker`, `wake` and `sockets`), which Hex's
+inspect carries (`BoxInfo::control_wake`) and its grants check holds a run's sockets to, Windows' UDP
+table showing no socket's peer; a controller's socket lanes driven from one thread on one wake (Hex's
+D-10, 9f5b1f75); a killed managed VM's AppContainer profiles released (D141, 16bbdf34:
+`release_app_containers`, `Refusal::Release`), which Hex calls nowhere yet; and a stream shared without
+an inheritable duplicate (D215, Hex's D-5, a168c2a3: `Stream::read_shared`, `write_shared` and
+`into_socket`, `&dyn Stream`'s `Read` and `Write`, a `try_clone` no child inherits), which Hex's test
+streams implement; and a member's stdio read and written without waiting, on the controller's one
+wake, and an exec's hangup (Hex's asks after D-10, 5142c6a7: `Output::try_next_record`,
+`Input::try_write`, `ExecControl::hangup`; an `ExecControl` let go before its exit was heard now hangs
+its exec or MCP connection up), Hex's MCP connections keeping theirs until they read their exit;
 a guest's size held to `check`'s rule from one source,
 `envelope` (672b6fb47); judged waits in place of recorded ones (ca7a04d0d: `Refusal::Stalled`, no
 `shards_api::record`, no conformance patiences); shards-ipc's start test holding a child to its
@@ -92,7 +129,9 @@ host's spawn), `crates/dns` (a credential grant's host names, checked as DNS nam
 `crates/remote` (the endpoint's controller, D252), so each is taken.
 The take list adds `docs/research/measurements/api-flakes/spawns.rs` and `half-close.rs`, which
 the API's and shards-afunix's tests include by path at this revision (`crates/api/src/client.rs`,
-`crates/afunix/src/lib.rs`).
+`crates/afunix/src/lib.rs`), and `docs/research/measurements/borrowed-no-clock/focused.rs`, which
+`managed-borrowed-nowait/focused.rs` includes for the tests of the borrowed connect with no clock
+(9156058fb).
 
 ## Recorded changes
 

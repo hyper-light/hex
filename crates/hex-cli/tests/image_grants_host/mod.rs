@@ -140,7 +140,10 @@ fn sockets_of(run: &[Process]) -> Vec<Socket> {
                 format!("{pid} {name}")
             })
             .collect();
-        assert!(!holders.is_empty(), "a socket no process holds ({HOW}): {s:?}");
+        assert!(
+            !holders.is_empty(),
+            "a socket no process holds ({HOW}): {s:?}"
+        );
         eprintln!(
             "GRANTS-SOCKET {} {} -> {} {} held by {}",
             if s.tcp { "tcp" } else { "udp" },
@@ -154,34 +157,49 @@ fn sockets_of(run: &[Process]) -> Vec<Socket> {
     sockets
 }
 
-/// Whether `socket` is the run's agent-control endpoint at `control` (`BoxInfo.control`): Hex's own control endpoint,
-/// which its run host binds on the host's loopback (Shards' D238, D252), a QUIC endpoint on a UDP socket (D180).
-fn is_control(socket: &Socket, control: SocketAddr) -> bool {
-    !socket.tcp && socket.local == control
+/// Whether `socket` is one of the run's agent-control endpoint's at `control` (`BoxInfo::control_sockets`: its served
+/// address, its driver's waker and its wake): Hex's own control endpoint, which its run host binds on the host's
+/// loopback (Shards' D238, D252), a QUIC endpoint on UDP sockets (D180), its waker and wake connected to each other, which
+/// a host's table may show with no peer (Windows' shows none for any UDP socket).
+fn is_control(socket: &Socket, control: &[SocketAddr; 3]) -> bool {
+    !socket.tcp && control.contains(&socket.local)
 }
 
-/// The sockets of `sockets` that take what comes in past the run's agent-control endpoint at `control`.
-fn listening_past(sockets: &[Socket], control: SocketAddr) -> Vec<&Socket> {
+/// The sockets of `sockets` that take what comes in past the run's agent-control endpoint's at `control`.
+fn listening_past<'s>(sockets: &'s [Socket], control: &[SocketAddr; 3]) -> Vec<&'s Socket> {
     sockets
         .iter()
         .filter(|s| s.listens() && !is_control(s, control))
         .collect()
 }
 
-/// The run's sockets, read once, and those that take what comes in past its agent-control endpoint at `control`, which
-/// must be on the host's loopback. The run holds that endpoint while it runs (Hex asks every run for one, which its run
-/// host binds before the run starts), so a reading without it missed a socket it was told of, and fails.
-fn read_past_control(run: &[Process], control: SocketAddr) -> (Vec<Socket>, Vec<Socket>) {
+/// The run's agent-control endpoint's sockets of `control` that none of `sockets` is.
+fn missing(sockets: &[Socket], control: &[SocketAddr; 3]) -> Vec<SocketAddr> {
+    control
+        .iter()
+        .filter(|at| !sockets.iter().any(|s| !s.tcp && s.local == **at))
+        .copied()
+        .collect()
+}
+
+/// The run's sockets, read once, and those that take what comes in past its agent-control endpoint's at `control`,
+/// each of which must be on the host's loopback. The run holds all three while it runs (Hex asks every run for an
+/// endpoint, which its run host binds before the run starts, and Shards tells all three, image channel v30), so a
+/// reading without one of them missed a socket it was told of, and fails: the endpoint's sockets are exactly that set.
+fn read_past_control(run: &[Process], control: [SocketAddr; 3]) -> (Vec<Socket>, Vec<Socket>) {
     assert!(
-        control.ip().to_canonical().is_loopback(),
-        "the run's agent-control endpoint at {control} is past the host's loopback"
+        control
+            .iter()
+            .all(|at| at.ip().to_canonical().is_loopback()),
+        "the run's agent-control endpoint at {control:?} is past the host's loopback"
     );
     let sockets = sockets_of(run);
+    let missing = missing(&sockets, &control);
     assert!(
-        sockets.iter().any(|s| is_control(s, control)),
-        "the run's agent-control endpoint at {control} is none of its sockets ({HOW}): {sockets:#?}"
+        missing.is_empty(),
+        "the run's agent-control endpoint's sockets {missing:?} are none of its sockets ({HOW}): {sockets:#?}"
     );
-    let past = listening_past(&sockets, control)
+    let past = listening_past(&sockets, &control)
         .into_iter()
         .cloned()
         .collect();
@@ -195,9 +213,9 @@ fn named(run: &[Process], name: &str) -> usize {
 
 /// A VM granted nothing whose image links its harness past the microVM: its run's VM process beside its run host,
 /// and one network process (D250: the run keeps its network, the network process told nothing kept, so it lets
-/// nothing past); no socket that takes what comes in but its run's agent-control endpoint at `control`, which it holds;
-/// and no flow past the host's loopback.
-pub fn granted_nothing(node: u32, control: SocketAddr) {
+/// nothing past); no socket that takes what comes in but its run's agent-control endpoint's at `control`, all three of
+/// which it holds; and no flow past the host's loopback.
+pub fn granted_nothing(node: u32, control: [SocketAddr; 3]) {
     let run = run_of(node);
     assert_eq!(
         named(&run, "shards-vm"),
@@ -212,7 +230,7 @@ pub fn granted_nothing(node: u32, control: SocketAddr) {
     let (sockets, listening) = read_past_control(&run, control);
     assert!(
         listening.is_empty(),
-        "the run of a VM granted nothing takes what comes in past its agent-control endpoint at {control}: \
+        "the run of a VM granted nothing takes what comes in past its agent-control endpoint at {control:?}: \
          {listening:#?}"
     );
     let leaving: Vec<&Socket> = sockets.iter().filter(|s| s.leaves()).collect();
@@ -223,9 +241,9 @@ pub fn granted_nothing(node: u32, control: SocketAddr) {
 }
 
 /// A VM granted one publish, bound at `at`: its network process there (D36: so a VM granted nothing, which had
-/// none, had a real one to lack), and its run listening at `at` alone past its agent-control endpoint at `control`,
-/// which it holds: at no wildcard address and not on the image's port `ungranted`.
-pub fn listens_alone(node: u32, at: SocketAddr, ungranted: u16, control: SocketAddr) {
+/// none, had a real one to lack), and its run listening at `at` alone past its agent-control endpoint's at `control`,
+/// all three of which it holds: at no wildcard address and not on the image's port `ungranted`.
+pub fn listens_alone(node: u32, at: SocketAddr, ungranted: u16, control: [SocketAddr; 3]) {
     let run = run_of(node);
     assert_eq!(
         named(&run, "shards-net"),
@@ -354,13 +372,19 @@ fn only_a_flow_past_the_loopback_leaves() {
 }
 
 /// What takes what comes in past a run's agent-control endpoint, judged alike on every OS (no VM; joint plan step 15,
-/// AC-T7.7.2): do judge, beside the endpoint at 127.0.0.1:43471 (`BoxInfo.control`), its own UDP socket there, another
-/// peerless UDP socket on the loopback (its QUIC driver's wake, which Shards connects to its waker past g121's fix), a
-/// TCP listener at the endpoint's own address and port, a UDP socket with a loopback peer and a TCP connection on the
-/// loopback. Expect the other peerless UDP socket and the TCP listener alone to take what comes in past it.
+/// AC-T7.7.2; Shards' D252 amended, image channel v30): do judge, beside the endpoint at 127.0.0.1:43471 with its waker
+/// at 46144 and its wake at 45708 (`BoxInfo::control_sockets`), its served UDP socket, its wake with no peer (as Windows'
+/// table shows every UDP socket) and its waker with its peer (as Linux's and macOS's show it), another peerless UDP socket
+/// on the loopback, a TCP listener at the endpoint's own address and port, and a TCP connection on the loopback. Expect
+/// the other peerless UDP socket and the TCP listener alone to take what comes in past it, and the endpoint's three
+/// sockets found; without its served socket, that one missing.
 #[test]
 fn a_runs_agent_control_endpoint_alone_takes_what_comes_in_past_its_grants() {
-    let control: SocketAddr = "127.0.0.1:43471".parse().unwrap();
+    let control: [SocketAddr; 3] = [
+        "127.0.0.1:43471".parse().unwrap(),
+        "127.0.0.1:46144".parse().unwrap(),
+        "127.0.0.1:45708".parse().unwrap(),
+    ];
     let socket = |tcp, local: &str, remote: Option<&str>, listening| Socket {
         tcp,
         local: local.parse().unwrap(),
@@ -368,14 +392,17 @@ fn a_runs_agent_control_endpoint_alone_takes_what_comes_in_past_its_grants() {
         listening,
         pids: vec![1],
     };
-    let wake = socket(false, "127.0.0.1:45708", None, false);
+    let stray = socket(false, "127.0.0.1:47000", None, false);
     let listener = socket(true, "127.0.0.1:43471", None, true);
     let sockets = [
         socket(false, "127.0.0.1:43471", None, false),
-        wake.clone(),
-        listener.clone(),
+        socket(false, "127.0.0.1:45708", None, false),
         socket(false, "127.0.0.1:46144", Some("127.0.0.1:45708"), false),
+        stray.clone(),
+        listener.clone(),
         socket(true, "127.0.0.1:50000", Some("127.0.0.1:7101"), false),
     ];
-    assert_eq!(listening_past(&sockets, control), [&wake, &listener]);
+    assert_eq!(listening_past(&sockets, &control), [&stray, &listener]);
+    assert!(missing(&sockets, &control).is_empty());
+    assert_eq!(missing(&sockets[1..], &control), [control[0]]);
 }

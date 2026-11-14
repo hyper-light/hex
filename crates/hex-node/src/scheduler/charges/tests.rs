@@ -99,6 +99,7 @@ fn w14_the_scheduler_takes_the_priors_its_nodes_learner_carries() {
         ranked: Vec::new(),
         unrecorded: Vec::new(),
         unacted: Vec::new(),
+        reservations: None,
     };
     let reports = vec![(Class::Shards, Some(capacity(Some(carried([14; 32])))))];
     let mut local = node();
@@ -167,6 +168,7 @@ fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
         ranked: Vec::new(),
         unrecorded: Vec::new(),
         unacted: Vec::new(),
+        reservations: None,
     };
     let learned = vec![
         (
@@ -235,6 +237,7 @@ fn a_node_vms_learned_holding_reaches_the_ledger_as_its_runs() {
             ranked: Vec::new(),
             unrecorded: Vec::new(),
             unacted: Vec::new(),
+            reservations: None,
         },
     )];
     let ids = BTreeMap::from([(BoxId::new("vm-a").unwrap(), key)]);
@@ -298,6 +301,7 @@ fn w14_a_prior_books_a_receipt_of_its_own_ceiling_alone() {
         ranked: Vec::new(),
         unrecorded: Vec::new(),
         unacted: Vec::new(),
+        reservations: None,
     };
     let mut local = node();
     local.costs[Class::Shards.index()] = Some(sizes);

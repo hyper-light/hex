@@ -58,7 +58,9 @@ fn record(run: u8, phase: NodeVmPhase) -> NodeVmRecord {
     NodeVmRecord {
         version: RECORD_VERSION,
         run: NodeRun::from_bytes([run; 16]),
-        image: "hex-node:rev@sha256:00".to_owned(),
+        image:
+            "hex-node:rev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
         allocation: allocation(),
         phase,
         diagnostics: None,
@@ -172,9 +174,14 @@ fn role(role: &str, dir: &Path) -> std::process::Command {
 
 /// These cases' other processes, run alone where `HEX_NODE_VM_ROLE` names one (an ordinary run passes at once):
 /// - `owner`, a node that runs node VM 7: it writes its row Booting, so it holds its lock, then ends;
-/// - `holding owner`, the same, then starts a child of its own that outlives it, which on Unix holds a descriptor of
-///   its lock file's open file description, as a child forked without an exec would; then reads its row back, as a
-///   node does, says so, and ends when its stdin ends;
+/// - `ending owner`, the same, its row then Ready, saying so; once its stdin says `end`, it puts why its last resort
+///   ends the VM into the row and writes it Ended, letting its lock go, then ends;
+/// - `locking owner`, a node between its first write's lock and its row: it takes node VM 6's lock with no row, says
+///   so, and ends when its stdin ends;
+/// - `holding owner`, the same, then starts a child of its own that outlives it, which holds its lock file as its
+///   stdin: on Unix a descriptor of its open file description, as a child forked without an exec would, and on Windows
+///   a handle of its file object, as a child that inherited it would (the review's C-13); then reads its row back, as
+///   a node does, says so, and ends when its stdin ends;
 /// - `child`: the owner's child, which goes once its test's directory holds `done`, or no longer is, saying so
 ///   (`bye`).
 #[test]
@@ -203,18 +210,52 @@ fn node_vm_role() {
         return;
     }
     let store = store_in(&dir);
+    if role == "locking owner" {
+        std::fs::create_dir_all(store.node_vm_directory()).unwrap();
+        let lock = open_lock(&store.node_vm_directory(), &run(6)).unwrap();
+        assert!(try_own(&lock).unwrap());
+        let mut out = std::io::stdout().lock();
+        out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
+        out.flush().unwrap();
+        let mut line = String::new();
+        while std::io::stdin().lock().read_line(&mut line).unwrap() > 0 {}
+        drop(lock);
+        return;
+    }
     let row = diagnosed(&dir, 7, NodeVmPhase::Booting);
     store.put_node_vm(&row).unwrap();
     if role == "owner" {
         return;
     }
-    let mut child = role_child(&dir);
-    #[cfg(unix)]
-    if let Some(lock) = store.node_vm_lock(&row.run) {
-        child.stdin(lock);
+    if role == "ending owner" {
+        let ready = NodeVmRecord {
+            phase: NodeVmPhase::Ready,
+            ..row.clone()
+        };
+        store.put_node_vm(&ready).unwrap();
+        let mut out = std::io::stdout().lock();
+        out.write_all(b"HEX_NODE_VM_OWNER_READY\n").unwrap();
+        out.flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        assert_eq!(line, "end\n");
+        store
+            .update_node_vm(&row.run, |row| {
+                row.last_resort = Some(end_of(&row.run));
+                true
+            })
+            .unwrap();
+        store
+            .put_node_vm(&NodeVmRecord {
+                phase: NodeVmPhase::Ended,
+                exit: Some(Exit::Signal(9)),
+                ..ready
+            })
+            .unwrap();
+        return;
     }
-    #[cfg(not(unix))]
-    child.stdin(std::process::Stdio::null());
+    let mut child = role_child(&dir);
+    child.stdin(store.node_vm_lock(&row.run).unwrap());
     #[expect(
         clippy::zombie_processes,
         reason = "it outlives this process, as the case asks: it is never waited for here"
@@ -292,9 +333,10 @@ fn w39_a_node_vm_row_whose_owner_ended_is_let_go_at_start() {
 }
 
 /// Joint plan step 39 (ROOT, 2026-11-13: a row whose run still lives is followed; the lock is its owner's alone, never
-/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it (on Unix
-/// sharing its lock file's open file description, as a child forked without an exec would), and reads its row back;
-/// start another node while it runs; then end the first. Expect the row followed, its receipt still Booting while its
+/// a child's): do run a node that writes node VM 7's row Booting, starts a child of its own that outlives it holding its
+/// lock file (on Unix sharing its open file description, as a child forked without an exec would, and on Windows its
+/// file object, as a child that inherited it would: the review's C-13), and reads its row back; start another node
+/// while it runs; then end the first. Expect the row followed, its receipt still Booting while its
 /// owner runs, its lock outliving the owner's reads of its row; then, the owner ended and its child still running, the
 /// row let go with its lock file and its diagnostics.
 #[test]
@@ -364,6 +406,67 @@ fn w39_a_node_vm_row_whose_owner_runs_is_followed_and_no_child_of_it_keeps_its_l
         || dir.path().join("bye").exists(),
     )
     .unwrap();
+}
+
+/// The owner `role` names, started in `dir` and followed until it says it is ready: its stdin the test's to write, and
+/// its stdout, which the test keeps open until the owner has ended, so the owner's last words find a reader.
+fn owner_ready(
+    role_named: &str,
+    dir: &Path,
+) -> (
+    std::process::Child,
+    std::io::BufReader<std::process::ChildStdout>,
+) {
+    use std::io::BufRead;
+    #[expect(
+        clippy::zombie_processes,
+        reason = "its caller waits for it; one that ended unready has ended, the test with it"
+    )]
+    let mut owner = role(role_named, dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = std::io::BufReader::new(owner.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            said.read_line(&mut line).unwrap(),
+            0,
+            "the owner ended unready"
+        );
+        if line.ends_with("HEX_NODE_VM_OWNER_READY\n") {
+            return (owner, said);
+        }
+    }
+}
+
+/// The review's C-11 (AC-T7.4.1; joint plan step 39, place 1): a node's start lets a row go from what it reads under the
+/// row's lock, so an end its owner kept between the start's read of the rows and its taking of that lock is carried,
+/// never dropped. Do run a node that writes node VM 7's row Ready; start another, which reads the rows; then, before it
+/// takes the row's lock, have the first put why its last resort ends the VM into the row, write it Ended and end. Expect
+/// the row let go as Ended, its last-resort end read back, and the row gone.
+#[test]
+fn c11_a_row_its_owner_ended_after_the_starts_read_is_let_go_as_ended_its_end_carried() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut owner, said) = owner_ready("ending owner", dir.path());
+    let mut ends = owner.stdin.take().unwrap();
+    SETTLE_READ.with(|then| {
+        *then.borrow_mut() = Some(Box::new(move || {
+            ends.write_all(b"end\n").unwrap();
+            drop(ends);
+            assert!(owner.wait().unwrap().success());
+            drop(said);
+        }));
+    });
+    let store = store_in(dir.path());
+    let settled = store.settle_node_vms().unwrap();
+    assert_eq!(
+        (settled.rows, settled.ends),
+        (vec![(run(7), NodeVmSettled::Ended)], vec![end_of(&run(7))])
+    );
+    assert_eq!(store.node_vm(&run(7)).unwrap(), None);
 }
 
 /// Joint plan step 39: do write node VM 7's row Ended, its end kept, then start a node. Expect the row let go, with its
@@ -545,4 +648,54 @@ fn an_unfollowed_node_vms_line_is_one_line_its_values_json_strings() {
             "ab".repeat(16)
         )
     );
+}
+
+/// The review's C-12 (AC-T7.4.1; joint plan step 39): a row write that fails leaves no temporary file, so none counts
+/// against the rows' scan bound. Do publish node VM 7's row where its place is a folder holding a file, a place its
+/// rename can't take. Expect the write refused and its temporary file gone.
+#[test]
+fn c12_a_row_write_that_fails_leaves_no_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let directory = store.node_vm_directory();
+    let (temporary, place) = scoped_paths(&directory, &name(&run(7)).unwrap()).unwrap();
+    std::fs::create_dir_all(place.join("in-the-way")).unwrap();
+    let bytes = record(7, NodeVmPhase::Booting).encode().unwrap();
+    assert!(
+        store
+            .publish_durable(&directory, &temporary, &place, &bytes)
+            .is_err()
+    );
+    assert!(!temporary.exists(), "its temporary file left");
+}
+
+/// The review's C-12 (AC-T7.4.1; joint plan step 39): a node's start removes what a crash left in the node VM rows'
+/// directory that no row names and no process holds, so none counts against the rows' scan bound for good: a row
+/// write's temporary file, and a lock file with no row. Do leave node VM 4's temporary file and node VM 5's lock file
+/// with no row, and run a node that holds node VM 6's lock with no row yet, as one does between its lock and its first
+/// write; then start a node. Expect node VM 4's and 5's files removed and 6's lock file kept while its holder runs;
+/// then, its holder ended, the next start removes it too.
+#[test]
+fn c12_a_starts_settle_removes_the_strays_a_crash_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let directory = store.node_vm_directory();
+    std::fs::create_dir_all(&directory).unwrap();
+    let (temporary, _) = scoped_paths(&directory, &name(&run(4)).unwrap()).unwrap();
+    std::fs::write(&temporary, b"{\"version\":").unwrap();
+    let unrowed = lock_path(&directory, &run(5)).unwrap();
+    std::fs::write(&unrowed, b"").unwrap();
+    let (mut holder, said) = owner_ready("locking owner", dir.path());
+    let held = lock_path(&directory, &run(6)).unwrap();
+    assert_eq!(store.settle_node_vms().unwrap().rows, []);
+    assert!(
+        !temporary.exists() && !unrowed.exists(),
+        "a crash's strays left"
+    );
+    assert!(held.exists(), "a live holder's lock file removed");
+    drop(holder.stdin.take());
+    assert!(holder.wait().unwrap().success());
+    drop(said);
+    assert_eq!(store.settle_node_vms().unwrap().rows, []);
+    assert!(!held.exists(), "an ended holder's lock file left");
 }

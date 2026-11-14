@@ -183,6 +183,7 @@ pub fn machine_time(stat: &str, uptime: &str, hz: u64) -> hex_api::MachineTime {
     hex_api::MachineTime {
         cpu_ns: cpu_time(stat, hz),
         uptime_ns: uptime.split_whitespace().next().and_then(seconds_ns),
+        boxes_cpu_ns: None,
     }
 }
 
@@ -233,6 +234,19 @@ fn seconds_ns(text: &str) -> Option<u64> {
         .ok()?
         .checked_mul(1_000_000_000)?
         .checked_add(fraction_ns)
+}
+
+/// A cgroup v2 `cpu.stat`'s `usage_usec`, the CPU time of everything under the cgroup since it was made (a removed
+/// child's among it: cgroup v2 flushes a child's counts into its parent's as it goes), in nanoseconds; none where the
+/// text doesn't read or the time passes a u64 (the review's A-8).
+pub fn cgroup_usage_ns(cpu_stat: &str) -> Option<u64> {
+    cpu_stat
+        .lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000)
 }
 
 /// A cgroup v2 `memory.max`: a limit in bytes, or none for `max`.
@@ -406,6 +420,7 @@ mod tests {
             hex_api::MachineTime {
                 cpu_ns: Some(1_630_000_000),
                 uptime_ns: Some(12_345_670_000_000),
+                boxes_cpu_ns: None,
             }
         );
         assert_eq!(
@@ -434,6 +449,23 @@ mod tests {
             (None, Some(1_500_000_000)),
             "no clock rate reads no CPU time"
         );
+    }
+
+    /// The review's A-8 (AC-T7.4.1), CLAUDE.md §6: a cgroup's CPU time is its `cpu.stat`'s `usage_usec`. Do read a real
+    /// `cpu.stat`, then broken ones. Expect 1,922,509 µs in nanoseconds; then none where a text breaks or overflows.
+    #[test]
+    fn a8_a_cgroups_cpu_time_is_its_usage_usec() {
+        let stat = "usage_usec 1922509\nuser_usec 1920000\nsystem_usec 2509\nnr_periods 0\n";
+        assert_eq!(cgroup_usage_ns(stat), Some(1_922_509_000));
+        for broken in [
+            "",
+            "user_usec 1\n",
+            "usage_usec\n",
+            "usage_usec -1\n",
+            "usage_usec 18446744073709551615\n",
+        ] {
+            assert_eq!(cgroup_usage_ns(broken), None, "{broken:?}");
+        }
     }
 
     /// CLAUDE.md §6, hostile input: do read real and broken `/proc/meminfo` text; expect bytes from the

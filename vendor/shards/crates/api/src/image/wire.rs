@@ -66,8 +66,16 @@ pub use shards_abi::run::nesting::Ready;
 /// ([`Request::upstream_roots`], D242), so that a side that knows none never runs an injector
 /// that trusts fewer roots than its orchestrator named; 27, a member's end typed
 /// ([`MemberEnded::end`]: exited, or killed by a signal), so that no side reads a signal as an
-/// exit of 128 plus it.
-pub const VERSION: u8 = 27;
+/// exit of 128 plus it; 28, the run's final use with its end ([`RunEnded::final_use`], D260):
+/// what its microVM used in all, read once its machine was down, or why none was, so that a
+/// side that tells none is never read as having used nothing; 29, the run's GPU report
+/// (D233): the scope its orchestrator names ([`Request::gpu_report`]) and its VM process's
+/// report relayed ([`to_client::GPU_REPORT`]), so that a side that relays none never starts a
+/// GPU run whose orchestrator waits for its renderer's word; 30, every socket the run's
+/// agent-control endpoint holds, each named ([`ControlAt::waker`], [`ControlAt::wake`]; D252),
+/// so that its orchestrator can hold each UDP socket the run holds to exactly those, where its
+/// host's table shows no socket's peer (Windows).
+pub const VERSION: u8 = 30;
 
 /// What the orchestrator's side sends.
 pub mod to_host {
@@ -129,7 +137,7 @@ pub mod to_client {
     pub const MEMBER_ENDED: u8 = 20;
     /// [`StatsAnswer`](super::StatsAnswer).
     pub const STATS: u8 = 21;
-    /// [`RunEnd`](super::RunEnd), last: the run has ended.
+    /// [`RunEnded`](super::RunEnded), last: the run has ended, and what it used in all.
     pub const ENDED: u8 = 22;
     /// [`Ready`](super::Ready): the run's own command moved its readiness under the nesting
     /// grant (D234), as its init said it ([`ready`](super::ready) reads it).
@@ -166,6 +174,12 @@ pub mod to_client {
     /// [`Revoked`](super::Revoked): the run's VM revoked a sign-in, answered in its network
     /// process; told, unanswered.
     pub const REVOKE: u8 = 38;
+    /// The run's VM process's GPU report (D232, D233), its frame's bytes as that process wrote
+    /// them on its private pipe, for a run whose request named a scope
+    /// ([`Request::gpu_report`]): once, before [`STARTED`], or before [`REFUSED`] where its VM
+    /// was refused its selection. Its orchestrator reads it as a managed launch's client reads
+    /// its own (`GpuReport::parse` against its scope and selection).
+    pub const GPU_REPORT: u8 = 39;
 }
 
 /// Why a payload could not be read or written.
@@ -529,6 +543,10 @@ pub struct Request {
     /// The roots the run's injector trusts beside the host's own, each a certificate's DER
     /// (D242), for its injected flows alone; empty for the host's alone. Appended in version 26.
     pub upstream_roots: Vec<Vec<u8>>,
+    /// The scope of the run's GPU report (D233): its VM process frames its renderer's report
+    /// with it, which its host relays ([`to_client::GPU_REPORT`]); none, no report. Nonzero,
+    /// and only with [`gpu_devices`](Self::gpu_devices). Appended in version 29.
+    pub gpu_report: Option<[u8; 16]>,
 }
 
 /// What a run's agent-control endpoint takes and serves (D252): the one key it takes, its
@@ -555,11 +573,24 @@ pub struct SocketGrant {
 }
 
 /// Where a run's agent-control endpoint is bound, and the SHA-256 of its microVM's own key,
-/// which its controller pins (D252).
+/// which its controller pins (D252); and the two other sockets it holds (version 30, D252).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlAt {
+    /// Where it serves, which its controller reaches.
     pub address: SocketAddr,
     pub vm: [u8; 32],
+    /// Its driver's waker: a loopback socket connected to `wake`, sending to it alone.
+    pub waker: SocketAddr,
+    /// Its driver's wake: a loopback socket connected to `waker`, taking datagrams from it
+    /// alone.
+    pub wake: SocketAddr,
+}
+
+impl ControlAt {
+    /// Every socket the endpoint holds: its served address, its waker's and its wake's.
+    pub fn sockets(&self) -> [SocketAddr; 3] {
+        [self.address, self.waker, self.wake]
+    }
 }
 
 /// Room for `bytes` more of member `member`'s `channel`.
@@ -1008,6 +1039,109 @@ pub enum RunEnd {
     Failed(String),
 }
 
+/// A run's end and what its microVM used in all (D260's final use): the run host's `ENDED`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEnded {
+    pub end: RunEnd,
+    pub final_use: FinalUse,
+}
+
+/// What a run's microVM used of its host in all (D260's final use): read by its VM process once
+/// its machine was down, every vCPU stopped after its guest's last instruction, and before that
+/// process let go of the machine's memory; or why it was not. A part of it not read is its
+/// words ([`Microvm`]), never a zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalUse {
+    /// Each vCPU's guest time in all, by its index, those gone among them (so
+    /// [`GuestTimes::departed_ns`] 0), then its VM process's own use, read after it.
+    Read(Microvm),
+    /// None read, and why.
+    Unread(Unused),
+}
+
+/// Why a run's end carries no final use of its microVM (R04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unused {
+    /// The run's microVM never started: it was stopped or refused before it did.
+    NotStarted,
+    /// Its VM was killed before its machine was down (`STOP`, or its orchestrator's asks
+    /// ending it): what it used went with it. A run's end awaited before its stop carries it.
+    Killed,
+    /// Its VM ended without telling it: it failed, its link to its run host broke, or its run
+    /// host ended without its run's end or broke its channel.
+    Untold,
+    /// What its VM told of it is none of the protocol's.
+    Broken(UseBroken),
+}
+
+/// Why a VM's use is none of its protocol's (D260).
+pub use shards_abi::rate::UseBroken;
+
+impl RunEnded {
+    /// `end`, its microVM's final use not read for `why`.
+    pub fn unused(end: RunEnd, why: Unused) -> RunEnded {
+        RunEnded {
+            end,
+            final_use: FinalUse::Unread(why),
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        let mut w = Writer(self.end.encode()?);
+        match &self.final_use {
+            FinalUse::Read(microvm) => {
+                w.u8(0);
+                w.microvm(Some(microvm))?;
+            }
+            FinalUse::Unread(why) => {
+                w.u8(1);
+                match why {
+                    Unused::NotStarted => w.u8(0),
+                    Unused::Killed => w.u8(1),
+                    Unused::Untold => w.u8(2),
+                    Unused::Broken(broken) => {
+                        w.u8(3);
+                        w.u8(match broken {
+                            UseBroken::Long => 0,
+                            UseBroken::Text => 1,
+                            UseBroken::Word => 2,
+                            UseBroken::Guest => 3,
+                            UseBroken::Host => 4,
+                        });
+                    }
+                }
+            }
+        }
+        w.done()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<RunEnded, WireError> {
+        let mut r = Reader(payload);
+        let end = r.run_end()?;
+        let tag = |what, tag| WireError::Tag { what, tag };
+        let final_use = match r.u8()? {
+            0 => FinalUse::Read(r.microvm()?.ok_or(tag("a microVM's final use", 0))?),
+            1 => FinalUse::Unread(match r.u8()? {
+                0 => Unused::NotStarted,
+                1 => Unused::Killed,
+                2 => Unused::Untold,
+                3 => Unused::Broken(match r.u8()? {
+                    0 => UseBroken::Long,
+                    1 => UseBroken::Text,
+                    2 => UseBroken::Word,
+                    3 => UseBroken::Guest,
+                    4 => UseBroken::Host,
+                    t => return Err(tag("a broken use", t)),
+                }),
+                t => return Err(tag("why no final use", t)),
+            }),
+            t => return Err(tag("a run's final use", t)),
+        };
+        r.end()?;
+        Ok(RunEnded { end, final_use })
+    }
+}
+
 /// A frame's header for `kind` and a payload of `len` bytes, refused past the bound.
 pub fn header(kind: u8, len: usize) -> Result<[u8; run::HEADER], WireError> {
     let len = u32::try_from(len).map_err(|_| WireError::TooLong)?;
@@ -1297,6 +1431,19 @@ impl<'a> Reader<'a> {
             1 => Ok(StreamEnd::Aborted(self.i32()?)),
             tag => Err(WireError::Tag { what, tag }),
         }
+    }
+    fn run_end(&mut self) -> Result<RunEnd, WireError> {
+        Ok(match self.u8()? {
+            0 => RunEnd::Exited(self.u32()?),
+            1 => RunEnd::Stopped,
+            2 => RunEnd::Failed(self.text()?),
+            tag => {
+                return Err(WireError::Tag {
+                    what: "a run's end",
+                    tag,
+                });
+            }
+        })
     }
     fn microvm(&mut self) -> Result<Option<Microvm>, WireError> {
         match self.u8()? {
@@ -1588,6 +1735,14 @@ impl Request {
         for root in &self.upstream_roots {
             w.bytes(root)?;
         }
+        // The run's GPU report's scope, appended in version 29 (D233).
+        match &self.gpu_report {
+            None => w.u8(0),
+            Some(scope) => {
+                w.u8(1);
+                w.0.extend_from_slice(scope);
+            }
+        }
         w.done()
     }
 
@@ -1806,6 +1961,12 @@ impl Request {
         for _ in 0..n {
             upstream_roots.push(r.bytes()?.to_vec());
         }
+        // The run's GPU report's scope, appended in version 29 (D233): nonzero, and of a run
+        // that names its GPUs, as a managed launch's is (`PreparedBoot::with_gpu_report`).
+        let gpu_report = if r.flag()? { Some(r.array::<16>()?) } else { None };
+        if gpu_report.is_some_and(|scope| scope == [0; 16] || gpu_devices.is_empty()) {
+            return Err(WireError::Gpu);
+        }
         r.end()?;
         Ok(Request {
             image,
@@ -1823,6 +1984,7 @@ impl Request {
             gpu_devices,
             sign_ins,
             upstream_roots,
+            gpu_report,
         })
     }
 }
@@ -2268,6 +2430,11 @@ impl Started {
                 w.ip(Some(at.address.ip()));
                 w.u16(at.address.port());
                 w.0.extend_from_slice(&at.vm);
+                // Its waker's and its wake's, in version 30 (D252).
+                for held in [at.waker, at.wake] {
+                    w.ip(Some(held.ip()));
+                    w.u16(held.port());
+                }
             }
         }
         // The rate's period, appended in version 17 (D247).
@@ -2320,9 +2487,16 @@ impl Started {
                 tag: 0,
             })?;
             let port = r.u16()?;
+            let vm = r.array::<32>()?;
+            let mut held = |what| -> Result<SocketAddr, WireError> {
+                let ip = r.ip()?.ok_or(WireError::Tag { what, tag: 0 })?;
+                Ok(SocketAddr::new(ip, r.u16()?))
+            };
             Some(ControlAt {
                 address: SocketAddr::new(ip, port),
-                vm: r.array::<32>()?,
+                vm,
+                waker: held("an endpoint's waker")?,
+                wake: held("an endpoint's wake")?,
             })
         } else {
             None
@@ -2348,8 +2522,9 @@ impl Started {
 
 impl Request {
     /// What a warm run host is started with and holds each run it is handed to (D253's
-    /// pools): this request with its members' stages, its deadline and its control ask taken
-    /// out, what alone may differ between the runs of one microVM; none of a run's secrets
+    /// pools): this request with its members' stages, its deadline, its control ask and its GPU
+    /// report's scope (D233) taken out, what alone may differ between the runs of one microVM;
+    /// none of a run's secrets
     /// is in it. Everything else is the microVM's: its image, size, command, ports, network,
     /// shares, nesting, credential grants and GPUs.
     pub fn exemplar(&self) -> Request {
@@ -2357,6 +2532,7 @@ impl Request {
             members: Vec::new(),
             ready_by: None,
             control: None,
+            gpu_report: None,
             ..self.clone()
         }
     }
@@ -2907,17 +3083,7 @@ impl RunEnd {
 
     pub fn decode(payload: &[u8]) -> Result<RunEnd, WireError> {
         let mut r = Reader(payload);
-        let end = match r.u8()? {
-            0 => RunEnd::Exited(r.u32()?),
-            1 => RunEnd::Stopped,
-            2 => RunEnd::Failed(r.text()?),
-            tag => {
-                return Err(WireError::Tag {
-                    what: "a run's end",
-                    tag,
-                });
-            }
-        };
+        let end = r.run_end()?;
         r.end()?;
         Ok(end)
     }
@@ -3241,6 +3407,7 @@ mod tests {
             gpu_devices: Vec::new(),
             sign_ins: Vec::new(),
             upstream_roots: Vec::new(),
+            gpu_report: None,
         }
     }
 
@@ -3265,10 +3432,11 @@ mod tests {
             },
         ];
         assert_eq!(Request::decode(&credited.encode().unwrap()).unwrap(), credited);
-        // A placeholder is the grants' last field, before the sign-ins' count (version 24) and
-        // the member's MCP bridge's flag (version 25): a request cut in it is refused.
+        // A placeholder is the grants' last field, before the sign-ins' count (version 24), the
+        // member's MCP bridge's flag (version 25), the upstream roots' count (version 26) and
+        // the GPU report's flag (version 29): a request cut in it is refused.
         let bytes = credited.encode().unwrap();
-        assert!(Request::decode(&bytes[..bytes.len() - 1 - 4 - 1]).is_err());
+        assert!(Request::decode(&bytes[..bytes.len() - 1 - 4 - 1 - 4 - 1]).is_err());
         // Each member's working directory, or none, in the members' order (version 5),
         // whether its input is the orchestrator's (version 6), and its run-time arguments, none,
         // several, or an empty one among others (version 18).
@@ -3328,12 +3496,13 @@ mod tests {
         .unwrap();
         // ... the control ask's absence (version 15), the GPUs' count (version 16), the
         // member's arguments' count (version 18), the sign-ins' count (version 24), the
-        // member's MCP bridge (version 25) and the upstream roots' count (version 26) last.
+        // member's MCP bridge (version 25), the upstream roots' count (version 26) and the GPU
+        // report's flag (version 29) last.
         assert_eq!(
-            asked.get(asked.len() - 37..).unwrap(),
+            asked.get(asked.len() - 38..).unwrap(),
             [
                 1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0
+                0, 0, 0, 0, 0, 0, 0
             ],
             "appended: the grant's flag, the deadline's, the destinations kept (all), the one \
              member's working directory (none) and its input, the credential grants' count \
@@ -3341,7 +3510,8 @@ mod tests {
              are held apart (no, version 12), the control ask (none, version 15), the GPUs' \
              count (zero, version 16), the member's arguments' count (zero, version 18), then \
              the sign-ins' count (zero, version 24), then its MCP bridge (none, version 25), then \
-             the upstream roots' count (zero, version 26)"
+             the upstream roots' count (zero, version 26), then the GPU report's flag (none, \
+             version 29)"
         );
         // Destinations kept by name, the host itself among them (D236), and none.
         for destinations in [
@@ -3529,11 +3699,12 @@ mod tests {
         ));
         // A member's input flag, before the credential grants' count (version 8), its
         // terminal's flag (version 11) and the members' reach (version 12), that is no flag.
-        // One member, so its input is the twentieth byte from the end (the count's four, its
+        // One member, so its input is the twenty-sixth byte from the end (the count's four, its
         // terminal's one, the reach's flag, the control ask's, the GPUs' count, its arguments'
-        // count, the sign-ins' count, its MCP bridge and the upstream roots' count follow it).
+        // count, the sign-ins' count, its MCP bridge, the upstream roots' count and the GPU
+        // report's flag follow it).
         let mut bad = request().encode().unwrap();
-        let at = bad.len() - 25;
+        let at = bad.len() - 26;
         assert_eq!(
             bad[at], 1,
             "the member's input flag precedes the credentials' count"
@@ -3613,10 +3784,10 @@ mod tests {
             }
         }
         // The reach's flag, before the control ask's, the GPUs' count, the member's arguments'
-        // count, the sign-ins' count, the MCP bridges and the upstream roots' count where none is
-        // held apart.
+        // count, the sign-ins' count, the MCP bridges, the upstream roots' count and the GPU
+        // report's flag where none is held apart.
         let mut flag = held(None).encode().unwrap();
-        let at = flag.len() - 19;
+        let at = flag.len() - 20;
         flag[at] = 2;
         assert_eq!(
             Request::decode(&flag),
@@ -3631,8 +3802,9 @@ mod tests {
             .unwrap();
         // ... then the control ask's absence (version 15), the GPUs' count (version 16), the
         // one member's arguments' count (version 18), the sign-ins' count (version 24), its MCP
-        // bridge (version 25) and the upstream roots' count (version 26).
-        let at = kindless.len() - (1 + 4 + "helper".len() + 4 + 1 + 4 + 4 + 4 + 1 + 4);
+        // bridge (version 25), the upstream roots' count (version 26) and the GPU report's flag
+        // (version 29).
+        let at = kindless.len() - (1 + 4 + "helper".len() + 4 + 1 + 4 + 4 + 4 + 1 + 4 + 1);
         assert_eq!(kindless[at], MemberKind::Agent as u8);
         kindless[at] = 2;
         assert_eq!(
@@ -3645,7 +3817,7 @@ mod tests {
         // Held apart, with four billion members in a few bytes, in place of the reach's flag
         // and what follows it.
         let mut hostile = held(None).encode().unwrap();
-        hostile.truncate(hostile.len() - 15);
+        hostile.truncate(hostile.len() - 20);
         hostile.push(1);
         hostile.extend_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(Request::decode(&hostile), Err(WireError::Short));
@@ -3695,14 +3867,15 @@ mod tests {
             }
         }
         // The second member's one argument, "ü", last before the sign-ins' count (version 24),
-        // the MCP bridges and the upstream roots' count (version 26): its bytes made no UTF-8.
+        // the MCP bridges, the upstream roots' count (version 26) and the GPU report's flag
+        // (version 29): its bytes made no UTF-8.
         let mut bad = with(&["--resume"], &["ü"]).encode().unwrap();
-        let at = bad.len() - 4 - 2 - 4 - "ü".len();
+        let at = bad.len() - 1 - 4 - 2 - 4 - "ü".len();
         bad[at] = 0xff;
         assert_eq!(Request::decode(&bad), Err(WireError::Text));
         // The second member's count, before the sign-ins', said as four billion in no bytes.
         let mut hostile = with(&[], &[]).encode().unwrap();
-        hostile.truncate(hostile.len() - 4 - 2 - 4);
+        hostile.truncate(hostile.len() - 1 - 4 - 2 - 4);
         let at = hostile.len() - 4;
         hostile[at..].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(Request::decode(&hostile), Err(WireError::Short));
@@ -3805,6 +3978,18 @@ mod tests {
         v24.truncate(v24.len() - 1);
         v24[0] = 24;
         assert_eq!(Request::decode(&v24), Err(WireError::Version(24)));
+        // One of version 28, without its GPU report's scope: refused by its version (D233), so a
+        // run host never starts a GPU run whose orchestrator waits for a report none relays.
+        let mut v28 = request().encode().unwrap();
+        v28.truncate(v28.len() - 1);
+        v28[0] = 28;
+        assert_eq!(Request::decode(&v28), Err(WireError::Version(28)));
+        // One of version 29 asks as version 30 does, but its host tells its endpoint's address
+        // alone, where this side reads its waker's and its wake's after it: refused by its
+        // version (D252), so no orchestrator reads a `Started` laid out otherwise.
+        let mut v29 = request().encode().unwrap();
+        v29[0] = 29;
+        assert_eq!(Request::decode(&v29), Err(WireError::Version(29)));
         // One of version 13 reads a vCPU's unread guest time as free words
         // (guest-cpu-time-v1), and one of 19 carries every field version 20 does, but its
         // client ends the run at a lease its host asks: each refused by its version, before
@@ -3817,10 +4002,11 @@ mod tests {
         // The nesting flag, before the deadline's tag, the destinations', the one member's
         // working directory's and input's, the credential grants' count (version 8), the
         // member's terminal's (version 11), the members' reach (version 12), the control ask
-        // (version 15), the GPUs' count (version 16), its arguments' count (version 18) and the
-        // sign-ins' count (version 24): no flag.
+        // (version 15), the GPUs' count (version 16), its arguments' count (version 18), the
+        // sign-ins' count (version 24), its MCP bridge (version 25), the upstream roots' count
+        // (version 26) and the GPU report's flag (version 29): no flag.
         let mut flag = request().encode().unwrap();
-        let at = flag.len() - 25;
+        let at = flag.len() - 30;
         flag[at] = 2;
         assert_eq!(
             Request::decode(&flag),
@@ -3832,9 +4018,9 @@ mod tests {
         // The destinations' list, before the member's working directory and input, the
         // credential grants' count, the member's terminal, the members' reach, the control ask,
         // the GPUs' count, the member's arguments' count, the sign-ins' count, its MCP bridge and
-        // the upstream roots' count: no list of version 3's and on.
+        // the upstream roots' count and the GPU report's flag: no list of version 3's and on.
         let mut list = request().encode().unwrap();
-        let at = list.len() - 27;
+        let at = list.len() - 28;
         list[at] = 2;
         assert_eq!(
             Request::decode(&list),
@@ -4046,11 +4232,11 @@ mod tests {
         };
         assert_eq!(long.encode(), Err(WireError::TooLong));
         let mut bad = request().encode().unwrap();
-        let at = bad.len() - 20;
+        let at = bad.len() - 21;
         assert_eq!(
             bad[at], 0,
             "the member's terminal flag precedes the members' reach, the control ask, the GPUs, \
-             its arguments, the sign-ins, its MCP bridge and the upstream roots"
+             its arguments, the sign-ins, its MCP bridge, the upstream roots and the GPU report"
         );
         bad[at] = 2;
         assert_eq!(
@@ -4252,6 +4438,7 @@ mod tests {
             gpu_devices: Vec::new(),
             sign_ins: Vec::new(),
             upstream_roots: Vec::new(),
+            gpu_report: None,
         };
         let exemplar = full.exemplar();
         assert!(exemplar.members.is_empty() && exemplar.ready_by.is_none() && exemplar.control.is_none());
@@ -4296,6 +4483,82 @@ mod tests {
     /// why, the largest numbers a u64 holds. vCPUs out of index order, a part's unknown tag, a count
     /// past what the bytes left could hold, cut short or padded: refused, never read as a
     /// cost.
+    /// A run's end reads back with its final use (D260), each end's with every final use and
+    /// each reason for none, and a tag no version has, or bytes past it, refused.
+    #[test]
+    fn a_runs_end_reads_back_with_its_final_use() {
+        let read = FinalUse::Read(Microvm {
+            host: Ok(HostUse {
+                cpu_ns: 90,
+                resident_bytes: 4096,
+                footprint_bytes: 8192,
+            }),
+            guest: Ok(GuestTimes {
+                vcpus: vec![
+                    VcpuTime {
+                        index: 0,
+                        guest_ns: 50,
+                        unread: None,
+                    },
+                    VcpuTime {
+                        index: 1,
+                        guest_ns: 30,
+                        unread: Some(shards_abi::guest_time::Unread::Gone),
+                    },
+                ],
+                departed_ns: 0,
+            }),
+        });
+        let words = FinalUse::Read(Microvm {
+            host: Err("its VM process: denied".into()),
+            guest: Err("the microVM has not started".into()),
+        });
+        let mut uses = vec![read, words];
+        uses.extend(
+            [Unused::NotStarted, Unused::Killed, Unused::Untold]
+                .into_iter()
+                .chain(
+                    [
+                        UseBroken::Long,
+                        UseBroken::Text,
+                        UseBroken::Word,
+                        UseBroken::Guest,
+                        UseBroken::Host,
+                    ]
+                    .map(Unused::Broken),
+                )
+                .map(FinalUse::Unread),
+        );
+        for end in [RunEnd::Exited(3), RunEnd::Stopped, RunEnd::Failed("x".into())] {
+            for final_use in &uses {
+                let ended = RunEnded {
+                    end: end.clone(),
+                    final_use: final_use.clone(),
+                };
+                let bytes = ended.encode().unwrap();
+                assert_eq!(RunEnded::decode(&bytes), Ok(ended));
+                assert_eq!(
+                    RunEnded::decode(&[&bytes[..], &[0]].concat()),
+                    Err(WireError::Trailing)
+                );
+                assert_eq!(RunEnded::decode(&bytes[..bytes.len() - 1]), Err(WireError::Short));
+            }
+        }
+        // An end alone, as a host of version 27 said it, is short of its final use.
+        assert_eq!(
+            RunEnded::decode(&RunEnd::Stopped.encode().unwrap()),
+            Err(WireError::Short)
+        );
+        let tagged = |tail: &[u8]| RunEnded::decode(&[&[1u8][..], tail].concat());
+        assert!(matches!(tagged(&[2]), Err(WireError::Tag { tag: 2, .. })));
+        assert!(matches!(tagged(&[1, 4]), Err(WireError::Tag { tag: 4, .. })));
+        assert!(matches!(tagged(&[1, 3, 5]), Err(WireError::Tag { tag: 5, .. })));
+        assert!(
+            matches!(tagged(&[0, 0]), Err(WireError::Tag { tag: 0, .. })),
+            "no cost read"
+        );
+    }
+
     #[test]
     fn a_runs_microvm_reads_back_as_its_host_said_it() {
         let times = GuestTimes {
@@ -4429,6 +4692,7 @@ mod tests {
             gpu_devices: Vec::new(),
             sign_ins: Vec::new(),
             upstream_roots: Vec::new(),
+            gpu_report: None,
         }
     }
 
@@ -4463,18 +4727,29 @@ mod tests {
     }
 
     /// Step 11 (b), D252: a started run tells where its endpoint is bound and the microVM's own
-    /// key, which the controller pins; a run asked for no endpoint tells none.
+    /// key, which the controller pins, and (version 30) its waker's and its wake's addresses,
+    /// each read back by its name; a run asked for no endpoint tells none.
     #[test]
     fn a_started_run_tells_where_its_endpoint_is_and_its_vms_key() {
+        const {
+            assert!(
+                VERSION >= 30,
+                "the channel's version 30 carries the waker and the wake"
+            )
+        };
         for control in [
             None,
             Some(ControlAt {
                 address: "127.0.0.1:40123".parse().unwrap(),
                 vm: [3u8; 32],
+                waker: "127.0.0.1:50001".parse().unwrap(),
+                wake: "127.0.0.1:50002".parse().unwrap(),
             }),
             Some(ControlAt {
                 address: "[::1]:40123".parse().unwrap(),
                 vm: [4u8; 32],
+                waker: "[::1]:50001".parse().unwrap(),
+                wake: "[::1]:50002".parse().unwrap(),
             }),
         ] {
             let started = Started {
@@ -4484,8 +4759,40 @@ mod tests {
                 rate_period: std::time::Duration::from_millis(100),
                 from: StartedFrom::Restored,
             };
-            assert_eq!(Started::decode(&started.encode().unwrap()).unwrap(), started);
+            let read = Started::decode(&started.encode().unwrap()).unwrap();
+            assert_eq!(read, started);
+            if let Some(at) = read.control {
+                assert_eq!(at.sockets(), [at.address, at.waker, at.wake]);
+                assert!(at.waker.port() == 50001 && at.wake.port() == 50002, "{at:?}");
+            }
         }
+        // Each of the two cut short, or its address's tag none, is refused, never defaulted.
+        let started = Started {
+            members: Vec::new(),
+            published: Vec::new(),
+            control: Some(ControlAt {
+                address: "127.0.0.1:40123".parse().unwrap(),
+                vm: [3u8; 32],
+                waker: "127.0.0.1:50001".parse().unwrap(),
+                wake: "127.0.0.1:50002".parse().unwrap(),
+            }),
+            rate_period: std::time::Duration::from_millis(100),
+            from: StartedFrom::Restored,
+        };
+        let bytes = started.encode().unwrap();
+        // The wake's address (a tag, four octets and a port), then the period (8) and how it
+        // started (1), last.
+        let wake = bytes.len() - 9 - (1 + 4 + 2);
+        let waker = wake - (1 + 4 + 2);
+        assert_eq!(bytes[waker], 4);
+        assert_eq!(bytes[waker + 1..waker + 5], [127, 0, 0, 1]);
+        assert_eq!(bytes[wake + 5..wake + 7], 50002u16.to_be_bytes());
+        for (at, what) in [(waker, "an endpoint's waker"), (wake, "an endpoint's wake")] {
+            let mut none = bytes.clone();
+            none[at] = 0;
+            assert_eq!(Started::decode(&none), Err(WireError::Tag { what, tag: 0 }));
+        }
+        assert!(Started::decode(&bytes[..wake + 3]).is_err());
     }
 
     /// D232 through D231 (D234's `gpus=`): the GPUs a run names cross the image channel in
@@ -4510,9 +4817,12 @@ mod tests {
         let bytes = named.encode().unwrap();
         assert_eq!(Request::decode(&bytes).unwrap().gpu_devices, gpus);
         // The last identity's text, "metal:00000001000002a1", before the one member's arguments'
-        // count (version 18) and the sign-ins' (version 24), made one D232's grammar refuses.
+        // count (version 18), the sign-ins' (version 24), its MCP bridge (version 25), the
+        // upstream roots' count (version 26) and the GPU report's flag (version 29), made one
+        // D232's grammar refuses.
         let mut unnamed = bytes.clone();
-        let at = unnamed.len() - 1 - 4 - 4 - "metal:00000001000002a1".len();
+        let at = unnamed.len() - 1 - 4 - 1 - 4 - 4 - "metal:00000001000002a1".len();
+        assert_eq!(unnamed[at], b'm');
         unnamed[at] = b'x';
         assert_eq!(Request::decode(&unnamed), Err(WireError::Gpu));
         let twice = Request {
@@ -4520,6 +4830,44 @@ mod tests {
             ..request()
         };
         assert_eq!(Request::decode(&twice.encode().unwrap()), Err(WireError::Gpu));
+    }
+
+    /// D233 through D231: a run's GPU report's scope (version 29). Expect: a scope read back
+    /// whole, none as none; a zero scope, or one of a run that names no GPU, refused as a
+    /// managed launch's is; a request cut in it refused; and no warm host's exemplar keeps it.
+    #[test]
+    fn a_runs_gpu_report_scope_crosses_the_channel_with_its_gpus_alone() {
+        let gpus = vec![shards_abi::gpu::PhysicalGpu::MetalRegistry(7)];
+        let scoped = Request {
+            gpu_devices: gpus.clone(),
+            gpu_report: Some([3; 16]),
+            ..request()
+        };
+        let bytes = scoped.encode().unwrap();
+        assert_eq!(Request::decode(&bytes).unwrap(), scoped);
+        for cut in 1..=16 {
+            assert!(Request::decode(&bytes[..bytes.len() - cut]).is_err(), "cut {cut}");
+        }
+        let unscoped = Request {
+            gpu_devices: gpus.clone(),
+            ..request()
+        };
+        assert_eq!(
+            Request::decode(&unscoped.encode().unwrap()).unwrap().gpu_report,
+            None
+        );
+        let zero = Request {
+            gpu_report: Some([0; 16]),
+            ..scoped.clone()
+        };
+        assert_eq!(Request::decode(&zero.encode().unwrap()), Err(WireError::Gpu));
+        let gpuless = Request {
+            gpu_devices: Vec::new(),
+            ..scoped.clone()
+        };
+        assert_eq!(Request::decode(&gpuless.encode().unwrap()), Err(WireError::Gpu));
+        assert_eq!(scoped.exemplar().gpu_report, None);
+        assert_eq!(scoped.exemplar().gpu_devices, gpus);
     }
 
     /// A run's upstream roots (version 26, D242). Expect: each DER read back, in order; a request
@@ -4584,9 +4932,10 @@ mod tests {
             assert!(Request::decode(&bytes[..bytes.len() - cut]).is_err(), "cut {cut}");
         }
         // The second sign-in's CLI, its code after its name, made one no version has; the one
-        // member's MCP bridge's flag (version 25) and the upstream roots' count (version 26) after it.
+        // member's MCP bridge's flag (version 25), the upstream roots' count (version 26) and
+        // the GPU report's flag (version 29) after it.
         let mut cli = bytes.clone();
-        let at = cli.len() - (4 + "chatgpt.com".len() + 4 + "api.openai.com".len() + 4 + 1 + 1 + 1 + 4);
+        let at = cli.len() - (4 + "chatgpt.com".len() + 4 + "api.openai.com".len() + 4 + 1 + 1 + 1 + 4 + 1);
         assert_eq!(cli[at], Cli::Codex.code());
         cli[at] = 9;
         assert!(matches!(Request::decode(&cli), Err(WireError::Tag { .. })));

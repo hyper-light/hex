@@ -21,22 +21,24 @@ use crate::Conn;
 /// `conn` as a local stream socket: the owner's end, its bytes the connection's. Its reads end cleanly whatever ended
 /// the connection; [`bridged`]'s tell a cut.
 pub fn socket(conn: Conn) -> io::Result<Local> {
-    bridged(conn).map(Bridged::into_socket)
+    bridged(conn).and_then(Bridged::into_socket)
 }
 
-/// `conn` as the owner's end of a bridge that tells a cut.
+/// `conn` as the owner's end of a bridge that tells a cut. Its two threads share the pair's other end, one reading it
+/// and one writing it: no duplicate, which Windows makes inheritable (the review's D-5).
 pub(crate) fn bridged(conn: Conn) -> io::Result<Bridged> {
     let (owner, ours) = pair()?;
     let conn = Arc::new(conn);
+    let ours = Arc::new(ours);
     let cut = Cut::default();
-    let up = (Arc::clone(&conn), ours.try_clone()?);
+    let up = (Arc::clone(&conn), Arc::clone(&ours));
     std::thread::Builder::new()
         .name("hex-quic-up".to_owned())
-        .spawn(move || upward(&up.0, up.1))?;
+        .spawn(move || upward(&up.0, &up.1))?;
     let recorded = cut.clone();
     std::thread::Builder::new()
         .name("hex-quic-down".to_owned())
-        .spawn(move || downward(&conn, ours, &recorded))?;
+        .spawn(move || downward(&conn, &ours, &recorded))?;
     Ok(Bridged::new(owner, cut))
 }
 
@@ -53,11 +55,11 @@ fn wiped(conn: &Conn, buf: &mut [u8], n: usize) {
 
 /// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
 /// [`downward`] then ends its reading.
-fn upward(conn: &Conn, mut from: Local) {
+fn upward(conn: &Conn, mut from: &Local) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         #[cfg(target_os = "macos")]
-        if hex_client::wait_readable(std::os::fd::AsFd::as_fd(&from)).is_err() {
+        if hex_client::wait_readable(std::os::fd::AsFd::as_fd(from)).is_err() {
             conn.reset(Why::Gone);
             return;
         }
@@ -86,7 +88,7 @@ fn upward(conn: &Conn, mut from: Local) {
 /// What the peer sends, to the owner; its End is the owner's end of input, and a cut its cut, recorded before the
 /// owner's socket ends. It stays until the connection is done both ways or gone, so the connection's end ends
 /// [`upward`] too, whichever half ended first.
-fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
+fn downward(conn: &Conn, mut to: &Local, cut: &Cut) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         match conn.read(&mut buf, None) {
@@ -102,13 +104,13 @@ fn downward(conn: &Conn, mut to: Local, cut: &Cut) {
                 wiped(conn, &mut buf, n);
                 if wrote.is_err() {
                     conn.reset(Why::Gone);
-                    end(&to);
+                    end(to);
                     return;
                 }
             }
             Err(e) => {
                 cut.record(&e);
-                end(&to);
+                end(to);
                 return;
             }
         }

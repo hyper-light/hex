@@ -2,7 +2,7 @@
 //! to callers that don't link Hex (decision 3 of docs/design/runtime-architecture.md):
 //!
 //!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
-//!            [--quic <address> --credentials <dir> [--staged <dir>]]
+//!            [--quic <address> --credentials <dir> [--staged <dir>]] [--capacity-view]
 //!   hex node enroll --name <name> --credentials <dir>
 //!   hex node links --socket <path>
 //!
@@ -152,9 +152,9 @@ fn link_line(link: &hex_core::wire::Link) -> String {
 }
 
 #[cfg(target_os = "linux")]
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--quic <address> --credentials <dir> [--staged <dir>]] | hex node --descriptors [--state <dir>] | hex node enroll --name <name> --credentials <dir> | hex node links --socket <path>";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--quic <address> --credentials <dir> [--staged <dir>]] [--capacity-view] | hex node --descriptors [--state <dir>] | hex node enroll --name <name> --credentials <dir> | hex node links --socket <path>";
 #[cfg(not(target_os = "linux"))]
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--quic <address> --credentials <dir>] | hex node enroll --name <name> --credentials <dir> | hex node links --socket <path>";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--quic <address> --credentials <dir>] [--capacity-view] | hex node enroll --name <name> --credentials <dir> | hex node links --socket <path>";
 
 /// `hex node --descriptors [--state <dir>]`: what a node of this process's owner, its state under `state` (`/` where
 /// none is named), running VM boxes where a backend is configured as `hex node` reads it, needs of its soft
@@ -190,6 +190,10 @@ struct Args {
     state: PathBuf,
     box_root: Option<PathBuf>,
     quic: Option<QuicArgs>,
+    /// Whether the machine's capacity view serves this node's machine, a keeper its scheduler's capacity lane keeps
+    /// (`--capacity-view`; docs/design/capacity-view.md CV10's configured form; the review's A-10): its charge learner
+    /// then learns nothing until that keeper has spoken since the node started.
+    capacity_view: bool,
     #[cfg(all(target_os = "linux", debug_assertions))]
     crash_at: Option<CrashPoint>,
 }
@@ -207,10 +211,18 @@ struct QuicArgs {
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
     let (mut quic, mut credentials, mut staged) = (None, None, None);
+    let mut capacity_view = false;
     #[cfg(all(target_os = "linux", debug_assertions))]
     let mut crash_at = None;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        if flag == "--capacity-view" {
+            if capacity_view {
+                return Err(format!("{flag} is given twice\n{USAGE}"));
+            }
+            capacity_view = true;
+            continue;
+        }
         if flag == "--quic" {
             let value = rest
                 .next()
@@ -277,6 +289,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
         quic,
+        capacity_view,
         #[cfg(all(target_os = "linux", debug_assertions))]
         crash_at,
     })
@@ -438,7 +451,10 @@ fn tell_the_service_manager() -> std::io::Result<()> {
 #[cfg(any(target_os = "macos", windows))]
 fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     node: &Arc<hex_node::recorded::Recorded<R>>,
+    capacity_view: bool,
 ) {
+    // Whether a capacity view serves this machine, as `--capacity-view` says (the review's A-10): set before it starts.
+    node.set_capacity_view(capacity_view);
     let mut err = std::io::stderr().lock();
     match node.start_charges() {
         Ok((window, unheld)) => {
@@ -548,7 +564,8 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     // What a label whose module the host's kernel doesn't run does: its owner's word, else skipped with a
     // warning.
     let node = node
-        .with_lsm(hex_runtime::linux::oci::lsm::Policy::from_env().map_err(|e| failed(e.into()))?);
+        .with_lsm(hex_runtime::linux::oci::lsm::Policy::from_env().map_err(|e| failed(e.into()))?)
+        .with_capacity_view(args.capacity_view);
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),
@@ -705,7 +722,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             .map_err(failed)?;
             boot_under_shards_init(&node, &fit).map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
-            charges(&node);
+            charges(&node, args.capacity_view);
             hosted_fit = Some(fit);
             node
         }
@@ -738,7 +755,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                 .map_err(failed)?;
             node.recover_guest_backing().map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
-            charges(&node);
+            charges(&node, args.capacity_view);
             node
         }
         None => {
@@ -874,7 +891,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             .map_err(failed)?;
             boot_under_shards_init(&node, &fit).map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
-            charges(&node);
+            charges(&node, args.capacity_view);
             hosted_fit = Some(fit);
             node
         }
@@ -895,7 +912,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                 .map_err(failed)?;
             node.recover_guest_backing().map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
-            charges(&node);
+            charges(&node, args.capacity_view);
             node
         }
         None => {
@@ -1205,6 +1222,19 @@ mod tests {
                 "{value}: {why}"
             );
         }
+    }
+
+    /// The review's A-10 (AC-T7.4.1; docs/design/capacity-view.md CV10's configured form): `--capacity-view` says a capacity
+    /// view serves the node's machine, a word of no value. Do parse without it, with it, and with it twice. Expect no
+    /// view, a view, then a refusal naming it given twice.
+    #[test]
+    fn a10_capacity_view_says_a_keeper_serves_the_machine() {
+        assert!(!parse(&args(&[])).unwrap().capacity_view);
+        assert!(parse(&args(&["--capacity-view"])).unwrap().capacity_view);
+        let why = parse(&args(&["--capacity-view", "--capacity-view"]))
+            .err()
+            .unwrap();
+        assert!(why.starts_with("--capacity-view is given twice"), "{why}");
     }
 
     /// HEX-QUIC-24 (docs/design/hex-quic.md Q9), as parsed: `--quic` asks for a listener only with the enrollment it

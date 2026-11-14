@@ -603,7 +603,7 @@ impl Node {
         for (id, record) in &records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             let handoff = crate::recorded::preflight_handoff_turns(
                 &self.turns,
                 &self.store,
@@ -700,7 +700,7 @@ impl Node {
         for (id, record) in &records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             // A retired box's VM is gone with its retirement (joint plan step 14): no native scope to adopt.
             if record.retired {
                 continue;
@@ -878,8 +878,12 @@ impl Node {
         let Some(record) = self.store.read_lifecycle(id)? else {
             return Ok(None);
         };
-        self.backend(record.spec.backend_class()?)
-            .map_err(|_| uncertain(id, "this node has no backend for its record's class"))
+        self.backend(record.spec.backend_class()?).map_err(|why| {
+            uncertain(
+                id,
+                &format!("this node has no backend for its record's class: {why}"),
+            )
+        })
     }
 
     pub(super) fn initialized_classes(&self) -> Vec<Class> {
@@ -901,7 +905,7 @@ impl Node {
         for (id, record) in records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             if record.spec.id != *id {
                 return Err(uncertain(id, "its record names another box"));
             }
@@ -914,8 +918,12 @@ impl Node {
             {
                 return Err(uncertain(id, "its record holds no allocation for its VM"));
             }
-            self.backend(record.spec.backend_class()?)
-                .map_err(|_| uncertain(id, "this node has no backend for its record's class"))?;
+            self.backend(record.spec.backend_class()?).map_err(|why| {
+                uncertain(
+                    id,
+                    &format!("this node has no backend for its record's class: {why}"),
+                )
+            })?;
         }
         let mut summary = RecoverySummary::default();
         summary
@@ -933,14 +941,17 @@ impl Node {
         for (id, record) in records {
             let record = record
                 .as_ref()
-                .map_err(|_| uncertain(id, "its record can't be read"))?;
+                .map_err(|why| uncertain(id, &format!("its record can't be read: {why}")))?;
             // A retired box ran nothing past its retirement and is kept for its owner's delete (joint plan step 14).
             if record.retired {
                 continue;
             }
-            let Some(backend) = self
-                .backend(record.spec.backend_class()?)
-                .map_err(|_| uncertain(id, "this node has no backend for its record's class"))?
+            let Some(backend) = self.backend(record.spec.backend_class()?).map_err(|why| {
+                uncertain(
+                    id,
+                    &format!("this node has no backend for its record's class: {why}"),
+                )
+            })?
             else {
                 continue;
             };

@@ -1870,12 +1870,22 @@ pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
 /// run-out told once, naming `party`, and the group followed by its members' own ends ([`Emptying`]) however late, never
 /// refused at a time.
 fn end_followed(pgid: i32, party: &[Piece<'_>]) -> Result<(), Refusal> {
-    let mut emptying = Emptying::watching(pgid)?;
+    let mut emptying = Emptying::watching(Whose::Group(pgid))?;
     let killed = Instant::now();
-    kill_group(pgid)?;
+    emptying.kill()?;
     crate::emptying::followed(&crate::emptying::EMPTYING, killed, party, |slice| {
         emptying.within(slice)
     })
+}
+
+/// Whether box user `uid`, its processes killed, holds none running within `slice` (`Duration::MAX`: until it holds
+/// none): the box-user mode's emptying, the box helper's ([`super::helper_daemon::Privileged::empties_within`]),
+/// followed as a killed group's is ([`Emptying`]). Its running processes are watched, then killed again, so none a kill
+/// before may have missed (one forked as the user was killed) runs on unkilled.
+pub(super) fn user_empties_within(uid: u32, slice: Duration) -> Result<bool, Refusal> {
+    let mut emptying = Emptying::watching(Whose::User(uid))?;
+    emptying.kill()?;
+    emptying.within(slice)
 }
 
 /// Sends group `pgid` KILL as far as this node may (killpg). XNU's `killpg1` (`bsd/kern/kern_sig.c`) passes a group's
@@ -1895,25 +1905,34 @@ fn kill_group(pgid: i32) -> Result<(), Refusal> {
     }
 }
 
-/// A killed box's group as its emptying's wait follows it (decision 9; the review's E-12): each member running, watched
-/// for its end and its forks on a kqueue of the wait's own (`EVFILT_PROC` with `NOTE_EXIT | NOTE_FORK`, which XNU
-/// attaches to any process the caller sees), and the group listed again only once no watched member is left or one has
-/// forked: the wait rests on the members' own ends, never on a spin listing the group again and again.
+/// Whose processes a killed box's emptying follows: its process group (the rootless mode), or its pool user, every
+/// process running as that user (the box-user mode, the helper's: a member that left the group by `setsid` is still its
+/// user's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    Group(i32),
+    User(u32),
+}
+
+/// A killed box as its emptying's wait follows it (decision 9; the review's E-12): each of its processes running,
+/// watched for its end and its forks on a kqueue of the wait's own (`EVFILT_PROC` with `NOTE_EXIT | NOTE_FORK`, which XNU
+/// attaches to any process the caller sees), and the box listed again only once no watched process is left or one has
+/// forked: the wait rests on the members' own ends, never on a spin listing the box again and again.
 struct Emptying {
-    pgid: i32,
+    whose: Whose,
     kq: Kqueue,
     /// The members watched and not yet seen to end, in order.
     watched: Vec<i32>,
-    /// A watched member forked since the group was last listed: its child is one more to end.
+    /// A watched member forked since the box was last listed: its child is one more to end.
     forked: bool,
-    /// The last listing found no member running: one more that finds none says the group is empty.
+    /// The last listing found no member running: one more that finds none says the box is empty.
     quiet: bool,
-    /// The group's listing, with room for every process the kernel holds.
+    /// The box's listing, with room for every process the kernel holds.
     pids: Vec<i32>,
     events: Vec<Event>,
 }
 
-/// What one listing of a killed group found: how many members it read running, and whether any of them wasn't watched
+/// What one listing of a killed box found: how many members it read running, and whether any of them wasn't watched
 /// before.
 struct Listed {
     running: usize,
@@ -1921,29 +1940,44 @@ struct Listed {
 }
 
 impl Emptying {
-    /// Group `pgid`, each member running now watched, before its kill, so none ends unseen.
-    fn watching(pgid: i32) -> Result<Self, Refusal> {
+    /// Box `whose`, each member running now watched, before its kill, so none ends unseen.
+    fn watching(whose: Whose) -> Result<Self, Refusal> {
         let mut emptying = Self {
-            pgid,
-            kq: Kqueue::new().map_err(|e| Refusal::os("making a group's emptying kqueue", e))?,
+            whose,
+            kq: Kqueue::new().map_err(|e| Refusal::os("making a box's emptying kqueue", e))?,
             watched: Vec::new(),
             forked: false,
             quiet: false,
-            pids: sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?,
+            pids: sys::listing().map_err(|e| Refusal::os("listing a box's members", e))?,
             events: Vec::new(),
         };
         emptying.watch_running()?;
         Ok(emptying)
     }
 
-    /// Lists the group and watches each member running that isn't watched yet. A member is watched once a read after
-    /// its watch's attach still finds it running in the group: XNU drains a process's references (`proc_refdrain`),
-    /// which the attach and the read take, before it posts `NOTE_EXIT` (`proc_exit`, `bsd/kern/kern_exit.c`), so a
-    /// member read running after its attach posts its end to the watch; one read ended, gone or out of the group by then
-    /// may have posted it before, and is left out.
+    /// Kills what of the box runs: its group (killpg, [`kill_group`]), or its user's processes
+    /// ([`super::helper_daemon::kill_user`], as root).
+    fn kill(&self) -> Result<(), Refusal> {
+        match self.whose {
+            Whose::Group(pgid) => kill_group(pgid),
+            Whose::User(uid) => super::helper_daemon::kill_user(uid, Signal::KILL.number())
+                .map(|_| ())
+                .map_err(|e| Refusal::os("killing a box user's processes", e)),
+        }
+    }
+
+    /// Lists the box and watches each member running that isn't watched yet. A member is watched once a read after its
+    /// watch's attach still finds it running in the box: XNU drains a process's references (`proc_refdrain`), which the
+    /// attach and the read take, before it posts `NOTE_EXIT` (`proc_exit`, `bsd/kern/kern_exit.c`), so a member read
+    /// running after its attach posts its end to the watch; one read ended, gone or out of the box by then (another
+    /// group, or another user: a set-user-ID program it ran) may have posted it before, or is no longer the box's to
+    /// wait for, and is left out.
     fn watch_running(&mut self) -> Result<Listed, Refusal> {
-        sys::group(self.pgid, &mut self.pids)
-            .map_err(|e| Refusal::os("listing a box's group", e))?;
+        match self.whose {
+            Whose::Group(pgid) => sys::group(pgid, &mut self.pids),
+            Whose::User(uid) => sys::user_pids(uid, &mut self.pids),
+        }
+        .map_err(|e| Refusal::os("listing a box's members", e))?;
         self.watched
             .try_reserve(self.pids.len())
             .map_err(|_| super::native_allocation(self.pids.len()))?;
@@ -1968,33 +2002,46 @@ impl Emptying {
             let gone = self
                 .kq
                 .watch_one(pid, 0, false)
-                .map_err(|e| Refusal::os("watching a killed group's member", e))?;
+                .map_err(|e| Refusal::os("watching a killed box's member", e))?;
             if gone {
                 continue;
             }
-            let in_group = sys::group_of(pid)
-                .map_err(|e| Refusal::os("reading a killed group's member's group", e))?
-                == Some(self.pgid);
-            if running(pid)? && in_group {
+            if running(pid)? && self.holds(pid)? {
                 self.watched.push(pid);
             } else {
                 self.kq
                     .unwatch(pid)
-                    .map_err(|e| Refusal::os("unwatching a killed group's member", e))?;
+                    .map_err(|e| Refusal::os("unwatching a killed box's member", e))?;
             }
         }
         self.watched.sort_unstable();
         Ok(listed)
     }
 
-    /// Whether the group empties within `slice` (`Duration::MAX`: until it does): each watched member's end taken as the
-    /// kernel posts it, the group listed again once none is left watched or one forked, a member running that wasn't
-    /// watched before (forked as the group was killed, so no kill may have reached it) killed with the group again, and
-    /// the group empty once two listings in a row find no member running (a child forked as the first was read is in the
+    /// Whether process `pid` is still the box's: in its group, or running as its user.
+    fn holds(&self, pid: i32) -> Result<bool, Refusal> {
+        Ok(match self.whose {
+            Whose::Group(pgid) => {
+                sys::group_of(pid).map_err(|e| Refusal::os("reading a member's group", e))?
+                    == Some(pgid)
+            }
+            Whose::User(uid) => {
+                sys::uid_of(pid).map_err(|e| Refusal::os("reading a member's user", e))?
+                    == Some(uid)
+            }
+        })
+    }
+
+    /// Whether the box empties within `slice` (`Duration::MAX`: until it does): each watched member's end taken as the
+    /// kernel posts it, the box listed again once none is left watched or one forked, a member running that wasn't
+    /// watched before (forked as the box was killed, so no kill may have reached it) killed with the box again, and the
+    /// box empty once two listings in a row find no member running (a child forked as the first was read is in the
     /// second).
     fn within(&mut self, slice: Duration) -> Result<bool, Refusal> {
         #[cfg(test)]
-        if !crate::emptying::hold::lets_empty(&self.pgid.to_string(), slice) {
+        if let Whose::Group(pgid) = self.whose
+            && !crate::emptying::hold::lets_empty(&pgid.to_string(), slice)
+        {
             return Ok(false);
         }
         let by = Instant::now().checked_add(slice);
@@ -2011,7 +2058,7 @@ impl Emptying {
                 }
                 self.quiet = false;
                 if listed.new {
-                    kill_group(self.pgid)?;
+                    self.kill()?;
                 }
                 if self.watched.is_empty() {
                     continue;
@@ -2026,7 +2073,7 @@ impl Emptying {
             };
             self.kq
                 .wait(None, left, &mut self.events)
-                .map_err(|e| Refusal::os("waiting on a killed group's members' ends", e))?;
+                .map_err(|e| Refusal::os("waiting on a killed box's members' ends", e))?;
             for event in &self.events {
                 match *event {
                     Event::Exit { pid, .. } => forget(&mut self.watched, pid),
@@ -3346,7 +3393,7 @@ mod emptying_tests {
             .spawn()
             .expect("start cat in a group of its own");
         let pgid = i32::try_from(cat.id()).unwrap();
-        let mut emptying = Emptying::watching(pgid).expect("watch the group");
+        let mut emptying = Emptying::watching(Whose::Group(pgid)).expect("watch the group");
         assert_eq!(emptying.within(Duration::ZERO), Ok(false));
         drop(cat.stdin.take());
         assert_eq!(emptying.within(Duration::MAX), Ok(true));

@@ -439,7 +439,8 @@ impl Relay {
                 Request::Call(
                     Call::Exec { streams, .. }
                     | Call::Run { streams, .. }
-                    | Call::Member { streams, .. },
+                    | Call::Member { streams, .. }
+                    | Call::Mcp { streams, .. },
                 ),
             )) => Some((header, streams)),
             _ => None,

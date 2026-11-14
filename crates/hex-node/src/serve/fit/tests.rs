@@ -61,8 +61,10 @@ fn a_fitted_nodes_terms_are_within_its_descriptors_at_the_most_places_that_fit()
 }
 
 /// D251's admission comes from the node's own budgets: a hosted VM's lanes are its two control connections and, for
-/// each program place, its three streams and its box's staging connection, two descriptors each, with its
-/// controller's two. Do: read the lanes and the hosted term at 10 places. Expect: 42 lanes, 86 descriptors.
+/// each program place, its three streams and its box's staging connection, with its controller's two descriptors. Each
+/// lane holds what `hex_client::guest::lanes` counts and its tests hold to the real descriptors (the review's D-6): its
+/// socket pair's two ends, a control connection's as every other's (the review's D-5). Do: read the lanes and the
+/// hosted term at 10 places. Expect: 42 lanes, 86 descriptors.
 #[test]
 fn a_hosted_vms_lanes_are_its_control_connections_and_four_for_each_place() {
     assert_eq!(lanes(10), 2 + 10 * 4);

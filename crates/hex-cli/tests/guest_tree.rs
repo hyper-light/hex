@@ -223,6 +223,10 @@ mod local {
     struct InProcess(PathBuf);
 
     impl Link for InProcess {
+        fn lends_identity(&self) -> bool {
+            false
+        }
+
         fn dial(&self, _port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
             let (near, far) = std::os::unix::net::UnixStream::pair()
                 .map_err(|e| Refusal::os("pairing a staging socket", e))?;
