@@ -87,6 +87,14 @@ struct Slot {
     route: Option<hex_api::RouteReceipt>,
     keeper: KeeperHold,
     state: SlotState,
+    /// A run's box's claim on its removal, carried from its making ([`crate::run::Claim`]); none for any other box.
+    run: Option<Arc<crate::run::Claim>>,
+}
+
+impl Slot {
+    fn carries(&self, claim: &Arc<crate::run::Claim>) -> bool {
+        self.run.as_ref().is_some_and(|run| Arc::ptr_eq(run, claim))
+    }
 }
 
 impl Slot {
@@ -500,6 +508,18 @@ impl Holding {
         marker: Option<PathBuf>,
         route: Option<hex_api::RouteReceipt>,
     ) -> Result<(), Refusal> {
+        self.reserve_with(id, devices, marker, route, None)
+    }
+
+    /// [`Holding::reserve`] of a box that carries `run`, its removal's claim as a run's box, from its making.
+    fn reserve_with(
+        &self,
+        id: OwnerRef<'_>,
+        devices: &[DeviceId],
+        marker: Option<PathBuf>,
+        route: Option<hex_api::RouteReceipt>,
+        run: Option<Arc<crate::run::Claim>>,
+    ) -> Result<(), Refusal> {
         let key = id.try_owned()?;
         let owned = copy_devices(devices)?;
         let mut selected = copy_devices(devices)?;
@@ -544,6 +564,7 @@ impl Holding {
                     route,
                     keeper: KeeperHold::Unheld,
                     state: SlotState::Creating,
+                    run,
                 },
             ),
         );
@@ -1019,17 +1040,35 @@ impl Holding {
     /// Keep the slot through every external cleanup operation; only an actual successful removal
     /// releases claims. Concurrent cancellation requests never remove a creator's slot underneath it.
     fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.remove_using(id, oci::end)
+        self.remove_using(id, oci::end, None)
+    }
+
+    /// Removes run box `id` where it still carries `claim`, its removal's claimer's (the run's end or a delete), as
+    /// [`Holding::remove`] removes any box: its slot kept, so a delete beside it waits for the claimer's word and no box
+    /// takes its id meanwhile. A box under the id that carries no such claim is another, which this touches not: the
+    /// claimer's box is gone.
+    fn remove_run(&self, id: &BoxId, claim: &Arc<crate::run::Claim>) -> Result<(), Refusal> {
+        self.remove_using(id, oci::end, Some(claim))
     }
 
     fn remove_using(
         &self,
         id: &BoxId,
         end: impl FnOnce(&Path) -> Result<(), Refusal>,
+        carrying: Option<&Arc<crate::run::Claim>>,
     ) -> Result<(), Refusal> {
         let (removal, marker) = {
             let mut boxes = self.boxes()?;
-            let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
+            let at = match (slot_index(&boxes, id), carrying) {
+                (Ok(at), Some(claim))
+                    if !boxes.get(at).is_some_and(|(_, slot)| slot.carries(claim)) =>
+                {
+                    return Ok(());
+                }
+                (Ok(at), _) => at,
+                (Err(_), Some(_)) => return Ok(()),
+                (Err(_), None) => return Err(Refusal::NoSuchBox(id.clone())),
+            };
             let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
             let removal = match &slot.state {
                 SlotState::Creating => {
@@ -1709,6 +1748,80 @@ impl WinRuntime {
         self.holding.drop_from_keeper(id)
     }
 
+    /// Makes box `spec`, a run's carrying `run`, its removal's claim, from its making ([`crate::run::Claim`]).
+    fn create_with(
+        &self,
+        spec: BoxSpec,
+        run: Option<&Arc<crate::run::Claim>>,
+    ) -> Result<BoxInfo, Refusal> {
+        self.check_native_spec(&spec)?;
+        // This ordinary native route advertises legacy identity cost (None). Managed VM launches
+        // enter the canonical Books transaction and configure their explicit allocation instead.
+        if spec.allocation.is_some() {
+            return Err(Refusal::Invalid {
+                what: "native runtime allocation",
+                why: copy_text("this ordinary native route advertises identity cost")?,
+            });
+        }
+        if matches!(spec.class, ClassSpec::Process) {
+            spec.check_no_devices("windows process")?;
+        }
+        // Refuse invalid/missing/native-incompatible bindings before taking a slot or creating jobs.
+        self.bindings(&spec)?;
+        let container = if matches!(spec.class, ClassSpec::Process) {
+            None
+        } else {
+            Some(self.container(&spec)?)
+        };
+        let marker = if matches!(spec.class, ClassSpec::Process) {
+            None
+        } else {
+            Some(self.marker(&spec.id)?)
+        };
+        if marker.as_ref().is_some_and(|path| path.exists()) {
+            return Err(Refusal::Exists(spec.id));
+        }
+        let physical_id = spec.id.try_clone()?;
+        self.holding.reserve_with(
+            OwnerRef::Box(&spec.id),
+            &spec.devices,
+            marker,
+            spec.route,
+            run.map(Arc::clone),
+        )?;
+        let held = match &spec.class {
+            ClassSpec::Process => match self.job_name(&spec.id) {
+                Some(name) => {
+                    JobBox::create_named(physical_id, &spec.bounds, self.processors, &name)
+                }
+                None => JobBox::create(physical_id, &spec.bounds, self.processors),
+            }
+            .and_then(native_held),
+            _ => match container.as_ref() {
+                Some(container) => self
+                    .create_oci(&spec, container)
+                    .map(|boxed| Held::Oci(Arc::new(boxed))),
+                None => Err(inconsistent_slots()),
+            },
+        };
+        if held.is_err() && matches!(spec.class, ClassSpec::Process) {
+            self.holding.unmade(&spec.id)?;
+            return held.and_then(|boxed| self.info(&boxed));
+        }
+        if let Err(error) = held.as_ref()
+            && !spec.devices.is_empty()
+        {
+            self.holding.preparation_failed(&spec.id)?;
+            return match self.holding.remove(&spec.id) {
+                Ok(()) => held.and_then(|boxed| self.info(&boxed)),
+                Err(cleanup) => Err(Refusal::Broken(format!(
+                    "native preparation failed ({error}); owned scratch cleanup remains pending ({cleanup})"
+                ))),
+            };
+        }
+        self.finish_make(&spec.id, held)
+    }
+
     fn get(&self, id: &BoxId) -> Result<Held, Refusal> {
         let boxes = self.boxes()?;
         let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
@@ -2044,67 +2157,7 @@ impl Runtime for WinRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        self.check_native_spec(&spec)?;
-        // This ordinary native route advertises legacy identity cost (None). Managed VM launches
-        // enter the canonical Books transaction and configure their explicit allocation instead.
-        if spec.allocation.is_some() {
-            return Err(Refusal::Invalid {
-                what: "native runtime allocation",
-                why: copy_text("this ordinary native route advertises identity cost")?,
-            });
-        }
-        if matches!(spec.class, ClassSpec::Process) {
-            spec.check_no_devices("windows process")?;
-        }
-        // Refuse invalid/missing/native-incompatible bindings before taking a slot or creating jobs.
-        self.bindings(&spec)?;
-        let container = if matches!(spec.class, ClassSpec::Process) {
-            None
-        } else {
-            Some(self.container(&spec)?)
-        };
-        let marker = if matches!(spec.class, ClassSpec::Process) {
-            None
-        } else {
-            Some(self.marker(&spec.id)?)
-        };
-        if marker.as_ref().is_some_and(|path| path.exists()) {
-            return Err(Refusal::Exists(spec.id));
-        }
-        let physical_id = spec.id.try_clone()?;
-        self.holding
-            .reserve(OwnerRef::Box(&spec.id), &spec.devices, marker, spec.route)?;
-        let held = match &spec.class {
-            ClassSpec::Process => match self.job_name(&spec.id) {
-                Some(name) => {
-                    JobBox::create_named(physical_id, &spec.bounds, self.processors, &name)
-                }
-                None => JobBox::create(physical_id, &spec.bounds, self.processors),
-            }
-            .and_then(native_held),
-            _ => match container.as_ref() {
-                Some(container) => self
-                    .create_oci(&spec, container)
-                    .map(|boxed| Held::Oci(Arc::new(boxed))),
-                None => Err(inconsistent_slots()),
-            },
-        };
-        if held.is_err() && matches!(spec.class, ClassSpec::Process) {
-            self.holding.unmade(&spec.id)?;
-            return held.and_then(|boxed| self.info(&boxed));
-        }
-        if let Err(error) = held.as_ref()
-            && !spec.devices.is_empty()
-        {
-            self.holding.preparation_failed(&spec.id)?;
-            return match self.holding.remove(&spec.id) {
-                Ok(()) => held.and_then(|boxed| self.info(&boxed)),
-                Err(cleanup) => Err(Refusal::Broken(format!(
-                    "native preparation failed ({error}); owned scratch cleanup remains pending ({cleanup})"
-                ))),
-            };
-        }
-        self.finish_make(&spec.id, held)
+        self.create_with(spec, None)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -2150,14 +2203,17 @@ impl Runtime for WinRuntime {
     }
 
     /// A run's box goes once its program ends (decision 7): a thread of the run's own waits on the program's
-    /// process handle and removes the box through the delete's own path ([`Holding::remove`], its job and the
+    /// process handle and removes the box through the delete's own path ([`Holding::remove_run`], its job and the
     /// keeper's handle with it), whether or not its caller still holds the run, and only then gives the caller
-    /// the end. Its kill is the box's KILL, the box's job holding that program alone.
+    /// the end. Its kill is the box's KILL, the box's job holding that program alone. The box carries its removal's
+    /// claim from its making, held here until it is whole and its program watched, so no delete moves it meanwhile,
+    /// and it is removed once, by the run's end or a delete, never after another box has taken its id (runtime goal 7).
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         spec.check_no_devices("windows")?;
         spec.check_run()?;
         let id = spec.id.clone();
-        self.create(spec)?;
+        let (claim, making) = crate::run::Claim::making();
+        self.create_with(spec, Some(&claim))?;
         let begun = self.exec(&id, program, stdio).and_then(|proc| {
             let b = match self.get(&id)? {
                 Held::Process(b) => b,
@@ -2168,17 +2224,24 @@ impl Runtime for WinRuntime {
                     });
                 }
             };
-            let (holding, gone) = (Arc::clone(&self.holding), id.clone());
+            let (holding, gone, carried) =
+                (Arc::clone(&self.holding), id.clone(), Arc::clone(&claim));
             crate::run::Run::start(
                 proc,
                 &id,
+                &claim,
                 Box::new(move || b.signal(Signal::KILL)),
-                Box::new(move || holding.remove(&gone)),
+                Box::new(move || holding.remove_run(&gone, &carried)),
             )
         });
+        making.made();
         match begun {
             Ok(run) => Ok(Box::new(run)),
-            Err(why) => Err(crate::run::undone(why, self.delete(&id), &id)),
+            Err(why) => Err(crate::run::undone(
+                why,
+                crate::run::delete(&claim, &id, || self.holding.remove_run(&id, &claim)),
+                &id,
+            )),
         }
     }
 
@@ -2223,18 +2286,25 @@ impl Runtime for WinRuntime {
         held.iter().map(|boxed| self.info(boxed)).collect()
     }
 
+    /// A run's box is its removal's claimer's ([`crate::run::delete`]); any other is removed here.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        {
+        let claim = {
             let boxes = self.boxes()?;
-            if let Ok(at) = slot_index(&boxes, id)
-                && let Some((_, slot)) = boxes.get(at)
-                && let Some(Held::Process(boxed)) = slot.physical()
+            let slot = slot_index(&boxes, id)
+                .ok()
+                .and_then(|at| boxes.get(at))
+                .map(|(_, slot)| slot);
+            if let Some(Held::Process(boxed)) = slot.and_then(Slot::physical)
                 && boxed.is_vm()
             {
                 return Err(Refusal::NoSuchBox(id.try_clone()?));
             }
+            slot.and_then(|slot| slot.run.clone())
+        };
+        match claim {
+            Some(claim) => crate::run::delete(&claim, id, || self.holding.remove_run(id, &claim)),
+            None => self.holding.remove(id),
         }
-        self.holding.remove(id)
     }
 }
 
@@ -2922,10 +2992,14 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let error = rt
             .holding
-            .remove_using(&spec.id, |_| {
-                calls.set(calls.get() + 1);
-                Ok(())
-            })
+            .remove_using(
+                &spec.id,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                },
+                None,
+            )
             .unwrap_err();
         assert!(matches!(
             error,

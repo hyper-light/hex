@@ -1242,12 +1242,13 @@ fn party<T>(thread: &thread::ScopedJoinHandle<'_, T>) -> hex_core::patience::Par
 /// hold run box `name`'s setup once its box is made and its program started, before the program's watch starts; run a
 /// program in it until it is ended, from another thread; once the setup has stopped at the hold, delete the box from
 /// another thread; once that delete waits on the setup or answers, let the setup go; then end the run's program
-/// (`end`). Expect: the delete waits rather than answer while the box is being made, then answers Ok; the run ends
-/// Signal(9); and the box is gone.
+/// (`end`). Expect: the delete waits rather than answer while the box is being made, then answers Ok; the run ends as
+/// its mode tells a program whose box a delete took (`ends`); and the box is gone.
 fn a_delete_of_a_run_being_made_waits_for_its_making(
     rt: &MacRuntime,
     name: &str,
     end: fn(&mut dyn Proc),
+    ends: Exit,
 ) {
     let id = BoxId::new(name).unwrap();
     let held = crate::run::hold::hold(&id, crate::run::hold::At::Making);
@@ -1281,7 +1282,7 @@ fn a_delete_of_a_run_being_made_waits_for_its_making(
             "the delete once the run was made"
         );
         end(&mut *run);
-        assert_eq!(hex_api::conformance::end_of(&mut *run), Ok(Exit::Signal(9)));
+        assert_eq!(hex_api::conformance::end_of(&mut *run), Ok(ends));
     });
     assert!(matches!(rt.inspect(&id), Err(Refusal::NoSuchBox(_))));
 }
@@ -1320,17 +1321,19 @@ fn e11_a_box_user_delete_beside_a_runs_removal_waits_for_its_word() {
     );
 }
 
-/// E-11 in the rootless process-group mode (step 1).
+/// E-11 in the rootless process-group mode (step 1): the delete's KILL ends the run's program, Signal(9).
 #[test]
 fn e11_a_rootless_delete_of_a_run_being_made_waits_for_its_making() {
     a_delete_of_a_run_being_made_waits_for_its_making(
         &rootless(),
         "e11-making-rootless",
         kill_by_run,
+        Exit::Signal(9),
     );
 }
 
-/// E-11 in the box-user mode (step 2), through a daemon on a real socket.
+/// E-11 in the box-user mode (step 2), through a daemon on a real socket: its helper keeps no end of a program whose
+/// box it has dropped, so the run's end, read after the delete, is Unknown (`proc::UserProc`).
 #[test]
 fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1338,5 +1341,6 @@ fn e11_a_box_user_delete_of_a_run_being_made_waits_for_its_making() {
         &helped(dir.path()),
         "e11-making-helped",
         kill_by_pid,
+        Exit::Unknown,
     );
 }
