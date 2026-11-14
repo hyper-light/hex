@@ -113,6 +113,8 @@ struct Record {
     governed: RefCell<BTreeMap<String, Duration>>,
     /// The cycle a platform's cap holds a VM over at any rate (C1), as the test sets it: none where it sets none.
     cycle: std::cell::Cell<Option<Duration>>,
+    /// Why that cycle is cold, where the test says it is (2c-4b): its helper has measured no stop.
+    cold: RefCell<Option<String>>,
     /// What holds each VM's rate once set (D255), as the test sets it: its governor for a VM it sets none for.
     held: RefCell<BTreeMap<String, hex_api::RateHeld>>,
     rooms: RefCell<Vec<(String, i64)>>,
@@ -170,8 +172,11 @@ impl Managed for Record {
             .unwrap_or_else(|| ManagedGuestTime::Unheld("the test tells none".to_owned())))
     }
 
-    fn cap_cycle(&self, _: u64) -> Result<Option<Duration>, Refusal> {
-        Ok(self.cycle.get())
+    fn cap_cycle(&self, _: u64) -> Result<CapCycle, Refusal> {
+        if let Some(cold) = self.cold.borrow().as_ref() {
+            return Ok(CapCycle::Cold(cold.clone()));
+        }
+        Ok(self.cycle.get().map_or(CapCycle::Never, CapCycle::Of))
     }
 
     fn least(&self, holder: Holder<'_>) -> u64 {
@@ -2581,6 +2586,55 @@ fn w14_each_vms_share_is_held_at_its_own_actuators_least() {
     assert_eq!(
         shares,
         vec![("img-1".to_owned(), 1), ("vm-1".to_owned(), 13)]
+    );
+}
+
+/// The review's A-14 (2c-4b; ROOT, 2026-11-13: a cold start told, never guessed): a VM its platform's cap holds, whose
+/// cap's cycle isn't known yet (its helper has measured no stop), is held at its share with no cycle in the learner's
+/// window, and what holds its rate says so. Do run a window of a managed VM whose process takes no rate, so its
+/// platform's cap holds it, on a learner whose platform's cap's cycle is cold; then answer the class's capacity. Expect
+/// no window taken from it, and its rate told held by its platform's cap, naming why its cycle is cold.
+#[test]
+fn w14_2c4b_a_cold_cap_cycle_is_told_on_its_vms_rate() {
+    let io = Record::default();
+    let held = vm("vm-2", 2);
+    io.set("vm-2", 0, GIB);
+    io.held.borrow_mut().insert(
+        "vm-2".to_owned(),
+        hex_api::RateHeld::Platform("its VM process takes no rate".into()),
+    );
+    *io.cold.borrow_mut() = Some("its helper has measured no stop".to_owned());
+    let mut learner = Learner::new(true, res(32_000, 64 * GIB)).unwrap();
+    learner
+        .window(
+            &io,
+            &holders(std::slice::from_ref(&held)),
+            res(24_000, 64 * GIB),
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        learner.next_window(),
+        None,
+        "no cycle taken from a cold cap"
+    );
+    let rates = learner
+        .learned(
+            Class::Shards,
+            &[cost()],
+            &holders(std::slice::from_ref(&held)),
+        )
+        .unwrap()
+        .unwrap()
+        .rates;
+    assert_eq!(
+        rates,
+        [hex_api::LearnedRate {
+            id: hex_api::LearnedHolder::Box(BoxId::new("vm-2").unwrap()),
+            held: hex_api::RateHeld::Platform(
+                "its VM process takes no rate; its helper has measured no stop".to_owned()
+            ),
+        }]
     );
 }
 

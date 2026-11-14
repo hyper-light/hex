@@ -1318,6 +1318,67 @@ mod tests {
         );
     }
 
+    /// The review's A-14 (2c-4b; ROOT, 2026-11-13: no record seeds): a managed VM on macOS runs under the cold control its
+    /// node sends, its helper learning its stop response in its own holds, never a census row's response, so its node
+    /// needs no row. Do take the managed control of guest inputs whose evidence has no CPU-response row, and of inputs
+    /// with a row for this host's class. Expect each the cold control of its cost, its cost beside it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn w14_2c4b_a_managed_control_is_cold_and_needs_no_census_row() {
+        let unit = hex_api::CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        };
+        let fixed = hex_api::CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: hex_api::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [3; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: unit,
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources::default(),
+        };
+        let row = hex_runtime::guest::CpuResponse {
+            host: "Mac15,1".to_owned(),
+            samples: 1,
+            p50: std::time::Duration::from_millis(1),
+            p90: std::time::Duration::from_millis(1),
+            p99: std::time::Duration::from_millis(1),
+            max: std::time::Duration::from_millis(2),
+            raw: [1; 32],
+        };
+        for rows in [Vec::new(), vec![row]] {
+            let inputs = hex_runtime::guest::GuestInputs {
+                config: hex_runtime::guest::GuestConfig {
+                    binary: PathBuf::from("/shards"),
+                    boot: hex_runtime::guest::Boot::Kernel {
+                        kernel: PathBuf::from("/k"),
+                        initrd: PathBuf::from("/i"),
+                    },
+                    vcpus: 1,
+                    memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+                    gpu: false,
+                    shares: Vec::new(),
+                    staged: String::new(),
+                },
+                cost,
+                native_images: None,
+                cpu_responses: rows,
+            };
+            assert_eq!(
+                managed_control(&inputs, "Mac15,1").unwrap(),
+                (hex_runtime::macos::CpuControl::cold(cost.id), cost),
+                "{} rows",
+                inputs.cpu_responses.len()
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     use hex_core::netns::Missing;
 

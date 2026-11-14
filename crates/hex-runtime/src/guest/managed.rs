@@ -269,6 +269,18 @@ pub enum ManagedRate {
     Platform(Refusal),
 }
 
+/// The cycle a platform's cap holds a managed VM over at a rate (joint plan step 14, C1; 2c-4b), which its node's charge
+/// learner's window takes for each VM that cap holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapCycle {
+    /// Its run and its hold at the rate, together.
+    Of(Duration),
+    /// None: the cap never holds a VM at the rate, its ceiling or past it.
+    Never,
+    /// Not known yet: its control has measured no stop to derive it from, why told (decision 9's cold start).
+    Cold(String),
+}
+
 /// A managed VM's rate's ask (decision 9; D255; ROOT, 2026-11-13), from its ask until its VM process answers: a wait
 /// of its own, measuring. Shards follows the VM with no bound of Hex's (`Duration::MAX`: until its process answers or
 /// the guest ends). Past the slowest answer seen, a watcher tells the run-out while the ask goes on, which is refused

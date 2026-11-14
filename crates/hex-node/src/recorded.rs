@@ -270,10 +270,11 @@ pub trait Recover: Runtime {
         Err(record.uncertain("its node has no native owner to read its usage"))
     }
 
-    /// Joint plan step 14 (C1; ROOT, 2026-11-13): the cycle this owner's cap holds a managed VM at `rate` over, derived
-    /// from how the platform holds a VM's CPU rate, which the charge learner's window takes for each VM that cap holds;
-    /// none at a rate it never holds a VM below. Refused, typed, naming what is missing where nothing derives it.
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    /// Joint plan step 14 (C1; ROOT, 2026-11-13; 2c-4b): the cycle this owner's cap holds a managed VM at `rate` over,
+    /// derived from how the platform holds a VM's CPU rate, which the charge learner's window takes for each VM that cap
+    /// holds: never at a rate it never holds a VM below, and cold, told, until what derives it has been measured.
+    /// Refused, typed, naming what is missing where nothing derives it.
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         let _ = rate;
         Err(Refusal::Platform {
             what: "a managed VM's cap's cycle",
@@ -2381,7 +2382,7 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
         }
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         self.runtime.cap_cycle(rate)
     }
 
@@ -3326,7 +3327,7 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::stop_managed(self, record)
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         hex_runtime::macos::MacRuntime::cap_cycle(self, rate)
     }
 
@@ -3447,7 +3448,7 @@ impl Recover for hex_runtime::windows::WinRuntime {
     /// A managed VM here is held by its governor over its governor's period (D255; every managed VM is booted
     /// `--host-managed`), the job's hard cap only its ceiling, so no job's cycle is a window: a VM whose process takes no
     /// rate is booked whole, told (ROOT, 2026-11-13).
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         let _ = rate;
         Err(Refusal::Platform {
             what: "a managed VM's cap's cycle",
@@ -3671,7 +3672,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         self.host().stop_managed(record)
     }
 
-    fn cap_cycle(&self, rate: u64) -> Result<Option<std::time::Duration>, Refusal> {
+    fn cap_cycle(&self, rate: u64) -> Result<hex_runtime::guest::CapCycle, Refusal> {
         self.host().cap_cycle(rate)
     }
 

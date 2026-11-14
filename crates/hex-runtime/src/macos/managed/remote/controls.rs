@@ -351,3 +351,88 @@ fn a_whole_reply_holds_wherever_the_helpers_close_lands_against_the_nodes_peer_r
         }
     }
 }
+
+/// The review's A-14 (2c-4b; ROOT, 2026-11-13: no record seeds): the node's managed control takes its cycle at a rate
+/// from the stop response its live helper learned in its own holds, asked of it each time, never the response its node
+/// configured. Do play the live helper in this process (its receipt naming this process, its endpoint bound here), its
+/// control having learned a 1 ms stop and then a slower 3 ms one, and take the node's cycle at a thousandth of a CPU
+/// after each, its node's control cold as it sends it. Expect each the control's cycle at the helper's answer then.
+#[test]
+fn w14_2c4b_the_controls_cycle_follows_its_helpers_learned_response() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let model = crate::macos::machine_model().unwrap();
+    let rates = hex_core::watch::seed(&model);
+    let runtime = MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .unwrap()
+    .with_cpu_control(crate::macos::CpuControl::cold([3; 32]))
+    .unwrap()
+    .with_managed_helper(
+        ManagedHelper::new(
+            directory.path().join("hex"),
+            directory.path().join("s"),
+            directory.path().join("r"),
+            Duration::from_secs(60),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let helper = runtime.managed_helper.as_ref().unwrap();
+    let pid = rustix::process::getpid().as_raw_nonzero().get();
+    let own = ProcId {
+        pid: u32::try_from(pid).unwrap(),
+        start_ticks: sys::rusage(pid).unwrap().unwrap().started,
+    };
+    let mut publisher = receipt::Publisher::new(helper, own).unwrap();
+    let listener = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+    crate::macos::private_descriptor(&listener, false).unwrap();
+    rustix::net::bind(
+        &listener,
+        &SocketAddrUnix::new(&helper.config.endpoint).unwrap(),
+    )
+    .unwrap();
+    rustix::fs::chmod(
+        &helper.config.endpoint,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    rustix::net::listen(&listener, libc::SOMAXCONN).unwrap();
+    publisher.bound(helper).unwrap();
+    let learned = [Duration::from_millis(1), Duration::from_millis(3)];
+    // The helper's side answers each ask with what its control has learned by then, as its server does.
+    let answering = std::thread::spawn(move || {
+        for response in learned {
+            let connection = rustix::net::accept(&listener).unwrap();
+            let (bytes, descriptors) =
+                frame::receive(connection.as_fd(), protocol::response::MAX_MESSAGE, None).unwrap();
+            let (version, id) = protocol::response::read(&bytes, descriptors.len()).unwrap();
+            let answer = protocol::response::encode_answer(version, id, Some(response)).unwrap();
+            frame::send(
+                connection.as_fd(),
+                &answer,
+                &[],
+                protocol::response::MAX_ANSWER,
+                None,
+            )
+            .unwrap();
+        }
+    });
+    let (_, ceiling) = runtime.cpu_control.unwrap();
+    for response in learned {
+        assert_eq!(
+            runtime.cap_cycle(1).unwrap(),
+            crate::macos::cycle_of(1, ceiling, Some(response)).unwrap(),
+            "the cycle at the helper's {response:?}"
+        );
+    }
+    answering.join().unwrap();
+    publisher.close_result(Ok(())).unwrap();
+}

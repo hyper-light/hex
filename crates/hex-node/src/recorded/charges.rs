@@ -28,7 +28,7 @@ use hex_api::{
     LearnedWindow, MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::record::{BoxRecord, NodeVmRecord, Phase};
-use hex_runtime::guest::ManagedGuestTime;
+use hex_runtime::guest::{CapCycle, ManagedGuestTime};
 use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
 use hex_sim::model::Class;
 
@@ -394,10 +394,11 @@ pub(crate) trait Managed {
     /// The least share the VM's actuator holds it at (C4; ROOT, 2026-11-13): an image VM's governor's
     /// ([`GOVERNOR_LEAST`]), a managed VM's its platform's cap's, which holds its share whatever its governor does.
     fn least(&self, holder: Holder<'_>) -> u64;
-    /// The cycle its platform's cap holds a managed VM at `rate` over (C1; ROOT, 2026-11-13): macOS's CPU control's, its
-    /// run and its hold, so the VM keeps its rate on average over one; none at a rate it never holds a VM below.
-    /// Refused where its platform derives none (Windows' job: its interval undocumented).
-    fn cap_cycle(&self, rate: u64) -> Result<Option<Duration>, Refusal>;
+    /// The cycle its platform's cap holds a managed VM at `rate` over (C1; ROOT, 2026-11-13; 2c-4b): macOS's CPU
+    /// control's, its run and its hold at the stop response its helper learned, so the VM keeps its rate on average over
+    /// one; never at a rate it never holds a VM below; cold, told, until its helper has measured a stop. Refused where its
+    /// platform derives none (Windows' job: its interval undocumented).
+    fn cap_cycle(&self, rate: u64) -> Result<CapCycle, Refusal>;
     /// What a Shards image VM costs its host, as its run host reads its VM process (`Runtime::host_use`, D241).
     fn host_use(&self, holder: Holder<'_>) -> Result<HostUse, Refusal>;
     /// The memory a holder its window doesn't learn takes now of what the machine reads free (C7; the review's A-10): a
@@ -2603,12 +2604,17 @@ fn act(io: &impl Managed, running: &[Holder<'_>], acts: Acts<'_>) -> Result<Acte
                 },
             )
             .and_then(|held| {
-                // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1).
-                let cycle = match held {
-                    hex_api::RateHeld::Platform(_) => io.cap_cycle(cap.share)?,
-                    _ => None,
-                };
-                Ok((held, cycle))
+                // Where its platform's cap holds it, its window takes that cap's cycle at its share (C1); a cycle not yet
+                // known is told on what holds its rate (2c-4b), never guessed.
+                Ok(match held {
+                    hex_api::RateHeld::Platform(why) => match io.cap_cycle(cap.share)? {
+                        CapCycle::Of(cycle) => (hex_api::RateHeld::Platform(why), Some(cycle)),
+                        CapCycle::Never | CapCycle::Cold(_) => {
+                            (hex_api::RateHeld::Platform(why), None)
+                        }
+                    },
+                    held => (held, None),
+                })
             });
         match capped {
             Ok((held, cycle)) => acted.caps.push(Capped {
