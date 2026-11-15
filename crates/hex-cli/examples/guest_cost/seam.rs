@@ -125,9 +125,10 @@ pub trait Driver {
     fn tear_down(&mut self, guest: Self::Guest) -> Result<(), String>;
     #[cfg(any(windows, test))]
     /// The window the class's VMs are held to `rate` milli-CPU over where that hold is each VM's own governor
-    /// (Shards' D191, D255): its period as a guest's VM process answers the rate. Every guest launched after is held
-    /// to `rate` once it is ready, as a node's learner holds a VM it has booted, and its own answer held to this
-    /// window. Refused by a class whose node holds its VMs' rates otherwise.
+    /// (Shards' D191, D255): its period as a guest's VM process answers the rate. Every guest launched after is read
+    /// at it through its boot, held to `rate` once it is ready, as a node's learner holds a VM it has booted, and read
+    /// from then on at its own governor's answer ([`Self::hold`]). Refused by a class whose node holds its VMs' rates
+    /// otherwise.
     fn governed_window(&mut self, rate: u64) -> Result<super::run::Window, String> {
         let _ = rate;
         Err(format!(
