@@ -1,6 +1,6 @@
 # Hex's `shards` build
 
-Shards is vendored here (vendor/MANIFEST.toml `[projects.shards-gpu]`) at `1c4570e369ce270f8ba659b51086a0c830dacee0`
+Shards is vendored here (vendor/MANIFEST.toml `[projects.shards-gpu]`) at `9975d1f551f8210a08fb744a04250767c72ead34`
 for the `shards` binary a node boots its Shards guests and image VMs with (SHARDS_BIN): its GPU VM process renders a
 Shards GPU guest's Venus on the host's driver, and its `shards api-run` hosts an image's boot (D231). Hex compiles
 none of it. The files Hex's changes touched are taken, with LICENSE (MIT), and `scripts/vendor.py check shards-gpu`
