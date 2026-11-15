@@ -2615,6 +2615,7 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
             resident_bytes: 1 << 20,
             guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
             window: read.window,
+            charged: hex_api::Charged::ToThread,
         }
     );
     *images.run.stats.lock().unwrap() = Stats {
