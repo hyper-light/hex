@@ -32,8 +32,9 @@ READY = b"hex guest ready"
 # The control port and token width, as docs/design/shards-guest.md §3a assigns them (hex_core::stream).
 CONTROL_PORT = 0x4845_5800
 TOKEN_BYTES = 8
-# hex_runtime::guest's: `panic=-1` reboots at once on a panic (kernel-parameters.txt, `panic=`).
-CMDLINE = "console=ttyS0 panic=-1"
+# hex_runtime::guest's: Shards' console (shards_api::CONSOLE, D261), virtio-console since Shards 35e2de91e;
+# `panic=-1` reboots at once on a panic (kernel-parameters.txt, `panic=`).
+CMDLINE = "console=hvc0 panic=-1"
 
 
 def read_exact(conn, n):
