@@ -107,6 +107,14 @@ pub trait Driver {
     /// slowest dial this process has seen, and past it their run-out told once and the wait going on by the guest's life,
     /// never ended at a bound; refused at the guest's end or its agent's refusal.
     fn ready(&mut self, guest: &mut Self::Guest) -> Result<(), String>;
+    /// Holds the ready guest to the census's rate where its own governor holds it, as a node's learner holds a VM it
+    /// has booted (Shards' D191, D255), and answers the period that governor holds it over: its own, as its VM process
+    /// derives it from the step it measured itself (D191's g), so two guests of one class may answer two. None where
+    /// the class's node holds every VM's rate over one window (Linux's `cpu.max` period, the Mac's cycle).
+    fn hold(&mut self, guest: &Self::Guest) -> Result<Option<Duration>, String> {
+        let _ = guest;
+        Ok(None)
+    }
     /// Holds the ready guest idle until `until`: its end in that time is a failure.
     fn idle(&mut self, guest: &Self::Guest, until: Instant) -> Result<(), String>;
     /// The guest agent's own report of what it has free inside the envelope: its answer, waited for as its connection

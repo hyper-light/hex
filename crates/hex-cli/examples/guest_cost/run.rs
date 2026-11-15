@@ -1025,7 +1025,8 @@ mod tests {
     use crate::seam::{Envelope, Launched, Lines};
 
     /// One scripted guest: its readings in turn (the last repeated), what its agent reports, what it
-    /// leaves on disk after its end, and how long after its launch it is ready.
+    /// leaves on disk after its end, how long after its launch it is ready, and the period its own governor
+    /// answers once it is held (none: its node holds every VM over one window).
     #[derive(Clone)]
     struct Script {
         uses: Vec<Use>,
@@ -1033,6 +1034,7 @@ mod tests {
         free: CapacityResources,
         left: Files,
         boots_in: Duration,
+        own: Option<Duration>,
     }
 
     /// Readings in turn, the last repeated.
@@ -1064,6 +1066,8 @@ mod tests {
         disk: Files,
         /// The rates its governed window was asked at.
         governed: Vec<u64>,
+        /// The ready guests held to the census's rate.
+        held: usize,
     }
 
     impl Driven {
@@ -1076,6 +1080,7 @@ mod tests {
                 torn_down: 0,
                 disk: Vec::new(),
                 governed: Vec::new(),
+                held: 0,
             }
         }
     }
@@ -1134,6 +1139,10 @@ mod tests {
             // Ready `boots_in` after its launch, followed to then.
             park_until(self.launched_at.ok_or("ready before a launch")? + script.boots_in);
             Ok(())
+        }
+        fn hold(&mut self, guest: &Option<Script>) -> Result<Option<Duration>, String> {
+            self.held += 1;
+            Ok(guest.as_ref().and_then(|s| s.own))
         }
         fn idle(&mut self, _: &Option<Script>, until: Instant) -> Result<(), String> {
             while let Some(left) = until.checked_duration_since(Instant::now()) {
@@ -1207,6 +1216,7 @@ mod tests {
             free: free(free_mem),
             left: Vec::new(),
             boots_in: Duration::ZERO,
+            own: None,
         }
     }
 
@@ -1513,6 +1523,34 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.matches("\nwindow_census ").count(), 1, "{text}");
+    }
+
+    /// AC-T7.4.1 (Shards' D191: a governor's period is its vCPUs times its own g over its share, g the step its VM
+    /// process measured itself; WHP item4, 2026-11-15: two guests at one rate answered 15.625 ms and 31.25 ms): a census
+    /// whose guests' governors answer periods other than its window's, one longer and one shorter: expect each guest held
+    /// once it is ready, none refused, and each read from its hold on at its own governor's period, as its node reads
+    /// each VM at its own: its samples' line naming that period.
+    #[test]
+    fn a_governed_guest_is_read_at_its_own_governors_period_from_its_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let steady: Vec<(Use, Holding)> = (0..64)
+            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
+            .collect();
+        let mut longer = script(steady.clone(), 400 << 20);
+        longer.own = Some(Duration::from_millis(40));
+        let mut shorter = script(steady, 400 << 20);
+        shorter.own = Some(Duration::from_millis(10));
+        let mut driver = Driven::new(dir.path(), vec![Some(longer), Some(shorter)]);
+        let mut samples = record(dir.path());
+        let census = census(&mut driver, 2, &window(20), 2, true, &mut samples).unwrap();
+        assert_eq!(census.samples.len(), 2);
+        assert_eq!(driver.held, 2, "a ready guest was never held");
+        let (path, _) = samples.finish().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let guests: Vec<&str> = text.lines().filter(|l| l.starts_with("guest ")).collect();
+        assert_eq!(guests.len(), 2, "{text}");
+        assert!(guests[0].ends_with(" window_ns 40000000"), "{text}");
+        assert!(guests[1].ends_with(" window_ns 10000000"), "{text}");
     }
 
     /// AC-T7.4.1 (ROOT, the Mac window's fixed point): a window that the rate sets, over guests whose VMM uses
