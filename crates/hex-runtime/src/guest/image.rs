@@ -958,7 +958,18 @@ fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, R
         resident_bytes: host.resident_bytes,
         guest_ns: per_vcpu(stats, vcpus)?,
         window,
+        charged: charged_of(host.charged),
     })
+}
+
+/// Whether a VM process's CPU holds its vCPUs' guest time, as Shards says it (D265), in Hex's words: one for one.
+pub(crate) fn charged_of(said: shards_api::image::Charged) -> hex_api::Charged {
+    use shards_api::image::Charged as Said;
+    match said {
+        Said::Unknown => hex_api::Charged::Unknown,
+        Said::ToThread => hex_api::Charged::ToThread,
+        Said::Apart => hex_api::Charged::Apart,
+    }
 }
 
 /// What each of the VM's `vcpus` vCPUs has run of its guest, by index, as its run host read it (D241's

@@ -293,6 +293,9 @@ pub enum ManagedGuestTime {
         ns: Vec<u64>,
         asked: Instant,
         answered: Instant,
+        /// Whether its VM process's CPU holds that guest time (D265), as its use said it, its host's part unread
+        /// [`hex_api::Charged::Unknown`].
+        charged: hex_api::Charged,
     },
     /// None apart, why in its words: its microVM not started yet, or a VM process that answers no use (one not booted
     /// `--host-managed`, or a shards before D260).
@@ -323,6 +326,13 @@ pub(super) fn guest_time(
         Ok(shards_api::ManagedUsed::Running(used)) => {
             USE.answered(took);
             let (asked, answered) = (used.asked, used.answered);
+            let charged = used
+                .microvm
+                .host
+                .as_ref()
+                .map_or(hex_api::Charged::Unknown, |host| {
+                    super::image::charged_of(host.charged)
+                });
             match used.microvm.guest {
                 Ok(times) => super::image::vcpus_ns(
                     &times,
@@ -333,6 +343,7 @@ pub(super) fn guest_time(
                     ns,
                     asked,
                     answered,
+                    charged,
                 }),
                 Err(why) => Ok(ManagedGuestTime::Unheld(why)),
             }
@@ -612,7 +623,7 @@ mod tests {
         let id = BoxId::new("vm-1").unwrap();
         let first = guest_time(&guest, &id, 2);
         assert!(
-            matches!(&first, Ok(ManagedGuestTime::PerVcpu { ns, asked, answered }) if *ns == [1_000u64, 2_000] && asked <= answered),
+            matches!(&first, Ok(ManagedGuestTime::PerVcpu { ns, asked, answered, .. }) if *ns == [1_000u64, 2_000] && asked <= answered),
             "{first:?}"
         );
         assert_eq!(
