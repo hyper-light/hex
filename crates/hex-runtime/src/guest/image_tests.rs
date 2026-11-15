@@ -2194,6 +2194,14 @@ fn b4_an_image_vms_delete_answers_once_its_run_host_and_every_process_it_started
             wake: std::net::SocketAddr::from(([127, 0, 0, 1], 11)),
         }),
         from: StartedFrom::Booted,
+        // Its grants past its microVM once made (Shards' D273, image channel v36): it makes no network.
+        egress: wire::Narrowing {
+            egress: wire::Keep::Only(Vec::new()),
+            mcp: wire::Keep::Only(Vec::new()),
+            destinations: wire::Keep::Only(Vec::new()),
+            dns: false,
+            members: None,
+        },
     }
     .encode()
     .unwrap();
