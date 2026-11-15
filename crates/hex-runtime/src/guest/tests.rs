@@ -491,12 +491,19 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
 #[test]
 fn the_guests_spec_names_its_init_ports_and_shares() {
     let spec = config().spec().unwrap();
-    assert_eq!(spec.cmdline, "console=hvc0 panic=-1 hex.shares=rw");
+    assert_eq!(
+        spec.cmdline,
+        format!("{} panic=-1 hex.shares=rw", shards_api::CONSOLE)
+    );
+    assert_eq!(shards_api::CONSOLE, "console=hvc0");
     let none = GuestConfig {
         shares: Vec::new(),
         ..config()
     };
-    assert_eq!(none.spec().unwrap().cmdline, "console=hvc0 panic=-1");
+    assert_eq!(
+        none.spec().unwrap().cmdline,
+        format!("{} panic=-1", shards_api::CONSOLE)
+    );
     assert_eq!(
         spec.ports,
         [stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT]
