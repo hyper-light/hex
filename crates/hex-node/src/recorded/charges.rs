@@ -750,7 +750,7 @@ impl Read {
             return None;
         };
         let vcpus = guest.iter().fold(0u64, |sum, ns| sum.saturating_add(*ns));
-        milli_over(self.cpu_ns.saturating_sub(vcpus), life)
+        milli_over(self.charged.own(self.cpu_ns, vcpus), life)
     }
 }
 
@@ -846,15 +846,17 @@ fn milli_over(ns: u64, span: Duration) -> Option<u64> {
         .map(|n| u64::try_from(n).unwrap_or(u64::MAX))
 }
 
-/// What a VM ran over a window, its whole CPU `cpu_ns` since its reading before: split into each vCPU's guest time and
-/// its VMM's own where its host read each vCPU's both times (D241), its VMM's own the whole less its vCPUs', never less
-/// than none past the clocks' steps; whole where it didn't. Two readings naming different vCPU counts are refused,
+/// What a VM ran over a window, its VM process's CPU `cpu_ns` since its reading before: split into each vCPU's guest
+/// time and its VMM's own where its host read each vCPU's both times (D241), its VMM's own as `charged` says
+/// ([`hex_api::Charged::own`], Shards' D265): the whole less its vCPUs' where its threads hold their guest time (never
+/// less than none past the clocks' steps), the whole where they ran apart or it isn't told, so a VM is never charged
+/// less than it ran; whole where it didn't read them. Two readings naming different vCPU counts are refused,
 /// typed: no vCPU's time is paired with another's.
 pub(crate) fn ran(
     cpu_ns: u64,
     now: Option<&[u64]>,
     before: Option<&[u64]>,
-    _charged: hex_api::Charged,
+    charged: hex_api::Charged,
 ) -> Result<Cpu, ChargeError> {
     let (Some(now), Some(before)) = (now, before) else {
         return Ok(Cpu::Whole(Duration::from_nanos(cpu_ns)));
@@ -875,7 +877,7 @@ pub(crate) fn ran(
     });
     Ok(Cpu::Split {
         guest,
-        own: Duration::from_nanos(cpu_ns.saturating_sub(vcpus)),
+        own: Duration::from_nanos(charged.own(cpu_ns, vcpus)),
     })
 }
 
