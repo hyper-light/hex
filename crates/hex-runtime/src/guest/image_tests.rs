@@ -445,8 +445,29 @@ impl ImageGuest for ModelGuest {
     fn members(&self) -> &[MemberInfo] {
         &self.members
     }
-    fn published(&self) -> &[Bound] {
-        &self.published
+    fn published(&self) -> Vec<Bound> {
+        self.published.clone()
+    }
+    fn publish(
+        &self,
+        _: shards_api::image::Publish,
+        _: Duration,
+    ) -> Result<Vec<Bound>, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's live publishing",
+            why: "the class publishes at its start alone".to_owned(),
+        })
+    }
+    fn unpublish(
+        &self,
+        _: shards_api::image::Proto,
+        _: std::net::SocketAddr,
+        _: Duration,
+    ) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's live publishing",
+            why: "the class publishes at its start alone".to_owned(),
+        })
     }
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
         self.control.as_ref()
@@ -565,6 +586,18 @@ impl ImageGuest for ModelGuest {
         Err(ImageRefusal::Unsupported {
             what: "the model's plugs",
             why: "it has none".to_owned(),
+        })
+    }
+    fn pause(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's pauses",
+            why: "it pauses none: the class pauses no run yet (P5.5b)".to_owned(),
+        })
+    }
+    fn resume(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's resumes",
+            why: "it pauses none: the class pauses no run yet (P5.5b)".to_owned(),
         })
     }
     fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
@@ -2277,6 +2310,7 @@ fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
             cpu_ns: 9_000_000,
             resident_bytes: 1 << 20,
             footprint_bytes: 1 << 20,
+            charged: shards_api::image::Charged::ToThread,
         }),
         guest,
     })

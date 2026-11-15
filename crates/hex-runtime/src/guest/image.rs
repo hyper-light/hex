@@ -826,6 +826,29 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Terminal(why) => {
             Refusal::Broken(format!("Shards refused {op} as a terminal's size: {why}"))
         }
+        // Only a warm host's ticket booting another pool's spec (D253) is refused so: a ticket is taken for its box's
+        // own spec alone, so this is the class's own fault.
+        ImageRefusal::OtherPool { reserved, asked } => Refusal::Broken(format!(
+            "Shards refused {op}: a warm host reserved for pool {reserved} booted a spec of {asked:?}"
+        )),
+        // A run's network (D269), refused at its start's binds or its image's narrowing: a port the host won't bind is
+        // the host's, every other the spec's.
+        ImageRefusal::Net(shards_api::image::NetRefusal::Bind, why) => Refusal::Os {
+            op,
+            why: format!("binding the run's published port: {why}"),
+        },
+        ImageRefusal::Net(kind, why) => Refusal::Invalid {
+            what: "shards image's network",
+            why: format!("{kind:?}: {why}"),
+        },
+        // Only a run paused (D267) is refused so, and only a pause or a resume as one: this class pauses no run yet
+        // (P5.5b's pause and resume type these as the box's own).
+        ImageRefusal::Paused { what } => {
+            Refusal::Broken(format!("Shards refused {op}: its run is paused ({what})"))
+        }
+        ImageRefusal::Pause(why) => {
+            Refusal::Broken(format!("Shards refused {op} as a pause: {why}"))
+        }
         // Only a save (D259) is refused so, and this class asks none.
         ImageRefusal::Save(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
@@ -2139,7 +2162,7 @@ impl ImageClass {
         let ClassSpec::ShardsImage(shards) = &spec.class else {
             return Ok(State::Running(guest));
         };
-        let Err(why) = crate::grants::bound(&shards.grants, guest.members(), guest.published())
+        let Err(why) = crate::grants::bound(&shards.grants, guest.members(), &guest.published())
         else {
             return Ok(State::Running(guest));
         };
@@ -2546,7 +2569,7 @@ impl ImageClass {
                 // Its publishes as bound (joint plan step 15, N6).
                 if let ClassSpec::ShardsImage(shards) = &record.spec.class {
                     shown.published =
-                        crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
+                        crate::grants::bound(&shards.grants, guest.members(), &guest.published())?;
                 }
                 // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake
                 // (Shards' D252 amended, image channel v30), so a reading of the host tells each from a socket no grant

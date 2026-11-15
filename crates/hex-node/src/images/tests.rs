@@ -65,8 +65,33 @@ impl ImageGuest for Held {
     fn members(&self) -> &[MemberInfo] {
         &[]
     }
-    fn published(&self) -> &[Bound] {
-        &[]
+    fn published(&self) -> Vec<Bound> {
+        Vec::new()
+    }
+
+    fn publish(
+        &self,
+        _: shards_api::image::Publish,
+        _: Duration,
+    ) -> Result<Vec<Bound>, ImageRefusal> {
+        Err(unasked())
+    }
+
+    fn unpublish(
+        &self,
+        _: shards_api::image::Proto,
+        _: std::net::SocketAddr,
+        _: Duration,
+    ) -> Result<(), ImageRefusal> {
+        Err(unasked())
+    }
+
+    fn pause(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
+        Err(unasked())
+    }
+
+    fn resume(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
+        Err(unasked())
     }
     fn control(&self) -> Option<&shards_api::image::ControlAt> {
         None
