@@ -613,9 +613,11 @@ mod tests {
         let vm = vm_process(
             &socket,
             vec![
-                Some(b"USED\ndeparted 0\nvcpu 0 1000\nvcpu 1 2000\nhost 5000 4096 8192\n"),
-                Some(b"USED\nguest-unread the microVM has not started\nhost 300 4096 8192\n"),
-                Some(b"USED\ndeparted 0\nvcpu 0 1\nvcpu 1 2\nvcpu 2 3\nhost 9 4096 8192\n"),
+                Some(b"USED\ndeparted 0\nvcpu 0 1000\nvcpu 1 2000\nhost 5000 4096 8192 thread\n"),
+                Some(
+                    b"USED\nguest-unread the microVM has not started\nhost 300 4096 8192 thread\n",
+                ),
+                Some(b"USED\ndeparted 0\nvcpu 0 1\nvcpu 1 2\nvcpu 2 3\nhost 9 4096 8192 thread\n"),
                 None,
             ],
         );
@@ -623,7 +625,7 @@ mod tests {
         let id = BoxId::new("vm-1").unwrap();
         let first = guest_time(&guest, &id, 2);
         assert!(
-            matches!(&first, Ok(ManagedGuestTime::PerVcpu { ns, asked, answered, .. }) if *ns == [1_000u64, 2_000] && asked <= answered),
+            matches!(&first, Ok(ManagedGuestTime::PerVcpu { ns, asked, answered, charged: hex_api::Charged::ToThread }) if *ns == [1_000u64, 2_000] && asked <= answered),
             "{first:?}"
         );
         assert_eq!(
