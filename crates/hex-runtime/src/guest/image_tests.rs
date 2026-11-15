@@ -425,6 +425,8 @@ struct ModelGuest {
     control: Option<shards_api::image::ControlAt>,
     /// Whether its boot gave its command the nesting grant (D234), whose READY it then says.
     nesting: bool,
+    /// Its run's grants past its microVM, as its boot's spec narrowed them (D273): the model changes none as it runs.
+    egress: shards_api::image::Narrowing,
 }
 
 /// Where the model's run host binds a run's agent-control endpoint, and its microVM's key (D252).
@@ -569,14 +571,7 @@ impl ImageGuest for ModelGuest {
             why: "the run asked no nesting grant".to_owned(),
         })
     }
-    fn plug(
-        &self,
-        _: &MemberName,
-        _: &std::path::Path,
-        _: &str,
-        _: bool,
-        _: Duration,
-    ) -> Result<(), ImageRefusal> {
+    fn plug(&self, _: &shards_api::image::Plug, _: Duration) -> Result<(), ImageRefusal> {
         Err(ImageRefusal::Unsupported {
             what: "the model's plugs",
             why: "it has none".to_owned(),
@@ -586,6 +581,29 @@ impl ImageGuest for ModelGuest {
         Err(ImageRefusal::Unsupported {
             what: "the model's plugs",
             why: "it has none".to_owned(),
+        })
+    }
+    fn egress(&self) -> shards_api::image::Narrowing {
+        self.egress.clone()
+    }
+    fn grant_egress(
+        &self,
+        _: &shards_api::image::EgressGrant,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's grants past its microVM",
+            why: "it changes none as its run runs".to_owned(),
+        })
+    }
+    fn revoke_egress(
+        &self,
+        _: &shards_api::image::EgressGrant,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's grants past its microVM",
+            why: "it changes none as its run runs".to_owned(),
         })
     }
     fn pause(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
@@ -986,6 +1004,7 @@ impl Images for ModelImages {
                 (Some(_), None, None, None) => Some(model_control()),
             },
             nesting: spec.nesting,
+            egress: spec.egress.clone(),
         }))
     }
 }

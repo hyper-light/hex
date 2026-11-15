@@ -2003,6 +2003,9 @@ impl ImageClass {
             upstream_roots: Vec::new(),
             // No GPU report (Shards' D233, image channel v29): it renders on no GPU.
             gpu_report: None,
+            // No plug root (Shards' D271, image channel v35): its shares are the start's, and nothing is plugged
+            // into its run as it runs.
+            plug_roots: Vec::new(),
         })
     }
 

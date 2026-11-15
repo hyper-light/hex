@@ -69,6 +69,32 @@ impl ImageGuest for Held {
         Vec::new()
     }
 
+    /// It has no network: nothing past its microVM is granted.
+    fn egress(&self) -> shards_api::image::Narrowing {
+        use shards_api::image::Keep;
+        shards_api::image::Narrowing {
+            egress: Keep::Only(Vec::new()),
+            mcp: Keep::Only(Vec::new()),
+            destinations: Keep::Only(Vec::new()),
+            dns: false,
+            members: None,
+        }
+    }
+    fn grant_egress(
+        &self,
+        _: &shards_api::image::EgressGrant,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(unasked())
+    }
+    fn revoke_egress(
+        &self,
+        _: &shards_api::image::EgressGrant,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(unasked())
+    }
+
     fn publish(
         &self,
         _: shards_api::image::Publish,
@@ -130,14 +156,7 @@ impl ImageGuest for Held {
     fn wait_ready(&self, _: Option<Ready>, _: Duration) -> Result<Option<Ready>, ImageRefusal> {
         Err(unasked())
     }
-    fn plug(
-        &self,
-        _: &MemberName,
-        _: &Path,
-        _: &str,
-        _: bool,
-        _: Duration,
-    ) -> Result<(), ImageRefusal> {
+    fn plug(&self, _: &shards_api::image::Plug, _: Duration) -> Result<(), ImageRefusal> {
         Err(unasked())
     }
     fn unplug(&self, _: &str, _: Duration) -> Result<(), ImageRefusal> {
