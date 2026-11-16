@@ -83,7 +83,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model
   of D231 and through the simulator served on a socket and over QUIC). Closes with: the class's wait records and
-  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `9975d1f55` or later).
+  its real-VM runs on KVM, HVF and WHP (`image_real`, ROOT's, its run hosts and shards-init at Shards `f17b8fb77` or later).
   Every run asks its agent-control endpoint of the class's own key (D238, D252): a signal but KILL reaches each member
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
@@ -92,6 +92,14 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   and resume (Shards' D267), in process and over the node's wire (`Call::Pause`, `Call::Resume`, appended), typed
   refusals, `BoxState::Paused`, its paused time in its usage, and its room held through its pause. Closes with: HEX-IMG-9
   on real VMs (KVM, HVF, WHP), ROOT's.
+  Built on `cp/t7-v41-swaps` and merged on Hex's local main, not pushed (`docs/design/shards-image-class.md` §11): Shards
+  `f17b8fb77` vendored (image channel v41), a member's component swapped in and its image's own back as its run runs
+  (Shards' D270 slice 4: `Runtime::swap`, `restore`, `components`, in process and over the node's wire, `Call::Swap`,
+  `Call::Restore`, `Call::Components`, appended), typed refusals (`Refusal::Swap` by `SwapCause`), each member's
+  generations (slice 3b: `Runtime::member` takes its current one's streams), its last generation's output no caller took
+  read to its end and let go so its start again goes on, told in `Swapped::unread`; and whether a share's files may be
+  run (D279: `ImageShare::exec`, on by default). Closes with: HEX-IMG-10 on real VMs (KVM, HVF, WHP) with a component
+  in each node's store (`HEX_IMAGE_COMPONENT`), ROOT's; Linux and Windows lints and tests, ROOT's.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
