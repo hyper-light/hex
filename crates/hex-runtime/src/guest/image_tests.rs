@@ -367,6 +367,33 @@ struct ModelRun {
     /// Whether its stops' threads end with no answer, as the test sets it: a stop asked unwinds before its run's end, as
     /// a stop whose thread failed would (D231's stop is never refused, so only its thread's end leaves it unanswered).
     abandon_stops: AtomicBool,
+    /// Its owner's pauses, as Shards' run host keeps a run's (D267; kiln plan P5.5b).
+    pauses: Mutex<ModelPauses>,
+    /// Whether its pauses and resumes are held, as the test says: one asked waits, its VM's answer not yet given, until
+    /// the test lets it go.
+    pause_held: Mutex<bool>,
+    pause_let_go: Condvar,
+}
+
+/// A model run's pauses (D267): since when its vCPUs are held, where they are, every ended pause's time, each move it
+/// was asked in order, and a refusal for the next where the test sets one, as a VM whose machine stopped first refuses.
+#[derive(Default)]
+struct ModelPauses {
+    since: Option<std::time::Instant>,
+    ended: Duration,
+    asked: Vec<&'static str>,
+    refuse: Option<String>,
+}
+
+impl ModelPauses {
+    /// Its paused time as Shards tells it (`Paused`): every pause's time to now, the one under way among it.
+    fn told(&self) -> shards_api::image::Paused {
+        let under_way = self.since.map_or(Duration::ZERO, |since| since.elapsed());
+        shards_api::image::Paused {
+            total: self.ended + under_way,
+            now: self.since.is_some(),
+        }
+    }
 }
 
 impl ModelRun {
@@ -374,6 +401,43 @@ impl ModelRun {
     fn hold_stops(&self, held: bool) {
         *self.stop_held.lock().unwrap() = held;
         self.stop_let_go.notify_all();
+    }
+
+    /// Holds each pause and resume from now on (`true`), or lets every one held go (`false`).
+    fn hold_pauses(&self, held: bool) {
+        *self.pause_held.lock().unwrap() = held;
+        self.pause_let_go.notify_all();
+    }
+
+    /// A pause (`hold`) or a resume of the run, as Shards' run host makes it (D267): refused `Ended` once it has
+    /// ended, `Pause` where the test set a refusal; done already where it is as asked; its paused time then told.
+    fn move_to(
+        &self,
+        op: &'static str,
+        hold: bool,
+    ) -> Result<shards_api::image::Paused, ImageRefusal> {
+        self.pauses.lock().unwrap().asked.push(op);
+        drop(
+            self.pause_let_go
+                .wait_while(self.pause_held.lock().unwrap(), |held| *held)
+                .unwrap(),
+        );
+        if let Some(end) = self.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(ended(end)));
+        }
+        let mut pauses = self.pauses.lock().unwrap();
+        if let Some(why) = pauses.refuse.take() {
+            return Err(ImageRefusal::Pause(why));
+        }
+        match (hold, pauses.since) {
+            (true, None) => pauses.since = Some(std::time::Instant::now()),
+            (false, Some(since)) => {
+                pauses.ended += since.elapsed();
+                pauses.since = None;
+            }
+            (true, Some(_)) | (false, None) => {}
+        }
+        Ok(pauses.told())
     }
 
     /// The run host's ask of credential `reference` (D242), as it relays its network process's first use of it: put to
@@ -523,11 +587,21 @@ impl ImageGuest for ModelGuest {
             .get(&member.name)
             .copied())
     }
-    fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+    // A run's stats carry its paused time, as every run host's since image channel v33 does (D267); its command's or a
+    // member's, asked of its guest, are refused at once while it is paused.
+    fn stats(&self, scope: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
         self.run.stats_asked.lock().unwrap().push(patience);
-        match self.run.end.lock().unwrap().clone() {
-            Some(end) => Err(ImageRefusal::Ended(ended(end))),
-            None => Ok(self.run.stats.lock().unwrap().clone()),
+        if let Some(end) = self.run.end.lock().unwrap().clone() {
+            return Err(ImageRefusal::Ended(ended(end)));
+        }
+        let paused = self.run.pauses.lock().unwrap().told();
+        match scope {
+            StatsScope::Run => Ok(Stats {
+                paused: Some(paused),
+                ..self.run.stats.lock().unwrap().clone()
+            }),
+            _ if paused.now => Err(ImageRefusal::Paused { what: "stats" }),
+            _ => Ok(self.run.stats.lock().unwrap().clone()),
         }
     }
     // The model keeps each room (D241) and rate (D247) it is told and holds the run as told: the room within none
@@ -535,6 +609,10 @@ impl ImageGuest for ModelGuest {
     fn room(&self, room: Option<i64>, _: Duration) -> Result<Option<u64>, ImageRefusal> {
         if let Some(end) = self.run.end.lock().unwrap().clone() {
             return Err(ImageRefusal::Ended(ended(end)));
+        }
+        // An ask its guest answers, refused at once while it is paused (D267).
+        if self.run.pauses.lock().unwrap().told().now {
+            return Err(ImageRefusal::Paused { what: "room" });
         }
         self.run.rooms.lock().unwrap().push(room);
         Ok(room.map(|room| u64::try_from(room.max(0)).unwrap()))
@@ -607,16 +685,10 @@ impl ImageGuest for ModelGuest {
         })
     }
     fn pause(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's pauses",
-            why: "it pauses none: the class pauses no run yet (P5.5b)".to_owned(),
-        })
+        self.run.move_to("pause", true)
     }
     fn resume(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's resumes",
-            why: "it pauses none: the class pauses no run yet (P5.5b)".to_owned(),
-        })
+        self.run.move_to("resume", false)
     }
     fn save(&self, _: &std::path::Path, _: Duration) -> Result<(), ImageRefusal> {
         Err(ImageRefusal::Unsupported {
@@ -2643,6 +2715,7 @@ fn w14_a_running_vm_is_told_its_room_held_to_its_rate_and_read_for_its_host_cost
             guest_ns: (1..=u64::from(vcpus)).map(|n| 1_000 * n).collect(),
             window: read.window,
             charged: hex_api::Charged::ToThread,
+            paused: Duration::ZERO,
         }
     );
     *images.run.stats.lock().unwrap() = Stats {
@@ -6310,4 +6383,236 @@ fn b12_an_image_vm_whose_record_cant_be_read_is_refused_in_its_words() {
         Err(Refusal::Broken(why)) => assert!(why.contains("its bytes end mid-field"), "{why}"),
         other => panic!("an unreadable record inspected: {other:?}"),
     }
+}
+
+/// Box `id`'s `op` refused for where its pause stands, `cause` (kiln plan P5.5b).
+fn stands(id: &BoxId, op: &'static str, cause: hex_api::PauseCause) -> Result<(), Refusal> {
+    Err(Refusal::Pause {
+        id: id.try_clone().unwrap(),
+        op,
+        cause,
+    })
+}
+
+/// A run's stats with every line its usage reads, its microVM's part among them, as its init and run host say them.
+fn said_stats(vcpus: u32) -> Stats {
+    Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(64 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    }
+}
+
+/// Kiln plan P5.5b (AC-T7.4.1; docs/design/shards-image-class.md §10): an image box pauses and resumes through its run
+/// as Shards' D267 holds its VM, each move asked of Shards once, its state, its usage and its refusals typed. Do: pause
+/// and resume a VM not yet started; start it, its members ones a signal reaches, read its usage, and resume it; pause it,
+/// then inspect it, read its usage, pause it again, signal it TERM, signal its harness and tell it its room; resume it,
+/// inspect it, read its usage and resume it again. Expect: before its start each refused Pause(NotRunning), asking Shards
+/// nothing; the running VM's resume refused Pause(Running); its pause asked of Shards once, the VM shown Paused, the
+/// endpoint it told as it ran still told, its usage its paused time; the second pause refused Pause(Paused), asking
+/// Shards nothing more;
+/// TERM and the harness's signal refused Pause(Paused) at once, taken by no lane, and its room refused Pause(Paused) as
+/// Shards refuses it; its resume asked once, the VM shown Running, its paused time no less than it was, and the second
+/// resume refused Pause(Running).
+#[test]
+fn p5_5b_an_image_box_pauses_and_resumes_through_its_run() {
+    use hex_api::PauseCause;
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    let taken = Taken::default();
+    *images.steered.lock().unwrap() = Some((Vec::new(), Arc::clone(&taken)));
+    *images.run.stats.lock().unwrap() = said_stats(vcpus);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-pause", None)).unwrap().id;
+    assert_eq!(
+        runtime.pause(&id),
+        stands(&id, "pause", PauseCause::NotRunning)
+    );
+    assert_eq!(
+        runtime.resume(&id),
+        stands(&id, "resume", PauseCause::NotRunning)
+    );
+    runtime.start(&id).unwrap();
+    assert_eq!(runtime.usage(&id).unwrap().paused_ns, Some(0));
+    assert_eq!(
+        runtime.resume(&id),
+        stands(&id, "resume", PauseCause::Running)
+    );
+    let running = runtime.inspect(&id).unwrap();
+    assert!(running.control.is_some(), "{running:?}");
+    assert_eq!(runtime.pause(&id), Ok(()));
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.control),
+        (BoxState::Paused, running.control)
+    );
+    let paused = runtime.usage(&id).unwrap().paused_ns.unwrap();
+    assert_eq!(runtime.pause(&id), stands(&id, "pause", PauseCause::Paused));
+    assert_eq!(
+        runtime.signal(&id, Signal::TERM),
+        stands(&id, "signal", PauseCause::Paused)
+    );
+    let claude = Member {
+        kind: MemberKind::Harness,
+        name: "claude".to_owned(),
+    };
+    assert_eq!(
+        runtime.signal_member(&id, &claude, Signal::TERM),
+        stands(&id, "signal a member", PauseCause::Paused)
+    );
+    assert!(taken.lock().unwrap().is_empty(), "{taken:?}");
+    assert_eq!(
+        runtime.room(&id, Some(32 << 20)),
+        Err(Refusal::Pause {
+            id: id.try_clone().unwrap(),
+            op: "telling a Shards image VM its room",
+            cause: PauseCause::Paused,
+        })
+    );
+    assert_eq!(runtime.resume(&id), Ok(()));
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    let resumed = runtime.usage(&id).unwrap().paused_ns.unwrap();
+    assert!(resumed >= paused, "paused {paused} ns, then {resumed} ns");
+    assert_eq!(
+        runtime.resume(&id),
+        stands(&id, "resume", PauseCause::Running)
+    );
+    assert_eq!(images.run.pauses.lock().unwrap().asked, ["pause", "resume"]);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+}
+
+/// Kiln plan P5.5b: one move of a VM's vCPUs at a time, held under the runs' lock until Shards answers it, so a pause and
+/// a resume asked together never leave Hex's word and the VM's apart. Do: hold the model's moves, pause a running VM on a
+/// thread of its own until Shards has been asked; then pause it, resume it and inspect it; then let the pause go. Expect:
+/// while the first pause is under way the second pause and the resume refused Lifecycle Busy, naming the pause, and the
+/// VM shown Paused, its guest answering nothing from its pause's ask; once let go, the first pause done, Shards asked one
+/// pause alone, and the VM Paused.
+#[test]
+fn p5_5b_one_move_of_a_vms_vcpus_at_a_time() {
+    static ASKED: Patience = Patience::measuring("test.hex_runtime.p5_5b_pause_asked");
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-pause-busy", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    images.run.hold_pauses(true);
+    let busy = |got: Result<(), Refusal>| {
+        matches!(
+            got,
+            Err(Refusal::Lifecycle {
+                cause: LifecycleCause::Busy,
+                why: Some(why),
+                ..
+            }) if why.contains("its pause is under way")
+        )
+    };
+    let answered = std::thread::scope(|scope| {
+        let pausing = scope.spawn(|| runtime.pause(&id));
+        follow::until(
+            &ASKED,
+            "the pause asked of Shards",
+            || spawned(&pausing),
+            || pausing.is_finished() || !images.run.pauses.lock().unwrap().asked.is_empty(),
+        )
+        .unwrap();
+        assert!(busy(runtime.pause(&id)), "a second pause");
+        assert!(busy(runtime.resume(&id)), "a resume");
+        assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Paused);
+        images.run.hold_pauses(false);
+        pausing.join().unwrap()
+    });
+    assert_eq!(answered, Ok(()));
+    assert_eq!(images.run.pauses.lock().unwrap().asked, ["pause"]);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Paused);
+}
+
+/// Kiln plan P5.5b (Shards' D267, `ImageRefusal::Pause`): a pause its VM didn't make, its machine stopped before every
+/// vCPU was held, is the guest's failure in its words, and leaves the VM as it was. Do: pause a running VM whose model
+/// refuses the next move so; then pause it again. Expect: the first refused Guest(Pause) naming the pause and Shards'
+/// words, the VM shown Running; the second done, Paused.
+#[test]
+fn p5_5b_a_pause_its_vm_didnt_make_is_its_guests_failure() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-pause-refused", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    images.run.pauses.lock().unwrap().refuse = Some("its machine stopped first".to_owned());
+    assert_eq!(
+        runtime.pause(&id),
+        Err(Refusal::Guest {
+            op: "pause",
+            failure: hex_api::GuestFailure::Pause("its machine stopped first".to_owned()),
+        })
+    );
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    assert_eq!(runtime.pause(&id), Ok(()));
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Paused);
+}
+
+/// Kiln plan P5.5b: a paused VM ends as a running one does, its use read as it pauses. Do: pause a running VM and delete
+/// it answering its final use; pause another and KILL it, then pause and resume it. Expect: the first's final use read,
+/// its paused time in it, the box gone; the second stopped, shown Empty with Signal(9), and its pause and resume then
+/// refused Pause(Ended).
+#[test]
+fn p5_5b_a_paused_vm_ends_as_a_running_one() {
+    use hex_api::PauseCause;
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    let images = ModelImages::new();
+    *images.run.stats.lock().unwrap() = said_stats(vcpus);
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-paused-deleted", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    runtime.pause(&id).unwrap();
+    let used = runtime.delete_with_host_use(&id).unwrap().unwrap();
+    assert!(used.paused <= used.window, "{used:?}");
+    assert!(record(&owner, &id).is_none());
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-paused-killed", None))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    runtime.pause(&id).unwrap();
+    runtime.signal(&id, Signal::KILL).unwrap();
+    let ended = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(ended.exit, Some(Exit::Signal(9)));
+    assert_eq!(runtime.pause(&id), stands(&id, "pause", PauseCause::Ended));
+    assert_eq!(
+        runtime.resume(&id),
+        stands(&id, "resume", PauseCause::Ended)
+    );
+}
+
+/// Kiln plan P5.5b (Shards' D267: a paused run's usage is what its guest last said before its pause, none where it said
+/// none): a VM paused before its guest ever answered a stats ask has no usage to tell until it resumes, refused as any
+/// call that needs its guest is while it is paused. Do: pause a running VM whose guest has said no stats; read its usage;
+/// resume it and read its usage again. Expect: the first refused Pause(Paused) naming usage; the second refused as a run
+/// whose init said no memory is, its own words, as before this step.
+#[test]
+fn p5_5b_a_vm_paused_before_its_guest_said_its_stats_has_no_usage_to_tell() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-paused-mute", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    runtime.pause(&id).unwrap();
+    assert_eq!(
+        runtime.usage(&id).map(drop),
+        stands(&id, "usage", hex_api::PauseCause::Paused)
+    );
+    runtime.resume(&id).unwrap();
+    assert!(matches!(
+        runtime.usage(&id),
+        Err(Refusal::Os { why, .. }) if why.contains("said no memory")
+    ));
 }

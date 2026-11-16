@@ -58,9 +58,9 @@ pub use runtime::{
     LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
     LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
     LearnedWindow, LifecycleCause, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    MachineTime, Membership, NodeRun, NodeVmPhase, NodeVmReceipt, Proc, RateHeld, Refusal,
-    Reserved, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, StartedFrom,
-    Upstream, Usage, VmSize,
+    MachineTime, Membership, NodeRun, NodeVmPhase, NodeVmReceipt, PauseCause, Proc, RateHeld,
+    Refusal, Reserved, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal,
+    StartedFrom, Upstream, Usage, VmSize,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, ImageMember,

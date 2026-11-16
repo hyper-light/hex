@@ -2334,6 +2334,31 @@ impl Runtime for Node {
         })
     }
 
+    /// Kiln plan P5.5b: a VM box's backend pauses it, an image VM's its class's; any other box of the node pauses none,
+    /// refused naming its class as inspect says it, as the trait refuses it.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.pause(id);
+        }
+        Err(Refusal::Pause {
+            cause: hex_api::PauseCause::Class(self.inspect(id)?.class),
+            id: id.clone(),
+            op: "pause",
+        })
+    }
+
+    /// Kiln plan P5.5b: a VM box's backend resumes it, as its pause is.
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.resume(id);
+        }
+        Err(Refusal::Pause {
+            cause: hex_api::PauseCause::Class(self.inspect(id)?.class),
+            id: id.clone(),
+            op: "resume",
+        })
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         if let Some(backend) = self.backend_record(id)? {
             return backend.usage(id);

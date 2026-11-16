@@ -127,6 +127,12 @@ contention rule and the predictors; they do not hold the step up.
   with decision 9's census-free cost").
 - **Cold**: until it has SEEDABLE windows its charge is no less than its booking (C2), as its p99.9 is not yet an
   observed sample.
+- **A pause** (kiln plan P5.5b; `shards-image-class.md` §10): a span between a VM's two readings that holds any of its
+  owner's pause, its paused time (Shards' D267, `HostUse::paused`) having grown between them, is no sample at all, its
+  reading the next span's start all the same: the pause cut its use, as a cap cuts it, and a pause SEEDABLE windows
+  long would otherwise bring its charge, and its booking with it, down to its VMM's own, and give others the room it
+  holds for its resume. Its charge and booking stay what the windows before the pause made them. The paused time only
+  grows within a run, so its growth says a span held a pause however short; no number is picked.
 - Use that grows past the charge is the contention rule's (C4, C5), not a margin's.
 
 **Sources.** A per-task percentile, summed per machine, is the per-task half of Google's production peak

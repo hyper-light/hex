@@ -3147,6 +3147,16 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.host_use(id)
     }
 
+    /// Kiln plan P5.5b: the box's runtime pauses it, an image VM's its class's; its record is unchanged, its claim and
+    /// its room held, as a pause ends no run.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.runtime_at(id)?.pause(id)
+    }
+
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.runtime_at(id)?.resume(id)
+    }
+
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         self.runtime
             .list()?

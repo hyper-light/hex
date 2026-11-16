@@ -189,6 +189,12 @@ mod hosted {
         ) -> Result<(), Refusal> {
             self.0.signal_member(id, member, signal)
         }
+        fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.pause(id)
+        }
+        fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.resume(id)
+        }
     }
 
     impl<R: Runtime> Host for Hosted<R> {
@@ -629,6 +635,52 @@ fn w2_a_vms_start_is_followed_through_started_over_quic() {
     assert_eq!(
         vm.client.started(&none),
         Err(hex_api::Refusal::NoSuchBox(none.clone()))
+    );
+    vm.client.delete(&vm.id).unwrap();
+}
+
+/// Kiln plan P5.5b (AC-T7.4.1; docs/design/shards-image-class.md §10): the node's wire carries an image box's pause and
+/// resume (`Call::Pause`, `Call::Resume`, appended), so a remote caller pauses a VM as a caller in the node's own process
+/// does, its state, its usage and its refusals coming back typed. Do: through a simulator node served over QUIC in this
+/// process, pause a running VM; inspect it, read its usage, signal its member, and pause it again; resume it, inspect it,
+/// read its usage and resume it again; then pause an id the node holds no box of. Expect: the pause done and the VM
+/// Paused, its usage telling its paused time; the member's signal refused Pause(Paused) naming it, and the second pause
+/// Pause(Paused); the resume done and the VM Running, its usage's paused time no less than it was while paused; the
+/// second resume Pause(Running); and NoSuchBox for the id with no box.
+#[test]
+fn p5_5b_a_vms_pause_and_resume_go_through_quic() {
+    use hex_api::{BoxState, PauseCause, Refusal, Runtime as _, Signal};
+    let vm = member_vm("node.pause.test", "paused-over-quic");
+    let refused = |op, cause| {
+        Err(Refusal::Pause {
+            id: vm.id.clone(),
+            op,
+            cause,
+        })
+    };
+    assert_eq!(vm.client.pause(&vm.id), Ok(()));
+    assert_eq!(vm.client.inspect(&vm.id).unwrap().state, BoxState::Paused);
+    let paused = vm.client.usage(&vm.id).unwrap().paused_ns.unwrap();
+    assert_eq!(
+        vm.client.signal_member(&vm.id, &vm.claude, Signal::TERM),
+        refused("signal a member", PauseCause::Paused)
+    );
+    assert_eq!(
+        vm.client.pause(&vm.id),
+        refused("pause", PauseCause::Paused)
+    );
+    assert_eq!(vm.client.resume(&vm.id), Ok(()));
+    assert_eq!(vm.client.inspect(&vm.id).unwrap().state, BoxState::Running);
+    let resumed = vm.client.usage(&vm.id).unwrap().paused_ns.unwrap();
+    assert!(resumed >= paused, "{resumed} ns paused, then {paused}");
+    assert_eq!(
+        vm.client.resume(&vm.id),
+        refused("resume", PauseCause::Running)
+    );
+    let none = BoxId::new("paused-over-quic-none").unwrap();
+    assert_eq!(
+        vm.client.pause(&none),
+        Err(Refusal::NoSuchBox(none.clone()))
     );
     vm.client.delete(&vm.id).unwrap();
 }
