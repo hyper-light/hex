@@ -88,6 +88,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
   (`Call::MemberSignal`, appended), which a remote member's kill rides too.
+  Built on `cp/t7-p5-5b-pause-v2`, not merged (kiln plan P5.5b; `docs/design/shards-image-class.md` §10): a box's pause
+  and resume (Shards' D267), in process and over the node's wire (`Call::Pause`, `Call::Resume`, appended), typed
+  refusals, `BoxState::Paused`, its paused time in its usage, and its room held through its pause. Closes with: HEX-IMG-9
+  on real VMs (KVM, HVF, WHP), ROOT's.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
