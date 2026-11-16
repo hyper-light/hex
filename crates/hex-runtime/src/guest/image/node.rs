@@ -435,6 +435,8 @@ impl ImageClass {
             gpu_report: None,
             // No plug root (Shards' D271, image channel v35): a node VM's shares are its start's.
             plug_roots: Vec::new(),
+            // No member, so no member's reach past its microVM to bound (Shards' D278, image channel v39).
+            egress_ceiling: Vec::new(),
         })
     }
 }

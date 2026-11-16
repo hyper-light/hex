@@ -851,6 +851,28 @@ fn requests() -> Vec<(u64, Request, usize)> {
         // Kiln plan P5.5b: an image box's pause and resume, appended.
         (212, Request::Call(Call::Pause(id("image"))), 0),
         (213, Request::Call(Call::Resume(id("image"))), 0),
+        // Shards' D270 slice 4: a component swapped in at a member's next start, its image's own back now, and the
+        // box's components, appended.
+        (
+            214,
+            Request::Call(Call::Swap {
+                id: id("image"),
+                at: "/harness/claude".to_owned(),
+                digest: hex_api::sim::SIM_COMPONENT.to_owned(),
+                when: SwapWhen::NextStart,
+            }),
+            0,
+        ),
+        (
+            215,
+            Request::Call(Call::Restore {
+                id: id("image"),
+                at: "/agents/helper".to_owned(),
+                when: SwapWhen::Now,
+            }),
+            0,
+        ),
+        (216, Request::Call(Call::Components(id("image"))), 0),
         // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
         (205, Request::Call(Call::Lessors), 0),
         (206, Request::Lessor(Ok(())), 0),
@@ -1138,6 +1160,48 @@ fn refusals() -> Vec<Refusal> {
             id: id("image"),
             op,
             cause,
+        }),
+    );
+    // Shards' D270 slice 4: a call refused for its box's components, each cause, Shards' with its words, a class's
+    // naming every class.
+    out.extend(
+        [
+            SwapCause::Unknown,
+            SwapCause::Artifact,
+            SwapCause::Kind,
+            SwapCause::Platform,
+            SwapCause::Asks,
+            SwapCause::Device,
+            SwapCause::Running,
+            SwapCause::Failed,
+        ]
+        .map(|cause| Refusal::Swap {
+            id: id("image"),
+            op: "swap",
+            cause,
+            why: Some(format!("{cause:?}, in Shards' words")),
+        }),
+    );
+    out.extend(
+        [
+            ("restore", SwapCause::NotRunning),
+            ("components", SwapCause::Ended),
+        ]
+        .into_iter()
+        .chain(
+            [
+                Class::Process,
+                Class::Oci,
+                Class::Firecracker,
+                Class::Shards,
+            ]
+            .map(|class| ("swap", SwapCause::Class(class))),
+        )
+        .map(|(op, cause)| Refusal::Swap {
+            id: id("image"),
+            op,
+            cause,
+            why: None,
         }),
     );
     out.extend(connect_refusals());
@@ -1454,6 +1518,36 @@ fn answers() -> Vec<(u64, Answer)> {
             key: Some([3; 32]),
         },
     ));
+    // Shards' D270 slice 4: a swap's answer, now, its member's generation started and what it let go unread, then one at
+    // a member's next start; and a box's components, none and two.
+    let held = ComponentAt {
+        at: "/harness/claude".to_owned(),
+        desired: Some(hex_api::sim::SIM_COMPONENT.to_owned()),
+        held: Some(hex_api::sim::SIM_COMPONENT.to_owned()),
+    };
+    let wanted = ComponentAt {
+        at: "/agents/helper".to_owned(),
+        desired: None,
+        held: Some(hex_api::sim::SIM_COMPONENT.to_owned()),
+    };
+    out.push((
+        214,
+        Answer::Swapped(Swapped {
+            components: vec![held.clone(), wanted.clone()],
+            started: Some(u32::MAX),
+            unread: u64::MAX,
+        }),
+    ));
+    out.push((
+        215,
+        Answer::Swapped(Swapped {
+            components: Vec::new(),
+            started: None,
+            unread: 0,
+        }),
+    ));
+    out.push((216, Answer::Components(Vec::new())));
+    out.push((216, Answer::Components(vec![held, wanted])));
     out
 }
 
@@ -2269,8 +2363,8 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    // 0x0024: the first request kind past every one defined, a resume's (kiln plan P5.5b) the last.
-    for kind in [0u16, 0x0024, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    // 0x0027: the first request kind past every one defined, a box's components' (Shards' D270 slice 4) the last.
+    for kind in [0u16, 0x0027, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2701,6 +2795,36 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
             any_pause_cause()
         )
             .prop_map(|(id, op, cause)| Refusal::Pause { id, op, cause }),
+        (
+            any_id(),
+            proptest::sample::select(&SOME_NAMES[..]),
+            any_swap_cause(),
+            proptest::option::of(any_text())
+        )
+            .prop_map(|(id, op, cause, why)| Refusal::Swap { id, op, cause, why }),
+    ]
+}
+
+/// Each cause of a refusal for a box's components (Shards' D270 slice 4), a class's naming any class.
+fn any_swap_cause() -> impl Strategy<Value = SwapCause> {
+    prop_oneof![
+        Just(SwapCause::Unknown),
+        Just(SwapCause::Artifact),
+        Just(SwapCause::Kind),
+        Just(SwapCause::Platform),
+        Just(SwapCause::Asks),
+        Just(SwapCause::Device),
+        Just(SwapCause::Running),
+        Just(SwapCause::Failed),
+        Just(SwapCause::NotRunning),
+        Just(SwapCause::Ended),
+        proptest::sample::select(vec![
+            Class::Process,
+            Class::Oci,
+            Class::Firecracker,
+            Class::Shards
+        ])
+        .prop_map(SwapCause::Class),
     ]
 }
 
@@ -5936,15 +6060,17 @@ fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
                 name: "claude".to_owned(),
             })],
             shares: vec![
-                Mount {
+                ImageShare {
                     source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
                     destination: "/home/agent/.claude".to_owned(),
                     read_only: false,
+                    exec: true,
                 },
-                Mount {
+                ImageShare {
                     source: PathBuf::from("/srv/projects/hex"),
                     destination: "/work/hex".to_owned(),
                     read_only: true,
+                    exec: false,
                 },
             ],
             ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
@@ -6225,10 +6351,11 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
         bounds: Bounds::default(),
         class: ClassSpec::ShardsImage(Box::new(ShardsImage {
             grants: each_way(),
-            shares: vec![Mount {
+            shares: vec![ImageShare {
                 source: PathBuf::from("/srv/projects/hex"),
                 destination: "/work/hex".to_owned(),
                 read_only: true,
+                exec: true,
             }],
             credentials,
             ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
@@ -6250,9 +6377,10 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
     put_credentials(&mut listed, &granted, &each_way()).unwrap();
     let listed = listed.done().unwrap();
     let share = b"/work/hex";
-    // After the share's guest path, its read-only flag, then the credentials.
-    let at = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len() + 1;
-    assert_eq!(bytes[at - 1], 1);
+    // After the share's guest path, its read-only flag and whether its files may be run (Shards' D279), then the
+    // credentials.
+    let at = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len() + 2;
+    assert_eq!(&bytes[at - 2..at], &[1, 1]);
     assert_eq!(&bytes[at..at + listed.len()], listed.as_slice());
     let unreached = openai_credential("evil.example");
     let refused = Request::Call(Call::Create(Box::new(spec(unreached.clone()))));
@@ -7129,4 +7257,113 @@ fn q13_a_sealed_message_is_held_to_one_messages_bound() {
         })
     );
     assert_eq!(here.next.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// Shards' D270 slice 4 (AC-T7.4.1): a swap crosses the wire as an appended call, its box, its member's path, its
+/// component's digest and when last, a byte (0 its next start, 1 now); its answer every member's component, the
+/// generation a `Now` started and the bytes it let go unread; its refusal tag 18, the cause's place and Shards' words
+/// as an option. Do write a swap now and read it back, then it with its when byte 2; write a swap's answer and a refusal
+/// and read each back, then the refusal with its cause byte 11. Expect each read back as written, its when the last
+/// byte, 1; when 2 refused as "swap when"; cause 11 refused as "swap cause".
+#[test]
+fn d270_a_swap_its_answer_and_its_refusal_cross_the_wire() {
+    let swap = Request::Call(Call::Swap {
+        id: id("image"),
+        at: "/harness/claude".to_owned(),
+        digest: hex_api::sim::SIM_COMPONENT.to_owned(),
+        when: SwapWhen::Now,
+    });
+    let bytes = request(7, &swap, MAX_MESSAGE).unwrap();
+    assert_eq!(bytes.last(), Some(&1));
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        swap
+    );
+    let mut hostile = bytes.clone();
+    let last = hostile.len() - 1;
+    hostile[last] = 2;
+    assert!(matches!(
+        read_request(&received(&hostile, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value {
+            what: "swap when",
+            ..
+        })
+    ));
+    let swapped = Answer::Swapped(Swapped {
+        components: vec![ComponentAt {
+            at: "/harness/claude".to_owned(),
+            desired: None,
+            held: Some(hex_api::sim::SIM_COMPONENT.to_owned()),
+        }],
+        started: Some(3),
+        unread: 4096,
+    });
+    let bytes = answer(7, &swapped, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        swapped
+    );
+    let refused = Answer::Refused(Refusal::Swap {
+        id: id("image"),
+        op: "swap",
+        cause: SwapCause::Asks,
+        why: Some("port 22/tcp is past its member's grants".to_owned()),
+    });
+    let bytes = answer(7, &refused, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        refused
+    );
+    let words = b"port 22/tcp is past its member's grants";
+    // The cause's tag sits before the option of its words: their tag and length.
+    let tag = bytes.len() - words.len() - size_of::<u32>() - 2;
+    assert_eq!(bytes[tag], 4, "Asks, by its place");
+    let mut hostile = bytes.clone();
+    hostile[tag] = 11;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "swap cause",
+            ..
+        })
+    ));
+}
+
+/// Shards' D279 (AC-T7.4.1): whether a share's files may be run from it crosses the wire after its read-only flag, a
+/// byte. Do create a VM sharing a project whose files may not be run, read it back, then send it with that byte 2.
+/// Expect it read back whole, its last share's byte 0 after a read-only 1, and the byte 2 refused as "exec".
+#[test]
+fn d279_a_shares_exec_crosses_the_wire_after_its_read_only_flag() {
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-noexec"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            shares: vec![ImageShare {
+                source: PathBuf::from("/srv/projects/hex"),
+                destination: "/work/hex".to_owned(),
+                read_only: true,
+                exec: false,
+            }],
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    })));
+    let bytes = request(9, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+    let share = b"/work/hex";
+    let at = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len();
+    assert_eq!(&bytes[at..at + 2], &[1, 0]);
+    let mut hostile = bytes.clone();
+    hostile[at + 1] = 2;
+    assert!(matches!(
+        read_request(&received(&hostile, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value { what: "exec", .. })
+    ));
 }

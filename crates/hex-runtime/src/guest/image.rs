@@ -4,7 +4,8 @@
 //! Store); its run is this process's, for a run ends with its owner in D231's first version.
 //!
 //! What the record and the run say of a box ([`State`], R04): Created (`Creating`), Booting, Running and Paused
-//! (`Ready`, a boot or run of this process, a paused run's vCPUs held out of its guest by its owner, kiln plan P5.5b),
+//! (`Ready`, a boot or run of this process, a paused run's vCPUs held out of its guest by its owner, kiln plan P5.5b; a
+//! running run's members each at the generation its swaps and restores now started, Shards' D270),
 //! Stopping, Ended (`Ready` with its exit), and Held (`Ready` or
 //! `Deleting` with no exit and no run of this process: an earlier node process's run, which D231 can
 //! neither take back nor prove gone, so its claim is kept and every call refused
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestFailure, GuestTime, HostUse,
     ImageMember, LifecycleCause, Member, MemberKind, NodeRun, PauseCause, Proc, Refusal,
-    ShardsImage, Signal, Upstream, Usage, VmSize,
+    ShardsImage, Signal, SwapCause, Upstream, Usage, VmSize,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -41,7 +42,8 @@ use shards_api::control::{
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats, StatsScope,
+    MemberEnd, MemberInfo, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats, StatsScope,
+    SwapRefusal,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -435,9 +437,9 @@ enum Run {
     /// Its boot, on a thread of its own, answers here; its stop (D231's `BootStop`) ends it mid-boot, as a delete
     /// asks it.
     Booting(Arc<Slot<Booted>>, Arc<BootStop>),
-    /// Its run, held, since its boot answered, its vCPUs as its owner last moved them ([`Motion`]). D231 stops a run it
-    /// drops, so it leaves only through its stop.
-    Running(Arc<dyn ImageGuest>, Instant, Motion),
+    /// Its run, held, since its boot answered, its vCPUs as its owner last moved them ([`Motion`]), and the generation
+    /// each member runs now ([`Generations`]). D231 stops a run it drops, so it leaves only through its stop.
+    Running(Arc<dyn ImageGuest>, Instant, Motion, Generations),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known, until its record says it.
@@ -460,6 +462,12 @@ enum Motion {
     /// Its resume asked of Shards and not yet answered.
     Resuming,
 }
+
+/// The generation each member of a run of this process runs now (Shards' D270 slice 3b: 0 its first, each start again
+/// one more), by its declared index, as this process's swaps and restores now started them ([`Runs::started_again`]): a
+/// member none started again is at its first, so none is kept for it, and no more than one for each member its image
+/// declares. Hex starts a member again through those alone, so nothing else moves it on.
+type Generations = BTreeMap<u32, u32>;
 
 /// A move of a running VM's vCPUs its owner asks ([`hex_api::Runtime::pause`], [`hex_api::Runtime::resume`]; kiln plan
 /// P5.5b).
@@ -909,6 +917,22 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
         ImageRefusal::Save(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
         }
+        // Only a member's start again of its own (D270 slice 3b) is refused so, and this class asks none: a swap's or a
+        // restore's start again is refused as its swap (below).
+        ImageRefusal::Restart(cause, why) => Refusal::Broken(format!(
+            "Shards refused {op} as a member's start again ({cause:?}): {why}"
+        )),
+        // A component's swap or restore its run host refused (D270 slice 4): the box's own refusal, typed by Shards'
+        // cause, in its words.
+        ImageRefusal::Swap(cause, why) => match id.try_clone() {
+            Ok(id) => Refusal::Swap {
+                id,
+                op,
+                cause: swap_cause(cause),
+                why: Some(why),
+            },
+            Err(refused) => refused,
+        },
         // Only a run that asks its GPU report (D233) is refused so, and this class asks none.
         ImageRefusal::GpuProbe(why) => {
             Refusal::Broken(format!("Shards refused {op} as a GPU report: {why}"))
@@ -922,6 +946,37 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
                  keeps to quote a run's end"
             ),
         },
+    }
+}
+
+/// Why Shards refused a component's swap (D270 slice 4), in Hex's words: Shards' eight, one for one.
+fn swap_cause(cause: SwapRefusal) -> SwapCause {
+    match cause {
+        SwapRefusal::Unknown => SwapCause::Unknown,
+        SwapRefusal::Artifact => SwapCause::Artifact,
+        SwapRefusal::Kind => SwapCause::Kind,
+        SwapRefusal::Platform => SwapCause::Platform,
+        SwapRefusal::Asks => SwapCause::Asks,
+        SwapRefusal::Device => SwapCause::Device,
+        SwapRefusal::Running => SwapCause::Running,
+        SwapRefusal::Failed => SwapCause::Failed,
+    }
+}
+
+/// Box `id`'s `op` on its components refused by Shards (D270 slice 4), typed: its run's end as the box's own `Ended`, as
+/// a pause's is; every other refusal as [`refused`] types it, its swap's own causes among it.
+fn swap_refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
+    match why {
+        ImageRefusal::Ended(_) => match id.try_clone() {
+            Ok(id) => Refusal::Swap {
+                id,
+                op,
+                cause: SwapCause::Ended,
+                why: None,
+            },
+            Err(refused) => refused,
+        },
+        why => refused(id, op, why),
     }
 }
 
@@ -1200,11 +1255,14 @@ fn member_name(m: &Member) -> MemberName {
 /// A member its caller drives, as a program (joint plan step 17): no process of this host, its end D231's
 /// `wait_member` (the run's end, where it ended with its run), and the caller's ends of its streams, given once.
 /// A signal to the member alone is the agent-control endpoint's (step 11), so its own kill awaits it; the box's
-/// stop (`signal(KILL)`, `delete`) ends it with its VM.
+/// stop (`signal(KILL)`, `delete`) ends it with its VM. It is one generation of its member (Shards' D270 slice 3b): a
+/// swap or restore now ends it and starts the next, whose streams and end are another program's.
 struct MemberProc {
     id: BoxId,
     guest: Arc<dyn ImageGuest>,
     name: MemberName,
+    /// Its member's generation it is: its streams' and its end's.
+    generation: u32,
     /// Its declared index, by which its run's endpoint names its lane (D238); none for one its image declares not.
     index: Option<u32>,
     /// Its run's agent-control, its kill's.
@@ -1231,7 +1289,7 @@ impl Proc for MemberProc {
         if let Some(exit) = self.ended {
             return Ok(Some(exit));
         }
-        let exit = match self.guest.wait_member(&self.name, timeout) {
+        let exit = match self.guest.wait_member(&self.name, self.generation, timeout) {
             Ok(None) => return Ok(None),
             Ok(Some(MemberEnd::Exited(code))) => {
                 i32::try_from(code).map_or(Exit::Unknown, Exit::Code)
@@ -1241,6 +1299,9 @@ impl Proc for MemberProc {
             Ok(Some(MemberEnd::Signaled(signal))) => {
                 i32::try_from(signal).map_or(Exit::Unknown, Exit::Signal)
             }
+            // Ended at once by its start again, its graceful end outlasting its patience (D270 slice 3b): every process
+            // of it killed, SIGKILL.
+            Ok(Some(MemberEnd::Killed)) => Exit::Signal(Signal::KILL.number()),
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
                 Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
@@ -1255,9 +1316,10 @@ impl Proc for MemberProc {
 
     /// KILL on its member's own lane, through its run's agent-control endpoint, dialed as the run's first signal goes
     /// (D238; goal 2's item 2): its end then its member's, Signal(9). One that has ended, or ends as it is asked, has
-    /// nothing left to end: answered at once.
+    /// nothing left to end: answered at once. Its end is read first, at once: a member's lane steers the generation that
+    /// runs as it opens (D270 slice 3b), and a later generation's is another program's to end.
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.ended.is_some() {
+        if self.ended.is_some() || self.wait_for(Duration::ZERO)?.is_some() {
             return Ok(());
         }
         let index = self.index.ok_or_else(|| {
@@ -1541,6 +1603,127 @@ fn held() -> Refusal {
     }
 }
 
+/// What a swap asks of its member's component (Shards' D270 slice 4; [`ImageClass::swap_image`]): one its node's store
+/// holds, by its manifest digest, or its image's own back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Change<'a> {
+    Swap(&'a str),
+    Restore,
+}
+
+impl Change<'_> {
+    /// The call it is, as its refusals name it.
+    fn op(self) -> &'static str {
+        match self {
+            Self::Swap(_) => "swap",
+            Self::Restore => "restore",
+        }
+    }
+
+    /// It, asked of `guest`'s run for its member at `at`, `when`: Shards waits for its run host's answer or its run's end
+    /// alone (`Duration::MAX`).
+    fn ask(
+        self,
+        guest: &dyn ImageGuest,
+        at: &str,
+        when: shards_api::image::SwapWhen,
+    ) -> Result<shards_api::image::Swapped, ImageRefusal> {
+        match self {
+            Self::Swap(digest) => guest.swap(at, digest, when, Duration::MAX),
+            Self::Restore => guest.restore(at, when, Duration::MAX),
+        }
+    }
+}
+
+/// The member a run's image runs at path `at`, as Shards names a member's component's path (D270 slice 4: `/agents/NAME`,
+/// `/harness/NAME`), with its declared index; none for a path of no member that runs.
+fn member_at(members: &[MemberInfo], at: &str) -> Option<(MemberName, u32)> {
+    let name = match at.strip_prefix("/agents/") {
+        Some(name) => MemberName::agent(name),
+        None => MemberName::harness(at.strip_prefix("/harness/")?),
+    };
+    members
+        .iter()
+        .find(|m| m.runs && m.kind == name.kind && m.name == name.name)
+        .map(|m| (name, m.index))
+}
+
+/// One channel of a member's last generation read to its end on a thread of its own and let go ([`drained`]).
+struct Drain {
+    name: MemberName,
+    generation: u32,
+    channel: Channel,
+    thread: std::thread::JoinHandle<std::io::Result<u64>>,
+}
+
+impl Drain {
+    /// How many bytes it let go, once its channel's end is told (`ImageGuest::wait_channel`): its reader then reaches
+    /// that end as soon as its last bytes are read, so the wait on its thread is that of their reads. A channel whose end
+    /// isn't told was never opened, so nothing of it came, and its thread ends with its run.
+    fn let_go(self, guest: &dyn ImageGuest) -> Result<u64, Refusal> {
+        let told = guest.wait_channel(&self.name, self.generation, self.channel, Duration::ZERO);
+        if !matches!(told, Ok(Some(_))) {
+            return Ok(0);
+        }
+        self.thread
+            .join()
+            .map_err(|_| {
+                Refusal::Broken(
+                    "the thread reading a member's last output ended with no answer".to_owned(),
+                )
+            })?
+            .map_err(|why| Refusal::os("reading a member's last output to its end", why))
+    }
+}
+
+/// Member `name`'s generation `generation`'s output that no caller took, each channel read on a thread of its own to its
+/// end and let go (Shards' D270 slice 3b: a member's next generation starts only once every channel of its last has
+/// ended, and what no one reads holds its channel): a channel Shards gives none of, taken already (its taker reads it)
+/// or never opened, is no channel of the node's to read. A thread that can't start refuses its swap, its channel let go
+/// as a reader that left is (Shards' pump letting go of what comes of it).
+fn drained(
+    guest: &Arc<dyn ImageGuest>,
+    name: &MemberName,
+    generation: u32,
+) -> Result<Vec<Drain>, Refusal> {
+    let mut drains = Vec::new();
+    for channel in [Channel::Stdout, Channel::Stderr] {
+        let Ok(mut output) = guest.take_output(name, generation, channel) else {
+            continue;
+        };
+        let thread = std::thread::Builder::new()
+            .name("hex-image-drain".to_owned())
+            .spawn(move || std::io::copy(&mut output, &mut std::io::sink()))
+            .map_err(|why| Refusal::os("reading a member's last output to its end", why))?;
+        drains.push(Drain {
+            name: name.clone(),
+            generation,
+            channel,
+            thread,
+        });
+    }
+    Ok(drains)
+}
+
+/// What a swap did (D270 slice 4), in Hex's words: every member's component, the generation of its member a `Now`
+/// started, and `unread`, the bytes of the ended generation's output no caller had taken, let go.
+fn swapped(said: shards_api::image::Swapped, unread: u64) -> hex_api::Swapped {
+    hex_api::Swapped {
+        components: said.components.into_iter().map(component_at).collect(),
+        started: said.started.map(|(_, generation)| generation),
+        unread,
+    }
+}
+
+/// A member's component as Shards says it (D270 slice 4), in Hex's words: one for one.
+fn component_at(said: shards_api::image::ComponentAt) -> hex_api::ComponentAt {
+    hex_api::ComponentAt {
+        at: said.at,
+        desired: said.desired,
+        held: said.held,
+    }
+}
+
 /// Box `id`'s `op`, which needs its guest's answer, refused at once while its vCPUs are held or a move of them is under
 /// way (kiln plan P5.5b; Shards' D267: its guest answers nothing then): a caller never waits on a frozen guest.
 fn paused(id: &BoxId, op: &'static str) -> Result<Refusal, Refusal> {
@@ -1563,7 +1746,7 @@ impl Runs {
     /// When `key`'s run started, as its boot answered, where it runs in this process, paused or not.
     fn started<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Instant>, Refusal> {
         Ok(match self.lock()?.get(key.into()) {
-            Some(Run::Running(_, at, _)) => Some(*at),
+            Some(Run::Running(_, at, ..)) => Some(*at),
             _ => None,
         })
     }
@@ -1571,7 +1754,7 @@ impl Runs {
     /// `key`'s run's guest, where it runs in this process, paused or not.
     fn guest<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Arc<dyn ImageGuest>>, Refusal> {
         Ok(match self.lock()?.get(key.into()) {
-            Some(Run::Running(guest, _, _)) => Some(Arc::clone(guest)),
+            Some(Run::Running(guest, ..)) => Some(Arc::clone(guest)),
             _ => None,
         })
     }
@@ -1597,13 +1780,13 @@ impl Runs {
             return Err(refused(PauseCause::NotRunning)?);
         };
         match run {
-            Run::Running(guest, _, motion) if *motion == from => {
+            Run::Running(guest, _, motion, _) if *motion == from => {
                 *motion = under_way;
                 Ok(Arc::clone(guest))
             }
-            Run::Running(_, _, Motion::Paused) => Err(refused(PauseCause::Paused)?),
-            Run::Running(_, _, Motion::Going) => Err(refused(PauseCause::Running)?),
-            Run::Running(_, _, under @ (Motion::Pausing | Motion::Resuming)) => {
+            Run::Running(_, _, Motion::Paused, _) => Err(refused(PauseCause::Paused)?),
+            Run::Running(_, _, Motion::Going, _) => Err(refused(PauseCause::Running)?),
+            Run::Running(_, _, under @ (Motion::Pausing | Motion::Resuming), _) => {
                 let under = match under {
                     Motion::Pausing => "its pause",
                     _ => "its resume",
@@ -1636,11 +1819,46 @@ impl Runs {
         done: bool,
     ) -> Result<(), Refusal> {
         let (from, under_way, to) = toward.motions();
-        if let Some(Run::Running(held, _, motion)) = self.lock()?.get_mut(Key::Box(id))
+        if let Some(Run::Running(held, _, motion, _)) = self.lock()?.get_mut(Key::Box(id))
             && Arc::ptr_eq(held, guest)
             && *motion == under_way
         {
             *motion = if done { to } else { from };
+        }
+        Ok(())
+    }
+
+    /// Member `index`'s generation that `key`'s run `guest` runs now (Shards' D270 slice 3b): as this process's swaps and
+    /// restores now started it, its first where none did; none where `guest` is no longer `key`'s run, held running.
+    fn generation<'k>(
+        &self,
+        key: impl Into<Key<'k>>,
+        guest: &Arc<dyn ImageGuest>,
+        index: u32,
+    ) -> Result<Option<u32>, Refusal> {
+        Ok(match self.lock()?.get(key.into()) {
+            Some(Run::Running(held, _, _, generations)) if Arc::ptr_eq(held, guest) => {
+                Some(generations.get(&index).copied().unwrap_or(0))
+            }
+            _ => None,
+        })
+    }
+
+    /// Member `index`'s generation `generation`, started by a swap or restore now of `key`'s run `guest` (D270 slice 4):
+    /// its current from Shards' answer on, never one before the one held. A run its stop has taken since, or another
+    /// run of the box, is left as it is.
+    fn started_again<'k>(
+        &self,
+        key: impl Into<Key<'k>>,
+        guest: &Arc<dyn ImageGuest>,
+        index: u32,
+        generation: u32,
+    ) -> Result<(), Refusal> {
+        if let Some(Run::Running(held, _, _, generations)) = self.lock()?.get_mut(key.into())
+            && Arc::ptr_eq(held, guest)
+        {
+            let current = generations.entry(index).or_insert(0);
+            *current = (*current).max(generation);
         }
         Ok(())
     }
@@ -1713,7 +1931,7 @@ impl Runs {
                     // Its run started as its boot answered, its vCPUs going.
                     let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                    *run = Run::Running(Arc::clone(&guest), at, Motion::Going);
+                    *run = Run::Running(Arc::clone(&guest), at, Motion::Going, Generations::new());
                     Settled::Started(guest)
                 }
                 // Its stop ended it mid-boot, as its delete asked (D231's `BootStop`): its run never started, and the
@@ -1739,7 +1957,7 @@ impl Runs {
                     Settled::Ends(end)
                 }
             },
-            Run::Running(guest, _, motion) => Settled::Running(Arc::clone(guest), *motion),
+            Run::Running(guest, _, motion, _) => Settled::Running(Arc::clone(guest), *motion),
             Run::Stopping(slot, stop) => match slot.take()? {
                 None => Settled::Stopping(Arc::clone(slot), stop.clone()),
                 Some((end, took)) => {
@@ -1771,7 +1989,7 @@ impl Runs {
                     // Its run started as its boot answered, its vCPUs going.
                     let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                    *run = Run::Running(guest, at, Motion::Going);
+                    *run = Run::Running(guest, at, Motion::Going, Generations::new());
                     Ok(())
                 }
                 Some((Err(why), took)) => {
@@ -2130,7 +2348,8 @@ impl ImageClass {
             publish: network.publish,
             egress: network.egress,
             // The host directories its caller names, and only those (default deny), as Shards takes each: a share
-            // Shards refuses refuses the start, in its words.
+            // Shards refuses refuses the start, in its words. Each runnable or not as its spec says (Shards' D279), and
+            // given its members where its image's `VOLUME` lies alone, as before D277: the spec names none.
             shares: image
                 .shares
                 .iter()
@@ -2138,6 +2357,8 @@ impl ImageClass {
                     host: m.source.clone(),
                     at: m.destination.clone(),
                     read_only: m.read_only,
+                    exec: m.exec,
+                    members: None,
                 })
                 .collect(),
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
@@ -2165,6 +2386,9 @@ impl ImageClass {
             // No plug root (Shards' D271, image channel v35): its shares are the start's, and nothing is plugged
             // into its run as it runs.
             plug_roots: Vec::new(),
+            // No member's reach past its image's grants as its run goes (Shards' D278, image channel v39): this class
+            // changes none.
+            egress_ceiling: Vec::new(),
         })
     }
 
@@ -2921,6 +3145,105 @@ impl ImageClass {
         }
     }
 
+    /// Image box `record`'s run's guest for `op`, a call on its components (Shards' D270 slice 4), and whether its vCPUs
+    /// are held, or a move of them is under way (kiln plan P5.5b), as its run stands: refused `Pending` while it boots,
+    /// held as every call is, `NotRunning` before its start and once its owner's stop has begun, `Ended` once its run
+    /// has ended, its host's reaping under way among it.
+    fn components_of(
+        &self,
+        record: &BoxRecord,
+        op: &'static str,
+    ) -> Result<(Arc<dyn ImageGuest>, bool), Refusal> {
+        let id = &record.spec.id;
+        let stands = |cause| -> Result<Refusal, Refusal> {
+            Ok(Refusal::Swap {
+                id: id.try_clone()?,
+                op,
+                cause,
+                why: None,
+            })
+        };
+        match self.settle(record)? {
+            State::Running(guest) => Ok((guest, false)),
+            State::Paused(guest) => Ok((guest, true)),
+            State::Booting => Err(pending(id)?),
+            State::Held => Err(held()),
+            State::Created | State::Stopping(_, Stop::Asked | Stop::Grants(_)) => {
+                Err(stands(SwapCause::NotRunning)?)
+            }
+            State::Stopping(_, Stop::Ended(_)) | State::Ended(_) => Err(stands(SwapCause::Ended)?),
+        }
+    }
+
+    /// Image box `record`'s member at path `at` given `change` (`Runtime::swap`, `Runtime::restore`; Shards' D270 slice
+    /// 4), at its next start or now. Each ask of Shards waits on its run host's answer or its run's end alone
+    /// (`Duration::MAX`), never a timer, as a pause's does: Shards' patience is a member's graceful end's too, so a
+    /// member that never ends at its SIGTERM holds a swap now until a KILL ends it, its own or its box's.
+    /// - **Its run** settled first: refused while paused, its guest answering nothing (`Pause(Paused)`), and as
+    ///   [`ImageClass::components_of`] refuses it.
+    /// - **Its component made ready** at its member's next start first: checked, plugged and mounted by its run host, or
+    ///   its image's own wanted back, refused typed with nothing of its member touched.
+    /// - **Now**, then, its member's current generation's output that no caller took is read to its end and let go
+    ///   ([`drained`]): Shards starts a member's next generation only once every channel of its last has ended, and
+    ///   fails its start past its patience otherwise, letting its member go. Then its start again is asked, the same
+    ///   change now; its next generation is its current from Shards' answer on ([`Runs::started_again`]), whose streams
+    ///   `Runtime::member` takes; and the drains whose channels Shards told ended say how many bytes they let go. A
+    ///   start again refused leaves its drains reading on, to its generation's end.
+    pub(super) fn swap_image(
+        &self,
+        record: BoxRecord,
+        at: &str,
+        change: Change<'_>,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let op = change.op();
+        let (guest, frozen) = self.components_of(&record, op)?;
+        if frozen {
+            return Err(paused(&id, op)?);
+        }
+        let ready = change
+            .ask(guest.as_ref(), at, shards_api::image::SwapWhen::NextStart)
+            .map_err(|why| swap_refused(&id, op, why))?;
+        if when == hex_api::SwapWhen::NextStart {
+            return Ok(swapped(ready, 0));
+        }
+        let runs = &self.image()?.runs;
+        let member = member_at(guest.members(), at);
+        let mut drains = Vec::new();
+        if let Some((name, index)) = &member
+            && let Some(generation) = runs.generation(&id, &guest, *index)?
+        {
+            drains = drained(&guest, name, generation)?;
+        }
+        let now = change
+            .ask(guest.as_ref(), at, shards_api::image::SwapWhen::Now)
+            .map_err(|why| swap_refused(&id, op, why))?;
+        if let Some((index, generation)) = now.started {
+            runs.started_again(&id, &guest, index, generation)?;
+        }
+        let mut unread: u64 = 0;
+        for drain in drains {
+            unread = unread
+                .checked_add(drain.let_go(guest.as_ref())?)
+                .ok_or_else(|| {
+                    Refusal::Broken("a member's output let go passes a u64 of bytes".to_owned())
+                })?;
+        }
+        Ok(swapped(now, unread))
+    }
+
+    /// Image box `record`'s members' components (`Runtime::components`; Shards' D270 slice 4), as its run host said them
+    /// with its last swap's answer: answered paused or not, from what its node holds; refused as
+    /// [`ImageClass::components_of`] refuses it.
+    pub(super) fn components_image(
+        &self,
+        record: BoxRecord,
+    ) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        let (guest, _) = self.components_of(&record, "components")?;
+        Ok(guest.components().into_iter().map(component_at).collect())
+    }
+
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
         let id = &record.spec.id;
@@ -2974,33 +3297,45 @@ impl ImageClass {
             State::Created | State::Ended(_) => return Err(Refusal::NotRunning(id, "member")),
         };
         let name = member_name(member);
-        let stdin = guest
-            .take_input(&name)
-            .map_err(|why| refused(&id, "taking a member's stdin", why))?;
-        let stdout = guest
-            .take_output(&name, Channel::Stdout)
-            .map_err(|why| refused(&id, "taking a member's stdout (its stdin taken)", why))?;
-        let stderr = guest.take_output(&name, Channel::Stderr).map_err(|why| {
-            refused(
-                &id,
-                "taking a member's stderr (its stdin and stdout taken)",
-                why,
-            )
-        })?;
-        let given = Given {
-            stdin: Some(stdin.into()),
-            stdout: Some(stdout.into()),
-            stderr: Some(stderr.into()),
-        };
         let index = guest
             .members()
             .iter()
             .find(|declared| declared.kind == name.kind && declared.name == name.name)
             .map(|declared| declared.index);
+        // Its current generation's streams (Shards' D270 slice 3b): its first's where no swap or restore now of this
+        // process started it again.
+        let generation = match index {
+            None => 0,
+            Some(index) => match self.image()?.runs.generation(&id, &guest, index)? {
+                Some(generation) => generation,
+                None => return Err(Refusal::NotRunning(id, "member")),
+            },
+        };
+        let stdin = guest
+            .take_input(&name, generation)
+            .map_err(|why| refused(&id, "taking a member's stdin", why))?;
+        let stdout = guest
+            .take_output(&name, generation, Channel::Stdout)
+            .map_err(|why| refused(&id, "taking a member's stdout (its stdin taken)", why))?;
+        let stderr = guest
+            .take_output(&name, generation, Channel::Stderr)
+            .map_err(|why| {
+                refused(
+                    &id,
+                    "taking a member's stderr (its stdin and stdout taken)",
+                    why,
+                )
+            })?;
+        let given = Given {
+            stdin: Some(stdin.into()),
+            stdout: Some(stdout.into()),
+            stderr: Some(stderr.into()),
+        };
         Ok(Box::new(MemberProc {
             id,
             guest,
             name,
+            generation,
             index,
             control: Arc::clone(&self.image()?.control),
             given: Some(given),
@@ -3451,6 +3786,29 @@ impl hex_api::Runtime for ImageClass {
 
     fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
         self.resume_image(self.called(id)?)
+    }
+
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.swap_image(self.called(id)?, at, Change::Swap(digest), when)
+    }
+
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.swap_image(self.called(id)?, at, Change::Restore, when)
+    }
+
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        self.components_image(self.called(id)?)
     }
 
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {

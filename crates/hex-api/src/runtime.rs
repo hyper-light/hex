@@ -257,6 +257,90 @@ pub trait Runtime: Send + Sync {
             op: "resume",
         })
     }
+
+    /// Gives the member of running Shards image box `id` at path `at` (`/agents/NAME` or `/harness/NAME`, its Agentfile's
+    /// directory for it) the component of manifest digest `digest` (`sha256:…`), an OSI artifact its node's Shards store
+    /// holds, in its running VM in place (Shards' D270 slice 4): checked against its image, made ready beside its
+    /// writable layer, and laid at its path as its member starts again: at its next start ([`SwapWhen::NextStart`]), or
+    /// now ([`SwapWhen::Now`]), its member's current generation asked to end (SIGTERM) and its next started with it.
+    /// Answers every member's component after it, the generation a `Now` started, whose streams and end
+    /// [`Runtime::member`] takes, and the bytes of the ended generation's output no caller had taken, which its node read
+    /// to their end and let go so that output no one reads held no restart ([`Swapped`]). It waits on its VM's answer or
+    /// its run's end alone, never a timer: a member that doesn't end at its SIGTERM holds a `Now` until a KILL ends it
+    /// (its own, [`Runtime::signal_member`], or its box's). Refused, typed ([`Refusal::Swap`]): each of Shards' own
+    /// causes, in its words ([`SwapCause`]); [`SwapCause::NotRunning`] before its start and once its stop has begun;
+    /// [`SwapCause::Ended`] once its run has ended; and [`SwapCause::Class`] for a box of any other class or form, which
+    /// is this default's answer, its class as inspect says it. While it is paused it is refused [`Refusal::Pause`]
+    /// `Paused`, its guest answering nothing; while it boots, `Lifecycle { Pending }`.
+    fn swap(&self, id: &BoxId, at: &str, digest: &str, when: SwapWhen) -> Result<Swapped, Refusal> {
+        let _ = (at, digest, when);
+        Err(Refusal::Swap {
+            cause: SwapCause::Class(self.inspect(id)?.class),
+            id: id.try_clone()?,
+            op: "swap",
+            why: None,
+        })
+    }
+
+    /// Gives the member of running Shards image box `id` at path `at` its image's own component back (Shards' D270 slice
+    /// 4), at its next start or now, as [`Runtime::swap`] gives it another: answered and refused as a swap is, naming
+    /// `restore`.
+    fn restore(&self, id: &BoxId, at: &str, when: SwapWhen) -> Result<Swapped, Refusal> {
+        let _ = (at, when);
+        Err(Refusal::Swap {
+            cause: SwapCause::Class(self.inspect(id)?.class),
+            id: id.try_clone()?,
+            op: "restore",
+            why: None,
+        })
+    }
+
+    /// Every member's component in running Shards image box `id`, as its run host said them with its last swap's answer
+    /// (Shards' D270 slice 4, [`ComponentAt`]): none where none was swapped. Answered from what its node holds, paused or
+    /// not; refused as a swap is, naming `components`.
+    fn components(&self, id: &BoxId) -> Result<Vec<ComponentAt>, Refusal> {
+        Err(Refusal::Swap {
+            cause: SwapCause::Class(self.inspect(id)?.class),
+            id: id.try_clone()?,
+            op: "components",
+            why: None,
+        })
+    }
+}
+
+/// When a component's swap or restore takes its member (Shards' D270 slice 4; [`Runtime::swap`]). The node's wire tags
+/// each by its place here, so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwapWhen {
+    /// At its member's next start: a later swap or restore `Now` of that member starts it, as Hex starts a member again
+    /// through no other call.
+    NextStart,
+    /// Now: its member's current generation asked to end (SIGTERM), and its next started with it.
+    Now,
+}
+
+/// One member's component in a running Shards image box (Shards' D270 slice 4; [`Runtime::components`]): its path
+/// (`/agents/NAME`, `/harness/NAME`), the component its next start lays there (`desired`) and the one its current
+/// generation runs with (`held`), each by its OSI artifact's manifest digest, none for its image's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentAt {
+    pub at: String,
+    pub desired: Option<String>,
+    pub held: Option<String>,
+}
+
+/// What a swap or a restore did ([`Runtime::swap`], [`Runtime::restore`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Swapped {
+    /// Every member's component after it, as its run host holds them.
+    pub components: Vec<ComponentAt>,
+    /// The generation of its member a `Now` started (Shards' D270 slice 3b: 0 its first, each start again one more),
+    /// whose streams and end [`Runtime::member`] takes; none for a `NextStart`.
+    pub started: Option<u32>,
+    /// The bytes of the ended generation's output that no caller had taken, which its node read to their end and let go
+    /// so that output no one reads held no restart: none for a `NextStart`, or where its callers took them.
+    pub unread: u64,
 }
 
 /// Whether a VM process's CPU time holds its vCPUs' guest time (Shards' D265), as that process learned it from its own
@@ -2889,6 +2973,59 @@ pub enum Refusal {
         op: &'static str,
         cause: PauseCause,
     },
+    /// Box `id`'s `op` refused for its components (Shards' D270 slice 4): a swap, a restore or a read of its components
+    /// ([`Runtime::swap`], [`Runtime::restore`], [`Runtime::components`]). Typed by [`SwapCause`], so a caller tells each
+    /// of Shards' causes, a box with no run, one whose run has ended and one of a class with no components apart without
+    /// reading words; `why` in Shards' words where it gave them. After `Pause` (append-only).
+    #[error("box {id}: {op}: {cause}{}", Said(.why))]
+    Swap {
+        id: BoxId,
+        op: &'static str,
+        cause: SwapCause,
+        why: Option<String>,
+    },
+}
+
+/// Why a box's component swap, its restore or a read of its components was refused ([`Refusal::Swap`]; Shards' D270 slice
+/// 4): Shards' own causes one for one (`shards_api::image::SwapRefusal`), then where the box stands. The node's wire tags
+/// each by its place here, so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SwapCause {
+    /// No member of its run's image runs at that path.
+    #[error("no member of its image runs at that path")]
+    Unknown,
+    /// Its node's Shards store holds no OSI artifact of that digest, or one it cannot read, or it is no sha256 digest.
+    #[error("its node holds no such component")]
+    Artifact,
+    /// The artifact is of another kind than its path's: an agent's at a harness's path.
+    #[error("the component is of another kind than its path's")]
+    Kind,
+    /// The artifact is of another platform than its VM's.
+    #[error("the component is of another platform than its VM's")]
+    Platform,
+    /// The artifact asks past what its member is granted.
+    #[error("the component asks past what its member is granted")]
+    Asks,
+    /// Its VM could not take it: no bus, no slot, or no room in its components' window.
+    #[error("its VM has no room for the component")]
+    Device,
+    /// A swap or a start again of its member is under way.
+    #[error("a swap of its member is under way")]
+    Running,
+    /// It failed, in its guest's or its run host's words: its member's start again among it, after which Shards lets that
+    /// member go (D270 slice 3b).
+    #[error("it failed")]
+    Failed,
+    /// It has no run: it hasn't started, or its stop has begun.
+    #[error("it has no run: it hasn't started, or its stop has begun")]
+    NotRunning,
+    /// Its run has ended.
+    #[error("its run has ended")]
+    Ended,
+    /// It is of a class or form whose boxes have no components to swap: every one but a Shards image box, a box of
+    /// `Class::Shards` in Hex's own guest among them.
+    #[error("only a Shards image box has components to swap, and it is of class {}", .0.name())]
+    Class(Class),
 }
 
 /// Where a box stands that refuses its pause, its resume, or a call that needs its guest's answer while it is paused
