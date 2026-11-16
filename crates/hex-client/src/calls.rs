@@ -91,10 +91,15 @@ pub enum BoxKind {
     /// A member's next MCP connection (`Call::Mcp`; goal 2's item 3): answered as its harness connects, which may be
     /// never, so past W* its wait follows the connection.
     Mcp,
+    /// An image box's pause (`Call::Pause`; kiln plan P5.5b): answered once its VM holds its vCPUs, a move of its VMM's
+    /// own that asks nothing of its guest, timed apart from every other kind.
+    Pause,
+    /// An image box's resume (`Call::Resume`; kiln plan P5.5b): answered once its VM lets its vCPUs go.
+    Resume,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Mcp as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Resume as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -119,8 +124,9 @@ macro_rules! class_wait {
 }
 
 /// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
-/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17) and a start
-/// followed to its end have no census row for any class, so they measure in every table.
+/// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17), a start
+/// followed to its end, a member's MCP connection and an image box's pause and resume (kiln plan P5.5b) have no census
+/// row for any class, so they measure in every table.
 macro_rules! class_waits {
     ($prefix:literal, $class:literal, measuring) => {
         $crate::calls::class_waits!(
@@ -153,6 +159,8 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".member.", $class), measuring),
             $crate::calls::class_wait!(concat!($prefix, ".started.", $class), measuring),
             $crate::calls::class_wait!(concat!($prefix, ".mcp.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".pause.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".resume.", $class), measuring),
         ]
     };
 }
@@ -203,7 +211,9 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Member { .. }
             | Call::MemberSignal { .. }
             | Call::Started(_)
-            | Call::Mcp { .. } => return None,
+            | Call::Mcp { .. }
+            | Call::Pause(_)
+            | Call::Resume(_) => return None,
         },
         Request::Release
         | Request::Taken
@@ -245,6 +255,8 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::MemberSignal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
         Call::Started(id) => (BoxKind::Started, Timed::Box(id)),
         Call::Mcp { id, .. } => (BoxKind::Mcp, Timed::Box(id)),
+        Call::Pause(id) => (BoxKind::Pause, Timed::Box(id)),
+        Call::Resume(id) => (BoxKind::Resume, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -3330,6 +3342,17 @@ impl<T: Transport> Runtime for Core<T> {
     /// Pending is waited for on the fact, never by looks.
     fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.info(Call::Started(id.clone()), "started")
+    }
+
+    /// Kiln plan P5.5b: an image box's pause, carried by the node's wire's appended call (`Call::Pause`), its refusals
+    /// the node's own, typed.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.done(Call::Pause(id.clone()), "pause")
+    }
+
+    /// Kiln plan P5.5b: an image box's resume, carried by the node's wire's appended call (`Call::Resume`).
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.done(Call::Resume(id.clone()), "resume")
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {

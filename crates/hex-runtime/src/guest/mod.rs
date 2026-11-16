@@ -1566,6 +1566,35 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Kiln plan P5.5b: an image VM's pause, its class's ([`image::ImageClass`]); any other box's refused as the trait
+    /// refuses it, naming its class: a Shards guest's oci box among them, its VM its node's.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.pause_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(record)) => Err(Refusal::Pause {
+                id: id.try_clone()?,
+                op: "pause",
+                cause: hex_api::PauseCause::Class(record.spec.class.class()),
+            }),
+        }
+    }
+
+    /// Kiln plan P5.5b: an image VM's resume, as its pause is routed.
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.resume_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(record)) => Err(Refusal::Pause {
+                id: id.try_clone()?,
+                op: "resume",
+                cause: hex_api::PauseCause::Class(record.spec.class.class()),
+            }),
+        }
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.routed(id)? {
             books::Routed::Retired(record) => Err(record.retired_refusal()?),
@@ -2311,6 +2340,16 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
         self.holder(id)?.host_use(id)
+    }
+
+    /// The runtime holding the box pauses it (kiln plan P5.5b), as it answers `host_use`: an image VM's its guest
+    /// runtime's class, a process box's its host's, which pauses none.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.holder(id)?.pause(id)
+    }
+
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.holder(id)?.resume(id)
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {

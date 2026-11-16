@@ -13,8 +13,8 @@
 //! image class's own cases ([`crate::conformance::IMAGE_CASES`]) hold it: created without a VM, booted
 //! by start, ended by KILL, its members unreached (their exec and signals refused as awaiting Shards'
 //! agent-control endpoint), and its guest time per vCPU read while it runs. The simulated VM runs every
-//! vCPU the whole time it runs: the most guest time a real one can report, so a consumer's bound holds
-//! against it.
+//! vCPU the whole time it runs but while its owner holds it paused (kiln plan P5.5b): the most guest time a real one
+//! can report, so a consumer's bound holds against it, and none while paused, as a real one's stays flat.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
-    Exit, GuestTime, Member, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime,
+    Exit, GuestTime, Member, Network, OciSpec, PauseCause, Proc, Program, Refusal, Rootfs, Runtime,
     RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage,
 };
 
@@ -103,12 +103,40 @@ struct SimBox {
     vm: Option<SimVm>,
 }
 
-/// A simulated Shards image VM: its vCPUs, from its allocation, when its start booted it, and the members whose
-/// streams its caller took ([`Runtime::member`]), each with its program, at most the members its spec names.
+/// A simulated Shards image VM: its vCPUs, from its allocation, when its start booted it, the members whose
+/// streams its caller took ([`Runtime::member`]), each with its program, at most the members its spec names, and its
+/// owner's pauses (kiln plan P5.5b): whether its vCPUs run now, and every pause's time that has ended.
 struct SimVm {
     vcpus: u32,
     booted: Option<Instant>,
     taken: Vec<(Member, Arc<SimProc>)>,
+    hold: SimHold,
+    /// Every pause's time that has ended.
+    pauses: Duration,
+}
+
+/// Whether a simulated VM's vCPUs run its guest, as its owner last moved them ([`Runtime::pause`], [`Runtime::resume`]):
+/// a move is made at once, so none is ever under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimHold {
+    Going,
+    /// Held out of its guest since this instant.
+    Paused(Instant),
+}
+
+impl SimVm {
+    /// Every pause's time to `now`, the one under way among it.
+    fn paused(&self, now: Instant) -> Result<Duration, Refusal> {
+        match self.hold {
+            SimHold::Going => Ok(self.pauses),
+            SimHold::Paused(since) => self
+                .pauses
+                .checked_add(now.saturating_duration_since(since))
+                .ok_or_else(|| {
+                    Refusal::Broken("a simulated VM's paused time passes a Duration".to_owned())
+                }),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -231,6 +259,12 @@ impl SimRuntime {
                 BoxState::Created
             } else if exit.is_some() {
                 BoxState::Empty
+            } else if b
+                .vm
+                .as_ref()
+                .is_some_and(|vm| matches!(vm.hold, SimHold::Paused(_)))
+            {
+                BoxState::Paused
             } else if running {
                 BoxState::Running
             } else {
@@ -256,10 +290,41 @@ impl SimRuntime {
 }
 
 impl SimRuntime {
-    /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does; any other is its run's
-    /// members', which its image runs and take it as their lanes give it (goal 2's item 2), the VM running on;
-    /// once it has ended, none reaches it.
-    fn signal_vm(b: &SimBox, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+    /// Box `b`'s VM, its run going, for its pause or resume, `op` (kiln plan P5.5b); or why not, as the image class refuses
+    /// it: a box of any other class as one that pauses none, its run ended, or none started yet.
+    fn movable<'b>(
+        b: &'b mut SimBox,
+        id: &BoxId,
+        op: &'static str,
+    ) -> Result<&'b mut SimVm, Refusal> {
+        let refused = |cause| Refusal::Pause {
+            id: id.clone(),
+            op,
+            cause,
+        };
+        let class = b.spec.class.class();
+        let ended = match &b.init {
+            Some(init) => init.exit()?.is_some(),
+            None => false,
+        };
+        let started = b.started;
+        let vm =
+            b.vm.as_mut()
+                .ok_or_else(|| refused(PauseCause::Class(class)))?;
+        if ended {
+            return Err(refused(PauseCause::Ended));
+        }
+        if !started {
+            return Err(refused(PauseCause::NotRunning));
+        }
+        Ok(vm)
+    }
+
+    /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does, paused or not; any other is its run's
+    /// members', which its image runs and take it as their lanes give it (goal 2's item 2), the VM running on, and which
+    /// a paused VM's members can't answer, refused at once as the class refuses it (P5.5b); once it has ended, none
+    /// reaches it.
+    fn signal_vm(b: &SimBox, vm: &SimVm, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         let init = match &b.init {
             Some(init) if init.exit()?.is_none() => init,
             _ => return Err(Refusal::NotRunning(id.clone(), "signal")),
@@ -267,11 +332,18 @@ impl SimRuntime {
         if signal == Signal::KILL {
             return init.end(Exit::Signal(Signal::KILL.number()));
         }
+        if matches!(vm.hold, SimHold::Paused(_)) {
+            return Err(Refusal::Pause {
+                id: id.clone(),
+                op: "signal",
+                cause: PauseCause::Paused,
+            });
+        }
         Ok(())
     }
 
-    /// A running image VM's usage: every vCPU ran the guest the whole time since its boot. Before its
-    /// boot and after its end there is no VM to read.
+    /// A running image VM's usage: every vCPU ran the guest the whole time since its boot that it wasn't paused, and its
+    /// paused time (P5.5b). Before its boot and after its end there is no VM to read.
     fn usage_vm(b: &SimBox, vm: &SimVm, id: &BoxId) -> Result<Usage, Refusal> {
         let running = match &b.init {
             Some(init) => init.exit()?.is_none(),
@@ -280,8 +352,16 @@ impl SimRuntime {
         let Some(booted) = vm.booted.filter(|_| running) else {
             return Err(Refusal::NotRunning(id.clone(), "usage"));
         };
-        let ran = u64::try_from(booted.elapsed().as_nanos())
-            .map_err(|_| Refusal::Broken("a simulated VM ran past u64 nanoseconds".to_owned()))?;
+        // Its life since its boot and its paused time, both to one instant, so a VM paused throughout two reads shows the
+        // same guest time at each; every pause began after its boot, so its life holds them all, and what ran is never
+        // less than none.
+        let now = Instant::now();
+        let paused = u64::try_from(vm.paused(now)?.as_nanos()).map_err(|_| {
+            Refusal::Broken("a simulated VM was paused past u64 nanoseconds".to_owned())
+        })?;
+        let ran = u64::try_from(now.saturating_duration_since(booted).as_nanos())
+            .map_err(|_| Refusal::Broken("a simulated VM ran past u64 nanoseconds".to_owned()))?
+            .saturating_sub(paused);
         let vcpus = usize::try_from(vm.vcpus)
             .ok()
             .filter(|n| *n <= GuestTime::MAX_VCPUS)
@@ -300,6 +380,7 @@ impl SimRuntime {
         Ok(Usage {
             pids: 1,
             guest: Some(GuestTime::PerVcpuNs(per_vcpu)),
+            paused_ns: Some(paused),
             ..b.usage.clone()
         })
     }
@@ -417,6 +498,8 @@ impl Runtime for SimRuntime {
                     .vcpus,
                 booted: None,
                 taken: Vec::new(),
+                hold: SimHold::Going,
+                pauses: Duration::ZERO,
             }),
             _ => None,
         };
@@ -583,6 +666,17 @@ impl Runtime for SimRuntime {
         if !running {
             return Err(Refusal::NotRunning(id.clone(), "signal a member"));
         }
+        // A paused VM's members answer nothing until it resumes (P5.5b), refused at once as the class refuses it.
+        if b.vm
+            .as_ref()
+            .is_some_and(|vm| matches!(vm.hold, SimHold::Paused(_)))
+        {
+            return Err(Refusal::Pause {
+                id: id.clone(),
+                op: "signal a member",
+                cause: PauseCause::Paused,
+            });
+        }
         let taken = b.vm.as_ref().and_then(|vm| {
             vm.taken
                 .iter()
@@ -682,8 +776,8 @@ impl Runtime for SimRuntime {
         let b = boxes
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        if b.vm.is_some() {
-            return Self::signal_vm(b, id, signal);
+        if let Some(vm) = &b.vm {
+            return Self::signal_vm(b, vm, id, signal);
         }
         let mut any = false;
         // Each program takes the signal itself, a run's among them, whose box then goes.
@@ -752,6 +846,50 @@ impl Runtime for SimRuntime {
             p.end(Exit::Signal(Signal::KILL.number()))?;
         }
         Ok(())
+    }
+
+    /// A running image VM's vCPUs held out of its guest (kiln plan P5.5b), at once, its guest time stopping and its
+    /// paused time growing until its resume; refused, typed, as the image class refuses it ([`SimRuntime::movable`]), and
+    /// `Paused` where it is paused already.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let vm = Self::movable(b, id, "pause")?;
+        match vm.hold {
+            SimHold::Going => {
+                vm.hold = SimHold::Paused(Instant::now());
+                Ok(())
+            }
+            SimHold::Paused(_) => Err(Refusal::Pause {
+                id: id.clone(),
+                op: "pause",
+                cause: PauseCause::Paused,
+            }),
+        }
+    }
+
+    /// A paused image VM's vCPUs let run its guest again (kiln plan P5.5b), at once, its pause's time added to its
+    /// paused time; refused as [`Runtime::pause`] is here, and `Running` where it isn't paused.
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let vm = Self::movable(b, id, "resume")?;
+        match vm.hold {
+            SimHold::Paused(_) => {
+                vm.pauses = vm.paused(Instant::now())?;
+                vm.hold = SimHold::Going;
+                Ok(())
+            }
+            SimHold::Going => Err(Refusal::Pause {
+                id: id.clone(),
+                op: "resume",
+                cause: PauseCause::Running,
+            }),
+        }
     }
 }
 

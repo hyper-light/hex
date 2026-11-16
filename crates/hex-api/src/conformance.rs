@@ -11,7 +11,8 @@ use crate::patience::{Party, Patience, Piece};
 use crate::{
     Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, CredentialGrant, Destination,
     DeviceId, DeviceKind, Exit, Grant, GuestTime, LifecycleCause, Member, MemberKind, Mount,
-    Network, OciSpec, Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
+    Network, OciSpec, PauseCause, Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio,
+    Upstream,
 };
 
 /// What a fixture's program does.
@@ -286,6 +287,11 @@ pub const IMAGE_CASES: &[Case] = &[
         id: "HEX-IMG-8",
         says: "create of a VM granting its member a credential toward a host no egress grant of its own reaches by name over TCP, toward no host, by a reference no store names, twice, with a placeholder no request could carry, with another credential's placeholder, or toward a host another member reaches ungranted, is refused Invalid naming credentials, making nothing; a VM granting its member credentials toward its own egress hosts, two toward one host each by its own placeholder, is made, and inspect shows its every credential grant, or, where its node leases no credentials, it is refused Unconfigured, making nothing",
         run: image_credentials,
+    },
+    Case {
+        id: "HEX-IMG-9",
+        says: "pause and resume of a VM not yet started are refused Pause(NotRunning), each naming its call, and a resume of a running VM Pause(Running); pause of a running VM is done and inspect shows it Paused, and a second pause is refused Pause(Paused); while paused, two reads of its usage tell its paused time and the same guest time per vCPU, and a signal TERM is refused Pause(Paused) naming signal; resume is done and inspect shows it Running, its usage's paused time no less than the time from its pause's answer to its resume's ask; KILL ends a paused VM, Empty with Signal(9), and its pause and resume are then refused Pause(Ended)",
+        run: image_pause,
     },
 ];
 
@@ -1265,6 +1271,95 @@ fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     })
 }
 
+/// HEX-IMG-9 (kiln plan 01a1dd2e8618733a87f2793aab1322a8's P5.5b, AC-T7.4.1; docs/design/shards-image-class.md §10): a
+/// Shards image VM pauses and resumes through its runtime, each refused, typed, where it can't be done, its state and its
+/// usage telling it. Its usage is read once as it runs first: a paused run's usage is what its guest last said of it
+/// before its pause (Shards' D267). Its paused time is held from below by what this caller saw, on the one clock it and
+/// its runtime share: its pause answered before `paused` was read here, and its resume asked after `resuming`.
+fn image_pause(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = image_made(rt, fx, "image-pause")?;
+    let refused = |op: &'static str, got: Result<(), Refusal>, cause: PauseCause, when: &str| {
+        let want = Refusal::Pause {
+            id: id.clone(),
+            op,
+            cause,
+        };
+        ensure(got.as_ref() == Err(&want), || {
+            format!("{op} {when}: {got:?}, not {want:?}")
+        })
+    };
+    let state = |want: BoxState, when: &str| -> Result<(), String> {
+        let info = rt
+            .inspect(&id)
+            .map_err(|e| format!("inspect {when}: {e}"))?;
+        ensure(info.state == want, || format!("a VM {when}: {info:?}"))
+    };
+    let usage = |when: &str| rt.usage(&id).map_err(|e| format!("usage {when}: {e}"));
+    deleting(rt, &id, || {
+        refused(
+            "pause",
+            rt.pause(&id),
+            PauseCause::NotRunning,
+            "before its start",
+        )?;
+        refused(
+            "resume",
+            rt.resume(&id),
+            PauseCause::NotRunning,
+            "before its start",
+        )?;
+        booted(rt, &id)?;
+        refused(
+            "resume",
+            rt.resume(&id),
+            PauseCause::Running,
+            "of a running VM",
+        )?;
+        usage("as it runs")?;
+        rt.pause(&id).map_err(|e| format!("pause: {e}"))?;
+        let paused = std::time::Instant::now();
+        state(BoxState::Paused, "paused")?;
+        refused("pause", rt.pause(&id), PauseCause::Paused, "of a paused VM")?;
+        let (first, second) = (usage("paused")?, usage("paused")?);
+        ensure(
+            first.paused_ns.is_some() && second.paused_ns.is_some(),
+            || format!("a paused VM's usage tells no paused time: {first:?}"),
+        )?;
+        let (ran, still) = (per_vcpu(first)?, per_vcpu(second)?);
+        ensure(ran == still, || {
+            format!("guest time grew while paused: {ran:?}, then {still:?}")
+        })?;
+        let term = rt.signal(&id, Signal::TERM);
+        let want = Refusal::Pause {
+            id: id.clone(),
+            op: "signal",
+            cause: PauseCause::Paused,
+        };
+        ensure(term.as_ref() == Err(&want), || {
+            format!("TERM to a paused VM: {term:?}, not {want:?}")
+        })?;
+        let resuming = std::time::Instant::now();
+        rt.resume(&id).map_err(|e| format!("resume: {e}"))?;
+        state(BoxState::Running, "resumed")?;
+        let resumed = usage("resumed")?;
+        let least =
+            u64::try_from(resuming.duration_since(paused).as_nanos()).map_err(|e| e.to_string())?;
+        ensure(resumed.paused_ns.is_some_and(|ns| ns >= least), || {
+            format!("a resumed VM's usage, paused {least} ns at least: {resumed:?}")
+        })?;
+        rt.pause(&id)
+            .map_err(|e| format!("pause before its KILL: {e}"))?;
+        stopped(rt, &id)?;
+        let info = exit_of(rt, fx, &id)?;
+        ensure(
+            (info.state, info.exit) == (BoxState::Empty, Some(Exit::Signal(9))),
+            || format!("a paused VM killed: {info:?}"),
+        )?;
+        refused("pause", rt.pause(&id), PauseCause::Ended, "after its end")?;
+        refused("resume", rt.resume(&id), PauseCause::Ended, "after its end")
+    })
+}
+
 fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = image_made(rt, fx, "image-members")?;
     deleting(rt, &id, || {
@@ -1960,6 +2055,12 @@ mod tests {
         }
         fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
             self.sim.delete(id)
+        }
+        fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.pause(id)
+        }
+        fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.resume(id)
         }
     }
 

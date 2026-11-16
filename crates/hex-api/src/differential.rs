@@ -705,6 +705,14 @@ fn kind(r: &Refusal) -> &'static str {
         Refusal::Failed { .. } => "Failed",
         Refusal::Unconfigured { .. } => "Unconfigured",
         Refusal::Guest { .. } => "Guest",
+        // Where a box's pause stands is the contract's, as what a refusal awaits is (kiln plan P5.5b).
+        Refusal::Pause { cause, .. } => match cause {
+            crate::PauseCause::Paused => "Pause(Paused)",
+            crate::PauseCause::Running => "Pause(Running)",
+            crate::PauseCause::NotRunning => "Pause(NotRunning)",
+            crate::PauseCause::Ended => "Pause(Ended)",
+            crate::PauseCause::Class(_) => "Pause(Class)",
+        },
     }
 }
 

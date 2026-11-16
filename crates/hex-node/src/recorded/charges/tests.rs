@@ -1346,6 +1346,7 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         guest_ns: vec![each_ns; usize::try_from(vcpus).unwrap()],
         window: std::time::Duration::ZERO,
         charged: hex_api::Charged::ToThread,
+        paused: std::time::Duration::ZERO,
     };
     io.host
         .borrow_mut()
@@ -1473,6 +1474,7 @@ fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
             guest_ns: vec![0; 16],
             window: std::time::Duration::ZERO,
             charged: hex_api::Charged::ToThread,
+            paused: std::time::Duration::ZERO,
         },
     );
     let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
@@ -1602,6 +1604,7 @@ fn unused(io: &Record, name: &str, held: u64) {
             guest_ns: vec![0; 16],
             window: Duration::ZERO,
             charged: hex_api::Charged::ToThread,
+            paused: std::time::Duration::ZERO,
         },
     );
 }
@@ -1810,6 +1813,7 @@ impl hex_api::Runtime for Images {
             guest_ns: Vec::new(),
             window: Duration::ZERO,
             charged: hex_api::Charged::ToThread,
+            paused: std::time::Duration::ZERO,
         })
     }
 }
@@ -1845,6 +1849,7 @@ impl crate::recorded::Recover for Images {
             guest_ns: Vec::new(),
             window: self.node_vm_rate_period(run)?.unwrap_or_default(),
             charged: hex_api::Charged::ToThread,
+            paused: std::time::Duration::ZERO,
         })
     }
     fn node_vm_rate_period(&self, run: hex_api::NodeRun) -> Result<Option<Duration>, Refusal> {
@@ -2441,6 +2446,7 @@ fn w14_d260_an_image_vms_governor_takes_its_share_less_its_vmms_own() {
         guest_ns: vec![each_ns; 16],
         window,
         charged: hex_api::Charged::ToThread,
+        paused: std::time::Duration::ZERO,
     };
     io.host.borrow_mut().insert(
         "img-1".to_owned(),
@@ -3115,6 +3121,7 @@ fn w39_a_node_vms_guest_is_told_its_room_as_an_image_vms_is() {
         guest_ns: vec![each_ns; 16],
         window: Duration::ZERO,
         charged: hex_api::Charged::ToThread,
+        paused: std::time::Duration::ZERO,
     };
     io.host
         .borrow_mut()

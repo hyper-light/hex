@@ -347,6 +347,12 @@ impl Runtime for ImageRuntime {
     fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.class.started(id)
     }
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.class.pause(id)
+    }
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.class.resume(id)
+    }
 }
 
 #[cfg(test)]

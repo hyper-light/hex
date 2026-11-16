@@ -57,9 +57,10 @@ use hex_api::{
     LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
     LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
     MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
-    PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld, Receiver, Refusal,
-    Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom,
-    Upstream, Usage, User, check_credentials, check_grants, check_published, check_sign_ins,
+    PauseCause, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld,
+    Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage,
+    Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants, check_published,
+    check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -201,6 +202,8 @@ mod kind {
     pub const START_FOLLOWED: u16 = 0x001f;
     pub const RESERVED: u16 = 0x0020;
     pub const MCP: u16 = 0x0021;
+    pub const PAUSE: u16 = 0x0022;
+    pub const RESUME: u16 = 0x0023;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -352,6 +355,13 @@ pub enum Call {
         streams: Streams,
         ask: Streams,
     },
+    /// Running Shards image box `id`'s vCPUs held out of its guest (`Runtime::pause`; kiln plan P5.5b, Shards' D267):
+    /// answered [`Answer::Done`] once its VM holds them, its state then `Paused` as inspect says it, or refused by type.
+    /// Appended.
+    Pause(BoxId),
+    /// Paused Shards image box `id`'s vCPUs let run its guest again (`Runtime::resume`; kiln plan P5.5b): answered
+    /// [`Answer::Done`] once its VM lets them go, or refused by type. Appended.
+    Resume(BoxId),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -1248,6 +1258,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.option_with(u.guest.as_ref(), put_guest_time)?;
             // Appended after guest time (D253; joint plan step 12): absent, a byte 0.
             w.option(u.started_from, put_started_from);
+            // Appended after how it started (kiln plan P5.5b): its paused time, absent a byte 0.
+            w.option(u.paused_ns, Writer::u64);
         }
         Answer::Boxes { infos, more } => {
             w.header(kind::BOXES, id);
@@ -1545,6 +1557,8 @@ fn parse_request(
             Request::Call(Call::MemberSignal { id, member, signal })
         }
         kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
+        kind::PAUSE => Request::Call(Call::Pause(box_id(&mut r).map_err(bad)?)),
+        kind::RESUME => Request::Call(Call::Resume(box_id(&mut r).map_err(bad)?)),
         kind::RESERVED => Request::Call(Call::Reserved(hex_api::Reserved {
             keeper: r.u64().map_err(bad)?,
             reserved: resources(&mut r).map_err(bad)?,
@@ -1811,6 +1825,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             io_write_bytes: r.u64()?,
             guest: r.option(guest_time)?,
             started_from: r.option(started_from)?,
+            paused_ns: r.option(Reader::u64)?,
         }),
         kind::BOXES => Answer::Boxes {
             more: r.bool("more")?,
@@ -1979,6 +1994,8 @@ fn request_name(kind: u16) -> &'static str {
         kind::START_FOLLOWED => "a start followed",
         kind::RESERVED => "a keeper's word",
         kind::MCP => "an MCP connection",
+        kind::PAUSE => "a pause",
+        kind::RESUME => "a resume",
         _ => "a request",
     }
 }
@@ -2049,6 +2066,14 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Started(b) => {
             w.header(kind::START_FOLLOWED, id);
+            w.string(b.as_str())
+        }
+        Call::Pause(b) => {
+            w.header(kind::PAUSE, id);
+            w.string(b.as_str())
+        }
+        Call::Resume(b) => {
+            w.header(kind::RESUME, id);
             w.string(b.as_str())
         }
         Call::Reserved(word) => {
@@ -4024,6 +4049,8 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         BoxState::Empty => 0,
         BoxState::Running => 1,
         BoxState::Created => 2,
+        // Kiln plan P5.5b: a Shards image VM its owner holds paused, after every older state.
+        BoxState::Paused => 3,
     });
     put_bounds(w, &info.bounds);
     w.bool(info.adopted);
@@ -4093,6 +4120,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             0 => BoxState::Empty,
             1 => BoxState::Running,
             2 => BoxState::Created,
+            3 => BoxState::Paused,
             t => return Err(Fault::value("box state", format!("variant {t}"))),
         },
         bounds: bounds(r)?,
@@ -4309,7 +4337,41 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.string(op)?;
             put_guest_failure(w, failure)
         }
+        // Kiln plan P5.5b: a call refused for where its box's pause stands, after every older refusal.
+        Refusal::Pause { id, op, cause } => {
+            w.u8(17);
+            w.string(id.as_str())?;
+            w.string(op)?;
+            put_pause_cause(w, *cause);
+            Ok(())
+        }
     }
+}
+
+/// Where a box's pause stands ([`Refusal::Pause`]): its tag, by its place in [`PauseCause`] (append-only), then a class
+/// refusal's class.
+fn put_pause_cause(w: &mut Writer, cause: PauseCause) {
+    match cause {
+        PauseCause::Paused => w.u8(0),
+        PauseCause::Running => w.u8(1),
+        PauseCause::NotRunning => w.u8(2),
+        PauseCause::Ended => w.u8(3),
+        PauseCause::Class(class) => {
+            w.u8(4);
+            w.u8(class_tag(class));
+        }
+    }
+}
+
+fn pause_cause(r: &mut Reader<'_>) -> Result<PauseCause, Fault> {
+    Ok(match r.u8()? {
+        0 => PauseCause::Paused,
+        1 => PauseCause::Running,
+        2 => PauseCause::NotRunning,
+        3 => PauseCause::Ended,
+        4 => PauseCause::Class(class(r)?),
+        t => return Err(Fault::value("pause cause", format!("variant {t}"))),
+    })
 }
 
 /// A Shards guest's failure ([`Refusal::Guest`]): its kind's tag, then its fields, each duration in whole nanoseconds.
@@ -4354,6 +4416,11 @@ fn put_guest_failure(w: &mut Writer, failure: &GuestFailure) -> Result<(), Fault
             w.u8(4);
             w.string(why)
         }
+        // Kiln plan P5.5b: a pause or a resume its VM didn't make, after every older failure.
+        GuestFailure::Pause(why) => {
+            w.u8(5);
+            w.string(why)
+        }
     }
 }
 
@@ -4377,6 +4444,7 @@ fn guest_failure(r: &mut Reader<'_>) -> Result<GuestFailure, Fault> {
         },
         3 => GuestFailure::Rate(r.string("guest rate")?),
         4 => GuestFailure::HostUse(r.string("guest host use")?),
+        5 => GuestFailure::Pause(r.string("guest pause")?),
         t => return Err(Fault::value("guest failure", format!("variant {t}"))),
     })
 }
@@ -4513,6 +4581,11 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         16 => Refusal::Guest {
             op: name(&r.string("refusal name")?)?,
             failure: guest_failure(r)?,
+        },
+        17 => Refusal::Pause {
+            id: box_id(r)?,
+            op: name(&r.string("refusal name")?)?,
+            cause: pause_cause(r)?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })

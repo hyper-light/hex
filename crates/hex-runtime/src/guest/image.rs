@@ -3,8 +3,9 @@
 //! started as the image's Agentfile declares them. The box's record is the guest's Books' (the node's
 //! Store); its run is this process's, for a run ends with its owner in D231's first version.
 //!
-//! What the record and the run say of a box ([`State`], R04): Created (`Creating`), Booting and Running
-//! (`Ready`, a boot or run of this process), Stopping, Ended (`Ready` with its exit), and Held (`Ready` or
+//! What the record and the run say of a box ([`State`], R04): Created (`Creating`), Booting, Running and Paused
+//! (`Ready`, a boot or run of this process, a paused run's vCPUs held out of its guest by its owner, kiln plan P5.5b),
+//! Stopping, Ended (`Ready` with its exit), and Held (`Ready` or
 //! `Deleting` with no exit and no run of this process: an earlier node process's run, which D231 can
 //! neither take back nor prove gone, so its claim is kept and every call refused
 //! `Awaits(AttachAfterCrash)` until a reboot of the host proves it ended).
@@ -27,9 +28,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HostUse, ImageMember,
-    LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
-    Usage, VmSize,
+    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestFailure, GuestTime, HostUse,
+    ImageMember, LifecycleCause, Member, MemberKind, NodeRun, PauseCause, Proc, Refusal,
+    ShardsImage, Signal, Upstream, Usage, VmSize,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -434,12 +435,56 @@ enum Run {
     /// Its boot, on a thread of its own, answers here; its stop (D231's `BootStop`) ends it mid-boot, as a delete
     /// asks it.
     Booting(Arc<Slot<Booted>>, Arc<BootStop>),
-    /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
-    Running(Arc<dyn ImageGuest>, Instant),
+    /// Its run, held, since its boot answered, its vCPUs as its owner last moved them ([`Motion`]). D231 stops a run it
+    /// drops, so it leaves only through its stop.
+    Running(Arc<dyn ImageGuest>, Instant, Motion),
     /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone. Why it stops beside it.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known, until its record says it.
     Ended(End),
+}
+
+/// Whether a running VM's vCPUs run its guest, as its owner moved them (kiln plan P5.5b): Shards' D267's own states,
+/// one for one. A move is asked of Shards only from `Going` (a pause) or `Paused` (a resume), and is held here, under
+/// the runs' lock, until Shards answers it ([`Runs::begin_move`], [`Runs::end_move`]), so two moves of a run never
+/// cross: a pause and a resume asked together end as the one asked first leaves it, never with Hex's word and the
+/// VM's apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Motion {
+    /// Its vCPUs run its guest: as its boot answered, or once its resume was answered.
+    Going,
+    /// Its pause asked of Shards and not yet answered.
+    Pausing,
+    /// Every vCPU held out of its guest by its VMM, as its pause was answered.
+    Paused,
+    /// Its resume asked of Shards and not yet answered.
+    Resuming,
+}
+
+/// A move of a running VM's vCPUs its owner asks ([`hex_api::Runtime::pause`], [`hex_api::Runtime::resume`]; kiln plan
+/// P5.5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Move {
+    Pause,
+    Resume,
+}
+
+impl Move {
+    /// The call it is, as its refusals name it.
+    fn op(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+        }
+    }
+
+    /// The motion it moves a run from, the one under way while Shards makes it, and the one it leaves once answered.
+    fn motions(self) -> (Motion, Motion, Motion) {
+        match self {
+            Self::Pause => (Motion::Going, Motion::Pausing, Motion::Paused),
+            Self::Resume => (Motion::Paused, Motion::Resuming, Motion::Going),
+        }
+    }
 }
 
 /// Why a run is stopping, so that a call that finds it so says which (goal 15's finding, 2026-11-13): its owner's stop
@@ -641,10 +686,10 @@ enum Settled {
     None,
     /// Its boot, its answer not yet given.
     Booting,
-    /// Its boot's answer, taken here: its run has started.
+    /// Its boot's answer, taken here: its run has started, its vCPUs going.
     Started(Arc<dyn ImageGuest>),
-    /// Its run, started before.
-    Running(Arc<dyn ImageGuest>),
+    /// Its run, started before, its vCPUs as its owner last moved them.
+    Running(Arc<dyn ImageGuest>, Motion),
     /// Its stop, its answer not yet given.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known: its boot refused, its stop's answer taken, or found so before.
@@ -656,6 +701,10 @@ enum State {
     Created,
     Booting,
     Running(Arc<dyn ImageGuest>),
+    /// Its run, its vCPUs held out of its guest by its owner or a move of them under way (kiln plan P5.5b), from whose
+    /// ask to its resume's answer its guest answers nothing (Shards' D267): a call that needs its guest's answer is
+    /// refused at once, never waited on.
+    Paused(Arc<dyn ImageGuest>),
     Stopping(Arc<Slot<RunEnd>>, Stop),
     Ended(End),
     Held,
@@ -841,14 +890,21 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             what: "shards image's network",
             why: format!("{kind:?}: {why}"),
         },
-        // Only a run paused (D267) is refused so, and only a pause or a resume as one: this class pauses no run yet
-        // (P5.5b's pause and resume type these as the box's own).
-        ImageRefusal::Paused { what } => {
-            Refusal::Broken(format!("Shards refused {op}: its run is paused ({what})"))
-        }
-        ImageRefusal::Pause(why) => {
-            Refusal::Broken(format!("Shards refused {op} as a pause: {why}"))
-        }
+        // An ask its guest would answer, refused at once by Shards while its run is paused or a move of it is under way
+        // (D267): the box's own refusal, typed, as the class's own is (kiln plan P5.5b).
+        ImageRefusal::Paused { .. } => match id.try_clone() {
+            Ok(id) => Refusal::Pause {
+                id,
+                op,
+                cause: PauseCause::Paused,
+            },
+            Err(why) => why,
+        },
+        // A pause or a resume its VM didn't make, its machine stopped before every vCPU was held (D267), in its words.
+        ImageRefusal::Pause(why) => Refusal::Guest {
+            op,
+            failure: GuestFailure::Pause(why),
+        },
         // Only a save (D259) is refused so, and this class asks none.
         ImageRefusal::Save(cause, why) => {
             Refusal::Broken(format!("Shards refused {op} as a save ({cause:?}): {why}"))
@@ -901,8 +957,8 @@ fn admitted_size(allocation: &hex_api::Allocation) -> Result<VmSize, Refusal> {
 }
 
 /// What a running VM's usage is, from its run's STATS: CPU, memory, processes and I/O from its guest's cgroup,
-/// and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]); with how its microVM started, `from` (D253). STATS has no
-/// memory peak, OOM kills or refused forks (docs/design/shards-image-class.md §4).
+/// each of its `vcpus` vCPUs' guest time ([`per_vcpu`]) and its paused time ([`paused_of`]); with how its microVM
+/// started, `from` (D253). STATS has no memory peak, OOM kills or refused forks (docs/design/shards-image-class.md §4).
 fn usage_of(stats: &Stats, vcpus: u32, from: hex_api::StartedFrom) -> Result<Usage, Refusal> {
     let read = |value: Option<u64>, what: &'static str| {
         value.ok_or_else(|| Refusal::Os {
@@ -923,7 +979,29 @@ fn usage_of(stats: &Stats, vcpus: u32, from: hex_api::StartedFrom) -> Result<Usa
         io_write_bytes: read(stats.write_bytes, "write")?,
         guest: Some(GuestTime::PerVcpuNs(per_vcpu(stats, vcpus)?)),
         started_from: Some(from),
+        paused_ns: Some(
+            u64::try_from(paused_of(stats, "reading a Shards image VM's stats")?.as_nanos())
+                .map_err(|_| {
+                    Refusal::Broken(
+                        "a Shards image VM's paused time passes a u64 of nanoseconds".to_owned(),
+                    )
+                })?,
+        ),
     })
+}
+
+/// The time a run was held paused by its owner since it started, as its run host told it with its run's stats
+/// (Shards' D267, `Stats::paused`, with every run's since image channel v33), every pause so far and the one under way
+/// among it: refused under `op`, naming why, where its run host told none, never read as none (D241's rule for every
+/// part of a run's stats).
+fn paused_of(stats: &Stats, op: &'static str) -> Result<Duration, Refusal> {
+    stats
+        .paused
+        .map(|paused| paused.total)
+        .ok_or_else(|| Refusal::Os {
+            op,
+            why: "its run host told no paused time with its run's stats".to_owned(),
+        })
 }
 
 /// How a run's microVM started (D253), as its run host said it as the run started, in Hex's words: Shards' five, one
@@ -940,8 +1018,9 @@ fn started_from(from: shards_api::image::StartedFrom) -> hex_api::StartedFrom {
 }
 
 /// What a running VM costs its host, from its run's microVM part (D241's `Stats::microvm`): its VM process's CPU time and
-/// own memory, as its run host read the process, and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). A part the run
-/// host did not read is refused, naming why, never read as none.
+/// own memory, as its run host read the process, each of its `vcpus` vCPUs' guest time ([`per_vcpu`]), and its paused time
+/// ([`paused_of`]), which its `window` holds. A part the run host did not read is refused, naming why, never read as
+/// none.
 fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, Refusal> {
     let unread = |why: String| Refusal::Os {
         op: "reading a Shards image VM's use of its host",
@@ -959,6 +1038,7 @@ fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, R
         guest_ns: per_vcpu(stats, vcpus)?,
         window,
         charged: charged_of(host.charged),
+        paused: paused_of(stats, "reading a Shards image VM's use of its host")?,
     })
 }
 
@@ -1461,6 +1541,16 @@ fn held() -> Refusal {
     }
 }
 
+/// Box `id`'s `op`, which needs its guest's answer, refused at once while its vCPUs are held or a move of them is under
+/// way (kiln plan P5.5b; Shards' D267: its guest answers nothing then): a caller never waits on a frozen guest.
+fn paused(id: &BoxId, op: &'static str) -> Result<Refusal, Refusal> {
+    Ok(Refusal::Pause {
+        id: id.try_clone()?,
+        op,
+        cause: PauseCause::Paused,
+    })
+}
+
 impl Runs {
     fn new() -> Self {
         Self(Mutex::new(Maps::default()))
@@ -1470,20 +1560,89 @@ impl Runs {
         self.0.lock().map_err(poisoned)
     }
 
-    /// When `key`'s run started, as its boot answered, where it runs in this process.
+    /// When `key`'s run started, as its boot answered, where it runs in this process, paused or not.
     fn started<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Instant>, Refusal> {
         Ok(match self.lock()?.get(key.into()) {
-            Some(Run::Running(_, at)) => Some(*at),
+            Some(Run::Running(_, at, _)) => Some(*at),
             _ => None,
         })
     }
 
-    /// `key`'s run's guest, where it runs in this process.
+    /// `key`'s run's guest, where it runs in this process, paused or not.
     fn guest<'k>(&self, key: impl Into<Key<'k>>) -> Result<Option<Arc<dyn ImageGuest>>, Refusal> {
         Ok(match self.lock()?.get(key.into()) {
-            Some(Run::Running(guest, _)) => Some(Arc::clone(guest)),
+            Some(Run::Running(guest, _, _)) => Some(Arc::clone(guest)),
             _ => None,
         })
+    }
+
+    /// Box `id`'s `toward`, a pause or a resume (kiln plan P5.5b), begun where its run's vCPUs are as that move asks
+    /// (going, for a pause; paused, for a resume): its motion moved to the move under way, and its guest given back for
+    /// the call to ask Shards outside this lock. Refused, typed, as the run stands: `Pause` naming `Paused` or `Running`
+    /// where it is as asked already, `Busy` while another move of it is under way, `Pending` while it boots, `NotRunning`
+    /// where its owner's stop has begun, `Ended` once its end is known, its host's reaping under way among it; a box with
+    /// no run of this process is no longer this call's to move, its record saying why ([`ImageClass::move_image`]),
+    /// refused `NotRunning`.
+    fn begin_move(&self, id: &BoxId, toward: Move) -> Result<Arc<dyn ImageGuest>, Refusal> {
+        let (from, under_way, _) = toward.motions();
+        let refused = |cause| -> Result<Refusal, Refusal> {
+            Ok(Refusal::Pause {
+                id: id.try_clone()?,
+                op: toward.op(),
+                cause,
+            })
+        };
+        let mut runs = self.lock()?;
+        let Some(run) = runs.get_mut(Key::Box(id)) else {
+            return Err(refused(PauseCause::NotRunning)?);
+        };
+        match run {
+            Run::Running(guest, _, motion) if *motion == from => {
+                *motion = under_way;
+                Ok(Arc::clone(guest))
+            }
+            Run::Running(_, _, Motion::Paused) => Err(refused(PauseCause::Paused)?),
+            Run::Running(_, _, Motion::Going) => Err(refused(PauseCause::Running)?),
+            Run::Running(_, _, under @ (Motion::Pausing | Motion::Resuming)) => {
+                let under = match under {
+                    Motion::Pausing => "its pause",
+                    _ => "its resume",
+                };
+                Err(Refusal::Lifecycle {
+                    id: id.try_clone()?,
+                    cause: LifecycleCause::Busy,
+                    why: Some(format!(
+                        "{under} is under way: one move of its vCPUs at a time"
+                    )),
+                })
+            }
+            Run::Booting(..) => Err(pending(id)?),
+            // Its run ended on its own, its host being reaped: ended, as its stop of its own is no stop of its owner's.
+            Run::Stopping(_, Stop::Ended(_)) | Run::Ended(_) => Err(refused(PauseCause::Ended)?),
+            Run::Stopping(_, Stop::Asked | Stop::Grants(_)) => {
+                Err(refused(PauseCause::NotRunning)?)
+            }
+        }
+    }
+
+    /// Box `id`'s move `toward`, begun on its run `guest` ([`Runs::begin_move`]), ended as Shards answered it: its motion
+    /// the one the move leaves where it was made (`done`), else back to the one it moved from. A run its stop has taken
+    /// since, or another run of the box, is left as it is: its stop's, or never this move's.
+    fn end_move(
+        &self,
+        id: &BoxId,
+        guest: &Arc<dyn ImageGuest>,
+        toward: Move,
+        done: bool,
+    ) -> Result<(), Refusal> {
+        let (from, under_way, to) = toward.motions();
+        if let Some(Run::Running(held, _, motion)) = self.lock()?.get_mut(Key::Box(id))
+            && Arc::ptr_eq(held, guest)
+            && *motion == under_way
+        {
+            *motion = if done { to } else { from };
+        }
+        Ok(())
     }
 
     /// Lets go of a run whose end is known, alone: a run still held goes only through its stop, since
@@ -1551,10 +1710,10 @@ impl Runs {
                     if let Some(waits) = waits {
                         waits.boot.answered(took);
                     }
-                    // Its run started as its boot answered.
+                    // Its run started as its boot answered, its vCPUs going.
                     let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                    *run = Run::Running(Arc::clone(&guest), at);
+                    *run = Run::Running(Arc::clone(&guest), at, Motion::Going);
                     Settled::Started(guest)
                 }
                 // Its stop ended it mid-boot, as its delete asked (D231's `BootStop`): its run never started, and the
@@ -1580,7 +1739,7 @@ impl Runs {
                     Settled::Ends(end)
                 }
             },
-            Run::Running(guest, _) => Settled::Running(Arc::clone(guest)),
+            Run::Running(guest, _, motion) => Settled::Running(Arc::clone(guest), *motion),
             Run::Stopping(slot, stop) => match slot.take()? {
                 None => Settled::Stopping(Arc::clone(slot), stop.clone()),
                 Some((end, took)) => {
@@ -1609,10 +1768,10 @@ impl Runs {
             Some(run @ Run::Booting(..)) => match slot.take()? {
                 Some((Ok(guest), took)) => {
                     waits.boot.answered(took);
-                    // Its run started as its boot answered.
+                    // Its run started as its boot answered, its vCPUs going.
                     let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
-                    *run = Run::Running(guest, at);
+                    *run = Run::Running(guest, at, Motion::Going);
                     Ok(())
                 }
                 Some((Err(why), took)) => {
@@ -2126,15 +2285,15 @@ impl ImageClass {
             // by its start, never Running.
             Settled::Started(guest) => {
                 self.keep_started(record, guest.as_ref())?;
-                match self.settle_running(image, id, guest)? {
+                match self.settle_running(image, id, guest, Motion::Going)? {
                     // Held to its grants by whichever call took its boot's answer, as by its start (N6).
                     State::Running(guest) => self.hold_grants(image, &record.spec, guest),
                     state => Ok(state),
                 }
             }
-            Settled::Running(guest) => {
+            Settled::Running(guest, motion) => {
                 self.keep_started(record, guest.as_ref())?;
-                self.settle_running(image, id, guest)
+                self.settle_running(image, id, guest, motion)
             }
             Settled::Ends(end) => {
                 let end = self.record_end(id, &end)?;
@@ -2208,18 +2367,24 @@ impl ImageClass {
     }
 
     /// A running VM whose run may have ended on its own: its host is then reaped through its stop, so no
-    /// run is let go of before its host has exited, and the box's end is the one its run reached, in its words.
+    /// run is let go of before its host has exited, and the box's end is the one its run reached, in its words. One whose
+    /// run goes on is Running, or Paused where its vCPUs' `motion` isn't going (kiln plan P5.5b): a paused run ends only
+    /// stopped or failed, and its end is read as any's (Shards' D267: every wait answered as ever).
     fn settle_running(
         &self,
         image: &ImageBoot,
         id: &BoxId,
         guest: Arc<dyn ImageGuest>,
+        motion: Motion,
     ) -> Result<State, Refusal> {
         let Some(ended) = guest
             .wait_for(Duration::ZERO)
             .map_err(|why| refused(id, "reading a Shards image VM's end", why))?
         else {
-            return Ok(State::Running(guest));
+            return Ok(match motion {
+                Motion::Going => State::Running(guest),
+                Motion::Pausing | Motion::Paused | Motion::Resuming => State::Paused(guest),
+            });
         };
         let reached = Stop::Ended(End::of(&ended.end));
         let slot = image.stop(guest, Some(ended.end))?;
@@ -2262,7 +2427,7 @@ impl ImageClass {
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}
-            State::Booting | State::Running(_) | State::Stopping(..) => {
+            State::Booting | State::Running(_) | State::Paused(_) | State::Stopping(..) => {
                 return Err(Refusal::Invalid {
                     what: "start",
                     why: format!("box {id} has started already"),
@@ -2380,7 +2545,8 @@ impl ImageClass {
                     state => state,
                 };
                 match state {
-                    State::Running(_) => Ok(()),
+                    // Paused by another call since its boot answered (kiln plan P5.5b): a start that succeeded.
+                    State::Running(_) | State::Paused(_) => Ok(()),
                     State::Stopping(slot, Stop::Grants(why)) => {
                         Err(self.grants_stopped(&id, slot, why, Past::Pending)?)
                     }
@@ -2416,7 +2582,8 @@ impl ImageClass {
         let image = self.image()?;
         let waits = image.waits()?;
         let slot = match state {
-            State::Running(guest) => {
+            // A paused run's stop is answered as a running one's (Shards' D267): its VM killed, its pause with it.
+            State::Running(guest) | State::Paused(guest) => {
                 let slot = image.stop(guest, None)?;
                 image.runs.stop_asked(id, &slot)?;
                 slot
@@ -2479,6 +2646,8 @@ impl ImageClass {
     fn signal_members(&self, id: &BoxId, state: State, signal: Signal) -> Result<(), Refusal> {
         let guest = match state {
             State::Running(guest) => guest,
+            // Its members' guest answers nothing while paused (kiln plan P5.5b): refused at once, never waited on.
+            State::Paused(_) => return Err(paused(id, "signal")?),
             State::Booting => return Err(pending(id)?),
             State::Held => return Err(held()),
             State::Created | State::Stopping(..) | State::Ended(_) => {
@@ -2514,6 +2683,8 @@ impl ImageClass {
         let id = record.spec.id.try_clone()?;
         let guest = match self.settle(&record)? {
             State::Running(guest) => guest,
+            // Its member's guest answers nothing while paused (kiln plan P5.5b): refused at once, never waited on.
+            State::Paused(_) => return Err(paused(&id, "signal a member")?),
             State::Held => return Err(held()),
             State::Booting => return Err(pending(&id)?),
             State::Created | State::Stopping(..) | State::Ended(_) => {
@@ -2576,37 +2747,50 @@ impl ImageClass {
     }
 
     pub(super) fn inspect_image(&self, record: BoxRecord) -> Result<BoxInfo, Refusal> {
-        match self.settle(&record)? {
-            State::Created | State::Booting => info(&record.spec, BoxState::Created, None),
-            State::Running(guest) => {
-                let mut shown = info(&record.spec, BoxState::Running, None)?;
-                // Its publishes as bound (joint plan step 15, N6).
-                if let ClassSpec::ShardsImage(shards) = &record.spec.class {
-                    shown.published =
-                        crate::grants::bound(&shards.grants, guest.members(), &guest.published())?;
-                }
-                // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake
-                // (Shards' D252 amended, image channel v30), so a reading of the host tells each from a socket no grant
-                // made.
-                shown.control = guest.control().map(|at| at.address);
-                shown.control_wake = guest.control().map(|at| hex_api::ControlWake {
-                    waker: at.waker,
-                    wake: at.wake,
-                });
-                Ok(shown)
-            }
-            State::Stopping(..) => info(&record.spec, BoxState::Running, None),
+        let (state, guest) = match self.settle(&record)? {
+            State::Running(guest) => (BoxState::Running, guest),
+            // Its machine kept whole while paused (kiln plan P5.5b): its publishes and its endpoint stay bound.
+            State::Paused(guest) => (BoxState::Paused, guest),
+            State::Created | State::Booting => return info(&record.spec, BoxState::Created, None),
+            State::Stopping(..) => return info(&record.spec, BoxState::Running, None),
             State::Ended(end) => {
                 let mut shown = info(&record.spec, BoxState::Empty, Some(end.exit))?;
                 shown.ended = end.why;
-                Ok(shown)
+                return Ok(shown);
             }
-            State::Held => Err(held()),
+            State::Held => return Err(held()),
+        };
+        let mut shown = info(&record.spec, state, None)?;
+        // Its publishes as bound (joint plan step 15, N6).
+        if let ClassSpec::ShardsImage(shards) = &record.spec.class {
+            shown.published =
+                crate::grants::bound(&shards.grants, guest.members(), &guest.published())?;
         }
+        // Its run's agent-control endpoint, as its run host told it (N6), and that endpoint's waker and wake (Shards'
+        // D252 amended, image channel v30), so a reading of the host tells each from a socket no grant made.
+        shown.control = guest.control().map(|at| at.address);
+        shown.control_wake = guest.control().map(|at| hex_api::ControlWake {
+            waker: at.waker,
+            wake: at.wake,
+        });
+        Ok(shown)
     }
 
     pub(super) fn usage_image(&self, record: BoxRecord) -> Result<Usage, Refusal> {
         let (guest, stats) = self.stats_image(&record, "usage")?;
+        // A run paused before its guest ever answered a stats ask has none of its guest's lines to tell until it resumes
+        // (Shards' D267: a paused run's are what its init last said before its pause, none where it said none), so its
+        // usage is refused as any call that needs its guest is while it is paused (kiln plan P5.5b).
+        let said = [
+            stats.memory_bytes,
+            stats.pids,
+            stats.cpu_ns,
+            stats.read_bytes,
+            stats.write_bytes,
+        ];
+        if said.iter().all(Option::is_none) && stats.paused.is_some_and(|paused| paused.now) {
+            return Err(paused(&record.spec.id, "usage")?);
+        }
         usage_of(
             &stats,
             vm_size(&record.spec)?.vcpus,
@@ -2621,7 +2805,9 @@ impl ImageClass {
         call: &'static str,
     ) -> Result<Arc<dyn ImageGuest>, Refusal> {
         match self.settle(record)? {
-            State::Running(guest) => Ok(guest),
+            // A paused run's guest is given too: its run's stats and its rate are answered as ever, and an ask its guest
+            // would answer is refused by Shards at once, typed (Shards' D267; [`refused`]).
+            State::Running(guest) | State::Paused(guest) => Ok(guest),
             State::Held => Err(held()),
             _ => Err(Refusal::NotRunning(record.spec.id.try_clone()?, call)),
         }
@@ -2682,6 +2868,59 @@ impl ImageClass {
         Ok(self.image_guest(&record, "rate_period")?.rate_period())
     }
 
+    /// Holds running image box `record`'s vCPUs out of its guest (`Runtime::pause`; kiln plan P5.5b, Shards' D267).
+    pub(super) fn pause_image(&self, record: BoxRecord) -> Result<(), Refusal> {
+        self.move_image(record, Move::Pause)
+    }
+
+    /// Lets paused image box `record`'s vCPUs run its guest again (`Runtime::resume`; kiln plan P5.5b, Shards' D267).
+    pub(super) fn resume_image(&self, record: BoxRecord) -> Result<(), Refusal> {
+        self.move_image(record, Move::Resume)
+    }
+
+    /// Image box `record`'s pause or resume, `toward` (kiln plan P5.5b; Shards' D267): its run settled first, so a boot's
+    /// or a stop's answer is taken and an end its run reached is seen, then the move begun under the runs' lock
+    /// ([`Runs::begin_move`]), asked of Shards outside it, and ended as Shards answered it ([`Runs::end_move`]). Shards'
+    /// VMM makes it at once, asking nothing of the guest, which may be slow or hung, so the ask waits on its VM's answer
+    /// or its run's end alone (`Duration::MAX`), never a timer, as a room's and a rate's do. Refused, typed: `Pending`
+    /// while it boots, held as every call is, `NotRunning` before its start and once its stop has begun, `Ended` once its
+    /// run has ended (Shards' `Ended` among it), as [`Runs::begin_move`] refuses a run not as the move asks, and in
+    /// Shards' words where its VM didn't make the move.
+    fn move_image(&self, record: BoxRecord, toward: Move) -> Result<(), Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let stands = |cause| -> Result<Refusal, Refusal> {
+            Ok(Refusal::Pause {
+                id: id.try_clone()?,
+                op: toward.op(),
+                cause,
+            })
+        };
+        match self.settle(&record)? {
+            State::Running(_) | State::Paused(_) => {}
+            State::Booting => return Err(pending(&id)?),
+            State::Held => return Err(held()),
+            State::Created | State::Stopping(_, Stop::Asked | Stop::Grants(_)) => {
+                return Err(stands(PauseCause::NotRunning)?);
+            }
+            // Its run ended, its host's reaping under way among it: its own end, never its owner's stop.
+            State::Stopping(_, Stop::Ended(_)) | State::Ended(_) => {
+                return Err(stands(PauseCause::Ended)?);
+            }
+        }
+        let runs = &self.image()?.runs;
+        let guest = runs.begin_move(&id, toward)?;
+        let answer = match toward {
+            Move::Pause => guest.pause(Duration::MAX),
+            Move::Resume => guest.resume(Duration::MAX),
+        };
+        runs.end_move(&id, &guest, toward, answer.is_ok())?;
+        match answer {
+            Ok(_) => Ok(()),
+            Err(ImageRefusal::Ended(_)) => Err(stands(PauseCause::Ended)?),
+            Err(why) => Err(refused(&id, toward.op(), why)),
+        }
+    }
+
     /// What running image box `record`'s VM costs its host (`Runtime::host_use`): its run's microVM part (D241).
     pub(super) fn host_use_image(&self, record: BoxRecord) -> Result<HostUse, Refusal> {
         let id = &record.spec.id;
@@ -2728,7 +2967,8 @@ impl ImageClass {
             });
         }
         let guest = match self.settle(&record)? {
-            State::Running(guest) => guest,
+            // A paused run's members' streams are its run host's to give, as every take is (Shards' D267).
+            State::Running(guest) | State::Paused(guest) => guest,
             State::Held => return Err(held()),
             State::Booting | State::Stopping(..) => return Err(pending(&id)?),
             State::Created | State::Ended(_) => return Err(Refusal::NotRunning(id, "member")),
@@ -2793,7 +3033,9 @@ impl ImageClass {
             });
         }
         let guest = match self.settle(&record)? {
-            State::Running(guest) => guest,
+            // A paused run's MCP lane is opened as a running one's and accepted once its guest goes on (Shards' D267):
+            // this call waits for its harness's connection however long that takes, a pause among it.
+            State::Running(guest) | State::Paused(guest) => guest,
             State::Held => return Err(held()),
             State::Booting => return Err(pending(&id)?),
             State::Created | State::Stopping(..) | State::Ended(_) => {
@@ -2828,7 +3070,7 @@ impl ImageClass {
         let stopped = match state {
             State::Held => return Err(held()),
             State::Booting => return Err(pending(&id)?),
-            State::Running(_) | State::Stopping(..) => {
+            State::Running(_) | State::Paused(_) | State::Stopping(..) => {
                 Some(self.stop_image(&id, state, Past::Pending)?)
             }
             State::Created | State::Ended(_) => None,
@@ -2925,7 +3167,10 @@ impl ImageClass {
     /// to read and none is made up.
     fn final_use(&self, id: &BoxId, state: &State) -> Result<Option<HostUse>, Refusal> {
         match state {
-            State::Running(_) => self.host_use_image(record_now(self, id)?).map(Some),
+            // A paused run's use is read as a running one's (Shards' D267: its run's stats answered as ever).
+            State::Running(_) | State::Paused(_) => {
+                self.host_use_image(record_now(self, id)?).map(Some)
+            }
             State::Stopping(..) | State::Ended(_) if ran(&record_now(self, id)?) => {
                 Err(ended_first(id.try_clone()?))
             }
@@ -2952,7 +3197,7 @@ impl ImageClass {
         }
         match state {
             State::Held => return Err(held()),
-            State::Booting | State::Running(_) | State::Stopping(..) => {
+            State::Booting | State::Running(_) | State::Paused(_) | State::Stopping(..) => {
                 // The delete's intent, durable before its waits, and the phase it was in.
                 let before = devices::with_record_transaction(self.image_books()?, &id, |t| {
                     let mut current = t.read(&id)?.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -2985,7 +3230,7 @@ impl ImageClass {
                     }
                 }
                 match state {
-                    State::Running(_) => {
+                    State::Running(_) | State::Paused(_) => {
                         self.stop_image(&id, state, Past::Follow)?;
                     }
                     State::Stopping(..) => {
@@ -3198,6 +3443,14 @@ impl hex_api::Runtime for ImageClass {
 
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         self.host_use_image(self.called(id)?)
+    }
+
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.pause_image(self.called(id)?)
+    }
+
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.resume_image(self.called(id)?)
     }
 
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {

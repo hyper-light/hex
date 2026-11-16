@@ -227,6 +227,36 @@ pub trait Runtime: Send + Sync {
             why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
         })
     }
+
+    /// Holds running Shards image box `id`'s vCPUs out of its guest where they are (kiln plan P5.5b; Shards' D267), its
+    /// VM kept whole: its memory, devices and connections, and the room its admission booked, which its node keeps
+    /// booked (no window that holds a pause is a sample of its learned charge). Its guest runs no CPU until
+    /// [`Runtime::resume`]; meanwhile inspect says [`BoxState::Paused`] and usage tells its paused time
+    /// ([`Usage::paused_ns`]). A call that needs its guest's answer while it is paused (a signal but KILL, a member's
+    /// signal, its room) is refused at once, [`PauseCause::Paused`], never waited on; KILL, delete, inspect, usage, its host
+    /// use and its members' streams answer as ever. Refused, typed ([`Refusal::Pause`]): [`PauseCause::Paused`] where it is
+    /// paused already, which a caller that lost its pause's answer takes as done; [`PauseCause::NotRunning`] before its
+    /// start and once its stop has begun; [`PauseCause::Ended`] once its run has ended; and [`PauseCause::Class`] for a box
+    /// of any other class or form, which is this default's answer, its class as inspect says it. Its boot under way is
+    /// [`Refusal::Lifecycle`] `Pending`, and a pause or resume of it under way `Busy`.
+    fn pause(&self, id: &BoxId) -> Result<(), Refusal> {
+        Err(Refusal::Pause {
+            cause: PauseCause::Class(self.inspect(id)?.class),
+            id: id.try_clone()?,
+            op: "pause",
+        })
+    }
+
+    /// Lets paused Shards image box `id`'s vCPUs run its guest again where they stopped ([`Runtime::pause`]; Shards'
+    /// D267), [`BoxState::Running`] once answered. Refused as a pause is, naming `resume`, but [`PauseCause::Running`]
+    /// where it isn't paused, which a caller that lost its resume's answer takes as done.
+    fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
+        Err(Refusal::Pause {
+            cause: PauseCause::Class(self.inspect(id)?.class),
+            id: id.try_clone()?,
+            op: "resume",
+        })
+    }
 }
 
 /// Whether a VM process's CPU time holds its vCPUs' guest time (Shards' D265), as that process learned it from its own
@@ -271,6 +301,11 @@ pub struct HostUse {
     pub window: Duration,
     /// Whether `cpu_ns` holds the vCPUs' guest time (D265). Appended after the other fields.
     pub charged: Charged,
+    /// The time its owner held its run paused since it started ([`Runtime::pause`]; Shards' D267, `Stats::paused`), every
+    /// pause so far and the one under way among it, on its run host's clock: part of `window`, which spans the whole run
+    /// as before, so a reader of two reads takes this one's growth off the window's for what ran between them, and one
+    /// that grew holds a pause. Appended after `charged`.
+    pub paused: Duration,
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
@@ -2555,6 +2590,10 @@ pub enum BoxState {
     Running,
     /// An `oci` box whose init waits for [`Runtime::start`].
     Created,
+    /// A Shards image VM whose vCPUs its owner holds out of its guest ([`Runtime::pause`]; kiln plan P5.5b), or is moving
+    /// so: its machine and its room held, its guest running no CPU and answering nothing from its pause's ask to its
+    /// resume's answer. Appended: the node's wire tags each state by its place here.
+    Paused,
 }
 
 /// How a macOS `process` box holds its members, which its node reports so a caller knows which (the
@@ -2684,6 +2723,12 @@ pub struct Usage {
     /// the wire means `None` (append-only, CLAUDE.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_from: Option<StartedFrom>,
+    /// A Shards image VM's time held paused by its owner since its run started ([`Runtime::pause`]; Shards' D267,
+    /// `Stats::paused`, on its run host's clock), in nanoseconds, every pause so far and the one under way among it:
+    /// `None` for a box with no VM to pause. After `started_from`, so absent on the wire means `None` (append-only,
+    /// CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_ns: Option<u64>,
 }
 
 /// How a Shards image VM's microVM started (D253), as its run host says it as the run starts: Shards' own five
@@ -2834,6 +2879,41 @@ pub enum Refusal {
         op: &'static str,
         failure: GuestFailure,
     },
+    /// Box `id`'s `op` refused for where its pause stands (kiln plan P5.5b): its pause or resume ([`Runtime::pause`],
+    /// [`Runtime::resume`]), or a call that needs its guest's answer while it is paused. Typed by [`PauseCause`], so a
+    /// caller tells a box paused already from one that runs, one with no run, one whose run has ended and one of a class
+    /// that pauses none, without reading words. After `Guest` (append-only).
+    #[error("box {id}: {op}: {cause}")]
+    Pause {
+        id: BoxId,
+        op: &'static str,
+        cause: PauseCause,
+    },
+}
+
+/// Where a box stands that refuses its pause, its resume, or a call that needs its guest's answer while it is paused
+/// ([`Refusal::Pause`]; kiln plan P5.5b). The node's wire tags each by its place here, so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PauseCause {
+    /// Its vCPUs are held out of its guest, or a pause or resume of them is under way, from whose ask to its resume's
+    /// answer its guest answers nothing (Shards' D267): a pause of it has nothing to do, so a caller that lost its
+    /// pause's answer takes this as done, and a call that needs its guest's answer waits for its resume.
+    #[error("it is paused")]
+    Paused,
+    /// Its vCPUs run its guest: a resume of it has nothing to do, so a caller that lost its resume's answer takes this as
+    /// done.
+    #[error("it runs, unpaused")]
+    Running,
+    /// It has no run to pause or resume: it hasn't started, or its stop has begun.
+    #[error("it has no run: it hasn't started, or its stop has begun")]
+    NotRunning,
+    /// Its run has ended.
+    #[error("its run has ended")]
+    Ended,
+    /// It is of a class or form whose boxes Hex pauses none of: every one but a Shards image box, the one whose VM is its
+    /// own and whose VMM holds its vCPUs (Shards' D267). A box of `Class::Shards` in Hex's own guest is among them.
+    #[error("only a Shards image box pauses, and it is of class {}", .0.name())]
+    Class(Class),
 }
 
 /// How a Shards guest failed a call ([`Refusal::Guest`]): each of Shards' kinds by itself (Shards R04), so a caller
@@ -2863,6 +2943,10 @@ pub enum GuestFailure {
     /// Its VM process answered its use with none of the protocol's (Shards' D260), as Shards says.
     #[error("answered its use with none of the protocol's: {0}")]
     HostUse(String),
+    /// Its VM didn't make a pause or a resume asked of it (kiln plan P5.5b; Shards' D267, `ImageRefusal::Pause`), in its
+    /// words: its machine stopped before every vCPU was held. After `HostUse` (append-only).
+    #[error("made no pause or resume asked of it: {0}")]
+    Pause(String),
 }
 
 /// How a Shards guest ended ([`GuestFailure::Ended`]): Shards' own ends.

@@ -848,6 +848,9 @@ fn requests() -> Vec<(u64, Request, usize)> {
             }),
             1,
         ),
+        // Kiln plan P5.5b: an image box's pause and resume, appended.
+        (212, Request::Call(Call::Pause(id("image"))), 0),
+        (213, Request::Call(Call::Resume(id("image"))), 0),
         // docs/design/credential-grants.md C7: a connection's lessors, and its answers to the node's lease asks.
         (205, Request::Call(Call::Lessors), 0),
         (206, Request::Lessor(Ok(())), 0),
@@ -1112,6 +1115,31 @@ fn refusals() -> Vec<Refusal> {
             why: "this node was given none to lease from".to_owned(),
         },
     ];
+    // Kiln plan P5.5b: a call refused for where its box's pause stands, each cause, a class's naming every class.
+    out.extend(
+        [
+            ("pause", PauseCause::Paused),
+            ("resume", PauseCause::Running),
+            ("pause", PauseCause::NotRunning),
+            ("resume", PauseCause::Ended),
+            ("signal", PauseCause::Paused),
+        ]
+        .into_iter()
+        .chain(
+            [
+                Class::Process,
+                Class::Oci,
+                Class::Firecracker,
+                Class::Shards,
+            ]
+            .map(|class| ("pause", PauseCause::Class(class))),
+        )
+        .map(|(op, cause)| Refusal::Pause {
+            id: id("image"),
+            op,
+            cause,
+        }),
+    );
     out.extend(connect_refusals());
     out
 }
@@ -1235,6 +1263,24 @@ fn answers() -> Vec<(u64, Answer)> {
                 io_write_bytes: u64::MAX,
                 guest: Some(GuestTime::PerVcpuNs(vec![0, 1, u64::MAX])),
                 started_from: Some(StartedFrom::Warm),
+                paused_ns: None,
+            }),
+        ),
+        // Kiln plan P5.5b: a Shards image VM's paused time, appended after how it started.
+        (
+            9,
+            Answer::Usage(Usage {
+                guest: Some(GuestTime::PerVcpuNs(vec![7, 7])),
+                started_from: Some(StartedFrom::Booted),
+                paused_ns: Some(u64::MAX),
+                ..Usage::default()
+            }),
+        ),
+        (
+            2,
+            Answer::Info(BoxInfo {
+                state: BoxState::Paused,
+                ..info()
             }),
         ),
         (
@@ -2548,7 +2594,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     (
         any_id(),
         0u8..4,
-        0u8..3,
+        0u8..4,
         any_bounds(),
         any::<bool>(),
         proptest::option::of(any_exit()),
@@ -2571,7 +2617,8 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                 state: match state {
                     0 => BoxState::Empty,
                     1 => BoxState::Running,
-                    _ => BoxState::Created,
+                    2 => BoxState::Created,
+                    _ => BoxState::Paused,
                 },
                 bounds,
                 adopted,
@@ -2647,6 +2694,29 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
             any_guest_failure()
         )
             .prop_map(|(op, failure)| Refusal::Guest { op, failure }),
+        (
+            any_id(),
+            proptest::sample::select(&SOME_NAMES[..]),
+            any_pause_cause()
+        )
+            .prop_map(|(id, op, cause)| Refusal::Pause { id, op, cause }),
+    ]
+}
+
+/// Each place a box's pause stands (kiln plan P5.5b), a class's naming any class.
+fn any_pause_cause() -> impl Strategy<Value = PauseCause> {
+    prop_oneof![
+        Just(PauseCause::Paused),
+        Just(PauseCause::Running),
+        Just(PauseCause::NotRunning),
+        Just(PauseCause::Ended),
+        proptest::sample::select(vec![
+            Class::Process,
+            Class::Oci,
+            Class::Firecracker,
+            Class::Shards
+        ])
+        .prop_map(PauseCause::Class),
     ]
 }
 
@@ -2670,6 +2740,7 @@ fn any_guest_failure() -> impl Strategy<Value = GuestFailure> {
         (any::<u32>(), any_text()).prop_map(|(pid, why)| GuestFailure::Gone { pid, why }),
         any_text().prop_map(GuestFailure::Rate),
         any_text().prop_map(GuestFailure::HostUse),
+        any_text().prop_map(GuestFailure::Pause),
     ]
 }
 
@@ -3134,11 +3205,13 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
         io_write_bytes: 19,
         guest: None,
         started_from: None,
+        paused_ns: None,
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    // The counters, then guest time's option byte and the microVM's start's, appended (joint plan step 12): none here.
-    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 2);
+    // The counters, then guest time's option byte and the microVM's start's, appended (joint plan step 12), and its
+    // paused time's (kiln plan P5.5b): none here.
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 3);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
