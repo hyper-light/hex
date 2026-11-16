@@ -6412,8 +6412,9 @@ fn said_stats(vcpus: u32) -> Stats {
 /// and resume a VM not yet started; start it, its members ones a signal reaches, read its usage, and resume it; pause it,
 /// then inspect it, read its usage, pause it again, signal it TERM, signal its harness and tell it its room; resume it,
 /// inspect it, read its usage and resume it again. Expect: before its start each refused Pause(NotRunning), asking Shards
-/// nothing; the running VM's resume refused Pause(Running); its pause asked of Shards once, the VM shown Paused, its
-/// endpoint still told, its usage its paused time; the second pause refused Pause(Paused), asking Shards nothing more;
+/// nothing; the running VM's resume refused Pause(Running); its pause asked of Shards once, the VM shown Paused, the
+/// endpoint it told as it ran still told, its usage its paused time; the second pause refused Pause(Paused), asking
+/// Shards nothing more;
 /// TERM and the harness's signal refused Pause(Paused) at once, taken by no lane, and its room refused Pause(Paused) as
 /// Shards refuses it; its resume asked once, the VM shown Running, its paused time no less than it was, and the second
 /// resume refused Pause(Running).
@@ -6442,11 +6443,13 @@ fn p5_5b_an_image_box_pauses_and_resumes_through_its_run() {
         runtime.resume(&id),
         stands(&id, "resume", PauseCause::Running)
     );
+    let running = runtime.inspect(&id).unwrap();
+    assert!(running.control.is_some(), "{running:?}");
     assert_eq!(runtime.pause(&id), Ok(()));
     let shown = runtime.inspect(&id).unwrap();
     assert_eq!(
         (shown.state, shown.control),
-        (BoxState::Paused, Some(model_control().address))
+        (BoxState::Paused, running.control)
     );
     let paused = runtime.usage(&id).unwrap().paused_ns.unwrap();
     assert_eq!(runtime.pause(&id), stands(&id, "pause", PauseCause::Paused));
