@@ -2269,7 +2269,8 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0022, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    // 0x0024: the first request kind past every one defined, a resume's (kiln plan P5.5b) the last.
+    for kind in [0u16, 0x0024, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -4845,15 +4846,15 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     let per_vcpu = usage(Some(GuestTime::PerVcpuNs(vec![5, 7])));
     let bytes = answer(4, &per_vcpu, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[counters..counters + 6], &[1, 0, 2, 0, 0, 0]);
-    // Then the microVM's start's option byte (D253): none here.
-    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>() + 1);
+    // Then the microVM's start's option byte (D253) and its paused time's (kiln plan P5.5b): none here.
+    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>() + 2);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         per_vcpu
     );
     let awaits = usage(Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)));
     let bytes = answer(4, &awaits, MAX_MESSAGE).unwrap();
-    assert_eq!(&bytes[counters..], &[1, 1, 0, 0]);
+    assert_eq!(&bytes[counters..], &[1, 1, 0, 0, 0]);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         awaits
@@ -4885,12 +4886,13 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     )
     .unwrap();
     let count = u32::try_from(GuestTime::MAX_VCPUS + 1).unwrap();
-    // Its count and the start's option byte after it, written again with a count past the index space.
-    read_past.truncate(read_past.len() - size_of::<u32>() - 1);
+    // Its count, and the start's and the paused time's option bytes after it, written again with a count past the index
+    // space.
+    read_past.truncate(read_past.len() - size_of::<u32>() - 2);
     read_past.extend_from_slice(&count.to_le_bytes());
     read_past.extend(std::iter::repeat_n(
         0,
-        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>() + 1,
+        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>() + 2,
     ));
     assert!(matches!(
         read_answer(&received(&read_past, 0), MAX_MESSAGE),
@@ -5520,11 +5522,12 @@ fn w12_an_infos_run_words_cross_the_wire_last() {
 
 /// Joint plan step 12 (D253; AC-T7.4.1): a usage answer says how a Shards image VM's microVM started, after its guest
 /// time, as an option: tag 1 and its place in `StartedFrom` (Booted 0, Saved 1, Restored 2, Replaced 3, Warm 4); a box
-/// with no Shards image run says none, a byte 0. Do answer each, then one whose tag is 5, then each as JSON. Expect each
-/// read back as written, its tag its last byte; none a 0 last; tag 5 refused as "started from"; the JSON named in
-/// kebab-case and left out where none.
+/// with no Shards image run says none, a byte 0. Its paused time's option byte follows it (kiln plan P5.5b), none here.
+/// Do answer each, then one whose tag is 5, then each as JSON. Expect each read back as written, its tag the byte before
+/// the paused time's 0; none a 0 there; tag 5 refused as "started from"; the JSON named in kebab-case and left out where
+/// none.
 #[test]
-fn w12_a_usages_microvm_start_crosses_the_wire_last() {
+fn w12_a_usages_microvm_start_crosses_the_wire_after_its_guest_time() {
     let usage = |started_from| {
         Answer::Usage(Usage {
             pids: 1,
@@ -5541,21 +5544,25 @@ fn w12_a_usages_microvm_start_crosses_the_wire_last() {
     ] {
         let said = usage(Some(from));
         let bytes = answer(4, &said, MAX_MESSAGE).unwrap();
-        assert_eq!(&bytes[bytes.len() - 2..], &[1, tag], "{from:?}");
+        assert_eq!(&bytes[bytes.len() - 3..], &[1, tag, 0], "{from:?}");
         assert_eq!(
             read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             said
         );
     }
     let none = answer(4, &usage(None), MAX_MESSAGE).unwrap();
-    assert_eq!(&none[none.len() - 2..], &[0, 0], "no guest time, no start");
+    assert_eq!(
+        &none[none.len() - 3..],
+        &[0, 0, 0],
+        "no guest time, no start, no paused time"
+    );
     assert_eq!(
         read_answer(&received(&none, 0), MAX_MESSAGE).unwrap().1,
         usage(None)
     );
     let mut hostile = answer(4, &usage(Some(StartedFrom::Warm)), MAX_MESSAGE).unwrap();
-    let last = hostile.len() - 1;
-    hostile[last] = 5;
+    let tag = hostile.len() - 2;
+    hostile[tag] = 5;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
         Err(Fault::Value {
@@ -5576,6 +5583,57 @@ fn w12_a_usages_microvm_start_crosses_the_wire_last() {
         serde_json::from_value::<Usage>(older).unwrap(),
         Usage::default()
     );
+}
+
+/// Kiln plan P5.5b (AC-T7.4.1): a usage answer says a Shards image VM's paused time last, after how its microVM started,
+/// as an option: tag 1 and its nanoseconds; a box with no VM to pause says none, a byte 0. Do answer a paused time of
+/// u64::MAX and none, then the first with its option's tag 2, then it cut short, then each as JSON. Expect each read
+/// back as written, its nanoseconds its last eight bytes after a 1, none a 0 last; tag 2 refused as an option; the cut
+/// one refused as truncated; the JSON naming `paused_ns` where some and leaving it out where none.
+#[test]
+fn p5_5b_a_usages_paused_time_crosses_the_wire_last() {
+    let usage = |paused_ns| {
+        Answer::Usage(Usage {
+            pids: 1,
+            started_from: Some(StartedFrom::Booted),
+            paused_ns,
+            ..Usage::default()
+        })
+    };
+    let said = usage(Some(u64::MAX));
+    let bytes = answer(4, &said, MAX_MESSAGE).unwrap();
+    let at = bytes.len() - size_of::<u64>() - 1;
+    assert_eq!(bytes[at], 1);
+    assert_eq!(&bytes[at + 1..], &u64::MAX.to_le_bytes());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        said
+    );
+    let none = answer(4, &usage(None), MAX_MESSAGE).unwrap();
+    assert_eq!(none.last(), Some(&0));
+    assert_eq!(
+        read_answer(&received(&none, 0), MAX_MESSAGE).unwrap().1,
+        usage(None)
+    );
+    let mut hostile = bytes.clone();
+    hostile[at] = 2;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value { what: "option", .. })
+    ));
+    assert!(matches!(
+        read_answer(&received(&bytes[..bytes.len() - 1], 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let paused = Usage {
+        paused_ns: Some(7),
+        ..Usage::default()
+    };
+    let json = serde_json::to_value(&paused).unwrap();
+    assert_eq!(json["paused_ns"], 7);
+    assert_eq!(serde_json::from_value::<Usage>(json).unwrap(), paused);
+    let older = serde_json::to_value(Usage::default()).unwrap();
+    assert!(older.get("paused_ns").is_none(), "skipped when none");
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5: a box's priority band reaches its node. Do send a create of a spec in band 3
