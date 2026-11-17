@@ -3429,9 +3429,17 @@ fn p2_2_a_guest_runtime_lists_the_image_class_only_where_it_boots_image_vms() {
         "{:?}",
         serving.classes()
     );
+    // Its host's pool, with the class's one route at its per-box cost on that pool (§11).
     assert_eq!(
         serving.capacity(hex_api::Class::ShardsImage),
-        Ok(Some(host_pool()))
+        Ok(Some(Capacity {
+            routes: vec![hex_api::RouteOffer {
+                key: route_key().unwrap(),
+                cost: Some(cost(host_pool().total).unwrap()),
+                backing: None,
+            }],
+            ..host_pool()
+        }))
     );
     let refused = runs_microvms(Ok(shards_api::HostCheck::Unusable {
         backend: Some(shards_api::Backend::Kvm),
@@ -3460,6 +3468,193 @@ fn p2_2_a_guest_runtime_lists_the_image_class_only_where_it_boots_image_vms() {
     assert_eq!(unserved.capacity(hex_api::Class::ShardsImage), Err(refused));
     assert!(record(&owner, &BoxId::new("unserved").unwrap()).is_none());
     assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2; docs/design/shards-image-class.md §11): the class's per-box cost is Shards'
+/// envelope on its node's plane. Do derive it for a plane twice and for another plane; allocate under it VMs asked at
+/// nothing, at a unit of each, and past Shards' least by less than a unit; and derive it for planes short of Shards'
+/// least VM. Expect its floor Shards' least VM, its ceiling the plane, no allowance of its own, one identity for one
+/// plane and another for another; each allocation one Shards boots as asked, covering what was asked; a VM past the
+/// plane refused; and the short planes refused.
+#[test]
+fn p2_2_the_image_class_cost_is_shards_envelope_on_its_nodes_plane() {
+    let total = host_pool().total;
+    let profile = cost(total).unwrap();
+    let (vcpus, least) = shards_api::envelope(std::env::consts::ARCH, 0, 0).unwrap();
+    assert_eq!(
+        profile.floor,
+        CapacityResources {
+            cpu_milli: u64::from(vcpus) * 1_000,
+            mem_bytes: least << 20,
+            disk_bytes: 0,
+        }
+    );
+    assert_eq!(profile.ceiling, total);
+    assert_eq!(profile.guest_overhead, CapacityResources::default());
+    assert_eq!(profile.overhead, CapacityResources::default());
+    assert_eq!(cost(total), Ok(profile));
+    let larger = CapacityResources {
+        mem_bytes: total.mem_bytes * 2,
+        ..total
+    };
+    assert_ne!(cost(larger).unwrap().id, profile.id);
+    for asked in [
+        CapacityResources::default(),
+        CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        CapacityResources {
+            cpu_milli: 1_500,
+            mem_bytes: (least << 20) + 1,
+            disk_bytes: 4_097,
+        },
+        CapacityResources {
+            cpu_milli: 3_000,
+            mem_bytes: 300 << 20,
+            disk_bytes: 0,
+        },
+    ] {
+        let allocation = profile.allocate(asked).unwrap();
+        assert!(admitted_size(&allocation).is_ok(), "{asked:?}");
+        assert_eq!(allocation.covers(asked), Ok(()), "{asked:?}");
+    }
+    assert!(
+        profile
+            .allocate(CapacityResources {
+                cpu_milli: total.cpu_milli + 1,
+                ..CapacityResources::default()
+            })
+            .is_err()
+    );
+    for short in [
+        CapacityResources {
+            cpu_milli: 500,
+            ..total
+        },
+        CapacityResources {
+            mem_bytes: 1 << 20,
+            ..total
+        },
+    ] {
+        assert!(cost(short).is_err(), "{short:?}");
+    }
+}
+
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2; docs/design/shards-image-class.md §11): a node's preflight holds an image
+/// VM's record to the image class's own checks, never a dedicated guest's. Do preflight the record of a VM its scheduler
+/// routed and sized under the class's cost; of one made with no route, sized by its caller; of one whose route names a
+/// backing; and of one sized at memory Shards boots otherwise. Expect the first two to pass; the third refused
+/// Uncertain, naming its route; the fourth refused Invalid, naming its allocation.
+#[test]
+fn p2_2_a_node_preflights_an_image_record_as_its_class_admitted_it() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let ready = |spec: BoxSpec| BoxRecord::new(spec, Phase::Ready, Vec::new());
+    let mut admitted = spec("image-admitted", None);
+    admitted.bounds = Bounds {
+        cpu_max_milli: Some(2_000),
+        memory_max: Some(256 << 20),
+        ..Bounds::default()
+    };
+    admitted.allocation = Some(
+        cost(host_pool().total)
+            .unwrap()
+            .allocate(CapacityResources {
+                cpu_milli: 2_000,
+                mem_bytes: 256 << 20,
+                disk_bytes: 0,
+            })
+            .unwrap(),
+    );
+    admitted.route = Some(hex_api::RouteReceipt {
+        key: route_key().unwrap(),
+        backing: None,
+    });
+    assert_eq!(runtime.preflight_box(&ready(admitted.clone())), Ok(()));
+    assert_eq!(
+        runtime.preflight_box(&ready(spec("image-own-size", None))),
+        Ok(())
+    );
+    let mut backed = admitted;
+    backed.route = Some(hex_api::RouteReceipt {
+        key: route_key().unwrap(),
+        backing: Some(hex_api::BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        }),
+    });
+    let refused = runtime.preflight_box(&ready(backed)).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Lifecycle { cause: LifecycleCause::Uncertain, why: Some(why), .. } if why.contains("route")),
+        "{refused:?}"
+    );
+    let mut odd = spec("image-odd", None);
+    odd.allocation = Some(
+        hex_api::RuntimeCost {
+            id: [5; 32],
+            floor: CapacityResources::default(),
+            ceiling: CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1 << 30,
+                disk_bytes: 0,
+            },
+            quantum: CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1 << 20,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        }
+        .allocate(CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 129 << 20,
+            disk_bytes: 0,
+        })
+        .unwrap(),
+    );
+    let refused = runtime.preflight_box(&ready(odd)).unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Invalid { what: "shards image", why } if why.contains("allocation")),
+        "{refused:?}"
+    );
+}
+
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2): a node counts its image class's route among the routes it offers where it
+/// boots image VMs, so its offers stay within their eligibility word. Do project the routes of a node's guest runtime
+/// that boots image VMs and of one that boots none. Expect the first's projection to hold the image route beside the
+/// dedicated guest's, two, and the second's the dedicated guest's alone, one.
+#[test]
+fn p2_2_a_node_counts_its_image_route_where_it_boots_image_vms() {
+    let images = ModelImages::new();
+    let config = super::super::tests::config();
+    let owner = Arc::new(Owner::new());
+    let unusable = runs_microvms(Ok(shards_api::HostCheck::Unusable {
+        backend: Some(shards_api::Backend::Kvm),
+        why: shards_api::Unusable::KvmDenied,
+    }))
+    .unwrap_err();
+    for (boot, count) in [
+        (Ok(Arc::clone(&images) as Arc<dyn Images>), 2),
+        (Err(unusable), 1),
+    ] {
+        let runtime = GuestRuntime::new(
+            Arc::new(shards_api::sim::SimGuests::new(|_| {
+                shards_api::End::PowerOff
+            })),
+            config.clone(),
+        )
+        .with_images(boot, waits(), owner.diagnostics())
+        .with_runtime_cost(fixed_cost(&config))
+        .unwrap();
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let mut projection = crate::devices::RouteProjection::new();
+        runtime.project_routes(&[], None, &mut projection).unwrap();
+        assert_eq!(projection.count().unwrap(), count);
+    }
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded

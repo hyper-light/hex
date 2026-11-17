@@ -83,8 +83,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `Class::ShardsImage` (`shards-image`, wire tag 4), listed only where the node's image boot runs and Shards' check of
   its host (`shards_api::host_check`, D262) says it runs microVMs, each answer mapped and a node that can't refusing an
   image VM in Shards' words; its capacity, learned charge, client waits and start costs its own; placed by hex-sim only
-  on a node listing it. Closes with: ROOT's runs of its tests, and Hex's scheduler admitting image boxes, which it never
-  has (a route and per-box cost for the class, and its payload checked without the allocation it derives; §8).
+  on a node listing it. Hex's scheduler admits image boxes (built on `root/p2-finish`, not merged): the class's
+  capacity offers its one route, a microVM of its own, at a per-box cost of its own (Shards' envelope on the node's
+  plane, census-free); its payloads are checked without the allocation the scheduler derives; a node preflights its
+  records as the class's. Closes with: ROOT's runs of its tests.
   The members a box's caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model

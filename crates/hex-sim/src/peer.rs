@@ -579,10 +579,10 @@ fn allocation_of<'a>(
     Ok(Some(allocation))
 }
 
-// Exact longest enum spellings plus the two fixed hexadecimal key arrays bound the receipt: no route carries a Shards
-// image VM (`RouteKey::check`), so its longer class name is never one.
+// Exact longest enum spellings plus the two fixed hexadecimal key arrays bound the receipt; a Shards image VM's route
+// (`RouteKey::check`, P2.2) makes `shards-image` the longest class name.
 const ROUTE_BYTES: usize =
-    "r1:firecracker:windows:arm64:firecracker:required:".len() + 32 * 2 + 1 + 16 * 2;
+    "r1:shards-image:windows:arm64:firecracker:required:".len() + 32 * 2 + 1 + 16 * 2;
 
 fn write_route(
     out: &mut impl std::fmt::Write,
@@ -650,6 +650,8 @@ fn route_of<'a>(
         Some("oci") => hex_api::Class::Oci,
         Some("firecracker") => hex_api::Class::Firecracker,
         Some("shards") => hex_api::Class::Shards,
+        // P2.2: appended, so a row written before it names none of it and reads as it was written.
+        Some("shards-image") => hex_api::Class::ShardsImage,
         _ => return Err(damaged("route original class")),
     };
     let os = match fields.next() {
@@ -3342,6 +3344,47 @@ mod tests {
                 (demand, None, Some(route))
             );
         }
+    }
+
+    /// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2): an image VM's placement row names its route's class by its own word and
+    /// reads back. Do write an owner's row for an image VM routed to a microVM of its own, with its allocation, then
+    /// read it. Expect its route word "r1:shards-image:linux:amd64:dedicated:none:-", and the row read back to its
+    /// demand, allocation and route.
+    #[test]
+    fn p2_2_an_image_vms_placement_row_names_its_route_and_reads_back() {
+        let allocation = hex_api::sim::sim_vm_allocation().unwrap();
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 2_000,
+                mem_bytes: 256 << 20,
+                ..Resources::default()
+            },
+            kind: Kind::Plain,
+            class: Class::ShardsImage,
+            ask: Ask {
+                runtime_class: Some(hex_api::Class::ShardsImage),
+                ..Ask::default()
+            },
+        };
+        let route = hex_api::RouteReceipt {
+            key: hex_api::RouteKey {
+                class: hex_api::Class::ShardsImage,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch: hex_api::ImageArch::Amd64,
+                },
+                execution: hex_api::Execution::ShardsDedicated,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            backing: None,
+        };
+        let word = "r1:shards-image:linux:amd64:dedicated:none:-";
+        let row = own_text(State::Asked, &demand, &[], Some(allocation), Some(route)).unwrap();
+        assert!(row.split(' ').any(|said| said == word), "{row}");
+        assert_eq!(
+            recorded_assignment(&row, &[]).unwrap(),
+            (demand, Some(allocation), Some(route))
+        );
     }
 
     /// AC-T7.4.1: an original OCI payload keeps its actual guest route through commit, wire and
