@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `04481e36be379b1c0a26575e66ef9c254be87865` (main).
+Revision: `f74f8e3efd6628b81ff7b8cdcd2af2d608efdd86` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -185,6 +185,14 @@ process's runnable threads and learns no rate from an answer that read no work (
 AF_UNIX path shards-afunix refuses says which and why, where a bare InvalidInput said neither
 (a982c9be0, D276 amended); shards-testdir says each panic of a test process on stderr as it happens
 (c0c852156); and remote's loopback test goes on past Winsock's WSAECONNRESET (d1b1e1412).
+
+Past 04481e36b this revision, the candidate for Shards' v0.8.0 tag, still speaks image channel 51,
+and no file Hex takes changes a type, a signature or a dependency Hex reads: shards-afunix tells
+every AF_UNIX socket its directory by afunix.h's parent-path controls, its address its file name
+alone, so a socket beneath a long path works on Windows (0e7773c19); a process has exited only once
+its whole thread group has, a Linux zombie leader with threads left counted as living (26942ced5,
+shards-ipc and the API's `taken`); and D215's judge refuses a party by its rate only once two
+answers have taught it, `Rated` counting them (`answers`, 739907a94), a type Hex names nowhere.
 
 ## Recorded changes
 
