@@ -3122,6 +3122,16 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.mcp(id, member)
     }
 
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime_at(id)?.exec_member(id, member, program, stdio)
+    }
+
     fn signal_member(
         &self,
         id: &BoxId,

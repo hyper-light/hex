@@ -24,7 +24,7 @@ run host's diagnostics held within a bound, `keep_diagnostics(to, bound)`, and a
 stdio read and written without waiting, and an exec's hangup; `2246a8829` before it, at `d91ebb32` and `d7179108`, every socket a run's agent-control endpoint holds
 told, its waker and wake in inspect; `2737fc4ec` before it, v29, at `20015fb5`, a run's stop returning
 released, so a delete frees nothing the run still holds, the review's B-4; `ce80cbb37` before that, at `9ff60efb`, a run's end with its microVM's final
-use, of which the class reads the end alone yet, a member's lane asks waited within their W* and followed past it, told,
+use, which the class keeps for a run that ended on its own since kiln's P7.1b (§3), a member's lane asks waited within their W* and followed past it, told,
 and no GPU report asked; `16451e19f` before that, v27, at `cf844022`, a member's end typed, a member a signal killed
 `Exit::Signal(n)`, never its 128-plus status; `37ddeb080` before that, v26, at `2f55dccf`, no upstream root named;
 `097ec0047` before that, v25, at `1314e5f2`, a member's MCP bridge refused by its field while the class asks no agent-control endpoint with
@@ -183,14 +183,15 @@ split, so a box can be admitted and recorded before it is needed:
 | `start` | `Phase::Ready` written first (the boot's intent, before any effect), then `Images::boot`, given the boot's learned bound as its patience (§6). |
 | `signal(KILL)`, Hex's stop | `ImageGuest::stop`: the VM process killed at once; it returns once the run is released (Shards `2737fc4ec`): its end, `RunEnd::Stopped`, told, its run host exited and reaped, and every process the host started (its VM, network and share processes) gone, so a delete frees nothing the run still holds (the review's B-4). The exit, `Signal(9)`, is recorded then. |
 | `signal(other)` | To every member of the run that runs, each on its own lane of the run's agent-control endpoint (D238, D252; goal 2's item 2): the run asks the endpoint of the class's own key and no socket lane, and its controller is dialed as the first signal goes, kept for that run. The VM runs on; a member that has ended is skipped; a run none of whose members can take it is refused `NotRunning(id, "signal: its run has no member a signal reaches")`. |
-| `exec` | Refused `Awaits(MemberExec)`: a member's exec is the agent-control endpoint's (step 11). |
+| `exec` | Refused `Invalid` naming exec: a program runs in one of the run's members, which `exec_member` names. |
+| `exec_member` | `Execs::exec` on a lane of its own of the run's agent-control endpoint (D238's exec lane, D243's member exec), its stdio pumped and its end waited for. |
 | `inspect`, `list` | The record's phase and exit, and this process's run (`wait_for` with no wait). |
 | `usage` | `stats(StatsScope::Run)` (§4). |
 | `delete` | `Deleting`, then `stop` if it runs, to its run's end, then the record removed. |
 
-Every member operation D231 doesn't give (a terminal, exec, signals) is refused typed, naming the capability
-(`Refusal::Awaits`), never stubbed. A member's own streams are the joint plan's step 17 (a kiln session's stdio as its
-harness member's):
+Every member operation D231 doesn't give (a terminal; a signal to an exec once its outputs have finished) is refused
+typed, naming the capability (`Refusal::Awaits`), never stubbed. A member's own streams are the joint plan's step 17
+(a kiln session's stdio as its harness member's):
 - `ShardsImage::members` names the members the box's caller drives (each its `Member`, variables over its image's,
   a working directory and run-time arguments, checked as an exec's variables, as D231's absolute, plain `workdir`,
   and as no command line's argument holds a NUL; each named once). The boot gives each a `MemberSpec` with `stdin`
@@ -256,6 +257,31 @@ harness member's):
   what it took. At the next revendor (Shards `9f5b1f754`'s `Dialed::wake`) the pending wait moves onto the node's event
   loop (`PendingMcp::wait(Duration::ZERO)` after each ring) and holds no thread; an open connection's pumps keep theirs
   until Shards gives `Output` and `Input` forms that don't wait.
+- `Runtime::exec_member(id, member, program, stdio)` (kiln's P7.1b ask, lane replay at kiln `107a4da17`: its replay ran
+  as its VM's own command, Hex running no program in a running image VM) runs `program` in any member its run declares
+  that runs a program, driven by its caller or not, as a `Proc`: Shards' member exec (D243) on a lane of its own of the
+  run's endpoint (D238's exec lane, `Execs::exec`, given at `9975d1f55`). It runs as its member does: its user,
+  confinement, namespaces and cgroup the member's, so a program naming a user is refused `Invalid`; its environment the
+  member's with the program's variables over it (where `exec` hands a program its whole environment); its working
+  directory the program's, else the member's; pipes, no terminal. Its stdio is an exec's (`Stdio`: the caller's own
+  ends, or ends asked for, given once). Its end is its status as Shards tells it once both its outputs have finished
+  (`Exit::Code`, 128 plus a signal's number where one ended it, as `docker exec` reports it), or `Signal(9)` where its
+  own kill ended it. Its kill is KILL on its lane (`EXEC_SIGNAL`) while its outputs are open; once both have finished,
+  Shards' one handle of the lane (`ExecControl`) waits for its exit and steers nothing beside that wait, so a kill then
+  is refused `Awaits(ExecSignalAfterOutput)` (a member's own lane gives its steering and its end apart; the exec's is
+  owed, §8). Its start waits within `hex.image.exec`'s W* and past it follows the run's connection (§6). Refused,
+  typed, in this order: `Invalid` for a program that can't be started, names a user, or is past what the lane carries
+  (`run::MAX_PAYLOAD`), before anything of its run; Pending while it boots, held, and `NotRunning(id, "exec in a
+  member")` before its start and once its stop has begun; `Invalid` for a member its run declares not;
+  `NotRunning(id, "exec in a member: it runs no program")` for one of files alone; `NotRunning(id, "exec in a member:
+  its member refused it, ended or confined")` where Shards says its member refused it (`Unstarted::Refused`: it has
+  ended, or its confinement refused what it asked); `NotRunning(id, "exec in a member: its run ended")` where the run's
+  connection ends first; and any other of Shards' faults `Os`, in its words. Three threads of its own pump it, its
+  stdin's, its stderr's, and its stdout's, which then waits for its end: an MCP connection's cost, for the same reason.
+  `Runtime::exec` of an image box, naming no member, is refused `Invalid` naming exec. The class serves it in process
+  (`ImageClass`, `GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`, hex-node's `ImageRuntime`, which kiln
+  holds) and the simulator runs its programs in the members a spec names; the node's wire carries no member exec yet,
+  so `hex-client` refuses one `Invalid` before anything is sent, as it refuses a host use.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -299,9 +325,16 @@ delete waits on, refused only where the boot's thread ends with no answer, as th
 its record kept), stops a run that started and follows its stop to its end however long past the stop's W*, then removes
 the box's diagnostics and record. `delete_with_host_use` answers the run's final use of its host, read as it ran before
 its stop, or none where its run never started (kiln charges nothing then); a delete retried then is NoSuchBox. A run
-that started is never answered none (the review's B-5): where its final use can't be read, its run having ended, or
-being stopped, before the delete (Shards' stats answer only a running run), or its read refused, the delete is refused,
-typed (`NotRunning`, or the read's own refusal), the box as it was. A stopped
+that ended on its own before its delete answers the final use its VM read once its machine was down and told with its
+end (Shards' D260's `FinalUse::Read`; kiln's P7.1b, whose replay held its run until its delete for want of it): the call
+that first sees that end (any settling call, the delete's own among them) converts it as a running VM's use is, each
+vCPU's guest time by index, its window from the run's start, as its boot answered, to there, and the box's record keeps
+it with its end (`BoxRecord::final_use`, a fact the node Store's lifecycle writes keep as they keep its exit), across
+the node's restarts, until its delete. A run that started is never answered none (the review's B-5): where no final
+use is kept, its run having been stopped before the delete (its use gone with its VM, Shards' stats answering only a
+running run) or its VM having told none whole at its end (`FinalUse::Unread`, Shards' `Unused`, or a part of it
+unread), or its read refused, the delete is refused, typed (`NotRunning`, its words saying which, or the read's own
+refusal), the box as it was. A stopped
 boot's time is no sample of the boot's W*: it is the time to its stop, no boot's answer. A caller waits for a start past
 W* with `Runtime::started` rather than polling (kiln's HexVms adapter, ROOT 2026-11-13): a box still booting is followed
 to its boot's answer as a delete follows it, by a wait of its own, `hex.image.started` (refused only where the boot's
@@ -365,6 +398,7 @@ image box: `ImageWaits::new` measures from nothing.
 | `hex.image.member` | a member's own lane's first word (D238): whether it runs, its steering then | the run's agent-control connection |
 | `hex.image.signal` | a signal's answer on a member's own lane: taken, or refused | the run's agent-control connection |
 | `hex.image.mcp` | a member's harness's next connection to its MCP bridge (D254), from its ask, which may be never | the run's agent-control connection |
+| `hex.image.exec` | a program's start in a member (D243), from its exec's ask to its host's word: started, or why not | the run's agent-control connection |
 
 D231's boot waits at most the patience its caller gives: past it, its run host is killed and the boot refused
 (`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and
@@ -412,9 +446,12 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   `9975d1f55` or later (image channel version 36: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
-- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec
-  (`MemberExec`; step 11; a member's signal rides its lane since goal 2's item 2), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
-  (unbuilt, D231). Given since 482c5d78: a stop for a boot under way (D231's `BootStop`, `ed1136305`), which a delete
+- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), an exec's steering apart
+  from its end, as a member's own lane gives them (`ExecSignalAfterOutput`: `ExecControl` steers nothing while its exit
+  is waited for, §2), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
+  (unbuilt, D231). Given since 482c5d78: member exec at `9975d1f55` (`MemberExec`, D238's exec lanes and D243, which
+  `Runtime::exec_member` rides, §2; a member's signal rides its lane since goal 2's item 2) and a run's final use with
+  its end (D260, kept for a run that ended on its own, §3); a stop for a boot under way (D231's `BootStop`, `ed1136305`), which a delete
   of a booting box asks (§3); the Windows run host (`WindowsRunHost`, 731b5e54), a boot patience (`Images::boot`'s),
   guest time per vCPU in the run's stats (D241), the run host holding only its stdio (D248, Hex's 0001 upstream), each
   member held to its reach (D246, Hex's 0002 upstream) and a never-started command's end in its VM's words (D249). The
@@ -423,6 +460,12 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   (§4).
 - **Its diagnostics' disk use** (§1): the bytes of a box's diagnostics file are its own use of the node's disk, which
   no usage the image class reports counts yet (`Usage` has no disk use).
+- **A member's program and a run's kept final use** (kiln's P7.1b; §2, §3): their real-VM runs (ROOT's): a program
+  run in a running image VM's harness, its output and its end, its kill, and a run that ends on its own deleted with
+  its host use, on KVM, HVF and WHP; a member exec carried by the node's wire, which carries none yet; and the final
+  use's window, which ends where this process first sees the run's end, at its next settling call: Shards tells no
+  instant with its end, and a wait on each run's end beside it (a thread for each run's life) is the alternative, its
+  cost unmeasured.
 
 ## 9. What would falsify it
 

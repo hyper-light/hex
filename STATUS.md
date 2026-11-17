@@ -88,6 +88,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
   (`Call::MemberSignal`, appended), which a remote member's kill rides too.
+  A program runs in any member of a running image VM (`Runtime::exec_member`, kiln's P7.1b: Shards' D243 on D238's
+  exec lane, given at `9975d1f55`), in process alone (the node's wire carries none yet), its kill riding its lane while
+  its outputs are open; and a run that ends on its own keeps the final use its VM tells with that end (D260) in its
+  record, which its delete with its host use answers. Unit-tested over the model's real endpoint on loopback and the
+  simulator. Closes with: their real-VM runs (ROOT's) and a member exec on the node's wire.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

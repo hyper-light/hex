@@ -269,7 +269,7 @@ pub const IMAGE_CASES: &[Case] = &[
     },
     Case {
         id: "HEX-IMG-5",
-        says: "a program exec'd in a running VM is refused Awaits(MemberExec); TERM is taken, its members' to take, and the VM runs on",
+        says: "a program exec'd in a running VM naming no member is refused Invalid naming exec, a program running in one of its members alone (exec_member); TERM is taken, its members' to take, and the VM runs on",
         run: image_members,
     },
     Case {
@@ -1273,11 +1273,9 @@ fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         ensure(
             matches!(
                 exec.as_ref().err(),
-                Some(Refusal::Awaits {
-                    needs: Upstream::MemberExec
-                })
+                Some(Refusal::Invalid { what: "exec", .. })
             ),
-            || format!("exec in a VM: {:?}", exec.as_ref().err()),
+            || format!("exec in a VM naming no member: {:?}", exec.as_ref().err()),
         )?;
         // A signal but KILL is its run's members' (goal 2's item 2): taken, each member's lane given it. The fixture's
         // image has a member that runs until a signal ends it, as image_real's harness does: one that had ended already
