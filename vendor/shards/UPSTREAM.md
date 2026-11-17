@@ -1,12 +1,12 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `f1e8a097b9726b8d8d512a1d5d2c9eacb3b279e1` (main).
+Revision: `8d6029e4d69392d93640135c8fa781239e92a769` (main).
 
-The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
+The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
 the measurement fixtures the API's and its transport's tests include by path. Cargo.toml is Hex's
-seven-member API-only workspace scaffold (listed as own in vendor/MANIFEST.toml),
+eight-member API-only workspace scaffold (listed as own in vendor/MANIFEST.toml),
 retaining upstream package/dependency/lint settings, and patching shards-remote's hyper-quic, which
 upstream takes from hyper-raft by git at the commit Hex vendors (e0613f52, patch Q35 on hyper-raft's
 branch p/q35-handshake-progress-v1, bound for its main: Q34's `Connection::idle_timeout`, which
@@ -34,8 +34,8 @@ member's terminal (D244), each member held to its reach of the names kept
 (D246), the run's CPU rate (D247) and the period its governor holds that rate over
 (`ImageGuest::rate_period`, version 17, 1acbf2cb9), a member's run-time arguments (D256,
 `MemberSpec::args`, version 18), how its microVM started, from its image's template or a warm run
-host's (D253, `ImageGuest::started_from`, versions 19 and 21; `ImagePools`, which Hex does not use
-yet), its credential grants' values leased by the orchestrator's lessor (D242, `ImageSpec::lessor`,
+host's (D253, `ImageGuest::started_from`, versions 19 and 21; `ImagePools`, through which Hex's image
+class boots the boxes of each warm pool its owner keeps, P3.1), its credential grants' values leased by the orchestrator's lessor (D242, `ImageSpec::lessor`,
 version 20), the setup keys a run's spec may name (D257), a run's end saying why and its run host's
 diagnostics kept whole in a file its orchestrator names (D258, `ImageGuest::keep_diagnostics`), the
 run's microVM saved whole for its owner (D259, `ImageGuest::save`, version 23, 8a9fa413d; Hex asks
@@ -158,14 +158,26 @@ its endpoint's link and its members' first stdio lanes, a run it has no room for
 members start (D252, d8935aca1, 32b27e6c3, 3c76f6c05: `ImageRefusal::Capacity`, version 51); a volume
 plugged with a bound, and a home's volumes listed and cleared (D281, 4a5178d9a, d704727d5, a3025e473:
 `PlugSource::Volume { name, bound }`, `PlugRefusal::Bound` and `Clearing`, versions 47 and 49,
-`shards_api::volumes`), of which Hex plugs and lists none yet; the agent-control endpoint's report of
+`shards_api::volumes`), which Hex's image class plugs into a box's members with their bounds, lists and
+clears (P6.2); the agent-control endpoint's report of
 every lane its controller was granted, MCP bridges among them (D254 amended, f99a3900b:
-`Linked::report`, `LinkReport`, ALPN `shards-control/2`; `Dialed::lanes` gone), which Hex reads
-nowhere yet; a name no grant reaches answered NXDOMAIN at once (D46, 4348c8c1b: `shards_dns::denied`,
+`Linked::report`, `LinkReport`, ALPN `shards-control/2`; `Dialed::lanes` gone), which Hex's
+`Runtime::link` answers (kiln's step 35); a name no grant reaches answered NXDOMAIN at once (D46, 4348c8c1b: `shards_dns::denied`,
 which was `refused`), which Hex calls nowhere; and on Windows a guest's vsock connection on two named
 pipes, its way down opened first (D272 S4, 0bef06525: `Stream::handle` the way down's pipe,
 `OwnedSocket` both ways' handles), which Hex's Windows client bridges to a local socket pair, as it
 bridges a node VM's lanes, since its readiness waits and its node's completion port wait on sockets.
+
+Past f1e8a097b this revision still speaks image channel 51 and adds nothing Hex calls. shards-api now
+takes Shards' Apple-frameworks crate on macOS (`crates/apple`, `shards-apple`, bound when first used:
+its host's block storage's completed I/O, read through IOKit in `storage.rs`), and on Windows reads its
+host's physical disks' completed I/O (`IOCTL_DISK_PERFORMANCE`, windows-sys's `Win32_Security` and
+`Win32_System_Ioctl`), so that D215's judge holds a wait in a kernel its host's only while those disks
+complete I/O (D215 amended, 927ba0119, 2726a8deb). So the take list and this workspace's members add
+`crates/apple`, whose only dependency is libc. Beside it: a daemon's deadline files read by name
+(D209 Part 10 and D163, 03c0b8603, adc48df03: `shards_ipc::deadline_text` and `deadline_in` in place
+of `grace_text` and `grace_until`, `RETRY` beside `GRACE`), and the demand rule's refill window made
+public (D26, e80ae3775: `Demand::window`), neither of which Hex calls.
 
 ## Recorded changes
 
