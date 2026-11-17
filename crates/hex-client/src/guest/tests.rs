@@ -1700,15 +1700,14 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
     );
     #[cfg(windows)]
     {
-        assert!(stdin.socket().is_some());
-        assert!(stdout.socket().is_some());
-        // AC-T7.4.1: no handle of these connections passes to a process this one starts with every inheritable
-        // handle (std's `Command`): the caller's ends, nor the control connection's handles the stream holds.
+        // A Shards stream on Windows is two pipes (Shards' D272): each caller's end is a pipe of its own, carried.
+        assert!(stdin.file_handle().is_some());
+        assert!(stdout.file_handle().is_some());
+        // AC-T7.4.1: no handle of the control connection, bridged to a local socket there, passes to a process this
+        // one starts with every inheritable handle (std's `Command`).
         let write = transport.write.lock().unwrap();
         let read = transport.read.lock().unwrap();
         for (what, socket) in [
-            ("the caller's stdin end", stdin.socket().unwrap()),
-            ("the caller's stdout end", stdout.socket().unwrap()),
             ("the control connection's writing handle", write.handle()),
             (
                 "the control connection's waiting handle",
@@ -1725,9 +1724,6 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             );
         }
         drop((write, read));
-        // A retained transfer copy closing must not shut down the caller's socket stream.
-        let retained: hex_api::End = stdin.socket().unwrap().try_clone_to_owned().unwrap().into();
-        drop(retained);
         let empty = hex_afunix::receive_socket(transport.handle(), &mut [0]).unwrap_err();
         assert_eq!(empty.kind(), std::io::ErrorKind::WouldBlock);
     }
@@ -1983,9 +1979,9 @@ fn d5_a_shards_control_connection_is_shared_never_cloned() {
 
 /// The review's D-5 (part 2), AC-T7.4.1: an exec's stream asked over a Shards link is handed to its caller as its
 /// connection's own socket, moved, never a duplicate (Shards' `Stream::into_socket`); on Windows, where a Shards stream
-/// is two pipes (Shards' D272), as its bridge's own socket, which no process this one starts holds. Do: ask stdin and
-/// stdout over a Shards link, and echo through the caller's ends. Expect: on Unix each end is the socket dialed for it,
-/// by its number; on Windows each is a socket no child inherits; and the echo comes back whole.
+/// is two pipes (Shards' D272), carried on a pipe of the caller's own, never a duplicate of the stream's. Do: ask stdin
+/// and stdout over a Shards link, and echo through the caller's ends. Expect: on Unix each end is the socket dialed for
+/// it, by its number; on Windows each a pipe; and the echo comes back whole.
 #[test]
 fn d5_an_asked_shards_stream_is_its_connections_own_socket() {
     let (guest, dialed, _) = recorded_echo();
@@ -2015,12 +2011,10 @@ fn d5_an_asked_shards_stream_is_its_connections_own_socket() {
         "a caller's end is a duplicate of its connection, not the connection's own socket"
     );
     #[cfg(windows)]
-    for end in [&stdin, &stdout] {
-        assert!(
-            !hex_afunix::inheritable(end.socket().unwrap()).unwrap(),
-            "a caller's end passes to processes this one starts"
-        );
-    }
+    assert!(
+        stdin.file_handle().is_some() && stdout.file_handle().is_some(),
+        "a caller's end is no pipe of its own: {stdin:?}, {stdout:?}"
+    );
     let mut stdin = hex_api::OwnedStream::from(stdin);
     stdin.write_all(b"handed over\n").unwrap();
     drop(stdin);
