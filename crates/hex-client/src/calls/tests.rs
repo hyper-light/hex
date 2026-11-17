@@ -1679,3 +1679,33 @@ fn b6_a_client_follows_started_on_its_node_and_refuses_delete_with_host_use_unse
         "{request:?}"
     );
 }
+
+/// Kiln plan step 35's `/runs/control` (AC-T7.4.1): a box's agent-control link is read in the process holding its run's
+/// controller, and the node's wire has no call for it yet, so a remote node's client refuses it, typed, naming the call
+/// and what its wire lacks, before anything is sent: never the trait's default, which says the box isn't a Shards image
+/// box. Do: ask a client for a box's link. Expect: `Invalid`, naming `link` and the wire's lack; nothing sent.
+#[test]
+fn s35_a_client_refuses_a_boxs_link_unsent() {
+    let client = client();
+    let id = BoxId::new("s35-remote").unwrap();
+    let link = client.link(&id);
+    assert!(
+        matches!(
+            &link,
+            Err(Refusal::Invalid { what: "link", why })
+                if why.contains("the node's wire carries no link call yet")
+        ),
+        "{link:?}"
+    );
+    assert!(
+        client
+            .conn
+            .shared
+            .transport
+            .outbound
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "nothing is sent"
+    );
+}

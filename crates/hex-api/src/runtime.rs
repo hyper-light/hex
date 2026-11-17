@@ -151,6 +151,25 @@ pub trait Runtime: Send + Sync {
         })
     }
 
+    /// The agent-control link of running Shards image box `id` (Shards' D238, D239, D252; kiln plan step 35's
+    /// `/runs/control`), as both its ends say it ([`ControlLink`]): what each end's TLS 1.3 handshake negotiated, its
+    /// controller's (this runtime's) and its endpoint's (the run's own, in its VM), and every lane its controller was
+    /// granted on it, by Shards' names, `mcp:N` among them for each member whose MCP bridge the run serves (D254). Its
+    /// controller is dialed where none is yet, as a member's signal dials it, and its endpoint's report is waited for
+    /// until it comes or the run's agent-control connection ends: decision 9's W* is where the census is told a run-out,
+    /// never where the wait ends. Asked again, it answers the same while its run is the same. Refused, typed: by a class
+    /// whose boxes have no agent-control link, naming the class; Pending while it boots, held, and `NotRunning(id,
+    /// "link")` before its start and once its stop has begun; `NotRunning(id, "link: its run ended")` where its
+    /// connection ends before its endpoint reports; and any other of Shards' faults `Os`, in its words.
+    fn link(&self, id: &BoxId) -> Result<ControlLink, Refusal> {
+        Err(Refusal::Invalid {
+            what: "link",
+            why: format!(
+                "box {id} isn't a Shards image box: only its run has an agent-control link"
+            ),
+        })
+    }
+
     /// Tells box `id`'s guest the room its caller's budget leaves it (D188; Shards' D241; joint plan step 14, C7): the
     /// caller's budget-left for the box, everything the VM holds coming out of it, in bytes past what the box holds now,
     /// negative where the budget is short of that (its guest then reclaims its file pages); none lifts the hold.
@@ -271,6 +290,31 @@ pub struct HostUse {
     pub window: Duration,
     /// Whether `cpu_ns` holds the vCPUs' guest time (D265). Appended after the other fields.
     pub charged: Charged,
+}
+
+/// A Shards image box's agent-control link as both its ends say it ([`Runtime::link`]; Shards' D238, D239): what each
+/// end's TLS 1.3 handshake negotiated, and every lane its controller was granted on it by Shards' names (`control`,
+/// `exec`, `log:run`, `mcp:N`: `shards_api::control::Granted::name`), in the order its endpoint's report gives them:
+/// the lanes its controller's subscriptions name, then, where it may ask for execs, the MCP bridge of each member its
+/// run serves one of (D254), ascending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlLink {
+    /// Its controller's, the runtime's own, as its TLS state says it.
+    pub controller: Negotiated,
+    /// Its endpoint's, the run's own in its VM, as its report on the link's control lane says it.
+    pub endpoint: Negotiated,
+    pub lanes: Vec<String>,
+}
+
+/// What one end of a TLS 1.3 handshake negotiated, by IANA's codes: its cipher suite (RFC 8446 §4.1.3; a Shards link
+/// takes TLS13_AES_256_GCM_SHA384 alone, D239) and its key exchange group (§4.2.7), each with its name as rustls says
+/// it, none for a code rustls doesn't know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Negotiated {
+    pub suite: u16,
+    pub suite_name: Option<&'static str>,
+    pub group: u16,
+    pub group_name: Option<&'static str>,
 }
 
 /// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.

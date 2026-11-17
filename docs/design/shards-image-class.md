@@ -270,6 +270,21 @@ harness member's):
   what it took. At the next revendor (Shards `9f5b1f754`'s `Dialed::wake`) the pending wait moves onto the node's event
   loop (`PendingMcp::wait(Duration::ZERO)` after each ring) and holds no thread; an open connection's pumps keep theirs
   until Shards gives `Output` and `Input` forms that don't wait.
+- `Runtime::link(id)` (kiln plan step 35's `/runs/control`) answers a running VM's agent-control link as both its ends
+  say it (`ControlLink`, Shards' `Linked::report`: D238, D239, D254): what each end's TLS 1.3 handshake negotiated, by
+  IANA's codes and rustls' names, its controller's (the class's own) and its endpoint's (the run's, as its report on the
+  link's control lane says it), and every lane its controller was granted, by Shards' names (`Granted::name`):
+  `control`, `exec` and `log:run`, then `mcp:N` for each member whose bridge the run serves. Its controller is dialed
+  where none is yet, as a signal's or an MCP connection's is, and kept for the run. Shards waits for the endpoint's
+  report, which comes once the link's handshake is done, or for the connection's end, taking no patience: the call holds
+  that run's link's own lock over the wait, which only calls asking that run's link take, so a second waits behind the
+  first for the same report, which Shards keeps once heard; `hex.image.link`'s W* is where the census is told a
+  run-out (§6). Refused, typed: Pending while it boots, held, and `NotRunning(id, "link")` before its start and once
+  its stop has begun; `NotRunning(id, "link: its run ended")` where the run's connection ends before its endpoint
+  reports; and any other of Shards' faults (the endpoint's refusal or reset of the control lane) `Os`, in its words. The
+  class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`, and hex-node's `ImageRuntime`,
+  which kiln holds); the node's wire carries no link call yet, so `hex-client` refuses it `Invalid`, naming the wire,
+  before anything is sent, as it refuses `room`, `rate` and `host_use`.
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
@@ -379,6 +394,7 @@ image box: `ImageWaits::new` measures from nothing.
 | `hex.image.member` | a member's own lane's first word (D238): whether it runs, its steering then | the run's agent-control connection |
 | `hex.image.signal` | a signal's answer on a member's own lane: taken, or refused | the run's agent-control connection |
 | `hex.image.mcp` | a member's harness's next connection to its MCP bridge (D254), from its ask, which may be never | the run's agent-control connection |
+| `hex.image.link` | a run's endpoint's report of its link (D238, D254), from a `link` call's ask, which comes once the link's handshake is done | the run's agent-control connection |
 
 D231's boot waits at most the patience its caller gives: past it, its run host is killed and the boot refused
 (`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and
@@ -390,6 +406,8 @@ stats ask is given `Duration::MAX` too and followed by its run's life alone, its
 A member's lane's first word and a signal's answer on it each wait within their W* on Shards' own handle for the ask
 (`PendingMember::wait`, `MemberSteering::steered`; Shards `155b5ee2e`), past it the run-out told once and the same ask
 waited on by the run's connection's life, never sent again.
+A link's report is waited for as a stats ask is: Shards' `Linked::report` takes no patience and waits for the report or
+the connection's end, so `hex.image.link`'s W* is where the census is told a run-out, once the answer comes past it.
 D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
 past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's
 follows it to its end (§3). The waits census (`hex_node::census`) records each wait's answers and run-outs with every

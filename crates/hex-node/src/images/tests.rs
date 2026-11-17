@@ -678,3 +678,27 @@ fn reads2_b14_one_boxs_transaction_leaves_anothers_turn_free() {
         "box b's turn taken while box a's transaction held"
     );
 }
+
+/// Kiln plan step 35's `/runs/control` (AC-T7.4.1): kiln holds the image runtime in process and reads its runs'
+/// agent-control links through it, so the runtime passes `link` to its class, never answering the trait's default, which
+/// says a box isn't a Shards image box. Do: ask the link of a box it holds none of, of an image VM created and not
+/// started, and of one running, whose model run tells no agent-control endpoint. Expect: `NoSuchBox`; `NotRunning(id,
+/// "link")` before its start; and, once it runs, `Broken`, the class finding no endpoint its run told.
+#[test]
+fn s35_the_image_runtime_passes_a_boxs_link_to_its_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    let unknown = BoxId::new("kiln-s35-none").unwrap();
+    assert!(matches!(images.link(&unknown), Err(Refusal::NoSuchBox(_))));
+    let id = images.create(image_box("kiln-s35-link")).unwrap().id;
+    assert_eq!(
+        images.link(&id),
+        Err(Refusal::NotRunning(id.clone(), "link"))
+    );
+    images.start(&id).unwrap();
+    let running = images.link(&id);
+    assert!(
+        matches!(&running, Err(Refusal::Broken(why)) if why.contains("told no agent-control endpoint")),
+        "{running:?}"
+    );
+}

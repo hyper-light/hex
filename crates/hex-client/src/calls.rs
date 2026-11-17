@@ -3313,6 +3313,18 @@ impl<T: Transport> Runtime for Core<T> {
         })
     }
 
+    // Kiln plan step 35: a box's agent-control link is read in the process holding its run's controller, the node's own
+    // or a runtime made in its caller's process, as kiln's is; the node's wire carries no link call yet.
+    fn link(&self, id: &BoxId) -> Result<hex_api::ControlLink, Refusal> {
+        Err(Refusal::Invalid {
+            what: "link",
+            why: format!(
+                "box {id}: the node's wire carries no link call yet; a box's agent-control link is read in the node's \
+                 own process"
+            ),
+        })
+    }
+
     /// Refused, typed, before anything is sent (the review's B-6): the node's wire carries no host use, so a delete here
     /// can't answer its VM's final use, and the trait's plain delete answering none would read as a run that never
     /// started, which kiln charges nothing for.
