@@ -535,15 +535,17 @@ impl shards_api::Stream for Looped {
     fn into_socket(self: Box<Self>) -> shards_api::OwnedSocket {
         #[cfg(unix)]
         return std::os::fd::OwnedFd::from(self.0);
+        // Shards' stream on Windows is two pipes (D272), which a loopback stand-in has none of: Hex bridges a Shards
+        // stream there and never takes them.
         #[cfg(windows)]
-        std::os::windows::io::OwnedSocket::from(self.0)
+        panic!("a loopback stand-in has no pipes to give: Hex bridges a Shards stream on Windows")
     }
 
     fn handle(&self) -> shards_api::Handle<'_> {
         #[cfg(unix)]
         return std::os::fd::AsFd::as_fd(&self.0);
         #[cfg(windows)]
-        std::os::windows::io::AsSocket::as_socket(&self.0)
+        panic!("a loopback stand-in has no pipe to wait on: Hex bridges a Shards stream on Windows")
     }
 
     fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
@@ -1739,12 +1741,12 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
     assert_eq!(output, "round trip\n");
 }
 
-/// A socket's own number in this process: a file descriptor on Unix, a Winsock socket on Windows. A duplicate is
-/// another number, made while the original is open.
+/// A Shards stream's own number in this process: a file descriptor on Unix; on Windows its way down's pipe handle
+/// (Shards' D272), as a number. A duplicate is another number, made while the original is open.
 #[cfg(unix)]
 type RawNumber = std::os::fd::RawFd;
 #[cfg(windows)]
-type RawNumber = std::os::windows::io::RawSocket;
+type RawNumber = usize;
 
 #[cfg(unix)]
 fn raw_number(handle: shards_api::Handle<'_>) -> RawNumber {
@@ -1753,17 +1755,12 @@ fn raw_number(handle: shards_api::Handle<'_>) -> RawNumber {
 
 #[cfg(windows)]
 fn raw_number(handle: shards_api::Handle<'_>) -> RawNumber {
-    std::os::windows::io::AsRawSocket::as_raw_socket(&handle)
+    std::os::windows::io::AsRawHandle::as_raw_handle(&handle) as usize
 }
 
 #[cfg(unix)]
 fn end_number(end: &hex_api::End) -> RawNumber {
     std::os::fd::AsRawFd::as_raw_fd(end)
-}
-
-#[cfg(windows)]
-fn end_number(end: &hex_api::End) -> RawNumber {
-    std::os::windows::io::AsRawSocket::as_raw_socket(&end.socket().unwrap())
 }
 
 /// A Shards guest that hands out its connections as they are dialed, each recorded by its socket's own number and
@@ -1985,9 +1982,10 @@ fn d5_a_shards_control_connection_is_shared_never_cloned() {
 }
 
 /// The review's D-5 (part 2), AC-T7.4.1: an exec's stream asked over a Shards link is handed to its caller as its
-/// connection's own socket, moved, never a duplicate (Shards' `Stream::into_socket`). Do: ask stdin and stdout over a
-/// Shards link, and echo through the caller's ends. Expect: each end is the socket dialed for it, by its number, and
-/// the echo comes back whole.
+/// connection's own socket, moved, never a duplicate (Shards' `Stream::into_socket`); on Windows, where a Shards stream
+/// is two pipes (Shards' D272), as its bridge's own socket, which no process this one starts holds. Do: ask stdin and
+/// stdout over a Shards link, and echo through the caller's ends. Expect: on Unix each end is the socket dialed for it,
+/// by its number; on Windows each is a socket no child inherits; and the echo comes back whole.
 #[test]
 fn d5_an_asked_shards_stream_is_its_connections_own_socket() {
     let (guest, dialed, _) = recorded_echo();
@@ -2010,11 +2008,19 @@ fn d5_an_asked_shards_stream_is_its_connections_own_socket() {
         3,
         "the control connection, then stdin's, then stdout's"
     );
+    #[cfg(unix)]
     assert_eq!(
         (end_number(&stdin), end_number(&stdout)),
         (dialed[1], dialed[2]),
         "a caller's end is a duplicate of its connection, not the connection's own socket"
     );
+    #[cfg(windows)]
+    for end in [&stdin, &stdout] {
+        assert!(
+            !hex_afunix::inheritable(end.socket().unwrap()).unwrap(),
+            "a caller's end passes to processes this one starts"
+        );
+    }
     let mut stdin = hex_api::OwnedStream::from(stdin);
     stdin.write_all(b"handed over\n").unwrap();
     drop(stdin);
