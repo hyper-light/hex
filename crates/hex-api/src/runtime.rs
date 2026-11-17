@@ -576,9 +576,11 @@ impl RouteKey {
             | (crate::Class::Firecracker, Execution::Firecracker) => {
                 self.image.os == ImageOs::Linux
             }
-            // An image VM is sized by its admitted allocation alone (`BoxSpec::check_image`): no route carries one
-            // (docs/design/shards-image-class.md §11).
-            (crate::Class::ShardsImage, _) => false,
+            // An image VM is a microVM of its own that Shards boots under shards-init, of a Linux image, attaching no
+            // device (D231): its route is that execution alone (docs/design/shards-image-class.md §11).
+            (crate::Class::ShardsImage, Execution::ShardsDedicated) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::None
+            }
             _ => false,
         };
         if !valid {
@@ -3801,6 +3803,84 @@ mod route_tests {
             serde_json::to_value(Execution::NodeVm).unwrap(),
             serde_json::json!("node-vm")
         );
+    }
+
+    /// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2; shards-image-class.md §11): an image VM's route is a microVM of its own
+    /// that Shards boots, of a Linux image, attaching no device. Do check image route keys, an offer of one and a
+    /// receipt committing to it, and charge a workload through it. Expect the dedicated key of a Linux image with no GPU
+    /// accepted and every other image key refused; its backend class Shards', as its box's is; the offer accepted with a
+    /// cost and refused without one; the receipt held to its class; and its charge its allocation's, none refused.
+    #[test]
+    fn p2_2_an_image_vms_route_is_its_own_microvm_charged_its_allocation() {
+        let image = |os: ImageOs, execution: Execution, gpu: GpuEligibility| RouteKey {
+            class: crate::Class::ShardsImage,
+            ..key(os, execution, gpu)
+        };
+        let dedicated = image(
+            ImageOs::Linux,
+            Execution::ShardsDedicated,
+            GpuEligibility::None,
+        );
+        assert!(dedicated.check().is_ok(), "{:?}", dedicated.check());
+        for bad in [
+            image(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            ),
+            image(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Any,
+            ),
+            image(
+                ImageOs::Windows,
+                Execution::ShardsDedicated,
+                GpuEligibility::None,
+            ),
+            image(ImageOs::Linux, Execution::Native, GpuEligibility::None),
+            image(
+                ImageOs::Linux,
+                Execution::ShardsShared,
+                GpuEligibility::None,
+            ),
+            image(ImageOs::Linux, Execution::NodeVm, GpuEligibility::None),
+            image(ImageOs::Linux, Execution::Firecracker, GpuEligibility::None),
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        assert_eq!(dedicated.backend_class(), crate::Class::Shards);
+        let offer = RouteOffer {
+            key: dedicated,
+            cost: Some(cost()),
+            backing: None,
+        };
+        assert!(offer.check().is_ok(), "{:?}", offer.check());
+        assert!(
+            RouteOffer {
+                cost: None,
+                ..offer
+            }
+            .check()
+            .is_err()
+        );
+        let receipt = RouteReceipt {
+            key: dedicated,
+            backing: None,
+        };
+        assert!(receipt.check(crate::Class::ShardsImage, false).is_ok());
+        assert!(receipt.check(crate::Class::Shards, false).is_err());
+        let workload = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let allocation = cost().allocate(workload).unwrap();
+        assert_eq!(
+            receipt.charged(workload, Some(allocation)),
+            Ok(allocation.booking())
+        );
+        assert!(receipt.charged(workload, None).is_err());
     }
 
     fn key(os: ImageOs, execution: Execution, gpu: GpuEligibility) -> RouteKey {

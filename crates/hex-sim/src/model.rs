@@ -558,7 +558,8 @@ impl RuntimeRoutes {
                     Os::Freebsd => false,
                 },
                 hex_api::Class::Process | hex_api::Class::Oci => native_os == node.platform.os,
-                // No route carries an image VM (`RouteKey::check`).
+                // An image VM's route executes on Shards, its backend class Shards' above (`RouteKey::check`, P2.2):
+                // no route's backend is the image class itself.
                 hex_api::Class::ShardsImage => false,
             };
             if arch != node.platform.arch || !supported {

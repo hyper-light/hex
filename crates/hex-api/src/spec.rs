@@ -100,8 +100,24 @@ impl BoxSpec {
     }
 
     /// Whether every value it names is well formed, before anything is made: its bounds, its owner and
-    /// a structured container's spec, each refused by its field's name (CLAUDE.md §3).
+    /// a structured container's spec, each refused by its field's name (CLAUDE.md §3), and a Shards image
+    /// VM's size from its admitted allocation.
     pub fn check(&self) -> Result<(), Refusal> {
+        self.check_payload()?;
+        match &self.class {
+            ClassSpec::ShardsImage(_) => self.check_image_size(),
+            ClassSpec::Process
+            | ClassSpec::Oci(_)
+            | ClassSpec::Bundle(_)
+            | ClassSpec::Firecracker(_)
+            | ClassSpec::Shards(_) => Ok(()),
+        }
+    }
+
+    /// Whether it is well formed as a scheduler's payload, before its admission (hex-node's `placement::validate`):
+    /// every check of [`BoxSpec::check`] but a Shards image VM's size, which its admitted allocation gives, the
+    /// scheduler deriving that from the original demand as it admits the box (docs/design/shards-image-class.md §11).
+    pub fn check_payload(&self) -> Result<(), Refusal> {
         self.bounds.check()?;
         self.check_devices()?;
         if let Some(route) = self.route {
@@ -144,11 +160,20 @@ impl BoxSpec {
         Ok(())
     }
 
-    /// A Shards image VM: its image and command ([`ShardsImage::check`]), its size from an admitted
-    /// allocation of whole vCPUs and MiB ([`crate::Allocation::vm_size`]), and no physical device,
-    /// which D231's image boot takes none of.
+    /// A Shards image VM: its image and command ([`ShardsImage::check`]), and no physical device, which
+    /// D231's image boot takes none of.
     fn check_image(&self, image: &ShardsImage) -> Result<(), Refusal> {
         image.check()?;
+        if !self.devices.is_empty() {
+            return Err(invalid_image(
+                "devices are named: D231's image boot attaches no physical device".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A Shards image VM's size: an admitted allocation of whole vCPUs and MiB ([`crate::Allocation::vm_size`]).
+    fn check_image_size(&self) -> Result<(), Refusal> {
         self.allocation
             .ok_or_else(|| {
                 invalid_image(
@@ -157,11 +182,6 @@ impl BoxSpec {
                 )
             })?
             .vm_size()?;
-        if !self.devices.is_empty() {
-            return Err(invalid_image(
-                "devices are named: D231's image boot attaches no physical device".to_owned(),
-            ));
-        }
         Ok(())
     }
 
@@ -1991,6 +2011,57 @@ mod tests {
                     why,
                 }) => assert!(why.contains(says), "{says}: refused as {why:?}"),
                 other => panic!("{says}: {other:?}"),
+            }
+        }
+    }
+
+    /// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2; shards-image-class.md §11): a scheduler's payload of an image VM names no
+    /// allocation, its scheduler deriving it as it admits the box. Do: check an image VM with no allocation as a
+    /// payload and as a box to make; then break its pin, and name a device. Expect: the payload passes and the box is
+    /// refused naming its allocation; each break refused by both checks alike, naming its field.
+    #[test]
+    fn p2_2_an_image_payload_is_checked_without_the_allocation_its_scheduler_derives() {
+        let mut payload = image_box(ShardsImage::new(crate::sim::SIM_IMAGE));
+        payload.allocation = None;
+        assert_eq!(payload.check_payload(), Ok(()));
+        match payload.check() {
+            Err(Refusal::Invalid {
+                what: "shards image",
+                why,
+            }) => assert!(why.contains("allocation"), "refused as {why:?}"),
+            other => panic!("{other:?}"),
+        }
+        type Break = Box<dyn Fn(&mut BoxSpec)>;
+        let cases: Vec<(&str, Break)> = vec![
+            (
+                "pinned",
+                Box::new(|spec: &mut BoxSpec| {
+                    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                        image.image = "harness:1".to_owned();
+                    }
+                }),
+            ),
+            (
+                "devices",
+                Box::new(|spec: &mut BoxSpec| {
+                    spec.devices = vec![DeviceId {
+                        kind: crate::DeviceKind::Gpu,
+                        key: 1,
+                    }]
+                }),
+            ),
+        ];
+        for (says, break_it) in cases {
+            let mut broken = payload.clone();
+            break_it(&mut broken);
+            for checked in [broken.check_payload(), broken.check()] {
+                match checked {
+                    Err(Refusal::Invalid {
+                        what: "shards image",
+                        why,
+                    }) => assert!(why.contains(says), "{says}: refused as {why:?}"),
+                    other => panic!("{says}: {other:?}"),
+                }
             }
         }
     }

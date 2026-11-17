@@ -37,6 +37,7 @@ use hex_api::{
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
+use sha2::{Digest, Sha256};
 use shards_api::control::{
     Controller, ExecControl, Execs, Fault, Got, Granted, Hangup, Identity, Input, Linked,
     McpConnection, Member as MemberLane, MemberControl, Output, Subscriptions, Unstarted,
@@ -1138,6 +1139,102 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             why: format!("the run host's budget had no room for the run's lanes: {why}"),
         },
     }
+}
+
+/// The class's route on this host (kiln plan 01a1dd2e…, P2.2; docs/design/shards-image-class.md §11): a microVM of its
+/// own that Shards boots under shards-init (D231), of a Linux image of this host's architecture, as Shards' guest is,
+/// attaching no device.
+pub(super) fn route_key() -> Result<hex_api::RouteKey, Refusal> {
+    let key = hex_api::RouteKey {
+        class: hex_api::Class::ShardsImage,
+        image: hex_api::ImagePlatform {
+            os: hex_api::ImageOs::Linux,
+            arch: super::route::host_platform()?.arch,
+        },
+        execution: hex_api::Execution::ShardsDedicated,
+        gpu: hex_api::GpuEligibility::None,
+    };
+    key.check()?;
+    Ok(key)
+}
+
+/// The class's per-box cost on a node whose resource plane totals `total` (docs/design/shards-image-class.md §11): its
+/// envelope is Shards' own, as `shards_api::envelope` gives it, so Hex states none of Shards' numbers. At least
+/// Shards' least VM on this architecture, in whole vCPUs (1,000 CPU milli each, as `Allocation::vm_size` reads them),
+/// Shards' memory unit and bytes of disk, so every allocation under it is a size Shards boots as asked
+/// ([`admitted_size`]); at most the node's whole plane. Census-free (decision 9, `RuntimeCost::census_free`): no VMM or
+/// guest allowance, what a VM takes past its envelope learned from its windows (learned-charge.md C1). Its identity is
+/// a digest of the numbers that define it, so no two profiles share one.
+pub(super) fn cost(total: hex_api::CapacityResources) -> Result<hex_api::RuntimeCost, Refusal> {
+    let arch = std::env::consts::ARCH;
+    let invalid = |why: String| Refusal::Invalid {
+        what: "shards image cost",
+        why,
+    };
+    let (vcpus, least) = shards_api::envelope(arch, 0, 0)
+        .map_err(|why| invalid(format!("Shards' least VM: {why}")))?;
+    // Shards rounds memory up to its unit from its least, itself a whole number of units: one MiB past the least
+    // rounds to one unit past it.
+    let past = least
+        .checked_add(1)
+        .ok_or_else(|| invalid(format!("{least} MiB, Shards' least, overflows")))?;
+    let (_, next) = shards_api::envelope(arch, vcpus, past)
+        .map_err(|why| invalid(format!("Shards' memory unit: {why}")))?;
+    let unit = next
+        .checked_sub(least)
+        .filter(|unit| *unit > 0)
+        .ok_or_else(|| invalid(format!("Shards rounds {past} MiB to {next} MiB")))?;
+    let bytes = |mib: u64| {
+        mib.checked_mul(1 << 20)
+            .ok_or_else(|| invalid(format!("{mib} MiB overflows its bytes")))
+    };
+    let floor = hex_api::CapacityResources {
+        cpu_milli: u64::from(vcpus)
+            .checked_mul(1000)
+            .ok_or_else(|| invalid(format!("{vcpus} vCPUs overflow their CPU milli")))?,
+        mem_bytes: bytes(least)?,
+        disk_bytes: 0,
+    };
+    let quantum = hex_api::CapacityResources {
+        cpu_milli: 1000,
+        mem_bytes: bytes(unit)?,
+        disk_bytes: 1,
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"hex shards-image envelope");
+    for part in [floor, quantum, total] {
+        for value in [part.cpu_milli, part.mem_bytes, part.disk_bytes] {
+            digest.update(value.to_be_bytes());
+        }
+    }
+    let cost = hex_api::RuntimeCost {
+        id: digest.finalize().into(),
+        floor,
+        ceiling: total,
+        quantum,
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources::default(),
+    };
+    cost.check()?;
+    Ok(cost)
+}
+
+/// A node's preflight of an image VM's record (`GuestRuntime::preflight_box`): its spec, its size as Shards boots it
+/// from its admitted allocation ([`vm_size`]), and its route, where its scheduler committed one, the class's own here
+/// ([`route_key`]). It has no selected guest of Hex's, and its run is the class's to settle as a call reads it (§5).
+pub(super) fn preflight(record: &BoxRecord) -> Result<(), Refusal> {
+    let spec = &record.spec;
+    spec.check()?;
+    vm_size(spec)?;
+    if let Some(receipt) = spec.route
+        && (receipt.key != route_key()? || receipt.backing.is_some())
+    {
+        return Err(super::books::uncertain(
+            &spec.id,
+            "its route isn't the Shards image class's on this host",
+        )?);
+    }
+    Ok(())
 }
 
 /// The box's VM size, held to what Shards boots on this host: a size it boots as asked, which

@@ -1880,7 +1880,8 @@ impl Driver {
 }
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
-    payload.spec.check()?;
+    // A payload names neither the route nor the allocation its admission derives, which an image VM's size is from.
+    payload.spec.check_payload()?;
     if payload.spec.route.is_some() {
         return Err(invalid_static("the scheduler derives the initialized execution route").into());
     }
