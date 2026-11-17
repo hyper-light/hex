@@ -6596,3 +6596,155 @@ fn b12_an_image_vm_whose_record_cant_be_read_is_refused_in_its_words() {
         other => panic!("an unreadable record inspected: {other:?}"),
     }
 }
+
+/// A warm room counting its claims, each refused, and its gives (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): a
+/// pool's host claims its room before it starts, so a room refusing every claim starts none.
+#[derive(Default)]
+struct CountedRoom {
+    claims: AtomicUsize,
+    gives: AtomicUsize,
+}
+
+impl WarmRoom for CountedRoom {
+    fn claim(&self, _: &WarmHost) -> bool {
+        self.claims.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+
+    fn give(&self, _: &WarmHost, _: Gave) {
+        self.gives.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The image class alone over the model's boot, given warm room `room` where there is one, its owner kept by the caller.
+fn pooling_class(room: Option<Arc<dyn WarmRoom>>) -> (ImageClass, Owner) {
+    let owner = Owner::new();
+    let class = ImageClass::new(super::super::tests::config().binary).with_boot(
+        Ok(ModelImages::new() as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    );
+    if let Some(room) = room {
+        class.bind_room(room).unwrap();
+    }
+    (class, owner)
+}
+
+/// HEX-IMG-9, the warm pools' conformance case.
+fn pools_case() -> &'static hex_api::conformance::Case {
+    hex_api::conformance::IMAGE_CASES
+        .iter()
+        .find(|case| case.id == "HEX-IMG-9")
+        .unwrap()
+}
+
+/// The pool of the model's boxes: their image and admitted size.
+fn sim_pool() -> WarmPool {
+    WarmPool {
+        image: hex_api::sim::SIM_IMAGE.to_owned(),
+        size: allocation().vm_size().unwrap(),
+    }
+}
+
+/// Kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1 (CP-T7.2; HEX-IMG-9): do hold the class given a warm room to the
+/// pools' case. Expect: it passes, each pool kept once however often asked, listed with no host warm or starting, until
+/// it's let go; and no keep claimed its room, as no box of a pool started.
+#[test]
+fn p3_1_the_class_given_a_room_keeps_lists_and_lets_go_of_warm_pools() {
+    let room = Arc::new(CountedRoom::default());
+    let (class, _owner) = pooling_class(Some(Arc::clone(&room) as Arc<dyn WarmRoom>));
+    pools_case()
+        .check(&class, &hex_api::sim::SimFixture::ShardsImage)
+        .unwrap();
+    assert_eq!(room.claims.load(Ordering::SeqCst), 0, "a keep claimed room");
+    assert_eq!(room.gives.load(Ordering::SeqCst), 0, "a let-go gave room");
+}
+
+/// P3.1 (HEX-IMG-9's other branch): do ask a class given no warm room to keep, and to let go of, a pool. Expect: each
+/// refused `Unconfigured` naming the warm room, which kiln maps to its typed NO_POOLS, and none listed.
+#[test]
+fn p3_1_a_class_given_no_room_keeps_no_pool() {
+    let (class, _owner) = pooling_class(None);
+    let pool = sim_pool();
+    assert_eq!(
+        Runtime::keep_pool(&class, &pool),
+        Err(Refusal::no_warm_room())
+    );
+    assert_eq!(
+        Runtime::let_go_pool(&class, &pool),
+        Err(Refusal::no_warm_room())
+    );
+    assert_eq!(Runtime::pools(&class), Ok(Vec::new()));
+    pools_case()
+        .check(&class, &hex_api::sim::SimFixture::ShardsImage)
+        .unwrap();
+}
+
+/// P3.1: do ask for a pool of a size Shards boots otherwise (one MiB of memory, short of its least). Expect: refused
+/// `Invalid` naming the warm pool, as a box of that size is refused at its create, and kept by none.
+#[test]
+fn p3_1_a_pool_of_a_size_shards_boots_otherwise_is_refused() {
+    let (class, _owner) = pooling_class(Some(Arc::new(CountedRoom::default())));
+    let pool = WarmPool {
+        size: VmSize {
+            vcpus: 1,
+            memory_mib: 1,
+        },
+        ..sim_pool()
+    };
+    assert!(
+        matches!(
+            Runtime::keep_pool(&class, &pool),
+            Err(Refusal::Invalid {
+                what: "warm pool",
+                ..
+            })
+        ),
+        "a pool Shards would boot at another size"
+    );
+    assert_eq!(Runtime::pools(&class), Ok(Vec::new()));
+}
+
+/// P3.1: do bind a class's warm room, then the same room again, then another. Expect: the same taken, another refused
+/// `Broken`, as its record authority is bound once.
+#[test]
+fn p3_1_a_classs_warm_room_is_bound_once() {
+    let room: Arc<dyn WarmRoom> = Arc::new(CountedRoom::default());
+    let (class, _owner) = pooling_class(Some(Arc::clone(&room)));
+    assert_eq!(class.bind_room(room), Ok(()));
+    assert!(matches!(
+        class.bind_room(Arc::new(CountedRoom::default())),
+        Err(Refusal::Broken(_))
+    ));
+}
+
+/// P3.1: do keep a pool of another image at a box's size, start the box; then keep the box's own pool and start a box of
+/// it. Expect: the first boots on the class's own boot, no kept pool being its; the second never reaches that boot, its
+/// pool's taking it (Shards' own run hosts, which this test has none of, so its start is refused; its room refuses every
+/// host its pool would start warm).
+#[test]
+fn p3_1_a_box_boots_through_the_pool_kept_for_its_image_and_size_alone() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let room = Arc::new(CountedRoom::default());
+    runtime
+        .images
+        .bind_room(Arc::clone(&room) as Arc<dyn WarmRoom>)
+        .unwrap();
+    let other = WarmPool {
+        image: format!("hex-other@sha256:{}", "0".repeat(64)),
+        ..sim_pool()
+    };
+    Runtime::keep_pool(&runtime.images, &other).unwrap();
+    let unpooled = runtime.create(spec("image-unpooled", None)).unwrap().id;
+    runtime.start(&unpooled).unwrap();
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    Runtime::keep_pool(&runtime.images, &sim_pool()).unwrap();
+    let pooled = runtime.create(spec("image-pooled", None)).unwrap().id;
+    assert!(runtime.start(&pooled).is_err(), "no Shards run host here");
+    assert_eq!(
+        images.asked.lock().unwrap().len(),
+        1,
+        "a box of a kept pool booted on the class's own boot"
+    );
+}

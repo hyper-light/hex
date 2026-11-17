@@ -227,6 +227,30 @@ pub trait Runtime: Send + Sync {
             why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
         })
     }
+
+    /// Keeps a warm pool for `pool`'s Shards image VMs from now on (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1;
+    /// Shards' D253): each box of its image and size then boots on a warm host of it where one is ready, Shards' demand
+    /// rule keeping as many warm as the room its runtime was given admits, each charged to that room before it starts.
+    /// Answered at once, no host started: a pool warms from its first box on. One kept already is kept. Refused
+    /// [`Refusal::no_warm_room`] by a runtime given no room (every runtime but a Shards image class given one),
+    /// `Invalid` for a pool [`WarmPool::check`] refuses or a size Shards boots otherwise, and `Full` past its most pools.
+    fn keep_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        let _ = pool;
+        Err(Refusal::no_warm_room())
+    }
+
+    /// Lets `pool` go: its warm and starting hosts end, each followed to its end and its room given back, before it
+    /// returns, but while a boot under way holds the pool, whose own end then ends them; a box booted from it runs on.
+    /// One it doesn't keep is let go already. Refused as [`Runtime::keep_pool`] is by a runtime given no room.
+    fn let_go_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        let _ = pool;
+        Err(Refusal::no_warm_room())
+    }
+
+    /// The warm pools it keeps now, and what each holds; none where it keeps none.
+    fn pools(&self) -> Result<Vec<WarmHeld>, Refusal> {
+        Ok(Vec::new())
+    }
 }
 
 /// Whether a VM process's CPU time holds its vCPUs' guest time (Shards' D265), as that process learned it from its own
@@ -1136,11 +1160,40 @@ impl Allocation {
 }
 
 /// A microVM's size ([`Allocation::vm_size`]): its vCPUs and its memory in MiB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VmSize {
     pub vcpus: u32,
     pub memory_mib: u64,
 }
+
+/// A warm pool of Shards image VMs ([`Runtime::keep_pool`]; kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): its
+/// boxes' image, pinned by its digest, and their size, as each of them is admitted ([`Allocation::vm_size`]). kiln names
+/// the pools; how many hosts each keeps warm is Shards' demand rule's (D26), within its runtime's room.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WarmPool {
+    pub image: String,
+    pub size: VmSize,
+}
+
+impl WarmPool {
+    /// Whether a runtime can be asked to keep it: its image pinned by a digest, as a box's is
+    /// ([`crate::check_pinned`]), refused `Invalid` naming `warm pool`. Its size is its runtime's to hold to what Shards
+    /// boots, as a box's is.
+    pub fn check(&self) -> Result<(), Refusal> {
+        crate::check_pinned("warm pool", &self.image)
+    }
+}
+
+/// What a kept warm pool holds now ([`Runtime::pools`]): its hosts warm, each ready for a box of it, and those starting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmHeld {
+    pub pool: WarmPool,
+    pub warm: usize,
+    pub starting: usize,
+}
+
+/// What [`Refusal::no_warm_room`] names: the room a runtime charges its warm hosts to, its owner's.
+pub const WARM_ROOM: &str = "warm room";
 
 /// The most priors one class's capacity answer carries: one for its own cost profile and one for each route's
 /// (joint plan step 14).
@@ -3171,6 +3224,16 @@ impl Refusal {
         Self::Os {
             op,
             why: err.to_string(),
+        }
+    }
+
+    /// A warm pool's refusal by a runtime given no room to charge its hosts to ([`Runtime::keep_pool`]): its
+    /// configuration's, as the same runtime given a room keeps one. Its caller matches [`WARM_ROOM`].
+    pub fn no_warm_room() -> Self {
+        Self::Unconfigured {
+            what: WARM_ROOM,
+            why: "a warm pool's hosts are each charged to their owner's room before they start, and it was given none"
+                .to_owned(),
         }
     }
 }

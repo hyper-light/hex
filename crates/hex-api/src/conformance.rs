@@ -12,6 +12,7 @@ use crate::{
     Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, CredentialGrant, Destination,
     DeviceId, DeviceKind, Exit, Grant, GuestTime, LifecycleCause, Member, MemberKind, Mount,
     Network, OciSpec, Ports, Program, Proto, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
+    WARM_ROOM, WarmHeld, WarmPool,
 };
 
 /// What a fixture's program does.
@@ -84,6 +85,14 @@ pub struct Case {
     pub id: &'static str,
     pub says: &'static str,
     run: fn(&dyn Runtime, &dyn Fixture) -> Result<(), String>,
+}
+
+impl Case {
+    /// This case alone, on `rt` and `fx`: for a class held to one case where its test can't make what the others need
+    /// (the image class's pools, HEX-IMG-9, with no VM booted).
+    pub fn check(&self, rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+        (self.run)(rt, fx)
+    }
 }
 
 /// A case that failed.
@@ -286,6 +295,11 @@ pub const IMAGE_CASES: &[Case] = &[
         id: "HEX-IMG-8",
         says: "create of a VM granting its member a credential toward a host no egress grant of its own reaches by name over TCP, toward no host, by a reference no store names, twice, with a placeholder no request could carry, with another credential's placeholder, or toward a host another member reaches ungranted, is refused Invalid naming credentials, making nothing; a VM granting its member credentials toward its own egress hosts, two toward one host each by its own placeholder, is made, and inspect shows its every credential grant, or, where its node leases no credentials, it is refused Unconfigured, making nothing",
         run: image_credentials,
+    },
+    Case {
+        id: "HEX-IMG-9",
+        says: "a warm pool of the VMs' image and size is kept once however often it's asked, and listed with no host warm or starting before a box of it starts, until it's let go; a pool it doesn't keep is let go already; a pool whose image isn't pinned by a digest is refused Invalid naming warm pool, kept by none; or, where its node was given no warm room, keeping or letting go of one is refused Unconfigured naming the warm room, and it lists none",
+        run: image_pools,
     },
 ];
 
@@ -1611,6 +1625,100 @@ fn image_credentials(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         }
         Err(e) => Err(format!("create granting {credentials:?}: {e}")),
     }
+}
+
+/// HEX-IMG-9 (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): the pools are the fixture's VMs', its image and size,
+/// and another image's of that size, so a runtime that holds a pool to what it boots keeps both.
+fn image_pools(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let spec = fx.spec(id("image-pools")?, Bounds::default());
+    let ClassSpec::ShardsImage(image) = &spec.class else {
+        return Err("the fixture's spec isn't a Shards image VM".to_owned());
+    };
+    let size = spec
+        .allocation
+        .ok_or_else(|| "the fixture's spec has no allocation".to_owned())?
+        .vm_size()
+        .map_err(|e| format!("the fixture's VM size: {e}"))?;
+    let pool = WarmPool {
+        image: image.image.clone(),
+        size,
+    };
+    let other = WarmPool {
+        image: format!("hex-conformance-pool@sha256:{}", "0".repeat(64)),
+        size,
+    };
+    let unpinned = WarmPool {
+        image: "hex-conformance-pool:latest".to_owned(),
+        size,
+    };
+    let listed = || rt.pools().map_err(|e| format!("pools: {e}"));
+    // Exactly `pools`, in any order, each with no host warm or starting.
+    let cold = |held: &[WarmHeld], pools: &[&WarmPool]| {
+        held.len() == pools.len()
+            && pools.iter().all(|pool| {
+                held.contains(&WarmHeld {
+                    pool: (*pool).clone(),
+                    warm: 0,
+                    starting: 0,
+                })
+            })
+    };
+    match rt.keep_pool(&pool) {
+        Ok(()) => {}
+        Err(Refusal::Unconfigured {
+            what: WARM_ROOM, ..
+        }) => {
+            let gone = rt.let_go_pool(&pool);
+            ensure(
+                matches!(
+                    gone,
+                    Err(Refusal::Unconfigured {
+                        what: WARM_ROOM,
+                        ..
+                    })
+                ),
+                || format!("a pool let go by a runtime given no warm room: {gone:?}"),
+            )?;
+            let held = listed()?;
+            return ensure(held.is_empty(), || {
+                format!("a runtime given no warm room listed {held:?}")
+            });
+        }
+        Err(e) => return Err(format!("keep {pool:?}: {e}")),
+    }
+    rt.keep_pool(&pool)
+        .map_err(|e| format!("keep {pool:?} again: {e}"))?;
+    rt.keep_pool(&other)
+        .map_err(|e| format!("keep {other:?}: {e}"))?;
+    let held = listed()?;
+    ensure(cold(&held, &[&pool, &other]), || {
+        format!("two pools kept, none of whose boxes started, listed {held:?}")
+    })?;
+    let refused = rt.keep_pool(&unpinned);
+    ensure(
+        matches!(
+            refused,
+            Err(Refusal::Invalid {
+                what: "warm pool",
+                ..
+            })
+        ),
+        || format!("keep {unpinned:?}: {refused:?}"),
+    )?;
+    rt.let_go_pool(&pool)
+        .map_err(|e| format!("let go of {pool:?}: {e}"))?;
+    rt.let_go_pool(&pool)
+        .map_err(|e| format!("let go of {pool:?} again: {e}"))?;
+    let held = listed()?;
+    ensure(cold(&held, &[&other]), || {
+        format!("one of two pools let go, the other listed as {held:?}")
+    })?;
+    rt.let_go_pool(&other)
+        .map_err(|e| format!("let go of {other:?}: {e}"))?;
+    let held = listed()?;
+    ensure(held.is_empty(), || {
+        format!("every pool let go, it listed {held:?}")
+    })
 }
 
 #[cfg(test)]

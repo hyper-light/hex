@@ -43,7 +43,9 @@ that, at `8aa7c028`; `e0cc059c` before that, at `c8b4ce6b`), with a failed run's
 runtime's words (`32b66a10`, `94d519d6`), the class whole and its host use read to its end (`ae7038d7`, `2a8bf6be`), a
 member's arguments and the VM's shares (`cf535152`), and `NoSuchBox` where a shared guest holds no record (`fac528d9`).
 On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, and HEX-IMG-2 to 5 on macOS HVF at
-`cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF at `fac528d9` or later, and every case on Windows WHP.
+`cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF at `fac528d9` or later, and every case on Windows WHP. Built (branch
+`root/hex-p31`, not merged), kiln plan `01a1dd2e313f72f69c6d93061143cc2e` P3.1: the warm pools kiln names, each booting
+its boxes through Shards' `ImagePools`, its hosts charged to the room its owner binds (§10); its real-VM runs owed.
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
@@ -64,7 +66,7 @@ Sources, read at the revisions named:
   (`ImageSpec::gpu_devices`) and D247's period (`ImageGuest::rate_period`): image channel version 17. At `740fa372`,
   versions 18 to 21: D256 (a member's run-time arguments, `MemberSpec::args`), D253 (a run's microVM restored from its
   image's template, or a warm run host's, `ImageGuest::started_from`, which a box's usage says and its record keeps;
-  `ImagePools`, not used here), D242's leases (`ImageSpec::lessor`: none here, as no box grants a credential) and D257
+  `ImagePools`, which the pools kiln names boot through, §10), D242's leases (`ImageSpec::lessor`: none here, as no box grants a credential) and D257
   (the setup keys a run's spec may name), and D258 (a run's end saying why: its asks' end typed, its VM's failure to
   serve it told, its end kept once seen, and its run host's diagnostics kept whole in a file its orchestrator names,
   `ImageGuest::keep_diagnostics`). At `3114e082f`, version 24: the sign-ins a run's injector captures
@@ -451,6 +453,56 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 - A digest-pinned image Shards' store cannot find whatever it is named (then pinning needs the name too).
 - A run host found holding a descriptor or handle it was not given (then D248's spawn is not enough, and the
   macOS and Windows creates wait again).
+
+## 10. Warm pools (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1)
+
+The split agreed with kiln: kiln names which pools exist (its P3.2, a pool for the agents people start on a machine, let
+go once none has started for its keep window); Shards' demand rule sizes each (D26: the largest burst of its runs within
+one refill window, at least one while in use, none once idle past its keep-alive); and every warm host is charged,
+before it starts, to the room its node's boxes are admitted from (D253's `WarmRoom`), so admission never oversubscribes.
+
+- **The calls** (`hex_api::Runtime`): `keep_pool(&WarmPool)` keeps a pool from now on, answered at once, no host started,
+  one kept already kept; `let_go_pool(&WarmPool)` lets one go, its warm and starting hosts ended, each followed to its
+  end and its room given back, before it returns, a box booted from it running on, and one not kept let go already;
+  `pools()` lists each kept pool with its hosts warm and starting. They are kiln's seam's `keep`, `let_go` and `pools`
+  one for one (`crates/kiln-seams/src/sandbox.rs` at kiln `da6ab301f`).
+- **A pool** is `WarmPool { image, size }`: its boxes' image, pinned by its digest (`check_pinned`, refused `Invalid`
+  naming `warm pool`), and their admitted size (`Allocation::vm_size`), held to what Shards boots as asked
+  (`shards_api::envelope`, refused `Invalid`), as a box's are. A box boots through the pool kept for its image and size
+  where there is one, and on the class's own boot (`ImageShards`) otherwise: a box of no named pool makes none, where
+  an `ImagePools` would make one from its first run.
+- **One of Shards' `ImagePools` for each kept pool**, its two threads (Shards' pools and room threads) its cost while it
+  holds no host. Shards gives no call that ends one pool's hosts (`ImagePools::release` ends the coldest of every pool),
+  so a pool let go is its own `ImagePools` dropped, which ends its hosts alone. At most `MAX_BOXES` pools, one for each
+  box a node holds, as kiln's simulator keeps one for each run it holds (`SIM_RUNS`): past them a keep is refused `Full`.
+  Within one, Shards keys its pools by a run's whole microVM (`wire::Request::exemplar`: image, size, command, ports,
+  network, shares, nesting, credential grants and GPUs), so a kept pool warms boxes alike in all of those: two boxes of
+  one image and size whose shares differ are two of Shards' pools within it, each warming from its own first run.
+- **The room** is its owner's, bound once (`ImageClass::bind_room`, `ImageRuntime::bind_room`): for the image runtime
+  kiln embeds, kiln's runner's ledger, the one its sessions are admitted from. A runtime given none keeps no pool: a keep
+  or a let-go is refused `Unconfigured` naming `WARM_ROOM` (`Refusal::no_warm_room`), which kiln maps to its typed
+  `NO_POOLS`, and it lists none. So does every other runtime (the trait's default), the full node's guest runtime and
+  `hex-client` among them.
+- **Its keep-alive** is Shards' `ImagePools::KEEP`, D26's (10 minutes, as AWS keeps an idle function: Shahrad et al.,
+  "Serverless in the Wild", USENIX ATC 2020, §1), the window kiln names a pool for after its last start (kiln's
+  `pools::KEEP`), so neither outlives the other.
+- **Its first start is cold.** Nothing is warm until a pool's first run teaches it its microVM (D253). kiln keeps a pool
+  as its first start comes, so that start boots on its own, the next teaches the pool, and the starts after it are warm.
+  The simulator keeps pools by name alone, none of its hosts warm or starting.
+
+Tests: HEX-IMG-9 (`hex_api::conformance`) on the simulator, on the class given a room and given none, and on hex-node's
+image runtime before and after its owner binds its room; a box booting through the pool kept for its image and size
+alone, and the room bound once (`image_tests.rs`, `p3_1_*`). On real VMs, owed (ROOT's), on KVM, HVF and WHP:
+`crates/hex-cli/tests/image_pools_real.rs`, a kept pool's second start `Warm`, a node holding a warm host admitting no
+box past its room, and n warm starts end to end (AC-T7.6.2, the plan's p50 <= 300 ms).
+
+Owed: those runs; the full node's room (its placement's ledger bound as the class's `WarmRoom`) and the node's wire
+carrying the three calls; and a box that needs room a warm host holds winning it back (`ImagePools::release`) as its
+owner asks, which its owner does today by letting the pool go.
+
+What would falsify it: a warm host started with no claim of its room, or a room held past its budget while hosts
+start (then the room isn't its admitter's); a box of a kept pool booting on the class's own boot, or a box of no kept
+pool making one.
 
 ## 11. A class of its own (kiln plan 01a1dd2e…, P2.2)
 

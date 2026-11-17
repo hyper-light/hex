@@ -712,3 +712,48 @@ fn reads2_b14_one_boxs_transaction_leaves_anothers_turn_free() {
         "box b's turn taken while box a's transaction held"
     );
 }
+
+/// A warm room refusing every claim (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): no pool of it starts a host.
+struct NoRoom;
+
+impl WarmRoom for NoRoom {
+    fn claim(&self, _: &shards_api::image::WarmHost) -> bool {
+        false
+    }
+
+    fn give(&self, _: &shards_api::image::WarmHost, _: shards_api::image::Gave) {}
+}
+
+/// Kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1 (CP-T7.2; HEX-IMG-9), kiln's call: do hold an image runtime made
+/// as kiln makes it to the pools' case, then bind it a warm room and hold it to the case again. Expect: before its room
+/// it keeps none, a keep and a let-go refused `Unconfigured` naming the warm room; once given one, it keeps, lists and
+/// lets go of pools as its class does.
+#[test]
+fn p3_1_an_image_runtime_keeps_warm_pools_once_its_owner_binds_their_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = Arc::new(Model::default());
+    let runtime = runtime(dir.path(), &model);
+    let case = hex_api::conformance::IMAGE_CASES
+        .iter()
+        .find(|case| case.id == "HEX-IMG-9")
+        .unwrap();
+    let pool = hex_api::WarmPool {
+        image: hex_api::sim::SIM_IMAGE.to_owned(),
+        size: allocation().vm_size().unwrap(),
+    };
+    assert_eq!(runtime.keep_pool(&pool), Err(Refusal::no_warm_room()));
+    case.check(runtime.as_ref(), &hex_api::sim::SimFixture::ShardsImage)
+        .unwrap();
+    runtime.bind_room(Arc::new(NoRoom)).unwrap();
+    case.check(runtime.as_ref(), &hex_api::sim::SimFixture::ShardsImage)
+        .unwrap();
+    runtime.keep_pool(&pool).unwrap();
+    assert_eq!(
+        runtime.pools(),
+        Ok(vec![hex_api::WarmHeld {
+            pool,
+            warm: 0,
+            starting: 0
+        }])
+    );
+}
