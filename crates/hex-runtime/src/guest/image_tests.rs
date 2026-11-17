@@ -3287,7 +3287,12 @@ fn image_vms_are_served_only_with_shards_kernel_and_init_both_or_neither() {
         })),
         super::super::tests::config(),
     )
-    .with_images(host_images(), waits(), owner.diagnostics());
+    // A host Shards' check says runs microVMs: this test's fact is the guest pair alone.
+    .with_images(
+        checked_images(|| Ok(shards_api::HostCheck::Usable(shards_api::Backend::Kvm))),
+        waits(),
+        owner.diagnostics(),
+    );
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     let made = runtime
@@ -3345,6 +3350,116 @@ fn the_guest_pair_is_read_as_the_run_host_reads_it() {
             "{k:?} {i:?}: {why}"
         );
     }
+}
+
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2): Shards' check of the host (`shards_api::host_check`, D262) decides whether a
+/// node boots image VMs, each of its answers mapped. Do: map a usable host, hosts Shards says run no microVM, and each way
+/// the check fails to be made or read. Expect: the usable host served; each unusable one refused Platform in Shards' own
+/// words; a check that didn't start, that the OS failed or that ended without its answer refused Os, its words kept; an
+/// answer of another Shards' refused Platform, naming it.
+#[test]
+fn p2_2_each_host_check_answer_maps_to_the_class_or_its_refusal() {
+    use shards_api::{Backend, CheckRefusal, HostCheck, Unusable};
+    assert_eq!(
+        runs_microvms(Ok(HostCheck::Usable(Backend::HypervisorFramework))),
+        Ok(())
+    );
+    for why in [
+        Unusable::KvmMissing,
+        Unusable::KvmDenied,
+        Unusable::HvSupportOff,
+        Unusable::WhpOff,
+        Unusable::NoNested,
+        Unusable::Unsupported {
+            os: "macos".into(),
+            arch: "x86_64".into(),
+        },
+    ] {
+        assert_eq!(
+            runs_microvms(Ok(HostCheck::Unusable {
+                backend: Some(Backend::Kvm),
+                why: why.clone(),
+            })),
+            Err(Refusal::Platform {
+                what: "Shards image VMs",
+                platform: std::env::consts::OS,
+                why: why.to_string(),
+            })
+        );
+    }
+    assert!(matches!(
+        runs_microvms(Err(CheckRefusal::Start("no such file".into()))),
+        Err(Refusal::Os { op: "starting shards api-check", why }) if why == "no such file"
+    ));
+    assert!(matches!(
+        runs_microvms(Err(CheckRefusal::Os {
+            what: "making the check's pipe",
+            kind: std::io::ErrorKind::OutOfMemory,
+        })),
+        Err(Refusal::Os {
+            op: "making the check's pipe",
+            ..
+        })
+    ));
+    assert!(matches!(
+        runs_microvms(Err(CheckRefusal::Ended {
+            status: Some(3),
+            said: "shards: no such command: api-check".into(),
+        })),
+        Err(Refusal::Os { why, .. }) if why.contains("no such command: api-check")
+    ));
+    assert!(matches!(
+        runs_microvms(Err(CheckRefusal::Version(2))),
+        Err(Refusal::Platform { what: "Shards image VMs", why, .. }) if why.contains("version 2")
+    ));
+}
+
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2): a node's guest runtime lists the Shards image class where it boots image VMs,
+/// the class's capacity its host's plane; one whose host Shards' check says runs no microVM lists none, and refuses an
+/// image VM's create and the class's capacity alike, in Shards' words. Do: a guest runtime over the model's image boot,
+/// and one given the refusal `host_images` makes of a host whose user may not open `/dev/kvm`. Expect: the first's
+/// classes hold shards-image, its capacity of the class the owner's plane; the second's hold none of it, its create and
+/// its capacity of the class each refused Platform naming `/dev/kvm`, and no boot asked of either.
+#[test]
+fn p2_2_a_guest_runtime_lists_the_image_class_only_where_it_boots_image_vms() {
+    let images = ModelImages::new();
+    let (serving, _owner) = model_runtime(&images, waits());
+    assert!(
+        serving.classes().contains(&hex_api::Class::ShardsImage),
+        "{:?}",
+        serving.classes()
+    );
+    assert_eq!(
+        serving.capacity(hex_api::Class::ShardsImage),
+        Ok(Some(host_pool()))
+    );
+    let refused = runs_microvms(Ok(shards_api::HostCheck::Unusable {
+        backend: Some(shards_api::Backend::Kvm),
+        why: shards_api::Unusable::KvmDenied,
+    }))
+    .unwrap_err();
+    assert!(
+        matches!(&refused, Refusal::Platform { what: "Shards image VMs", why, .. } if why.contains("/dev/kvm")),
+        "{refused:?}"
+    );
+    let owner = Arc::new(Owner::new());
+    let unserved = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        super::super::tests::config(),
+    )
+    .with_images(Err(refused.clone()), waits(), owner.diagnostics());
+    let books: Arc<dyn Books> = owner.clone();
+    unserved.bind_books(Arc::downgrade(&books)).unwrap();
+    assert!(!unserved.classes().contains(&hex_api::Class::ShardsImage));
+    assert_eq!(
+        unserved.create(spec("unserved", None)),
+        Err(refused.clone())
+    );
+    assert_eq!(unserved.capacity(hex_api::Class::ShardsImage), Err(refused));
+    assert!(record(&owner, &BoxId::new("unserved").unwrap()).is_none());
+    assert!(images.asked.lock().unwrap().is_empty());
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded

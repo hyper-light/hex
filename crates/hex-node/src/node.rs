@@ -974,7 +974,7 @@ impl Node {
                 _ => self.oci_boxes.get(id),
             },
             Class::Process => self.root.get(id),
-            Class::Firecracker | Class::Shards => None,
+            Class::Firecracker | Class::Shards | Class::ShardsImage => None,
         }
     }
 

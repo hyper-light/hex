@@ -428,6 +428,9 @@ impl RouteKey {
             | (crate::Class::Firecracker, Execution::Firecracker) => {
                 self.image.os == ImageOs::Linux
             }
+            // An image VM is sized by its admitted allocation alone (`BoxSpec::check_image`): no route carries one
+            // (docs/design/shards-image-class.md §11).
+            (crate::Class::ShardsImage, _) => false,
             _ => false,
         };
         if !valid {

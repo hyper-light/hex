@@ -97,16 +97,17 @@ pub enum BoxKind {
 pub const BOX_KINDS: usize = BoxKind::Mcp as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
-pub const CLASSES: usize = 4;
+pub const CLASSES: usize = 5;
 
-/// `tables`' entry for `class`: process, oci, firecracker, shards, in that order.
+/// `tables`' entry for `class`: process, oci, firecracker, shards, shards-image, in that order.
 pub(crate) fn by_class<W>(tables: &[W; CLASSES], class: Class) -> &W {
-    let [process, oci, firecracker, shards] = tables;
+    let [process, oci, firecracker, shards, shards_image] = tables;
     match class {
         Class::Process => process,
         Class::Oci => oci,
         Class::Firecracker => firecracker,
         Class::Shards => shards,
+        Class::ShardsImage => shards_image,
     }
 }
 
@@ -164,6 +165,7 @@ static UNRECORDED: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.unrecorded", "oci", measuring),
     class_waits!("client.unrecorded", "firecracker", measuring),
     class_waits!("client.unrecorded", "shards", measuring),
+    class_waits!("client.unrecorded", "shards-image", measuring),
 ];
 
 /// The wait of `request`'s plain kind in `waits`, a client's table of its plain kinds' learned waits (decision 9: a

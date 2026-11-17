@@ -363,7 +363,9 @@ impl GuestRuntime {
             }
             // Only an already charged exact dedicated legacy record is
             // unambiguous here. A legacy shared VM cannot acquire a new grant.
-            None if spec.class.class() == Class::Shards || !spec.devices.is_empty() => {
+            None if matches!(spec.class.class(), Class::Shards | Class::ShardsImage)
+                || !spec.devices.is_empty() =>
+            {
                 self.check_allocation(spec)?;
                 selected::Record::intent(record, &self.config)?;
                 if !spec.devices.is_empty() {

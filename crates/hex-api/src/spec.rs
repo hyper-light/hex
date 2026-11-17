@@ -20,6 +20,12 @@ pub enum Class {
     Firecracker,
     /// A microVM run by an initialized Shards backend.
     Shards,
+    /// A Shards image VM ([`ClassSpec::ShardsImage`]): an Agentfile image Shards' run host boots under shards-init
+    /// (Shards' D231), a microVM of its own, counted apart from Hex's own Shards guests. Listed only where the node's
+    /// image boot is configured and Shards' check of its host (`shards_api::host_check`, D262) says it runs microVMs
+    /// (kiln plan 01a1dd2e…, P2.2; docs/design/shards-image-class.md §11). Appended (the wire is append-only).
+    #[serde(rename = "shards-image")]
+    ShardsImage,
 }
 
 impl Class {
@@ -29,6 +35,7 @@ impl Class {
             Self::Oci => "oci",
             Self::Firecracker => "firecracker",
             Self::Shards => "shards",
+            Self::ShardsImage => "shards-image",
         }
     }
 }
@@ -70,12 +77,18 @@ impl BoxSpec {
         self.route.map(|receipt| receipt.key.execution)
     }
 
-    /// Resolve only the original form or its validated immutable execution receipt.
+    /// Resolve only the original form or its validated immutable execution receipt: the class of the backend that runs
+    /// it. A Shards image VM's is the Shards backend, whose image class boots it (D231).
     pub fn backend_class(&self) -> Result<Class, Refusal> {
         self.check()?;
         Ok(match self.route_execution() {
             None | Some(crate::runtime::Execution::Native | crate::runtime::Execution::NodeVm) => {
-                self.class.class()
+                match self.class.class() {
+                    Class::ShardsImage => Class::Shards,
+                    class @ (Class::Process | Class::Oci | Class::Firecracker | Class::Shards) => {
+                        class
+                    }
+                }
             }
             Some(
                 crate::runtime::Execution::ShardsShared
@@ -280,7 +293,8 @@ impl ClassSpec {
             Self::Process => Class::Process,
             Self::Oci(_) | Self::Bundle(_) => Class::Oci,
             Self::Firecracker(_) => Class::Firecracker,
-            Self::Shards(_) | Self::ShardsImage(_) => Class::Shards,
+            Self::Shards(_) => Class::Shards,
+            Self::ShardsImage(_) => Class::ShardsImage,
         }
     }
 }
@@ -1595,7 +1609,7 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.1 (joint plan step 12): a Shards image VM of class Shards, its image pinned by a digest
+    /// AC-T7.4.1 (joint plan step 12): a Shards image VM of its own class (P2.2), its image pinned by a digest
     /// and its size its allocation's. Do: check a pinned image running its members alone, and one with a
     /// command, and read each back from JSON. Expect: both pass, read back whole, and a run of either is
     /// refused (a VM has an init). Do: break the image's pin, its digest's algorithm or digits, the name
@@ -1610,7 +1624,7 @@ mod tests {
         };
         for image in [pinned.clone(), commanded] {
             let boxed = image_box(image);
-            assert_eq!(boxed.class.class(), Class::Shards);
+            assert_eq!(boxed.class.class(), Class::ShardsImage);
             assert_eq!(boxed.check(), Ok(()));
             assert!(matches!(
                 boxed.check_run(),

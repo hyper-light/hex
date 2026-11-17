@@ -1450,7 +1450,7 @@ fn must_outlive_host(record: &BoxRecord) -> bool {
 fn managed_scope_required(record: &BoxRecord) -> bool {
     matches!(
         record.spec.class.class(),
-        hex_api::Class::Shards | hex_api::Class::Firecracker
+        hex_api::Class::Shards | hex_api::Class::ShardsImage | hex_api::Class::Firecracker
     ) || (record.spec.class.class() == hex_api::Class::Oci && record.spec.allocation.is_some())
 }
 

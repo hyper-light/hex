@@ -423,6 +423,11 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   (§4).
 - **Its diagnostics' disk use** (§1): the bytes of a box's diagnostics file are its own use of the node's disk, which
   no usage the image class reports counts yet (`Usage` has no disk use).
+- **The scheduler's admission of image boxes** (§11): Hex's scheduler refuses an image payload as it always has
+  (`placement::validate` checks the spec, which an image box passes only with its allocation, and refuses a payload
+  that carries one, the scheduler deriving it), and no route carries an image VM. It admits them once the class has a
+  route and a per-box cost of its own (its envelope from Shards' `envelope`, census-free by decision 9), each with its
+  evidence, and its payloads are checked without the allocation the scheduler then derives.
 
 ## 9. What would falsify it
 
@@ -432,3 +437,52 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 - A digest-pinned image Shards' store cannot find whatever it is named (then pinning needs the name too).
 - A run host found holding a descriptor or handle it was not given (then D248's spawn is not enough, and the
   macOS and Windows creates wait again).
+
+## 11. A class of its own (kiln plan 01a1dd2e…, P2.2)
+
+The Hex lead's note, approved in kiln plan `01a1dd2e195c7328b7a9bf2b12fb923a`'s P2.2: `Class::ShardsImage` appended,
+listed only where the image backend boots and Shards' check of the host says it runs microVMs. Built on
+`root/hex-p22`, not merged; its tests are written and owed to ROOT's runs.
+
+- **The class.** `hex_api::Class::ShardsImage`, named `shards-image`, the wire's class tag 4 after every older one: an
+  image box's class (`ClassSpec::ShardsImage`), as its inspect and a node's listing say it. Its backend is still the
+  Shards guest runtime, whose image class boots it (`BoxSpec::backend_class` answers `Shards` for it), so a node
+  dispatches, preflights and recovers an image box as it did, and its record still takes a native scope
+  (`Store::put_lifecycle`).
+- **Listed where it boots.** A node lists the class (`Runtime::classes`, its hello's classes) only where
+  `ImageClass::serves`: its image boot configured, Shards' boot given and its waits given. `host_images` gives the
+  boot only where Shards' own check of the host (`shards_api::host_check`, D262), asked once of the `shards` its run
+  hosts are as the node starts, says it runs microVMs, and each answer is mapped (`runs_microvms`): `Usable` serves;
+  `Unusable` is refused `Platform` (`Shards image VMs`) in Shards' own words, a fact of the host; a check that didn't
+  start, that the OS failed or that ended without its answer is refused `Os`, in its words; an answer this Hex doesn't
+  read (`Version`, `Wire`: another Shards' `shards`) is refused `Platform`, naming it. A node that serves none lists
+  none and refuses an image box's create, and the class's capacity, with that refusal; `ImageClass::serves` gives it to
+  a caller that asks before any create (kiln's runner, for P2.4's `node_images`, through `ImageRuntime::class`).
+- **Its own accounting.** The class's capacity answer is its host's plane, on which the record authority books each
+  image VM at its receipt, with no route, backing or device of the class's own; the charge learner learns its VMs in a
+  class of their own (`hex_sim::model::Class::ShardsImage`), so their priors, and its capacity answer's learned part
+  (C8), are theirs alone, while each keeps what it awaited as a Shards VM: its room (`GuestRoom`, C7) and its move
+  (`LiveMove`, C5). The client times its box kinds in a table of their own (`client.answer.<kind>.shards-image`), and
+  the scheduler counts its starts apart (`start_cost`).
+- **Placed only where listed.** hex-sim's model has the class, its bit 8 in `Classes`: the index admits an image VM's
+  demand only on a node whose classes hold it (`Verdict::NoClass` elsewhere). A node's facts hold it only where its
+  runtime was initialized for it, Shards' check among that, and on the hypervisor Shards boots it on, as Shards' own
+  class is held (KVM, Hypervisor.framework; on Windows Shards' check is the one fact of it). Peer rows, launch
+  observations, traces and needs name it `shards-image`. The generator draws none, as no recorded trace carries one.
+- **Not yet.** Hex's scheduler admits no image box (§8): no route carries an image VM (`RouteKey::check`), its
+  initialized admission takes a class only through its routes and an all-legacy cohort only with a per-box cost, so a
+  scheduler given a `shards-image` backend refuses it, typed; and `placement::validate` refuses an image payload, as it
+  did before the class (an image spec is checked with the allocation the scheduler derives). The class's placement is
+  hex-sim's index alone until then. kiln's runner sizes its image VMs itself and places by its own balancer, reading
+  the class from its node's listing.
+
+Tests (written, not run here): hex-core's `the_shards_image_class_is_tag_4_and_reads_back_identical`; hex-sim's
+`initialized_classes_obey_platform_and_feature_filters` and `p2_2_an_image_box_lands_only_on_the_node_listing_the_image_class`;
+hex-runtime's `p2_2_each_host_check_answer_maps_to_the_class_or_its_refusal` and
+`p2_2_a_guest_runtime_lists_the_image_class_only_where_it_boots_image_vms`; hex-node's
+`p2_2_an_image_runtime_lists_its_class_only_where_it_boots_image_vms`.
+
+What would falsify it:
+- A host whose `shards api-check` says usable where an image VM can't boot (then Shards' check is the wrong gate).
+- A node whose image VMs' priors move a Shards guest's, or the other way (then the classes aren't apart).
+- A run host that isn't the `shards` the check was asked of (then the check vouches for another binary).

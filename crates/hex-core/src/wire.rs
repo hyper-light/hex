@@ -3988,6 +3988,8 @@ fn class_tag(c: Class) -> u8 {
         Class::Oci => 1,
         Class::Firecracker => 2,
         Class::Shards => 3,
+        // P2.2: a Shards image VM's own class, after every older one.
+        Class::ShardsImage => 4,
     }
 }
 
@@ -3997,6 +3999,7 @@ fn class(r: &mut Reader<'_>) -> Result<Class, Fault> {
         1 => Ok(Class::Oci),
         2 => Ok(Class::Firecracker),
         3 => Ok(Class::Shards),
+        4 => Ok(Class::ShardsImage),
         t => Err(Fault::value("class", format!("variant {t}"))),
     }
 }

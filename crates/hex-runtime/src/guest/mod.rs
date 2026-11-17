@@ -1335,6 +1335,9 @@ impl Runtime for GuestRuntime {
         }
     }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        if class == Class::ShardsImage {
+            return self.image_capacity().map(Some);
+        }
         if !matches!(class, Class::Oci | Class::Shards) {
             return Err(Refusal::Invalid {
                 what: "capacity class",
@@ -1383,11 +1386,15 @@ impl Runtime for GuestRuntime {
     }
 
     fn classes(&self) -> Vec<Class> {
+        let mut classes = vec![Class::Oci];
         if self.uses_books() && self.runtime_cost.is_some() {
-            vec![Class::Oci, Class::Shards]
-        } else {
-            vec![Class::Oci]
+            classes.push(Class::Shards);
         }
+        // P2.2: its image class, where its node boots image VMs (`ImageClass::serves`), which a create says otherwise.
+        if self.uses_books() && self.images.serves().is_ok() {
+            classes.push(Class::ShardsImage);
+        }
+        classes
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -2243,17 +2250,20 @@ impl<P: Runtime> Runtime for WithGuest<P> {
                 }
                 self.oci.capacity(class)
             }
-            Class::Shards => self.oci.capacity(class),
+            Class::Shards | Class::ShardsImage => self.oci.capacity(class),
             Class::Firecracker => self.process.capacity(class),
         }
     }
 
     fn classes(&self) -> Vec<Class> {
-        if self.oci.classes().contains(&Class::Shards) {
-            vec![Class::Process, Class::Oci, Class::Shards]
-        } else {
-            vec![Class::Process, Class::Oci]
+        let mut classes = vec![Class::Process, Class::Oci];
+        let guest = self.oci.classes();
+        for class in [Class::Shards, Class::ShardsImage] {
+            if guest.contains(&class) {
+                classes.push(class);
+            }
         }
+        classes
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

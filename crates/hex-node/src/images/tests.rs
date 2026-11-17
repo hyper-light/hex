@@ -229,6 +229,40 @@ fn runtime(dir: &Path, model: &Arc<Model>) -> Arc<ImageRuntime> {
     .unwrap()
 }
 
+/// AC-T7.4.1 (kiln plan 01a1dd2e…, P2.2): kiln's node, an image runtime, lists the Shards image class only where it
+/// boots image VMs, and one that can't carries Shards' why. Do: open an image runtime over the model's image boot, and
+/// one over the refusal `host_images` makes where Shards' check says this host runs no microVM; create an image VM on
+/// each. Expect: the first lists shards-image alone and makes it, of that class; the second lists none, says why as its
+/// class serves none, and refuses the create Platform in Shards' words, keeping no record and asking no boot.
+#[test]
+fn p2_2_an_image_runtime_lists_its_class_only_where_it_boots_image_vms() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = Arc::new(Model::default());
+    let serving = runtime(&dir.path().join("serving"), &model);
+    assert_eq!(serving.classes(), vec![Class::ShardsImage]);
+    assert_eq!(serving.class().serves(), Ok(()));
+    let made = serving.create(image_box("served")).unwrap();
+    assert_eq!(made.class, Class::ShardsImage);
+    let why = Refusal::Platform {
+        what: "Shards image VMs",
+        platform: std::env::consts::OS,
+        why: shards_api::Unusable::KvmDenied.to_string(),
+    };
+    let unserved = ImageRuntime::with_images(
+        dir.path().join("shards"),
+        shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home")).unwrap(),
+        &dir.path().join("unserved"),
+        Err(why.clone()),
+        Ok(ImageWaits::new()),
+    )
+    .unwrap();
+    assert_eq!(unserved.classes(), Vec::<Class>::new());
+    assert_eq!(unserved.class().serves(), Err(why.clone()));
+    assert_eq!(unserved.create(image_box("refused")), Err(why));
+    assert_eq!(unserved.list().unwrap(), Vec::new());
+    assert!(model.asked.lock().unwrap().is_empty());
+}
+
 /// The second box shown Running once its held boot is let go: this test's fact alone.
 static SHOWN: hex_core::patience::Patience =
     hex_core::patience::Patience::measuring("test.hex_node.image_start_shown");
@@ -248,7 +282,7 @@ fn w12_an_image_runtime_serves_the_image_class_alone_on_a_store_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let model = Arc::new(Model::default());
     let images = runtime(dir.path(), &model);
-    assert_eq!(images.classes(), vec![Class::Shards]);
+    assert_eq!(images.classes(), vec![Class::ShardsImage]);
     let mut process = image_box("process-box");
     process.class = ClassSpec::Process;
     process.allocation = None;
