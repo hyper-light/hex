@@ -313,6 +313,7 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     ),
     class_waits!("client.guest.answer", "firecracker", measuring),
     class_waits!("client.guest.answer", "shards", measuring),
+    class_waits!("client.guest.answer", "shards-image", measuring),
 ];
 #[cfg(not(target_os = "macos"))]
 static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
@@ -320,6 +321,7 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.guest.answer", "oci", measuring),
     class_waits!("client.guest.answer", "firecracker", measuring),
     class_waits!("client.guest.answer", "shards", measuring),
+    class_waits!("client.guest.answer", "shards-image", measuring),
 ];
 
 /// The relay's token on a guest's control connection whose caller gave no deadline (the review's D-2), learned as
@@ -392,6 +394,7 @@ static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.quic.answer", "oci", measuring),
     class_waits!("client.quic.answer", "firecracker", measuring),
     class_waits!("client.quic.answer", "shards", measuring),
+    class_waits!("client.quic.answer", "shards-image", measuring),
 ];
 
 static QUIC_RELAY_TOKEN: Patience = Patience::measuring("client.quic.relay.token");

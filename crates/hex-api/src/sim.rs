@@ -370,6 +370,7 @@ impl Runtime for SimRuntime {
                 Class::Oci,
                 Class::Firecracker,
                 Class::Shards,
+                Class::ShardsImage,
             ],
         }
     }

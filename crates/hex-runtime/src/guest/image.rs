@@ -1079,7 +1079,7 @@ fn unread_info(id: BoxId) -> BoxInfo {
     BoxInfo {
         published: Vec::new(),
         id,
-        class: hex_api::Class::Shards,
+        class: hex_api::Class::ShardsImage,
         state: BoxState::Empty,
         bounds: hex_api::Bounds::default(),
         allocation: None,
@@ -1832,13 +1832,57 @@ fn boot_on_its_thread(
 /// Shards' image boot (D231), or why this node serves no image VM: every host runs it, its run host started
 /// holding only its stdio (vendor/patches/shards 0001) and booting the guest the node's environment names, which
 /// it inherits: `SHARDS_KERNEL` and `SHARDS_INIT`, read here once, as the node starts ([`guest_pair`];
-/// docs/design/shards-image-class.md §1).
-pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
+/// docs/design/shards-image-class.md §1); and only where Shards' own check of this host, asked once of `binary`, the
+/// `shards` its run hosts are, says it runs microVMs ([`runs_microvms`]; Shards' D262, §11).
+pub fn host_images(binary: &Path) -> Result<Arc<dyn Images>, Refusal> {
+    checked_images(|| shards_api::host_check(Some(binary)))
+}
+
+/// [`host_images`] with Shards' check of the host `check`, asked only once the guest pair is taken.
+fn checked_images(
+    check: impl FnOnce() -> Result<shards_api::HostCheck, shards_api::CheckRefusal>,
+) -> Result<Arc<dyn Images>, Refusal> {
     guest_pair(
         std::env::var_os("SHARDS_KERNEL").as_deref(),
         std::env::var_os("SHARDS_INIT").as_deref(),
     )?;
+    runs_microvms(check())?;
     Ok(Arc::new(shards_api::image::ImageShards::new()))
+}
+
+/// What Shards' check of this host (`shards_api::host_check`, D262) answered, each answer mapped (kiln plan
+/// 01a1dd2e…, P2.2): a host that runs microVMs serves the class; one that doesn't is refused `Platform` in Shards' own
+/// words, a fact of the host, as every create of the class then is and its listing leaves it out; a check that couldn't
+/// be made is refused `Os`, the call's failure in its words; and an answer this Hex doesn't read, from a `shards` of
+/// another Shards than the one Hex vendors, `Platform`, naming it.
+fn runs_microvms(
+    checked: Result<shards_api::HostCheck, shards_api::CheckRefusal>,
+) -> Result<(), Refusal> {
+    use shards_api::{CheckRefusal, HostCheck};
+    let unserved = |why: String| Refusal::Platform {
+        what: "Shards image VMs",
+        platform: std::env::consts::OS,
+        why,
+    };
+    match checked {
+        Ok(HostCheck::Usable(_)) => Ok(()),
+        Ok(HostCheck::Unusable { why, .. }) => Err(unserved(why.to_string())),
+        Err(CheckRefusal::Start(why)) => Err(Refusal::Os {
+            op: "starting shards api-check",
+            why,
+        }),
+        Err(CheckRefusal::Os { what, kind }) => Err(Refusal::Os {
+            op: what,
+            why: format!("{kind:?}"),
+        }),
+        Err(refused @ CheckRefusal::Ended { .. }) => Err(Refusal::Os {
+            op: "asking shards api-check whether this host runs microVMs",
+            why: refused.to_string(),
+        }),
+        Err(refused @ (CheckRefusal::Version(_) | CheckRefusal::Wire(_))) => Err(unserved(
+            format!("its shards answers a host check this Hex doesn't read: {refused}"),
+        )),
+    }
 }
 
 /// The guest a node's run hosts would boot, from its `SHARDS_KERNEL` and `SHARDS_INIT` (`kernel`, `init`) as D231's
@@ -2003,6 +2047,16 @@ impl ImageClass {
             platform: std::env::consts::OS,
             why: "this node configures no Shards image boot".to_owned(),
         })
+    }
+
+    /// Whether this node boots Shards image VMs: its image boot configured, Shards' boot given where Shards' check of its
+    /// host says it runs microVMs ([`host_images`]), and its waits; else the refusal every create of the class gets, in
+    /// its words, its listing leaving the class out (kiln plan 01a1dd2e…, P2.2).
+    pub fn serves(&self) -> Result<(), Refusal> {
+        let image = self.image()?;
+        image.images()?;
+        image.waits()?;
+        Ok(())
     }
 
     fn image_books(&self) -> Result<&Weak<dyn Books>, Refusal> {
@@ -2304,9 +2358,7 @@ impl ImageClass {
 
     pub(super) fn create_image(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
-        let image = self.image()?;
-        image.images()?;
-        image.waits()?;
+        self.serves()?;
         vm_size(&spec)?;
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
@@ -3178,8 +3230,13 @@ impl ImageClass {
 /// Shards image VM, through it, once its record authority is bound ([`ImageClass::bind_books`]). A box of any other
 /// class is refused at its create, and a program in a member awaits the agent-control endpoint, as on any node.
 impl hex_api::Runtime for ImageClass {
+    /// Its class where it boots image VMs ([`ImageClass::serves`]), else none: a create says why.
     fn classes(&self) -> Vec<hex_api::Class> {
-        vec![hex_api::Class::Shards]
+        if self.serves().is_ok() {
+            vec![hex_api::Class::ShardsImage]
+        } else {
+            Vec::new()
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

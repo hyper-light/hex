@@ -557,6 +557,18 @@ impl GuestRuntime {
         Ok(capacity)
     }
 
+    /// The Shards image class's capacity (kiln plan 01a1dd2e…, P2.2): its host's resource plane, on which the record
+    /// authority books each image VM at its receipt, with no route, backing or device of the class's own (D231's image
+    /// boot attaches none); refused in its words where this node boots no image VM (`ImageClass::serves`).
+    pub(super) fn image_capacity(&self) -> Result<hex_api::Capacity, Refusal> {
+        self.images.serves()?;
+        let mut capacity = self.authority()?.capacity()?;
+        capacity.devices = Vec::new();
+        capacity.device_routes = Vec::new();
+        capacity.check()?;
+        Ok(capacity)
+    }
+
     /// Dedicated VM statistics come from the same native scope, including its
     /// helpers. No relay/guest must be usable to observe those retained resources.
     pub(super) fn native_usage(

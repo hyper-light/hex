@@ -79,6 +79,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   run host started holding only its stdio (D248, Hex's former 0001 upstream); its usage carries each vCPU's guest
   time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
   SHARDS_INIT aren't a pair serves none.
+  Its own class (kiln plan 01a1dd2e…, P2.2; `shards-image-class.md` §11), built on `root/hex-p22`, not merged:
+  `Class::ShardsImage` (`shards-image`, wire tag 4), listed only where the node's image boot runs and Shards' check of
+  its host (`shards_api::host_check`, D262) says it runs microVMs, each answer mapped and a node that can't refusing an
+  image VM in Shards' words; its capacity, learned charge, client waits and start costs its own; placed by hex-sim only
+  on a node listing it. Closes with: ROOT's runs of its tests, and Hex's scheduler admitting image boxes, which it never
+  has (a route and per-box cost for the class, and its payload checked without the allocation it derives; §8).
   The members a box's caller drives (`ShardsImage::members`, joint plan step 17) boot with their stdin asked, and
   `Runtime::member` hands the caller a member's stdin, stdout, stderr and end, once, in process and over the node's
   wire (`Call::Member`: its ends given on a local socket, joined to a QUIC client's lanes; unit-tested over a model

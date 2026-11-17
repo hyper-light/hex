@@ -880,6 +880,8 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         Class::Process | Class::Oci => ClassSpec::Oci,
         Class::Firecracker => ClassSpec::Firecracker,
         Class::Shards => ClassSpec::Shards,
+        // An image VM renders no OCI spec: its image's fields are refused by name in the image suite (`run_image`).
+        Class::ShardsImage => return Ok(()),
     };
     let _ = rt.delete(&id);
     let base = OciSpec {
@@ -1108,7 +1110,7 @@ fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         })?;
         let info = rt.inspect(&id).map_err(|e| e.to_string())?;
         ensure(
-            (info.class, info.state, info.exit) == (Class::Shards, BoxState::Created, None),
+            (info.class, info.state, info.exit) == (Class::ShardsImage, BoxState::Created, None),
             || format!("a new VM: {info:?}"),
         )?;
         let again = rt.create(fx.spec(id.clone(), Bounds::default()));

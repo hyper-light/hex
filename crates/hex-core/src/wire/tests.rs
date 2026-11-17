@@ -2549,7 +2549,7 @@ fn any_exit() -> impl Strategy<Value = Exit> {
 fn any_info() -> impl Strategy<Value = BoxInfo> {
     (
         any_id(),
-        0u8..4,
+        0u8..5,
         0u8..3,
         any_bounds(),
         any::<bool>(),
@@ -2568,7 +2568,8 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
                     0 => Class::Process,
                     1 => Class::Oci,
                     2 => Class::Firecracker,
-                    _ => Class::Shards,
+                    3 => Class::Shards,
+                    _ => Class::ShardsImage,
                 },
                 state: match state {
                     0 => BoxState::Empty,
@@ -4755,6 +4756,59 @@ fn a_shards_image_spec_is_class_tag_5_then_its_image_and_command() {
             Err(Fault::Truncated { .. })
         ));
     }
+}
+
+/// P2.2 (kiln plan 01a1dd2e…): a Shards image VM's own class is tag 4, after every class before it, wherever the wire
+/// carries a class. Do: a node's hello listing it, a capacity call for it and a box's info of it. Expect: each read back
+/// identical, the call's class byte 4. Do: that byte 5. Expect: refused as a class's variant.
+#[test]
+fn the_shards_image_class_is_tag_4_and_reads_back_identical() {
+    let hello = Answer::Hello(Hello {
+        build: build(),
+        classes: vec![
+            Class::Process,
+            Class::Oci,
+            Class::Shards,
+            Class::ShardsImage,
+        ],
+        limits: Limits {
+            connections: 64,
+            message_bytes: MAX_MESSAGE,
+            in_flight: 1,
+            programs: 1,
+        },
+        budgets: Budgets {
+            in_flight: 64,
+            programs: 1024,
+        },
+    });
+    let bytes = answer(1, &hello, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        hello
+    );
+    let capacity = Request::Call(Call::Capacity(Class::ShardsImage));
+    let bytes = request(2, &capacity, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        capacity
+    );
+    assert_eq!(bytes.last(), Some(&4));
+    let mut hostile = bytes.clone();
+    *hostile.last_mut().unwrap() = 5;
+    assert!(matches!(
+        read_request(&received(&hostile, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value { what: "class", .. })
+    ));
+    let shown = Answer::Info(BoxInfo {
+        class: Class::ShardsImage,
+        ..info()
+    });
+    let bytes = answer(3, &shown, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        shown
+    );
 }
 
 /// AC-T7.4.1 (joint plan steps 12 and 14): a usage answer's guest time follows its eight counters as

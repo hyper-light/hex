@@ -47,6 +47,7 @@ impl Transport for Memory {
             class_waits!("test.refusal", "oci", measuring),
             class_waits!("test.refusal", "firecracker", measuring),
             class_waits!("test.refusal", "shards", measuring),
+            class_waits!("test.refusal", "shards-image", measuring),
         ];
         by_class(&CLASS_ANSWERS, class)
     }
@@ -1161,7 +1162,7 @@ mod release_frame {
 #[test]
 fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!((KINDS, BOX_KINDS, CLASSES), (21, 14, 4));
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (21, 14, 5));
     for (request, index) in [
         (
             Request::Hello {
@@ -1354,6 +1355,7 @@ fn every_kind_and_class_has_its_own_census_name() {
             Class::Oci,
             Class::Firecracker,
             Class::Shards,
+            Class::ShardsImage,
         ] {
             for (kind, wait) in kinds.iter().zip(T::class_answers(class)) {
                 assert_eq!(wait.name(), format!("{prefix}.{kind}.{}", class.name()));
