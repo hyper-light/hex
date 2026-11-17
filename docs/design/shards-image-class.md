@@ -102,9 +102,10 @@ Sources, read at the revisions named:
 
 ## 1. The shape
 
-- A box of `ClassSpec::ShardsImage(ShardsImage { image, command })` is of `Class::Shards`: one microVM of its own,
-  which `shards_api::image::Images::boot` boots under shards-init. shards-init applies the image's Agentfile: each
-  member (agent or harness) starts in its confined domain from its own `harness.json`/`agent.json` (D54, D59).
+- A box of `ClassSpec::ShardsImage(ShardsImage { image, command })` is of its own class, `Class::ShardsImage`, run by
+  the Shards backend (§11): one microVM of its own, which `shards_api::image::Images::boot` boots under shards-init.
+  shards-init applies the image's Agentfile: each member (agent or harness) starts in its confined domain from its own
+  `harness.json`/`agent.json` (D54, D59).
 - Hex's other Shards form, `ClassSpec::Shards(OciSpec)`, keeps booting Hex's own guest (`hex` as PID 1, its node
   inside; `shards-guest.md`), and so does the `oci` class on macOS and Windows. Hex's PID 1 is kept for good (§7).
 - **Size.** `Allocation::vm_size`: the admitted guest envelope in whole vCPUs (1,000 CPU milli each) and MiB, as the

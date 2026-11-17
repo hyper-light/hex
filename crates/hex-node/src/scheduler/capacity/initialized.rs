@@ -1148,8 +1148,12 @@ mod tests {
             },
             ask: hex_sim::model::Ask {
                 runtime_class: Some(hex_api::Class::ShardsImage),
-                os: platform.then_some(Os::Linux),
-                arch: platform.then_some(hex_sim::model::Arch::X86_64),
+                os: if platform { Some(Os::Linux) } else { None },
+                arch: if platform {
+                    Some(hex_sim::model::Arch::X86_64)
+                } else {
+                    None
+                },
                 ..hex_sim::model::Ask::default()
             },
         };

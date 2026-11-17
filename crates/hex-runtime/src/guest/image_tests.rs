@@ -1128,8 +1128,9 @@ fn kept(owner: &Owner, id: &BoxId) -> Party {
     }
 }
 
-/// Joint plan step 12: do create, then start, an image VM of two vCPUs and 256 MiB with no command.
-/// Expect: create records it Creating and shows it Created, booting nothing; start writes Ready first
+/// AC-T7.4.1 (joint plan step 12): do create, then start, an image VM of two vCPUs and 256 MiB with no command.
+/// Expect: create records it Creating and shows it Created, of its own class, `shards-image` (its backend still
+/// Shards'; docs/design/shards-image-class.md §11, P2.2), booting nothing; start writes Ready first
 /// and boots once, asking Shards for exactly its pinned image, its admitted size, no command, none of its
 /// image's grants (default deny until goal 15 programs them; no destination kept, D236) and no nesting grant
 /// (D234: no harness is a nested runtime); then it shows Running.
@@ -1141,7 +1142,7 @@ fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
     let id = made.id.clone();
     assert_eq!(
         (made.class, made.state, made.exit),
-        (hex_api::Class::Shards, BoxState::Created, None)
+        (hex_api::Class::ShardsImage, BoxState::Created, None)
     );
     assert_eq!(record(&owner, &id).unwrap().phase, Phase::Creating);
     assert!(images.asked.lock().unwrap().is_empty());
