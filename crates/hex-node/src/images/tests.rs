@@ -128,14 +128,55 @@ impl ImageGuest for Held {
     fn started_from(&self) -> StartedFrom {
         StartedFrom::Booted
     }
-    fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
+    fn take_output(
+        &self,
+        _: &MemberName,
+        _: u32,
+        _: Channel,
+    ) -> Result<std::io::PipeReader, ImageRefusal> {
         Err(unasked())
     }
-    fn take_input(&self, _: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
+    fn take_input(&self, _: &MemberName, _: u32) -> Result<std::io::PipeWriter, ImageRefusal> {
         Err(unasked())
     }
-    fn wait_member(&self, _: &MemberName, _: Duration) -> Result<Option<MemberEnd>, ImageRefusal> {
+    fn wait_member(
+        &self,
+        _: &MemberName,
+        _: u32,
+        _: Duration,
+    ) -> Result<Option<MemberEnd>, ImageRefusal> {
         Err(unasked())
+    }
+    fn restart(&self, _: &MemberName, _: &[Vec<u8>], _: Duration) -> Result<u32, ImageRefusal> {
+        Err(unasked())
+    }
+    fn member_egress(
+        &self,
+        _: &MemberName,
+        _: Option<&shards_api::image::Reach>,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(unasked())
+    }
+    fn swap(
+        &self,
+        _: &str,
+        _: &str,
+        _: shards_api::image::SwapWhen,
+        _: Duration,
+    ) -> Result<shards_api::image::Swapped, ImageRefusal> {
+        Err(unasked())
+    }
+    fn restore(
+        &self,
+        _: &str,
+        _: shards_api::image::SwapWhen,
+        _: Duration,
+    ) -> Result<shards_api::image::Swapped, ImageRefusal> {
+        Err(unasked())
+    }
+    fn components(&self) -> Vec<shards_api::image::ComponentAt> {
+        Vec::new()
     }
     fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
         Err(unasked())
@@ -183,6 +224,7 @@ impl ImageGuest for Held {
     fn wait_channel(
         &self,
         _: &MemberName,
+        _: u32,
         _: Channel,
         _: Duration,
     ) -> Result<Option<ChannelEnd>, ImageRefusal> {

@@ -1091,6 +1091,11 @@ impl GuestRuntime {
                     host: share.dir.clone(),
                     at: share.at.clone(),
                     read_only: share.read_only,
+                    // Its containers' bind mounts come from these roots, their programs among them (Shards' D279: as
+                    // every share's were before it).
+                    exec: true,
+                    // Its run's own root alone, where Hex's init mounts each share (Shards' D277: as before it).
+                    members: None,
                 })
                 .collect(),
             controller: identity.fingerprint(),
@@ -1593,6 +1598,38 @@ impl Runtime for GuestRuntime {
                 cause: hex_api::PauseCause::Class(record.spec.class.class()),
             }),
         }
+    }
+
+    /// Shards' D270 slice 4: an image VM's member given a component, its class's ([`image::ImageClass`]); any other box's
+    /// refused as the trait refuses it, naming its class: a Shards guest's oci box among them, its VM its node's.
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        let record = self.swappable(id, "swap")?;
+        self.images
+            .swap_image(record, at, image::Change::Swap(digest), when)
+    }
+
+    /// Shards' D270 slice 4: an image VM's member given its image's own component back, as its swap is routed.
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        let record = self.swappable(id, "restore")?;
+        self.images
+            .swap_image(record, at, image::Change::Restore, when)
+    }
+
+    /// Shards' D270 slice 4: an image VM's components, as its swap is routed.
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        let record = self.swappable(id, "components")?;
+        self.images.components_image(record)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -2350,6 +2387,31 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
         self.holder(id)?.resume(id)
+    }
+
+    /// The runtime holding the box swaps its member's component (Shards' D270 slice 4), as it pauses it: an image VM's
+    /// its guest runtime's class, a process box's its host's, which has none.
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.holder(id)?.swap(id, at, digest, when)
+    }
+
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.holder(id)?.restore(id, at, when)
+    }
+
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        self.holder(id)?.components(id)
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {

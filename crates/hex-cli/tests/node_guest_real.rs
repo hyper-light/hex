@@ -868,6 +868,8 @@ mod kvm {
                 host: share.dir.clone(),
                 at: share.at.clone(),
                 read_only: share.read_only,
+                exec: true,
+                members: None,
             })
             .collect();
         let identity = shards_api::control::Identity::generate().unwrap();

@@ -14,7 +14,10 @@
 //! by start, ended by KILL, its members unreached (their exec and signals refused as awaiting Shards'
 //! agent-control endpoint), and its guest time per vCPU read while it runs. The simulated VM runs every
 //! vCPU the whole time it runs but while its owner holds it paused (kiln plan P5.5b): the most guest time a real one
-//! can report, so a consumer's bound holds against it, and none while paused, as a real one's stays flat.
+//! can report, so a consumer's bound holds against it, and none while paused, as a real one's stays flat. Its members'
+//! components are swapped at once (Shards' D270 slice 4): its image runs one harness of its own ([`SIM_HARNESS`])
+//! beside the members its spec says its caller drives, and its node's store holds one harness's component
+//! ([`SIM_COMPONENT`]).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -24,8 +27,9 @@ use std::time::{Duration, Instant};
 use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
-    Exit, GuestTime, Member, Network, OciSpec, PauseCause, Proc, Program, Refusal, Rootfs, Runtime,
-    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage,
+    ComponentAt, Exit, GuestTime, Member, MemberKind, Network, OciSpec, PauseCause, Proc, Program,
+    Refusal, Rootfs, Runtime, RuntimeCost, ShardsImage, Signal, Stdio, SwapCause, SwapWhen,
+    Swapped, Upstream, Usage,
 };
 
 /// The echo program: what comes in on `stdin` goes out on `stdout`, at most [`SIM_ECHO_BYTES`] of it, and it ends
@@ -104,15 +108,23 @@ struct SimBox {
 }
 
 /// A simulated Shards image VM: its vCPUs, from its allocation, when its start booted it, the members whose
-/// streams its caller took ([`Runtime::member`]), each with its program, at most the members its spec names, and its
-/// owner's pauses (kiln plan P5.5b): whether its vCPUs run now, and every pause's time that has ended.
+/// streams its caller took ([`Runtime::member`]), each with its program, at most the members its spec names, its
+/// owner's pauses (kiln plan P5.5b): whether its vCPUs run now, and every pause's time that has ended, and its members'
+/// components and generations (Shards' D270 slices 3b and 4).
 struct SimVm {
     vcpus: u32,
     booted: Option<Instant>,
+    /// The members whose current generation's streams its caller took, each with its program: a member started again
+    /// leaves it, its next generation's to take.
     taken: Vec<(Member, Arc<SimProc>)>,
     hold: SimHold,
     /// Every pause's time that has ended.
     pauses: Duration,
+    /// Each member's component by its path, as its run holds it: the one its next start lays there and the one its
+    /// current generation runs with, by digest, none for its image's own. A path neither names is left out.
+    components: BTreeMap<String, (Option<String>, Option<String>)>,
+    /// Each member's current generation by its path, where a swap or restore now started it again: 0, its first, else.
+    generations: BTreeMap<String, u32>,
 }
 
 /// Whether a simulated VM's vCPUs run its guest, as its owner last moved them ([`Runtime::pause`], [`Runtime::resume`]):
@@ -320,6 +332,145 @@ impl SimRuntime {
         Ok(vm)
     }
 
+    /// Box `b`'s VM, its run going, for `op`: a swap, a restore or a read of its components (Shards' D270 slice 4); or why
+    /// not, as the image class refuses it: a box of any other class as one with no components, its run ended, or none
+    /// started yet.
+    fn swappable<'b>(
+        b: &'b mut SimBox,
+        id: &BoxId,
+        op: &'static str,
+    ) -> Result<&'b mut SimVm, Refusal> {
+        let refused = |cause| Refusal::Swap {
+            id: id.clone(),
+            op,
+            cause,
+            why: None,
+        };
+        let class = b.spec.class.class();
+        let ended = match &b.init {
+            Some(init) => init.exit()?.is_some(),
+            None => false,
+        };
+        let started = b.started;
+        let vm =
+            b.vm.as_mut()
+                .ok_or_else(|| refused(SwapCause::Class(class)))?;
+        if ended {
+            return Err(refused(SwapCause::Ended));
+        }
+        if !started {
+            return Err(refused(SwapCause::NotRunning));
+        }
+        Ok(vm)
+    }
+
+    /// Box `id`'s member at path `at` given component `digest`, or its image's own back where none (`op`, a swap or a
+    /// restore), at its next start or now, as Shards' run host makes it (D270 slice 4) and the image class refuses it:
+    /// typed where it can't be made, `Pause(Paused)` while its VM is paused; now, its current generation ends as TERM
+    /// ends a program with no handler, its streams no caller's any longer, and its next is current, its streams taken
+    /// anew. The simulator's members say nothing no caller reads, so none is let go unread.
+    fn change(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: Option<&str>,
+        when: SwapWhen,
+        op: &'static str,
+    ) -> Result<Swapped, Refusal> {
+        let refused = |cause, why: String| Refusal::Swap {
+            id: id.clone(),
+            op,
+            cause,
+            why: Some(why),
+        };
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let member = match &b.spec.class {
+            ClassSpec::ShardsImage(image) => member_at(image, at),
+            _ => None,
+        };
+        let vm = Self::swappable(b, id, op)?;
+        if matches!(vm.hold, SimHold::Paused(_)) {
+            return Err(Refusal::Pause {
+                id: id.clone(),
+                op,
+                cause: PauseCause::Paused,
+            });
+        }
+        let member = member.ok_or_else(|| {
+            refused(
+                SwapCause::Unknown,
+                format!("no member of the image runs at {at}"),
+            )
+        })?;
+        if let Some(digest) = digest {
+            if digest != SIM_COMPONENT {
+                return Err(refused(
+                    SwapCause::Artifact,
+                    format!("its node's store holds no artifact {digest}"),
+                ));
+            }
+            if member.kind != MemberKind::Harness {
+                return Err(refused(
+                    SwapCause::Kind,
+                    format!("{digest} is a harness's, and {at} an agent's path"),
+                ));
+            }
+        }
+        let held = vm.components.get(at).and_then(|(_, held)| held.clone());
+        let desired = digest.map(str::to_owned);
+        let started = match when {
+            SwapWhen::NextStart => None,
+            SwapWhen::Now => {
+                // A member whose generation ended with no start again under way ended whole: Shards' restart refuses
+                // it, and its swap says so (D270 slice 3b).
+                if let Some((_, proc)) = vm.taken.iter().find(|(taken, _)| *taken == member) {
+                    if proc.exit()?.is_some() {
+                        return Err(refused(
+                            SwapCause::Failed,
+                            format!(
+                                "its member at {at} ended with its generation, and runs no more"
+                            ),
+                        ));
+                    }
+                    proc.set(Exit::Signal(Signal::TERM.number()))?;
+                }
+                vm.taken.retain(|(taken, _)| *taken != member);
+                let next = vm
+                    .generations
+                    .get(at)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        refused(
+                            SwapCause::Failed,
+                            format!("{at} has no generation past {}", u32::MAX),
+                        )
+                    })?;
+                vm.generations.insert(at.to_owned(), next);
+                Some(next)
+            }
+        };
+        let held = if started.is_some() {
+            desired.clone()
+        } else {
+            held
+        };
+        if desired.is_none() && held.is_none() {
+            vm.components.remove(at);
+        } else {
+            vm.components.insert(at.to_owned(), (desired, held));
+        }
+        Ok(Swapped {
+            components: listed(&vm.components),
+            started,
+            unread: 0,
+        })
+    }
+
     /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does, paused or not; any other is its run's
     /// members', which its image runs and take it as their lanes give it (goal 2's item 2), the VM running on, and which
     /// a paused VM's members can't answer, refused at once as the class refuses it (P5.5b); once it has ended, none
@@ -500,6 +651,8 @@ impl Runtime for SimRuntime {
                 taken: Vec::new(),
                 hold: SimHold::Going,
                 pauses: Duration::ZERO,
+                components: BTreeMap::new(),
+                generations: BTreeMap::new(),
             }),
             _ => None,
         };
@@ -891,6 +1044,26 @@ impl Runtime for SimRuntime {
             }),
         }
     }
+
+    /// A running image VM's member given the one component its node's store holds, at once ([`SimRuntime::change`]).
+    fn swap(&self, id: &BoxId, at: &str, digest: &str, when: SwapWhen) -> Result<Swapped, Refusal> {
+        self.change(id, at, Some(digest), when, "swap")
+    }
+
+    /// A running image VM's member given its image's own component back, at once ([`SimRuntime::change`]).
+    fn restore(&self, id: &BoxId, at: &str, when: SwapWhen) -> Result<Swapped, Refusal> {
+        self.change(id, at, None, when, "restore")
+    }
+
+    /// A running image VM's members' components, paused or not; refused as a swap is.
+    fn components(&self, id: &BoxId) -> Result<Vec<ComponentAt>, Refusal> {
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let vm = Self::swappable(b, id, "components")?;
+        Ok(listed(&vm.components))
+    }
 }
 
 /// A simulated program, and the caller's ends of the streams its exec asked for until they are taken.
@@ -954,6 +1127,47 @@ pub enum SimFixture {
 /// digits, the fixture's own.
 pub const SIM_IMAGE: &str =
     "hex-sim/harness@sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+
+/// The harness the simulator's image runs of its own, at `/harness/hex-sim` (Shards' D270 slice 4's paths), beside the
+/// members a box's spec says its caller drives, each of which the simulator takes as its image's too.
+pub const SIM_HARNESS: &str = "hex-sim";
+
+/// The one component the simulated node's Shards store holds (Shards' D270 slice 4): a harness's OSI artifact, by its
+/// manifest digest, a sha256's 64 hex digits, the fixture's own.
+pub const SIM_COMPONENT: &str =
+    "sha256:c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+/// The member a simulated image runs at path `at`, `/agents/NAME` or `/harness/NAME` as Shards names a member's
+/// directory (D270 slice 4): its own harness ([`SIM_HARNESS`]), or a member `image`'s spec says its caller drives.
+fn member_at(image: &ShardsImage, at: &str) -> Option<Member> {
+    let (kind, name) = match at.strip_prefix("/agents/") {
+        Some(name) => (MemberKind::Agent, name),
+        None => (MemberKind::Harness, at.strip_prefix("/harness/")?),
+    };
+    let member = Member {
+        kind,
+        name: name.to_owned(),
+    };
+    if (kind == MemberKind::Harness && name == SIM_HARNESS)
+        || image.members.iter().any(|m| m.member == member)
+    {
+        Some(member)
+    } else {
+        None
+    }
+}
+
+/// A simulated run's components as its run host lists them: each path's, in the paths' order.
+fn listed(components: &BTreeMap<String, (Option<String>, Option<String>)>) -> Vec<ComponentAt> {
+    components
+        .iter()
+        .map(|(at, (desired, held))| ComponentAt {
+            at: at.clone(),
+            desired: desired.clone(),
+            held: held.clone(),
+        })
+        .collect()
+}
 
 /// The simulator's Shards image VM's admitted allocation, the fixture's own inputs: two vCPUs, so the
 /// per-vCPU cases see more than one, and 256 MiB, even and past Shards' least on every host (128 MiB,
@@ -1063,6 +1277,16 @@ impl Fixture for SimFixture {
             Act::Echo => Program::of(&["echo"]),
         }
     }
+    /// The simulated node's one component, for the image's own harness ([`SIM_HARNESS`], [`SIM_COMPONENT`]).
+    fn component(&self) -> Option<crate::conformance::Component> {
+        match self {
+            Self::ShardsImage => Some(crate::conformance::Component {
+                at: format!("/harness/{SIM_HARNESS}"),
+                digest: SIM_COMPONENT.to_owned(),
+            }),
+            Self::Process | Self::Bundle | Self::Spec | Self::Firecracker | Self::Shards => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1144,6 +1368,71 @@ mod tests {
         assert!(matches!(
             runtime.member(&plain, &claude),
             Err(Refusal::Invalid { what: "member", .. })
+        ));
+    }
+
+    /// Shards' D270 slices 3b and 4 (AC-T7.4.1): a sim image box's member given a component now ends the program its
+    /// caller took, as TERM ends a program with no handler, and starts its next generation, whose streams its caller
+    /// takes anew; a component of an agent's at a harness's path is refused Kind, and one of a box of another class
+    /// Class. Do: take a driven harness, swap the sim's component in at it now, take it again; swap at a driven agent's
+    /// path; swap in a process box. Expect: its first program ended Signal(15), generation 1 started, its streams given
+    /// again; Swap(Kind); Swap(Class(Process)).
+    #[test]
+    fn d270_a_sim_members_swap_now_ends_its_program_and_its_next_is_taken_anew() {
+        let runtime = SimRuntime::new();
+        let claude = Member {
+            kind: MemberKind::Harness,
+            name: "claude".to_owned(),
+        };
+        let helper = Member {
+            kind: MemberKind::Agent,
+            name: "helper".to_owned(),
+        };
+        let id = BoxId::new("sim-swaps").unwrap();
+        runtime
+            .create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+                    members: vec![
+                        crate::ImageMember::new(claude.clone()),
+                        crate::ImageMember::new(helper),
+                    ],
+                    ..ShardsImage::new(SIM_IMAGE)
+                })),
+                owner: None,
+                devices: Vec::new(),
+                allocation: Some(sim_vm_allocation().unwrap()),
+                route: None,
+                band: 0,
+            })
+            .unwrap();
+        runtime.start(&id).unwrap();
+        let mut first = runtime.member(&id, &claude).unwrap();
+        let swapped = runtime
+            .swap(&id, "/harness/claude", SIM_COMPONENT, SwapWhen::Now)
+            .unwrap();
+        assert_eq!(swapped.started, Some(1));
+        assert_eq!(first.try_wait().unwrap(), Some(Exit::Signal(15)));
+        let mut next = runtime.member(&id, &claude).unwrap();
+        assert!(next.streams().unwrap().stdin.is_some());
+        assert!(matches!(
+            runtime.swap(&id, "/agents/helper", SIM_COMPONENT, SwapWhen::NextStart),
+            Err(Refusal::Swap {
+                cause: SwapCause::Kind,
+                ..
+            })
+        ));
+        let plain = BoxId::new("sim-swaps-process").unwrap();
+        runtime
+            .create(SimFixture::Process.spec(plain.clone(), Bounds::default()))
+            .unwrap();
+        assert!(matches!(
+            runtime.components(&plain),
+            Err(Refusal::Swap {
+                cause: SwapCause::Class(Class::Process),
+                ..
+            })
         ));
     }
 

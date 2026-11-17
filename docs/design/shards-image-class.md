@@ -4,7 +4,11 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `9975d1f55`, image channel v36 (an orchestrator's run told the memory it may plug, as a
+Merged on Hex's local main at Shards `f17b8fb77`, image channel v41 (built on `cp/t7-v41-swaps`, not pushed: a member's
+component swapped in and its image's own back as its run runs, D270 slice 4, v40, `Runtime::swap`, `restore` and
+`components`, with its members' generations, slice 3b, v38, §11; whether a share's files may be run, D279, v41,
+`ImageShare::exec`; and two this class asks none of, a share given its members as they start, D277, v37, and a member's
+own reach past its microVM within its ceiling, D278, v39); `9975d1f55` before it, image channel v36 (an orchestrator's run told the memory it may plug, as a
 daemon's is, D275: harness members are no longer ended at their boot share, a member past its run's room still held at
 the run's hold (D275's share within a room held back); an HVF vCPU taking memory plugged after it as memory, D274; live volumes, `ImageGuest::plug(&Plug)` and
 `ImageSpec::plug_roots`, D271, v35, and a run's grants past its microVM changed as it runs, D273, v36, neither of which
@@ -40,7 +44,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
   `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`,
-  `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee` and `9975d1f55`) and
+  `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee`, `9975d1f55` and `f17b8fb77`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -81,7 +85,7 @@ Sources, read at the revisions named:
   a run's stop returning released (D231, `c133bfb56`: its run host exited and reaped, every process it started gone).
   At `2246a8829`, version 30: every socket a run's agent-control endpoint holds (D252 amended, `d3950c7d1`:
   `ControlAt::waker`, `wake`, `sockets`).
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`, `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee` and `9975d1f55`: `crates/api/src/image.rs` (`Images`, its `boot` and
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`, `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee`, `9975d1f55` and `f17b8fb77`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -204,12 +208,13 @@ harness member's):
 - `ShardsImage::shares` names the host directories the guest sees (D231's shares, `-v HOST:AT[:ro]`; kiln's step
   18: a person's home volumes and a project at its host path, D235), each a `Mount`: its host directory, checked as
   a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
-  read-only. The boot asks Shards for exactly those, in order (default deny: the image's grants widen none), and a
-  share Shards refuses refuses the start as `Invalid`, in Shards' words. A member gets one where its image's
-  `VOLUME` at that path is for it (D109), the run's own command where no `VOLUME` declares it.
+  read-only, and whether its files may be run (D279, §11). The boot asks Shards for exactly those, in order (default
+  deny: the image's grants widen none), and a share Shards refuses refuses the start as `Invalid`, in Shards' words. A
+  member gets one where its image's `VOLUME` at that path is for it (D109), the run's own command where no `VOLUME`
+  declares it.
 - `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
   stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
-  its end (`wait_member`; `WithRun` is the run's end, as the box's own). It is no process of this host
+  its end (`wait_member`; `WithRun` is the run's end, as the box's own), each its current generation's (D270, §11). It is no process of this host
   (`on_this_host` false, no pid: D231 names none), and its own kill is KILL on its own lane of the run's endpoint,
   its end then `Signal(9)` (a member that has ended has nothing to end); the box's KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
@@ -416,7 +421,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `9975d1f55` or later (image channel version 36: Hex's `shards` and its shards-init, rebuilt on each host by
+  `f17b8fb77` or later (image channel version 41: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec
@@ -433,6 +438,12 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 - **Pause and resume on real VMs** (§10, ROOT's): HEX-IMG-9 through `image_real` on Linux KVM, macOS HVF and Windows
   WHP, at Shards `9975d1f55` or later (image channel version 33 or later: D267's pause), and the learned charge across
   a pause on a macOS or Windows node's recorded trace.
+- **Swaps on real VMs** (§11, ROOT's): HEX-IMG-10 through `image_real` on Linux KVM, macOS HVF and Windows WHP, at
+  Shards `f17b8fb77` or later (image channel version 41), each node's Shards home holding a component for the image's
+  harness (`HEX_IMAGE_COMPONENT`), and a swap now of a harness whose output no caller reads past what a pipe holds.
+- **From Shards, for swaps** (§11): a start again that gives its member the run-time arguments its first start had
+  (D256's `MemberSpec::args`; a swap now restarts its member with none, so a harness started with kiln's flags, its
+  `--resume` among them, starts again without them), and MCP servers' paths (D270 slice 4's "not yet").
 
 ## 9. What would falsify it
 
@@ -444,6 +455,8 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   macOS and Windows creates wait again).
 - A paused VM whose guest time grows, or a pause that waits on its guest (then D267's hold is no pause, and §10's
   paused windows hide use, or its patience is wrong for a hung guest).
+- A member's next generation started before its last's channels ended, or a channel's end told after its swap's answer
+  (then §11's drains are not what holds a start again, or a joined drain waits for its run's end).
 
 ## 10. Pause and resume (kiln plan P5.5b)
 
@@ -528,3 +541,104 @@ the learner holding a paused VM's charge and booking through SEEDABLE paused win
 **What would falsify it.** A VM whose guest time grows while Hex says it paused; a resumed VM whose use passes the
 charge its pre-pause windows made more often than one window in SEEDABLE, the windows around its pause left out; a
 caller of kiln's that needs a move it lost the answer of answered as done rather than refused typed.
+
+## 11. Component swaps and a share's exec (Shards' D270 slices 3b and 4, D279)
+
+Decided 2026-11-16, built on `cp/t7-v41-swaps` and merged on Hex's local main (not pushed), AC-T7.4.1. The Hex lead's
+brief (2026-11-16): bring Hex to Shards' vendor point `f17b8fb77` (image channel v41), expose a member's component swaps
+through Hex as P5.5b exposed pause and resume (§10), and carry a volume's `exec` through the image class.
+
+Sources, read at the revisions named: Shards' D270 ("Components swapped into running image VMs, sans rebuild", slices
+3b and 4, with the faults its HVF runs found), D277 (a share given its members as they start), D278 (a member's own
+grants past its microVM) and D279 (a share's or a plug's files may be refused execution), `docs/design/architecture.md`
+at `f17b8fb77`; `shards_api::image` at `f17b8fb77` (`ImageGuest::swap`, `restore`, `components`, `restart`, the
+generation on `take_output`, `take_input`, `wait_member` and `wait_channel`, `ImageRefusal::Swap` with `SwapRefusal`,
+`ImageRefusal::Restart`, `MemberEnd::Killed`, `ImageShare::exec` and `members`, `Plug::exec`, `ImageSpec::egress_ceiling`),
+`image/session.rs` (each generation's pumps, given room as they start; a reader that left has the rest let go) and
+`image/wire.rs` (`SwapAsk`, `SwapAnswer`, `ComponentAt`, `Swapped`); `crates/shards/src/api_run.rs` at `f17b8fb77`
+(`swap`, `restart_turn`, `last_output_ended`, `end_channel`).
+
+- **The calls.** `Runtime::swap(id, at, digest, when)`, `Runtime::restore(id, at, when)` and `Runtime::components(id)`,
+  typed. `at` is a member's path (`/agents/NAME`, `/harness/NAME`), `digest` the manifest digest of an OSI artifact its
+  node's Shards store holds, `when` `SwapWhen::NextStart` or `SwapWhen::Now` (the wire's tags 0 and 1). A swap or a
+  restore answers `Swapped`: every member's component after it (`ComponentAt`: its path, the digest its next start lays,
+  the one its current generation runs with, none for its image's own), the generation of its member a `Now` started, and
+  the bytes of the ended generation's output no caller had taken, let go (the draining rule, below). The node's wire
+  carries them appended: `Call::Swap` (kind `0x0024`), `Call::Restore` (`0x0025`) and `Call::Components` (`0x0026`),
+  answered `Answer::Swapped` (`0x8018`) and `Answer::Components` (`0x8019`). hex-client's `Core` sends them on every
+  transport, each timed by a box kind of its own (`client.answer.swap.<class>`, `.restore.`, `.components.`), measuring
+  as pause's do. Every runtime that holds an image box passes them to its class (`WithGuest`, `GuestRuntime`,
+  `Recorded`, Linux's `Node`, hex-node's `ImageRuntime`); the trait's own answer for any other is the class refusal.
+- **The refusals.** `Refusal::Swap { id, op, cause, why }` (appended, tag 18), `cause` a `SwapCause` (append-only, tags 0
+  to 10): Shards' `SwapRefusal` one for one, matched whole, `Unknown`, `Artifact`, `Kind`, `Platform`, `Asks`, `Device`,
+  `Running` and `Failed`, `why` Shards' words; then `NotRunning` before its start and once its stop has begun, `Ended`
+  once its run has ended (Shards' `ImageRefusal::Ended` among it), and `Class(class)` for a box of any other class or
+  form, a Shards guest's oci box among them. Its boot under way is `Lifecycle { Pending }`, a held run
+  `Awaits(AttachAfterCrash)`. While paused, a swap or a restore is refused at once, `Pause { cause: Paused }`, its guest
+  answering nothing (§10); `components` is answered as ever, from what its node holds. Shards' `ImageRefusal::Restart`
+  comes of a member's restart of its own, which this class asks none of (its starts again are its swaps'): `Broken`
+  where seen, as every refusal of an ask the class makes none of is.
+- **Its component first.** A swap or a restore is asked of Shards at its member's next start first: its artifact checked,
+  its image built where the store has none, plugged and mounted, or its image's own wanted back. Refused there, nothing
+  of its member is touched. Only then, where `Now` was asked, the same change is asked now, which starts its member
+  again, its component plugged already (the run host's plug of one plugged answers at once). Shards' `Now` would do
+  both in one ask, but the member's output would then be read from before its artifact was checked, and a swap refused
+  for its artifact would leave the node reading the output of a member that runs on.
+- **Generations.** A start again ends its member's current generation (SIGTERM to its command) and starts its next in
+  the namespaces its generations keep (D270 slice 3b), each generation's stdin, stdout, stderr and end its own. The
+  class keeps each member's current generation with its run, by declared index, from Shards' answer
+  (`Swapped::started`), and starts a member again through these calls alone, so nothing else moves it. `Runtime::member`
+  takes the member's current generation's streams, once each. A program taken before stays its generation's: its end is
+  that generation's (`MemberEnd::Killed`, a generation its start again ended at once, read `Signal(9)`), and its kill,
+  which rides the member's lane, is answered at once once its generation has ended, as a lane steers the generation
+  running as it opens.
+- **The draining rule.** Shards starts a member's next generation only once every channel of its last has ended, and its
+  run host takes no more of a channel while its orchestrator's pipe is unread (shards-api's pump writes each part into
+  the caller's pipe before it gives its host room for more; what no one reads backs up into that channel alone): a start
+  again whose last generation's output no one reads fails past its patience, `Failed`, and Shards lets that member go.
+  So before it asks the start again, the class takes each of the member's current output channels no caller took (a
+  member no caller drives has none taken; `take_output` refuses one taken, its taker's to read) and reads it on a
+  thread of its own to its end, letting its bytes go. A caller that took them reads them to their end, as it reads any
+  program's. Each channel's end comes before Shards' answer (one stream, in order), so once the swap is answered the
+  drains of channels told ended are joined, their bytes `Swapped::unread`; a channel told no end was never opened,
+  nothing of it came, and its thread ends with its run. Refused after its first ask, the drains read on to their
+  generation's end. The model's run host fails a start again whose last output no one could read (its worst case: past
+  what a pipe holds unread), so `d270_a_swap_now_lets_go_of_its_members_unread_output_and_its_start_again_goes_on`
+  fails without the drains.
+- **Its wait.** Each ask waits on its run host's answer or its run's end alone (`Duration::MAX`), never a timer, as a
+  pause's does. Shards' patience is its member's graceful end's too (ended at once past it, `MemberEnd::Killed`) and its
+  last output's: a bound of Hex's would kill a member slower to end than it guessed, and a start again it failed would
+  let its member go whole. With none, a member that never ends at its SIGTERM holds a `Now` until a KILL ends it, its
+  own (`Runtime::signal_member`) or its box's, and output a caller took and never reads holds it until it is read or the
+  run ends.
+- **A share's exec.** `ShardsImage::shares` are `ImageShare`s (`source`, `destination`, `read_only`, `exec`), no longer
+  `Mount`s, so an OCI mount keeps its own form. `exec` (D279) is on unless a spec says otherwise: serde's default, left
+  out of JSON where on, so every record and request written before it reads as it did; the wire writes it after
+  `read_only` in each share. The class gives it to Shards' `ImageShare::exec`; off, each of the share's mounts is
+  `noexec`. The node VM's own shares (§7, `HEX_GUEST_SHARES`) stay runnable: its containers' bind mounts come from them.
+  Every `ImageShare` the class makes names no members (D277's `None`: given where the image's `VOLUME` lies, as before)
+  and no member's ceiling (D278's `egress_ceiling` empty): kiln asks Hex for neither yet.
+- **Simulator and fakes.** `hex_api::sim::SimRuntime` swaps at once: its image runs one harness of its own
+  (`SIM_HARNESS`) beside the members its spec names, and its node's store holds one harness's component
+  (`SIM_COMPONENT`); a `Now` ends the program its caller took as TERM ends one with no handler, and its next
+  generation's streams are takeable anew; its refusals the class's. HEX-IMG-10 holds every runtime of the class to them,
+  the fixture naming its component (`Fixture::component`; `image_real` takes one from `HEX_IMAGE_COMPONENT`).
+
+**Alternatives not taken.** Shards' `Now` in one ask (above). Each unread reader dropped rather than read (Shards' pump
+then lets its bytes go uncounted; read, they are told). A finite patience (above). A `Runtime::restart` of its own (no
+caller asked one; a `NextStart` swap is laid by a later `Now`). `exec` on `Mount` (the OCI class would carry a field it
+honours nowhere yet).
+
+**Tests.** HEX-IMG-10 (`hex_api::conformance`) through the simulator in process, through a node's socket
+(`the_image_cases_hold_through_a_nodes_socket`) and, ROOT's, on real VMs (`image_real`); over QUIC
+(`d270_a_vms_swap_and_restore_go_through_quic`); the class over a model of D270 (`image_tests.rs`, `d270_*`: the drain,
+a driven member's generations each its own program, a generation killed at its start again, every refusal); the
+simulator's own (`d270_a_sim_members_swap_now_ends_its_program_and_its_next_is_taken_anew`); the wire's round trips,
+generators and bytes (`d270_a_swap_its_answer_and_its_refusal_cross_the_wire`,
+`d279_a_shares_exec_crosses_the_wire_after_its_read_only_flag`); a share's exec in JSON
+(`d279_a_shares_exec_is_on_unless_it_says_so`); and the class asking Shards for each share's exec
+(`w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names`).
+
+**What would falsify it.** A member's next generation started before its last's channels ended, or a channel's end told
+after its swap's answer (§9); a share whose files may not be run that runs a binary; a swap now that leaves its member's
+streams to its last generation's caller.

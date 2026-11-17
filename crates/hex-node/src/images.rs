@@ -353,6 +353,26 @@ impl Runtime for ImageRuntime {
     fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
         self.class.resume(id)
     }
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.class.swap(id, at, digest, when)
+    }
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.class.restore(id, at, when)
+    }
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        self.class.components(id)
+    }
 }
 
 #[cfg(test)]

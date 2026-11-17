@@ -195,6 +195,26 @@ mod hosted {
         fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
             self.0.resume(id)
         }
+        fn swap(
+            &self,
+            id: &BoxId,
+            at: &str,
+            digest: &str,
+            when: hex_api::SwapWhen,
+        ) -> Result<hex_api::Swapped, Refusal> {
+            self.0.swap(id, at, digest, when)
+        }
+        fn restore(
+            &self,
+            id: &BoxId,
+            at: &str,
+            when: hex_api::SwapWhen,
+        ) -> Result<hex_api::Swapped, Refusal> {
+            self.0.restore(id, at, when)
+        }
+        fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+            self.0.components(id)
+        }
     }
 
     impl<R: Runtime> Host for Hosted<R> {
@@ -682,6 +702,84 @@ fn p5_5b_a_vms_pause_and_resume_go_through_quic() {
         vm.client.pause(&none),
         Err(Refusal::NoSuchBox(none.clone()))
     );
+    vm.client.delete(&vm.id).unwrap();
+}
+
+/// Shards' D270 slice 4 (AC-T7.4.1; docs/design/shards-image-class.md §11): the node's wire carries an image box's
+/// component swap, restore and components (`Call::Swap`, `Call::Restore`, `Call::Components`, appended), so a remote
+/// caller swaps a member's component as a caller in the node's own process does, its answers and refusals coming back
+/// typed. Do: through a simulator node served over QUIC in this process, swap the image's harness's component in now,
+/// read the components, restore its image's own at its next start, then swap a digest its node holds none of and swap at
+/// a path no member runs at; take the swapped member's next generation's streams. Expect: the swap now answered held,
+/// its member's generation 1 started and nothing let go unread; the components as it answered them; the restore wanted
+/// none and held it, no generation started; Swap(Artifact) and Swap(Unknown), each naming swap with Shards' words; and
+/// the member driven anew, its streams taken.
+#[test]
+fn d270_a_vms_swap_and_restore_go_through_quic() {
+    use hex_api::sim::{SIM_COMPONENT, SIM_HARNESS};
+    use hex_api::{ComponentAt, Refusal, Runtime as _, SwapCause, SwapWhen};
+    let vm = member_vm("node.swap.test", "swapped-over-quic");
+    let at = format!("/harness/{SIM_HARNESS}");
+    let now = vm
+        .client
+        .swap(&vm.id, &at, SIM_COMPONENT, SwapWhen::Now)
+        .unwrap();
+    let held = vec![ComponentAt {
+        at: at.clone(),
+        desired: Some(SIM_COMPONENT.to_owned()),
+        held: Some(SIM_COMPONENT.to_owned()),
+    }];
+    assert_eq!(
+        (&now.components, now.started, now.unread),
+        (&held, Some(1), 0)
+    );
+    assert_eq!(vm.client.components(&vm.id).unwrap(), held);
+    let back = vm.client.restore(&vm.id, &at, SwapWhen::NextStart).unwrap();
+    assert_eq!(
+        (back.components, back.started),
+        (
+            vec![ComponentAt {
+                at: at.clone(),
+                desired: None,
+                held: Some(SIM_COMPONENT.to_owned()),
+            }],
+            None
+        )
+    );
+    let cause = |got: Result<hex_api::Swapped, Refusal>| match got {
+        Err(Refusal::Swap {
+            op: "swap",
+            cause,
+            why: Some(_),
+            ..
+        }) => cause,
+        other => panic!("{other:?}"),
+    };
+    let none = format!("sha256:{}", "0".repeat(64));
+    assert_eq!(
+        cause(vm.client.swap(&vm.id, &at, &none, SwapWhen::Now)),
+        SwapCause::Artifact
+    );
+    assert_eq!(
+        cause(
+            vm.client
+                .swap(&vm.id, "/harness/nobody", SIM_COMPONENT, SwapWhen::Now)
+        ),
+        SwapCause::Unknown
+    );
+    let claude = format!("/harness/{}", vm.claude.name);
+    let started = vm
+        .client
+        .swap(&vm.id, &claude, SIM_COMPONENT, SwapWhen::Now)
+        .unwrap()
+        .started;
+    assert_eq!(
+        started,
+        Some(1),
+        "the driven member's own first start again"
+    );
+    let mut member = vm.client.member(&vm.id, &vm.claude).unwrap();
+    assert!(member.streams().unwrap().stdout.is_some());
     vm.client.delete(&vm.id).unwrap();
 }
 

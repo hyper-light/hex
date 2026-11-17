@@ -3157,6 +3157,31 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.resume(id)
     }
 
+    /// Shards' D270 slice 4: the box's runtime swaps its member's component, an image VM's its class's; its record is
+    /// unchanged, as a member's start again ends no run.
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.runtime_at(id)?.swap(id, at, digest, when)
+    }
+
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        self.runtime_at(id)?.restore(id, at, when)
+    }
+
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        self.runtime_at(id)?.components(id)
+    }
+
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         self.runtime
             .list()?

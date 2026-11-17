@@ -96,10 +96,17 @@ pub enum BoxKind {
     Pause,
     /// An image box's resume (`Call::Resume`; kiln plan P5.5b): answered once its VM lets its vCPUs go.
     Resume,
+    /// An image box's member given a component (`Call::Swap`; Shards' D270 slice 4): answered once its run host holds
+    /// it, and, now, once its member's next generation has started, which waits on its last's end.
+    Swap,
+    /// An image box's member given its image's own component back (`Call::Restore`): answered as a swap is.
+    Restore,
+    /// An image box's components (`Call::Components`): answered from what its node holds.
+    Components,
 }
 
 /// The box kinds' waits for one class ([`BoxKind`]).
-pub const BOX_KINDS: usize = BoxKind::Resume as usize + 1;
+pub const BOX_KINDS: usize = BoxKind::Components as usize + 1;
 
 /// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
 pub const CLASSES: usize = 4;
@@ -125,8 +132,8 @@ macro_rules! class_wait {
 
 /// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
 /// name per (kind, class)); `measuring` makes every one of them so. A member's take (joint plan step 17), a start
-/// followed to its end, a member's MCP connection and an image box's pause and resume (kiln plan P5.5b) have no census
-/// row for any class, so they measure in every table.
+/// followed to its end, a member's MCP connection, an image box's pause and resume (kiln plan P5.5b) and its components'
+/// swap, restore and read (Shards' D270 slice 4) have no census row for any class, so they measure in every table.
 macro_rules! class_waits {
     ($prefix:literal, $class:literal, measuring) => {
         $crate::calls::class_waits!(
@@ -161,6 +168,9 @@ macro_rules! class_waits {
             $crate::calls::class_wait!(concat!($prefix, ".mcp.", $class), measuring),
             $crate::calls::class_wait!(concat!($prefix, ".pause.", $class), measuring),
             $crate::calls::class_wait!(concat!($prefix, ".resume.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".swap.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".restore.", $class), measuring),
+            $crate::calls::class_wait!(concat!($prefix, ".components.", $class), measuring),
         ]
     };
 }
@@ -213,7 +223,10 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             | Call::Started(_)
             | Call::Mcp { .. }
             | Call::Pause(_)
-            | Call::Resume(_) => return None,
+            | Call::Resume(_)
+            | Call::Swap { .. }
+            | Call::Restore { .. }
+            | Call::Components(_) => return None,
         },
         Request::Release
         | Request::Taken
@@ -257,6 +270,9 @@ fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
         Call::Mcp { id, .. } => (BoxKind::Mcp, Timed::Box(id)),
         Call::Pause(id) => (BoxKind::Pause, Timed::Box(id)),
         Call::Resume(id) => (BoxKind::Resume, Timed::Box(id)),
+        Call::Swap { id, .. } => (BoxKind::Swap, Timed::Box(id)),
+        Call::Restore { id, .. } => (BoxKind::Restore, Timed::Box(id)),
+        Call::Components(id) => (BoxKind::Components, Timed::Box(id)),
         Call::List
         | Call::Netns
         | Call::Schedule(_)
@@ -2717,6 +2733,15 @@ impl<T: Transport> Core<T> {
         }
     }
 
+    /// A call whose answer is a swap's ([`Answer::Swapped`]; Shards' D270 slice 4).
+    fn swapped(&self, call: Call, name: &'static str) -> Result<hex_api::Swapped, Refusal> {
+        match self.plain(call)? {
+            Answer::Swapped(swapped) => Ok(swapped),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected(name, &other)),
+        }
+    }
+
     /// A call whose answer is a box's info.
     fn info(&self, call: Call, name: &'static str) -> Result<BoxInfo, Refusal> {
         match self.plain(call)? {
@@ -2983,6 +3008,8 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::CaptureAsk { .. } => "a sign-in's capture",
         Answer::RefreshAsk { .. } => "a sign-in's refresh",
         Answer::SignInRevoked { .. } => "a sign-in revoked",
+        Answer::Swapped(_) => "a swap's answer",
+        Answer::Components(_) => "a box's components",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -3353,6 +3380,48 @@ impl<T: Transport> Runtime for Core<T> {
     /// Kiln plan P5.5b: an image box's resume, carried by the node's wire's appended call (`Call::Resume`).
     fn resume(&self, id: &BoxId) -> Result<(), Refusal> {
         self.done(Call::Resume(id.clone()), "resume")
+    }
+
+    /// Shards' D270 slice 4: an image box's member given a component, carried by the node's wire's appended call
+    /// (`Call::Swap`), its refusals the node's own, typed.
+    fn swap(
+        &self,
+        id: &BoxId,
+        at: &str,
+        digest: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        let call = Call::Swap {
+            id: id.clone(),
+            at: at.to_owned(),
+            digest: digest.to_owned(),
+            when,
+        };
+        self.swapped(call, "swap")
+    }
+
+    /// Shards' D270 slice 4: an image box's member given its image's own component back (`Call::Restore`).
+    fn restore(
+        &self,
+        id: &BoxId,
+        at: &str,
+        when: hex_api::SwapWhen,
+    ) -> Result<hex_api::Swapped, Refusal> {
+        let call = Call::Restore {
+            id: id.clone(),
+            at: at.to_owned(),
+            when,
+        };
+        self.swapped(call, "restore")
+    }
+
+    /// Shards' D270 slice 4: an image box's components (`Call::Components`).
+    fn components(&self, id: &BoxId) -> Result<Vec<hex_api::ComponentAt>, Refusal> {
+        match self.plain(Call::Components(id.clone()))? {
+            Answer::Components(components) => Ok(components),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("components", &other)),
+        }
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {

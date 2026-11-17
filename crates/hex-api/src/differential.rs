@@ -713,6 +713,20 @@ fn kind(r: &Refusal) -> &'static str {
             crate::PauseCause::Ended => "Pause(Ended)",
             crate::PauseCause::Class(_) => "Pause(Class)",
         },
+        // Why a component's swap was refused is the contract's too (Shards' D270 slice 4), Shards' words beside it not.
+        Refusal::Swap { cause, .. } => match cause {
+            crate::SwapCause::Unknown => "Swap(Unknown)",
+            crate::SwapCause::Artifact => "Swap(Artifact)",
+            crate::SwapCause::Kind => "Swap(Kind)",
+            crate::SwapCause::Platform => "Swap(Platform)",
+            crate::SwapCause::Asks => "Swap(Asks)",
+            crate::SwapCause::Device => "Swap(Device)",
+            crate::SwapCause::Running => "Swap(Running)",
+            crate::SwapCause::Failed => "Swap(Failed)",
+            crate::SwapCause::NotRunning => "Swap(NotRunning)",
+            crate::SwapCause::Ended => "Swap(Ended)",
+            crate::SwapCause::Class(_) => "Swap(Class)",
+        },
     }
 }
 

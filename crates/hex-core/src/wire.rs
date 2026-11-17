@@ -49,18 +49,18 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, ControlWake, CredentialGrant, Destination,
-    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit,
-    GpuEligibility, Grant, GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember, ImageOs,
-    ImagePlatform, IoKind, IoRates, Learned, LearnedAwait, LearnedCeiling, LearnedEnd,
-    LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank, LearnedRate,
-    LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
+    ComponentAt, ConnectFailure, ConnectPhase, ConnectReply, ControlWake, CredentialGrant,
+    Destination, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution,
+    Exit, GpuEligibility, Grant, GuestEnd, GuestFailure, GuestTime, ImageArch, ImageMember,
+    ImageOs, ImagePlatform, ImageShare, IoKind, IoRates, Learned, LearnedAwait, LearnedCeiling,
+    LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedRank,
+    LearnedRate, LearnedReservations, LearnedUnacted, LearnedUnread, LearnedUnrecorded, LearnedUse,
     LearnedWindow, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
     MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, NodeVmPhase, NodeVmReceipt, OciSpec,
     PauseCause, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Published, RateHeld,
     Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage,
-    Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants, check_published,
-    check_sign_ins,
+    Signal, StartedFrom, SwapCause, SwapWhen, Swapped, Upstream, Usage, User, check_credentials,
+    check_grants, check_published, check_sign_ins,
 };
 
 use hex_api::lease::{Lease, LeaseRefused, SignInRefused, SignInTokens, Value};
@@ -204,6 +204,11 @@ mod kind {
     pub const MCP: u16 = 0x0021;
     pub const PAUSE: u16 = 0x0022;
     pub const RESUME: u16 = 0x0023;
+    pub const SWAP: u16 = 0x0024;
+    pub const RESTORE: u16 = 0x0025;
+    pub const COMPONENTS: u16 = 0x0026;
+    pub const SWAPPED: u16 = 0x8018;
+    pub const COMPONENTS_ANSWER: u16 = 0x8019;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -362,6 +367,25 @@ pub enum Call {
     /// Paused Shards image box `id`'s vCPUs let run its guest again (`Runtime::resume`; kiln plan P5.5b): answered
     /// [`Answer::Done`] once its VM lets them go, or refused by type. Appended.
     Resume(BoxId),
+    /// Running Shards image box `id`'s member at path `at` given the component of manifest digest `digest` its node's
+    /// store holds, at its next start or now (`Runtime::swap`; Shards' D270 slice 4): answered [`Answer::Swapped`], or
+    /// refused by type. Appended.
+    Swap {
+        id: BoxId,
+        at: String,
+        digest: String,
+        when: SwapWhen,
+    },
+    /// Running Shards image box `id`'s member at path `at` given its image's own component back (`Runtime::restore`):
+    /// answered [`Answer::Swapped`], or refused by type. Appended.
+    Restore {
+        id: BoxId,
+        at: String,
+        when: SwapWhen,
+    },
+    /// Shards image box `id`'s members' components (`Runtime::components`): answered [`Answer::Components`], or refused
+    /// by type. Appended.
+    Components(BoxId),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -485,6 +509,10 @@ pub enum Answer {
         sign_in: String,
         key: Option<[u8; 32]>,
     },
+    /// A swap's or a restore's ([`Call::Swap`], [`Call::Restore`]; Shards' D270 slice 4). Appended.
+    Swapped(Swapped),
+    /// A box's components' ([`Call::Components`]). Appended.
+    Components(Vec<ComponentAt>),
 }
 
 /// A peer's connection to the node over QUIC, as the node's own TLS negotiated it (docs/design/hex-quic.md Q12).
@@ -1356,8 +1384,52 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.string(sign_in)?;
             w.option(key.as_ref(), |w, key| w.raw(key));
         }
+        // Shards' D270 slice 4: every member's component, the generation a `Now` started, and the bytes it let go
+        // unread.
+        Answer::Swapped(swapped) => {
+            w.header(kind::SWAPPED, id);
+            w.list(&swapped.components, put_component)?;
+            w.option(swapped.started, Writer::u32);
+            w.u64(swapped.unread);
+        }
+        Answer::Components(components) => {
+            w.header(kind::COMPONENTS_ANSWER, id);
+            w.list(components, put_component)?;
+        }
     }
     w.done()
+}
+
+/// A member's component ([`ComponentAt`]; Shards' D270 slice 4): its path, then options of the digest its next start
+/// lays and of the one its current generation runs with.
+fn put_component(w: &mut Writer, component: &ComponentAt) -> Result<(), Fault> {
+    w.string(&component.at)?;
+    w.option_with(component.desired.as_deref(), Writer::string)?;
+    w.option_with(component.held.as_deref(), Writer::string)
+}
+
+fn component(r: &mut Reader<'_>) -> Result<ComponentAt, Fault> {
+    Ok(ComponentAt {
+        at: r.string("a component's path")?,
+        desired: r.option(|r| r.string("a component wanted"))?,
+        held: r.option(|r| r.string("a component held"))?,
+    })
+}
+
+/// When a swap takes its member ([`SwapWhen`]): its tag, by its place there (append-only).
+fn swap_when_tag(when: SwapWhen) -> u8 {
+    match when {
+        SwapWhen::NextStart => 0,
+        SwapWhen::Now => 1,
+    }
+}
+
+fn swap_when(r: &mut Reader<'_>) -> Result<SwapWhen, Fault> {
+    match r.u8()? {
+        0 => Ok(SwapWhen::NextStart),
+        1 => Ok(SwapWhen::Now),
+        t => Err(Fault::value("swap when", format!("variant {t}"))),
+    }
 }
 
 /// A retained refusal's canonical Answer envelope, id zero, without cloning its body.
@@ -1559,6 +1631,18 @@ fn parse_request(
         kind::START_FOLLOWED => Request::Call(Call::Started(box_id(&mut r).map_err(bad)?)),
         kind::PAUSE => Request::Call(Call::Pause(box_id(&mut r).map_err(bad)?)),
         kind::RESUME => Request::Call(Call::Resume(box_id(&mut r).map_err(bad)?)),
+        kind::SWAP => Request::Call(Call::Swap {
+            id: box_id(&mut r).map_err(bad)?,
+            at: r.string("a swap's path").map_err(bad)?,
+            digest: r.string("a swap's digest").map_err(bad)?,
+            when: swap_when(&mut r).map_err(bad)?,
+        }),
+        kind::RESTORE => Request::Call(Call::Restore {
+            id: box_id(&mut r).map_err(bad)?,
+            at: r.string("a restore's path").map_err(bad)?,
+            when: swap_when(&mut r).map_err(bad)?,
+        }),
+        kind::COMPONENTS => Request::Call(Call::Components(box_id(&mut r).map_err(bad)?)),
         kind::RESERVED => Request::Call(Call::Reserved(hex_api::Reserved {
             keeper: r.u64().map_err(bad)?,
             reserved: resources(&mut r).map_err(bad)?,
@@ -1893,6 +1977,12 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             sign_in: r.string("a revoked sign-in")?,
             key: r.option(|r| r.array::<32>())?,
         },
+        kind::SWAPPED => Answer::Swapped(Swapped {
+            components: r.list(component)?,
+            started: r.option(Reader::u32)?,
+            unread: r.u64()?,
+        }),
+        kind::COMPONENTS_ANSWER => Answer::Components(r.list(component)?),
         kind::GIVEN => {
             let pid = r.u32()?;
             let given = r.u8().and_then(Streams::of)?;
@@ -1996,6 +2086,9 @@ fn request_name(kind: u16) -> &'static str {
         kind::MCP => "an MCP connection",
         kind::PAUSE => "a pause",
         kind::RESUME => "a resume",
+        kind::SWAP => "a swap",
+        kind::RESTORE => "a restore",
+        kind::COMPONENTS => "a components",
         _ => "a request",
     }
 }
@@ -2074,6 +2167,30 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Resume(b) => {
             w.header(kind::RESUME, id);
+            w.string(b.as_str())
+        }
+        Call::Swap {
+            id: b,
+            at,
+            digest,
+            when,
+        } => {
+            w.header(kind::SWAP, id);
+            w.string(b.as_str())?;
+            w.string(at)?;
+            w.string(digest)?;
+            w.u8(swap_when_tag(*when));
+            Ok(())
+        }
+        Call::Restore { id: b, at, when } => {
+            w.header(kind::RESTORE, id);
+            w.string(b.as_str())?;
+            w.string(at)?;
+            w.u8(swap_when_tag(*when));
+            Ok(())
+        }
+        Call::Components(b) => {
+            w.header(kind::COMPONENTS, id);
             w.string(b.as_str())
         }
         Call::Reserved(word) => {
@@ -3609,8 +3726,9 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
 /// its variables, an option of its working directory (joint plan step 17), its run-time arguments (D256, after
 /// the working directory) and whether it asks an MCP bridge (Shards' D254, after its arguments), then its shares (kiln's step 18), each its host directory, where its guest sees it and
-/// whether read-only, as a mount's, then its credential grants (joint plan step 33, [`put_credentials`]). Fields a later
-/// step adds go after the credentials (append-only).
+/// whether read-only, as a mount's, and whether its files may be run from it (Shards' D279, after read-only), then its
+/// credential grants (joint plan step 33, [`put_credentials`]). Fields a later step adds go after the credentials
+/// (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
@@ -3632,6 +3750,7 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
         w.path(&m.source)?;
         w.string(&m.destination)?;
         w.bool(m.read_only);
+        w.bool(m.exec);
         Ok(())
     })?;
     put_credentials(w, &image.credentials, &image.grants)?;
@@ -3653,10 +3772,11 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
             })
         })?,
         shares: r.list(|r| {
-            Ok(Mount {
+            Ok(ImageShare {
                 source: r.path()?,
                 destination: r.string("share destination")?,
                 read_only: r.bool("read_only")?,
+                exec: r.bool("exec")?,
             })
         })?,
         credentials: Vec::new(),
@@ -4345,7 +4465,53 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             put_pause_cause(w, *cause);
             Ok(())
         }
+        // Shards' D270 slice 4: a call refused for its box's components, after every older refusal.
+        Refusal::Swap { id, op, cause, why } => {
+            w.u8(18);
+            w.string(id.as_str())?;
+            w.string(op)?;
+            put_swap_cause(w, *cause);
+            w.option_with(why.as_deref(), Writer::string)
+        }
     }
+}
+
+/// Why a box's components refused a call ([`Refusal::Swap`]): its tag, by its place in [`SwapCause`] (append-only), then
+/// a class refusal's class.
+fn put_swap_cause(w: &mut Writer, cause: SwapCause) {
+    match cause {
+        SwapCause::Unknown => w.u8(0),
+        SwapCause::Artifact => w.u8(1),
+        SwapCause::Kind => w.u8(2),
+        SwapCause::Platform => w.u8(3),
+        SwapCause::Asks => w.u8(4),
+        SwapCause::Device => w.u8(5),
+        SwapCause::Running => w.u8(6),
+        SwapCause::Failed => w.u8(7),
+        SwapCause::NotRunning => w.u8(8),
+        SwapCause::Ended => w.u8(9),
+        SwapCause::Class(class) => {
+            w.u8(10);
+            w.u8(class_tag(class));
+        }
+    }
+}
+
+fn swap_cause(r: &mut Reader<'_>) -> Result<SwapCause, Fault> {
+    Ok(match r.u8()? {
+        0 => SwapCause::Unknown,
+        1 => SwapCause::Artifact,
+        2 => SwapCause::Kind,
+        3 => SwapCause::Platform,
+        4 => SwapCause::Asks,
+        5 => SwapCause::Device,
+        6 => SwapCause::Running,
+        7 => SwapCause::Failed,
+        8 => SwapCause::NotRunning,
+        9 => SwapCause::Ended,
+        10 => SwapCause::Class(class(r)?),
+        t => return Err(Fault::value("swap cause", format!("variant {t}"))),
+    })
 }
 
 /// Where a box's pause stands ([`Refusal::Pause`]): its tag, by its place in [`PauseCause`] (append-only), then a class
@@ -4586,6 +4752,12 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
             id: box_id(r)?,
             op: name(&r.string("refusal name")?)?,
             cause: pause_cause(r)?,
+        },
+        18 => Refusal::Swap {
+            id: box_id(r)?,
+            op: name(&r.string("refusal name")?)?,
+            cause: swap_cause(r)?,
+            why: r.option(|r| r.string("swap refusal reason"))?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
