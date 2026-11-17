@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `f74f8e3efd6628b81ff7b8cdcd2af2d608efdd86` (main).
+Revision: `85cecd75bb6d7b01520afd2ef9796e05fe770e8b` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -186,13 +186,24 @@ AF_UNIX path shards-afunix refuses says which and why, where a bare InvalidInput
 (a982c9be0, D276 amended); shards-testdir says each panic of a test process on stderr as it happens
 (c0c852156); and remote's loopback test goes on past Winsock's WSAECONNRESET (d1b1e1412).
 
-Past 04481e36b this revision, the candidate for Shards' v0.8.0 tag, still speaks image channel 51,
-and no file Hex takes changes a type, a signature or a dependency Hex reads: shards-afunix tells
+Past 04481e36b, f74f8e3ef (once the tag's candidate) still spoke image channel 51, and no file
+Hex takes changed a type, a signature or a dependency Hex reads: shards-afunix tells
 every AF_UNIX socket its directory by afunix.h's parent-path controls, its address its file name
 alone, so a socket beneath a long path works on Windows (0e7773c19); a process has exited only once
 its whole thread group has, a Linux zombie leader with threads left counted as living (26942ced5,
 shards-ipc and the API's `taken`); and D215's judge refuses a party by its rate only once two
 answers have taught it, `Rated` counting them (`answers`, 739907a94), a type Hex names nowhere.
+
+Past f74f8e3ef this revision, Shards' main as its v0.8.0 tag nears, still speaks image channel 51
+and changes one call Hex makes: a VM's AppContainer profile records are kept per user, beside the
+profiles in the user's own LocalAppData, where they were in the VM's cache (D141 amended, 1c155368a),
+so `shards_api::release_app_containers` takes the VM's identity and its end alone and
+`app_container_records` says where the records are; Hex's Windows-managed receipt keeps no runtime
+paths for it (de5ee7490). Beside it: a confined child is given the LOCALAPPDATA its profile's folder
+is beneath (c3ae0c61d; shards-ipc takes windows-sys's `Win32_System_Environment` for it, a feature, so
+Cargo.lock is unchanged); a bind or connect shards-afunix refuses says its path and its call
+(08bfe4176); and the judge's `LOOKS_TO_REFUSE` and `Judge::refused_within` bound a still party by its
+rule (85cecd75b), which Hex calls nowhere.
 
 ## Recorded changes
 
