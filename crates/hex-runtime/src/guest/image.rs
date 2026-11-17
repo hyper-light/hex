@@ -40,7 +40,8 @@ use shards_api::control::{
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats, StatsScope,
+    MemberEnd, MemberName, MemberSpec, NetRefusal, PlugFor, RunEnd, RunEnded, Secret, Stats,
+    StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -165,11 +166,14 @@ impl Control {
         Ok(identity)
     }
 
-    /// What every run asks of its agent-control endpoint: this class's key alone, and no lane to its command's sockets.
+    /// What every run asks of its agent-control endpoint: this class's key alone, no lane to its command's sockets, and
+    /// its members' stdio not served as its lanes (Shards' D252, image channel v44): a driven member's streams are taken
+    /// from the run ([`ImageClass::member_image`]).
     fn ask(&self) -> Result<ControlAsk, Refusal> {
         Ok(ControlAsk {
             controller: self.identity()?.fingerprint(),
             sockets: None,
+            stdio: false,
         })
     }
 
@@ -832,12 +836,28 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             "Shards refused {op}: a warm host reserved for pool {reserved} booted a spec of {asked:?}"
         )),
         // A run's network (D269), refused at its start's binds or its image's narrowing: a port the host won't bind is
-        // the host's, every other the spec's.
-        ImageRefusal::Net(shards_api::image::NetRefusal::Bind, why) => Refusal::Os {
+        // the host's, every other the spec's. A member's own reach (D278) and its grants on a network shared by runs
+        // (D285) are refused so too, and this class changes neither: the spec's, by kind.
+        ImageRefusal::Net(NetRefusal::Bind, why) => Refusal::Os {
             op,
             why: format!("binding the run's published port: {why}"),
         },
-        ImageRefusal::Net(kind, why) => Refusal::Invalid {
+        ImageRefusal::Net(
+            kind @ (NetRefusal::NoNetwork
+            | NetRefusal::Widening
+            | NetRefusal::Unknown
+            | NetRefusal::Network
+            | NetRefusal::Image
+            | NetRefusal::Unheld
+            | NetRefusal::NoSuchNetwork
+            | NetRefusal::NameTaken
+            | NetRefusal::Exhausted
+            | NetRefusal::PairedElsewhere
+            | NetRefusal::Ipv6
+            | NetRefusal::Grant
+            | NetRefusal::Overlaps),
+            why,
+        ) => Refusal::Invalid {
             what: "shards image's network",
             why: format!("{kind:?}: {why}"),
         },
@@ -865,6 +885,25 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
                 "its admitted disk, {bound} bytes, is short of the {tail} bytes of its run host's diagnostics Shards \
                  keeps to quote a run's end"
             ),
+        },
+        // Only a member's restart or a component's swap (D270) is refused so, and this class asks neither.
+        ImageRefusal::Restart(cause, why) => Refusal::Broken(format!(
+            "Shards refused {op} as a member's restart ({cause:?}): {why}"
+        )),
+        ImageRefusal::Swap(cause, why) => Refusal::Broken(format!(
+            "Shards refused {op} as a component's swap ({cause:?}): {why}"
+        )),
+        // A member's working directory its guest could not enter as it started (D277), so none of the run's members
+        // ran: the spec's, in its run host's words (the member, the directory and the errno).
+        ImageRefusal::Workdir(why) => Refusal::Invalid {
+            what: "shards image",
+            why: format!("a member's working directory: {why}"),
+        },
+        // Its run host's budget had no room for the run's agent-control endpoint or its members' first stdio lanes,
+        // charged before its members start (D252): none ran, and the run may boot once that host has room.
+        ImageRefusal::Capacity(why) => Refusal::Os {
+            op,
+            why: format!("the run host's budget had no room for the run's lanes: {why}"),
         },
     }
 }
@@ -1109,6 +1148,10 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
     }
 }
 
+/// A member's first generation (Shards' D270: 0 its first, each restart's one more), whose streams and end a driven
+/// member's are: this class restarts and swaps none.
+const FIRST_GENERATION: u32 = 0;
+
 /// A member as Shards' image boot names it.
 fn member_name(m: &Member) -> MemberName {
     match m.kind {
@@ -1133,6 +1176,21 @@ struct MemberProc {
     ended: Option<Exit>,
 }
 
+impl MemberProc {
+    /// The end of a member that ended with its run, `end` its run's: its exit; or, where the run failed (its VM, its
+    /// host or its guest, or its own command never started: D249), its run's refusal in its runtime's words, as the box's
+    /// start says it (`Refusal::Failed`), rather than an unknown exit that drops them (kiln P2.3's "exited -1").
+    fn with_run(&self, end: &RunEnd) -> Result<Exit, Refusal> {
+        match end {
+            RunEnd::Failed(why) => Err(Refusal::Failed {
+                id: self.id.try_clone()?,
+                why: why.clone(),
+            }),
+            RunEnd::Exited(_) | RunEnd::Stopped => Ok(exit_of(end)),
+        }
+    }
+}
+
 impl Proc for MemberProc {
     /// D231 names no member's pid in its guest: none is told.
     fn pid(&self) -> u32 {
@@ -1151,7 +1209,10 @@ impl Proc for MemberProc {
         if let Some(exit) = self.ended {
             return Ok(Some(exit));
         }
-        let exit = match self.guest.wait_member(&self.name, timeout) {
+        let exit = match self
+            .guest
+            .wait_member(&self.name, FIRST_GENERATION, timeout)
+        {
             Ok(None) => return Ok(None),
             Ok(Some(MemberEnd::Exited(code))) => {
                 i32::try_from(code).map_or(Exit::Unknown, Exit::Code)
@@ -1161,12 +1222,14 @@ impl Proc for MemberProc {
             Ok(Some(MemberEnd::Signaled(signal))) => {
                 i32::try_from(signal).map_or(Exit::Unknown, Exit::Signal)
             }
+            // Ended at once by its restart (D270), every process of it killed: KILL's end. This class restarts none.
+            Ok(Some(MemberEnd::Killed)) => Exit::Signal(Signal::KILL.number()),
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
-                Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
+                Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => self.with_run(&ended.end)?,
                 Ok(None) | Err(_) => Exit::Unknown,
             },
-            Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
+            Err(ImageRefusal::Ended(ended)) => self.with_run(&ended.end)?,
             Err(why) => return Err(refused(&self.id, "waiting for a member's end", why)),
         };
         self.ended = Some(exit);
@@ -1979,6 +2042,13 @@ impl ImageClass {
                     host: m.source.clone(),
                     at: m.destination.clone(),
                     read_only: m.read_only,
+                    // Its files run from it, as every share's did before Shards' D279 (image channel v41): a box's
+                    // share names no `noexec`.
+                    exec: true,
+                    // Its member scope (Shards' D277, image channel v37; P1.4): the members it names given it as they
+                    // start, each where it is seen in its own root; none, the run's own root alone, as before.
+                    members: (!m.members.is_empty())
+                        .then(|| PlugFor::Members(m.members.iter().map(member_name).collect())),
                 })
                 .collect(),
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
@@ -2006,6 +2076,9 @@ impl ImageClass {
             // No plug root (Shards' D271, image channel v35): its shares are the start's, and nothing is plugged
             // into its run as it runs.
             plug_roots: Vec::new(),
+            // No member's reach past its image's grants (Shards' D278, image channel v39): its grants are the start's,
+            // and this class changes no member's reach as it runs.
+            egress_ceiling: Vec::new(),
         })
     }
 
@@ -2735,18 +2808,20 @@ impl ImageClass {
         };
         let name = member_name(member);
         let stdin = guest
-            .take_input(&name)
+            .take_input(&name, FIRST_GENERATION)
             .map_err(|why| refused(&id, "taking a member's stdin", why))?;
         let stdout = guest
-            .take_output(&name, Channel::Stdout)
+            .take_output(&name, FIRST_GENERATION, Channel::Stdout)
             .map_err(|why| refused(&id, "taking a member's stdout (its stdin taken)", why))?;
-        let stderr = guest.take_output(&name, Channel::Stderr).map_err(|why| {
-            refused(
-                &id,
-                "taking a member's stderr (its stdin and stdout taken)",
-                why,
-            )
-        })?;
+        let stderr = guest
+            .take_output(&name, FIRST_GENERATION, Channel::Stderr)
+            .map_err(|why| {
+                refused(
+                    &id,
+                    "taking a member's stderr (its stdin and stdout taken)",
+                    why,
+                )
+            })?;
         let given = Given {
             stdin: Some(stdin.into()),
             stdout: Some(stdout.into()),

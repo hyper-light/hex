@@ -748,7 +748,17 @@ pub trait Guest: Send + Sync {
 }
 ```
 
-**On Windows the stream must be Shards' overlapped AF_UNIX socket.** Hex's guest client reads on one thread while
+**On Windows the stream is two named pipes since Shards' D272** (S4, `0bef06525`; vendored at `f1e8a097b`): a way
+down Hex reads and a way up it writes, `shards_api::Handle` the way down's pipe and `OwnedSocket` both ways' handles.
+Neither the client's readiness waits (`WSAPoll`) nor the node's completion port (Winsock's events on a socket) waits on
+a pipe, so on Windows `hex_client::guest::shards` bridges a connection the client waits on (the control connection,
+the files and stamps ports) to a local socket pair, two threads copying through the stream's shared reads and writes,
+as a node VM's lanes are bridged, and carries an exec's stream on a pipe whose end is its caller's, one thread a
+stream (`Link::dial_piped`; and the caller's own CONNECTs, HEX-RT-17's offer), as a node VM's lanes carry one. Hex's
+`Handle` stays a socket on Windows, its own type. A completion-port wait on a pipe (a zero-byte overlapped read) would
+retire the control connection's bridge. Before D272, as follows, the stream was Shards' overlapped AF_UNIX socket.
+
+**On Windows the stream had to be Shards' overlapped AF_UNIX socket.** Hex's guest client reads on one thread while
 others write on the same connection, and a Winsock socket made without `WSA_FLAG_OVERLAPPED` (`socket2` 0.6's,
 `src/sys/windows.rs:253-265`) serializes them (Shards `crates/afunix/src/lib.rs:63`: "same connection, by any of
 its handles, 2.9-3.9 s in M207's runs, where an overlapped"). A receive timed out by `SO_RCVTIMEO` leaves the

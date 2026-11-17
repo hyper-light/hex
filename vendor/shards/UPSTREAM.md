@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `9975d1f551f8210a08fb744a04250767c72ead34` (main).
+Revision: `f1e8a097b9726b8d8d512a1d5d2c9eacb3b279e1` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -132,6 +132,40 @@ the API's and shards-afunix's tests include by path at this revision (`crates/ap
 `crates/afunix/src/lib.rs`), and `docs/research/measurements/borrowed-no-clock/focused.rs`, which
 `managed-borrowed-nowait/focused.rs` includes for the tests of the borrowed connect with no clock
 (9156058fb).
+
+Past 9975d1f55 (image channel 36) this revision speaks image channel 51, and Hex's node takes what it
+adds: a share given to members as they start, beside the run's own root (D277, 325457a88:
+`ImageShare::members`, version 37), which Hex passes from a share's own member scope
+(`hex_api::Mount::members`); a member's working directory its guest could not enter refused typed as
+its members start (D277 amended, f84089c9f, 806841601: `ImageRefusal::Workdir`, versions 42 and 43,
+told to `ImageGuest::wait_member`); a member's generations, started again in its running microVM, and
+a component swapped into it by digest or its image's back (D270 slices 3b and 4, 5be1ca21a,
+c0aee1b38, 600ab556d, c91fe3614: `ImageGuest::restart`, `swap`, `restore` and `components`,
+`RestartRefusal`, `SwapRefusal`, `SwapWhen`, `Swapped`, `MemberEnd::Killed`, versions 38, 40, 45, 46,
+48 and 49), every member stream and end now named by its generation, 0 its first: Hex restarts and
+swaps none, so its members' streams and ends are their first generation's; each member's own reach
+past its microVM within its ceiling (D278, f6e0b057b, 3f6734697: `ImageGuest::member_egress`,
+`ImageSpec::egress_ceiling`, version 39) and a member's grants on a network shared by runs (D285
+slices 4 to 6, 94b5276d8, 57f1e6a39, 4348c8c1b: `ImageGuest::connect`, `disconnect`,
+`shards_api::networks`, version 50), neither of which Hex asks yet, their refusals typed
+(`NetRefusal::Unheld`, `NoSuchNetwork`, `NameTaken`, `Exhausted`, `PairedElsewhere`, `Ipv6`, `Grant`,
+`Overlaps`); whether a share's or a plug's files may be run (D279, f17b8fb77: `ImageShare::exec`,
+`Plug::exec`, version 41), which Hex leaves as every share was before, run from; its members' stdio
+served as lanes of its agent-control endpoint where its control asks it (D252, 10c82ef2c:
+`ControlAsk::stdio`, version 44, `shards_api::control::member_output` and `member_input`), which Hex
+does not ask, taking its driven members' stdio from the run as before; its run host's budget holding
+its endpoint's link and its members' first stdio lanes, a run it has no room for refused before its
+members start (D252, d8935aca1, 32b27e6c3, 3c76f6c05: `ImageRefusal::Capacity`, version 51); a volume
+plugged with a bound, and a home's volumes listed and cleared (D281, 4a5178d9a, d704727d5, a3025e473:
+`PlugSource::Volume { name, bound }`, `PlugRefusal::Bound` and `Clearing`, versions 47 and 49,
+`shards_api::volumes`), of which Hex plugs and lists none yet; the agent-control endpoint's report of
+every lane its controller was granted, MCP bridges among them (D254 amended, f99a3900b:
+`Linked::report`, `LinkReport`, ALPN `shards-control/2`; `Dialed::lanes` gone), which Hex reads
+nowhere yet; a name no grant reaches answered NXDOMAIN at once (D46, 4348c8c1b: `shards_dns::denied`,
+which was `refused`), which Hex calls nowhere; and on Windows a guest's vsock connection on two named
+pipes, its way down opened first (D272 S4, 0bef06525: `Stream::handle` the way down's pipe,
+`OwnedSocket` both ways' handles), which Hex's Windows client bridges to a local socket pair, as it
+bridges a node VM's lanes, since its readiness waits and its node's completion port wait on sockets.
 
 ## Recorded changes
 
