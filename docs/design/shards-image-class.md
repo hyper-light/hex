@@ -275,8 +275,57 @@ harness member's):
 
 What D234 to D236 add is asked for as Hex holds it: no nesting grant (`nesting: false`, no `ready_by`: no harness
 is a nested runtime, step 39's), the destinations a box's grants name kept and each member held to its own reach
-(network-grants.md N4), and a plug's refusal, which only a plug's call could bring and this class makes none,
-refused `Broken`, naming it.
+(network-grants.md N4), and D235's plugs, D271's, for the volumes its spec gives its members alone, as its run starts
+(§2a), each refusal typed by what refused it.
+
+## 2a. Volumes (kiln plan 01a1dd2e…, P6.2; Shards' D271, D281)
+
+An agent's volumes are kept on its machine across its sessions: each a named volume of the node's Shards home (the
+store its run hosts' `SHARDS_HOME` names), made empty where it isn't there and kept past the run, so the next run
+given it finds what the last one left. Status, 2026-11-16: built against Shards `f1e8a097b` (image channel v51,
+`shards api-volumes` answers v3), written and unit-tested over the model and the simulator, not run (§8).
+
+- **The spec.** `ShardsImage::volumes`, each an `ImageVolume`: its name in the store (its grammar Shards'); its bound
+  in bytes, at least one; where its members see it (`at`): absolute, plain and strictly beneath a top-level
+  directory, at no share's or other volume's place; the members it is plugged into, each named once, at least one;
+  and whether read-only. `ShardsImage::check` refuses each by its field (`volumes[i].…`). The node's wire carries them
+  after the sign-ins, a bound of 0 refused as it is read.
+- **Its plug roots, granted at start.** A member's domain is given every right beneath its roots as it starts and none
+  later (D271: Landlock only narrows), so the run is granted, as `ImageSpec::plug_roots`, the top-level directory of
+  each volume's place, each once, and no other. A place beneath a directory its guest keeps its own (`/proc`, `/sys`,
+  `/dev`, `/tmp`, `/etc`, `/run`, as Shards' `shards_abi::run::plug::root_name` says) is refused at create.
+- **Plugged as its run starts.** On the boot's thread, once the run has started and its diagnostics are kept (§1),
+  each volume is plugged in the spec's order (`ImageGuest::plug`: `PlugSource::Volume { name, bound }`,
+  `PlugFor::Members`, its files runnable as every share's are, D279), before the boot answers: no call takes the run,
+  nor a member's streams, before its volumes are in place. Each plug waits for its run host's answer or the run's
+  end, as the boot does, the boot's learned wait following it (§6). The first refused stops the run (D231's stop, to
+  its end) and refuses the boot in Shards' words, its box ended with them, as any refused boot's is (§3).
+- **Admission.** A volume's bound is drawn from the disk its box was admitted with (its allocation's `disk_bytes`,
+  kiln's `Isolation::disk`): its volumes' bounds together within it, else its create is refused `Invalid` before
+  anything is made. Its run host's diagnostics (§1) are held within what they leave, so every byte the box may write
+  on its node's disk is charged to it once; a box whose volumes take all of it holds its diagnostics within Shards'
+  tail, as one admitted with no disk does (§1). Shards holds each bound as the files are written (D281: ENOSPC past
+  it). What a volume holds already is on its node's disk outside any box, its node's free room short of it: an
+  admission that counts it reads it, with its bound and its charge, through `Runtime::volumes`, a page's or an
+  admission's cost, never a start's (D281: each listing walks every volume's files).
+- **Listing.** `Runtime::volumes()` answers every volume of the home as `shards api-volumes list` reads it
+  (`shards_api::volumes::volumes`: the class's own `shards` in the class's home): its name, the bytes its files take,
+  its bound, its charge by its bound's measure, when it was made, and whether it is a run's anonymous one, which is no
+  agent's. Served in process, by the class, `hex-node`'s `ImageRuntime` (kiln's) and the simulator; the node's wire
+  doesn't carry it.
+- **Clearing.** `Runtime::clear_volume(name)` removes it with its files (`shards_api::volumes::clear_volume`), so the
+  next run given it finds it empty. Whether a run holds it is Shards' to say: each run that plugs or mounts it, an
+  image box's or a daemon's, holds its lock from its plug to its end (D281's P6-fix), so a box created and not yet
+  started holds nothing, and its start's plug then makes the volume anew. Hex keeps no record of holders beside
+  Shards' locks.
+- **Refusals** (Shards' R04), each by its retry: `Refusal::Volume { cause, why }`, in Shards' words, which name the
+  volume. `Bound`: a start asked it with another bound than the runs holding it serve it with, which changes only once
+  none does. `Clearing`: a clearing holds it; asked again once that has answered, it is made anew, empty. `InUse`: a
+  clearing of one a run holds, its files kept. `Unknown`: a clearing of one the home has none of. A plug's other
+  refusals: the spec's (`Request`, `Member`, `Outside`, `Taken`, `Volume`) `Invalid`; its host's and its microVM's
+  (`Host`, `Device`) `Os`; an unplug's (`Unknown`, `Busy`) the class's own fault, `Broken`, as it unplugs nothing. A
+  clearing's others: a name the store takes none by `Invalid`; files not all removed, and a `shards` that didn't
+  start, answered no frame or answered another version, `Os`.
 
 `RunEnd` becomes the box's exit as Shards reports it: `Exited(status)` is `Exit::Code(status)` (`docker run`'s
 status, 128 plus a signal's number where one ended it, kept as the number it is rather than guessed back into a
@@ -373,7 +422,7 @@ image box: `ImageWaits::new` measures from nothing.
 
 | Wait | What it waits for | Its party |
 |---|---|---|
-| `hex.image.boot` | `Images::boot`'s answer: the run started, or the refusal | the boot's thread, D231's run host |
+| `hex.image.boot` | `Images::boot`'s answer: the run started, its volumes plugged (§2a), or the refusal | the boot's thread, D231's run host |
 | `hex.image.stats` | `stats(Run)`'s answer | the run |
 | `hex.image.stop` | `stop`'s return: its run released, its end told, its run host and every process it started gone (Shards `2737fc4ec`) | the stop's thread, the run host |
 | `hex.image.delete_boot` | a delete's ask to the boot of the box it deletes answering, its run started or its host ended (§3) | the boot's thread |
@@ -444,6 +493,11 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   that carries one, the scheduler deriving it), and no route carries an image VM. It admits them once the class has a
   route and a per-box cost of its own (its envelope from Shards' `envelope`, census-free by decision 9), each with its
   evidence, and its payloads are checked without the allocation the scheduler then derives.
+- **Volumes (§2a), real-VM runs** (ROOT, KVM, HVF and WHP, at Hex's vendor point of Shards `f1e8a097b` or later): a
+  box given a volume writes a file there and the next box given it reads it; a write past its bound refused ENOSPC; a
+  start refused `Volume { Bound }` while another box holds it with another bound; its clearing refused
+  `Volume { InUse }` while a box holds it, then its files gone once none does. The node's wire carries no listing or
+  clearing yet (`Runtime::volumes`, `clear_volume`): in process alone.
 
 ## 9. What would falsify it
 
@@ -453,6 +507,10 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 - A digest-pinned image Shards' store cannot find whatever it is named (then pinning needs the name too).
 - A run host found holding a descriptor or handle it was not given (then D248's spawn is not enough, and the
   macOS and Windows creates wait again).
+- A volume a running box holds that a clearing removes (then Shards' holds are not the authority on its holders, and
+  Hex keeps a record of its own boxes' beside them, §2a).
+- A box whose volumes and diagnostics together take more of its node's disk than it was admitted with, past Shards'
+  diagnostics tail (then the bounds are not drawn from its admission, §2a).
 
 ## 10. Warm pools (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1)
 

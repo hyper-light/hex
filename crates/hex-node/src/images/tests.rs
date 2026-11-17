@@ -757,3 +757,102 @@ fn p3_1_an_image_runtime_keeps_warm_pools_once_its_owner_binds_their_room() {
         }])
     );
 }
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1; Shards' D281): a person sees an agent's volumes and clears one through the
+/// runtime kiln holds, which asks its own `shards` binary in its own Shards home, as it starts its run hosts. Do list
+/// the home's volumes and clear two through a runtime whose `shards` answers as `shards api-volumes` does, in that home
+/// alone: the listing two volumes, an agent's and a run's anonymous one, the clearing of one a run holds refused, of
+/// another done. Expect both listed whole, by name, bytes, bound, charge, time and kind; the held one refused `Volume {
+/// InUse }` in Shards' words; the other cleared.
+#[cfg(unix)]
+#[test]
+fn p6_2_a_homes_volumes_are_listed_and_cleared_through_its_own_shards() {
+    use shards_api::volumes::{ClearCause, HomeVolume as Listed, cleared, listed};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+        .unwrap()
+        .home()
+        .to_owned();
+    let volumes = vec![
+        Listed {
+            name: "kiln-agent-cache".to_owned(),
+            bytes: Some(3 << 20),
+            bound: Some(1 << 30),
+            charge: Some((3 << 20) + (4 << 10)),
+            created_ns: 1_794_712_180_000_000_000,
+            anonymous: false,
+        },
+        Listed {
+            name: "0f".repeat(32),
+            bytes: None,
+            bound: None,
+            charge: None,
+            created_ns: 0,
+            anonymous: true,
+        },
+    ];
+    let held = "volume kiln-agent-cache is held by a run that plugged it";
+    // Each frame as printf(1) writes its bytes back.
+    let printf = |frame: Vec<u8>| {
+        let octal: String = frame.iter().map(|b| format!("\\{b:03o}")).collect();
+        format!("printf '{octal}'")
+    };
+    let script = format!(
+        "#!/bin/sh\n\
+         [ \"$1\" = api-volumes ] && [ \"$SHARDS_HOME\" = '{}' ] || exit 9\n\
+         case \"$2\" in\n\
+         list) {} ;;\n\
+         clear) [ \"$3\" = kiln-agent-cache ] && {} || {} ;;\n\
+         esac\n",
+        home.display(),
+        printf(listed(&volumes).unwrap()),
+        printf(cleared(&Err((ClearCause::InUse, held.to_owned()))).unwrap()),
+        printf(cleared(&Ok(())).unwrap()),
+    );
+    std::fs::write(dir.path().join("shards"), script).unwrap();
+    std::fs::set_permissions(
+        dir.path().join("shards"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let images = runtime(dir.path(), &Arc::new(Model::default()));
+    let seen: Vec<_> = images
+        .volumes()
+        .unwrap()
+        .into_iter()
+        .map(|v| {
+            (
+                v.name,
+                v.bytes,
+                v.bound,
+                v.charge,
+                v.created_ns,
+                v.anonymous,
+            )
+        })
+        .collect();
+    let asked: Vec<_> = volumes
+        .into_iter()
+        .map(|v| {
+            (
+                v.name,
+                v.bytes,
+                v.bound,
+                v.charge,
+                v.created_ns,
+                v.anonymous,
+            )
+        })
+        .collect();
+    assert_eq!(seen, asked);
+    assert_eq!(
+        images.clear_volume("kiln-agent-cache"),
+        Err(Refusal::Volume {
+            cause: hex_api::VolumeCause::InUse,
+            why: held.to_owned()
+        })
+    );
+    assert_eq!(images.clear_volume("kiln-agent-notes"), Ok(()));
+}

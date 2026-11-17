@@ -97,6 +97,15 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   that runs on its own lane, a member's own kill too, and a member asking an MCP bridge (D254) is asked of its run.
   One member's own signal (`Runtime::signal_member`) rides its lane alone, in process and over the node's wire
   (`Call::MemberSignal`, appended), which a remote member's kill rides too.
+  A box's volumes (`ShardsImage::volumes`; kiln plan 01a1dd2e…, P6.2; Shards' D271 and D281, at Hex's vendor point of
+  Shards `f1e8a097b`): each plugged into the members it names as its run starts, by its name in the node's Shards home
+  and with its bound, beneath its top-level directory, the plug root its run is granted, before its boot answers; their
+  bounds drawn from the disk its box was admitted with, its diagnostics held within what they leave; a volume other
+  runs hold with another bound, or one a clearing holds, refuses the start typed (`Refusal::Volume`). The home's
+  volumes are listed and cleared through `shards_api::volumes` (`Runtime::volumes`, `Runtime::clear_volume`: in
+  process, the class, `ImageRuntime` and the simulator; not on the node's wire), a held one refused
+  `Volume { InUse }`. Built, its tests written and none run yet: closes with those and its runs on KVM, HVF and WHP
+  (ROOT's, shards-image-class.md §8).
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
