@@ -2121,6 +2121,39 @@ fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
     );
 }
 
+/// kiln P2.3 (AC-T7.4.1): a member its caller drives whose run failed (in its run host's or its VM's words, Shards'
+/// D249) ends in those words, never an unknown exit that drops them. Do: take a driven member of a running VM; have its
+/// run fail, the member ending with it. Expect its wait refused `Failed`, naming its box and the run's words.
+#[test]
+fn p23_a_member_whose_run_failed_ends_in_its_runs_words() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let codex = Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    };
+    let mut boxed = spec("image-member-failed", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.members.push(ImageMember::new(codex.clone()));
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    runtime.start(&id).unwrap();
+    let mut proc = runtime.member(&id, &codex).unwrap();
+    images
+        .run
+        .member_ends
+        .lock()
+        .unwrap()
+        .insert("codex".to_owned(), MemberEnd::WithRun);
+    let words = "Setup (entering its working directory): errno 2";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    let ended = proc.wait_for(Duration::ZERO);
+    assert!(
+        matches!(&ended, Err(Refusal::Failed { id: failed, why }) if *failed == id && why == words),
+        "{ended:?}"
+    );
+}
+
 /// Shards' #72 (image channel v27, `MemberEnd::Signaled`): a member's end is typed, a signal that killed it its own end
 /// beside its exit, never folded into the status `docker run` reports (128 plus its number), which an exit can be too.
 /// Do: take four members of a running VM; have one killed by TERM, one by KILL, one exit 143, and one ended at once by

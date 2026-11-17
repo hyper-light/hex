@@ -1176,6 +1176,21 @@ struct MemberProc {
     ended: Option<Exit>,
 }
 
+impl MemberProc {
+    /// The end of a member that ended with its run, `end` its run's: its exit; or, where the run failed (its VM, its
+    /// host or its guest, or its own command never started: D249), its run's refusal in its runtime's words, as the box's
+    /// start says it (`Refusal::Failed`), rather than an unknown exit that drops them (kiln P2.3's "exited -1").
+    fn with_run(&self, end: &RunEnd) -> Result<Exit, Refusal> {
+        match end {
+            RunEnd::Failed(why) => Err(Refusal::Failed {
+                id: self.id.try_clone()?,
+                why: why.clone(),
+            }),
+            RunEnd::Exited(_) | RunEnd::Stopped => Ok(exit_of(end)),
+        }
+    }
+}
+
 impl Proc for MemberProc {
     /// D231 names no member's pid in its guest: none is told.
     fn pid(&self) -> u32 {
@@ -1211,10 +1226,10 @@ impl Proc for MemberProc {
             Ok(Some(MemberEnd::Killed)) => Exit::Signal(Signal::KILL.number()),
             // Its run ended first, and the member with it: the run's end is its own.
             Ok(Some(MemberEnd::WithRun)) => match self.guest.wait_for(Duration::ZERO) {
-                Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
+                Ok(Some(ended)) | Err(ImageRefusal::Ended(ended)) => self.with_run(&ended.end)?,
                 Ok(None) | Err(_) => Exit::Unknown,
             },
-            Err(ImageRefusal::Ended(ended)) => exit_of(&ended.end),
+            Err(ImageRefusal::Ended(ended)) => self.with_run(&ended.end)?,
             Err(why) => return Err(refused(&self.id, "waiting for a member's end", why)),
         };
         self.ended = Some(exit);
