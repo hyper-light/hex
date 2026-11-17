@@ -3133,6 +3133,10 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime_at(id)?.exec_member(id, member, program, stdio)
     }
 
+    fn link(&self, id: &BoxId) -> Result<hex_api::ControlLink, Refusal> {
+        self.runtime_at(id)?.link(id)
+    }
+
     fn signal_member(
         &self,
         id: &BoxId,

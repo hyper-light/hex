@@ -842,6 +842,9 @@ struct ModelImages {
     /// members that refuse them, and where each exec's member and spec is told ([`serve_execs`]); none, and it serves
     /// none.
     executed: Mutex<Option<(Vec<u32>, Execed)>>,
+    /// Where the model's run host names these members' MCP bridges (D254) in its real agent-control endpoint's report
+    /// and serves no lane past it ([`serve_reports`]); none, and its endpoint is another's.
+    reports: Mutex<Option<Vec<u32>>>,
 }
 
 impl ModelImages {
@@ -866,6 +869,7 @@ impl ModelImages {
             steered: Mutex::new(None),
             bridged: Mutex::new(None),
             executed: Mutex::new(None),
+            reports: Mutex::new(None),
         })
     }
 
@@ -1088,7 +1092,12 @@ impl Images for ModelImages {
                     Some(serve_members(ask, ended, taken))
                 }
                 (Some(ask), Some(dir), None, None, None) => Some(serve_lanes(ask, dir)),
-                (Some(_), None, None, None, None) => Some(model_control()),
+                (Some(ask), None, None, None, None) => {
+                    Some(match self.reports.lock().unwrap().clone() {
+                        Some(bridges) => serve_reports(ask, &bridges),
+                        None => model_control(),
+                    })
+                }
             },
             nesting: spec.nesting,
             egress: spec.egress.clone(),
@@ -7515,5 +7524,115 @@ fn p3_1_a_box_boots_through_the_pool_kept_for_its_image_and_size_alone() {
         images.asked.lock().unwrap().len(),
         1,
         "a box of a kept pool booted on the class's own boot"
+    );
+}
+
+/// A run's real agent-control endpoint (D238, D252) on loopback, Shards' own, its microVM's key the model's, taking
+/// `ask`'s controller alone and admitting its execs, its report naming `bridges` as the members whose MCP bridge its run
+/// serves (D254); its host starts nothing a controller asks, each ask refused as one its run asked none of, so what a
+/// controller reads of it is its report. A model run's endpoint and host live while the test does.
+fn serve_reports(
+    ask: &shards_api::image::ControlAsk,
+    bridges: &[u32],
+) -> shards_api::image::ControlAt {
+    use shards_api::control::exec;
+    let vm = shards_api::control::Identity::generate().unwrap();
+    let (endpoint, served) = shards_remote::control::Endpoint::bind(
+        &vm,
+        ask.controller,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        shards_remote::control::Streams {
+            outputs: &[],
+            inputs: &[],
+            execs: Some(shards_api::control::exec_admissions()),
+            sockets: None,
+            bridges,
+        },
+    )
+    .unwrap();
+    let (address, waker, wake) = (endpoint.address, endpoint.waker, endpoint.wake);
+    std::thread::spawn(move || endpoint.run());
+    let starts = served.execs.unwrap();
+    let revoke = served.revoke;
+    std::thread::spawn(move || {
+        // Held for the endpoint's life: let go, it would end every lane.
+        let _revoke = revoke;
+        for start in starts {
+            start
+                .replies
+                .tell(exec::Reply::Unstarted(exec::Unstarted::Refused));
+        }
+    });
+    shards_api::image::ControlAt {
+        address,
+        vm: vm.fingerprint(),
+        waker,
+        wake,
+    }
+}
+
+/// Kiln plan step 35's `/runs/control` (D238, D239, D254; AC-T7.4.1): a running image VM's agent-control link, as both
+/// its ends say it. Do: a box whose spec asks the agent `helper` (its run's member 1) a bridge, its run's endpoint
+/// Shards' own on loopback, its report naming member 1's bridge; ask its link before its start, then twice once it
+/// runs, then once its VM is killed. Expect: `NotRunning(id, "link")` before the start; then both ends' word on one TLS
+/// 1.3 handshake, TLS13_AES_256_GCM_SHA384 (0x1302, D239) and one key exchange group, each named, and the lanes its
+/// controller was granted, by Shards' names: its control lane, its execs and the run's log they read, then member 1's
+/// bridge (`mcp:1`); the second answer the first's; the box Running, its VM never stopped; and `NotRunning(id, "link")`
+/// once its VM is killed.
+#[test]
+fn s35_a_running_image_vms_link_says_both_ends_tls_and_its_lanes() {
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = three_members();
+    *images.reports.lock().unwrap() = Some(vec![1]);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let helper = agent("helper");
+    let id = runtime
+        .create(bridged_spec("image-link", &[&helper]))
+        .unwrap()
+        .id;
+    assert_eq!(
+        runtime.link(&id),
+        Err(Refusal::NotRunning(id.clone(), "link"))
+    );
+    runtime.start(&id).unwrap();
+    let link = runtime.link(&id).unwrap();
+    assert_eq!(
+        link.controller, link.endpoint,
+        "both ends' word on one handshake"
+    );
+    assert_eq!(
+        (link.controller.suite, link.controller.suite_name),
+        (0x1302, Some("TLS13_AES_256_GCM_SHA384"))
+    );
+    assert!(
+        link.controller.group_name.is_some(),
+        "{:?}",
+        link.controller
+    );
+    assert_eq!(link.lanes, ["control", "exec", "log:run", "mcp:1"]);
+    assert_eq!(runtime.link(&id).unwrap(), link, "asked again, the same");
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
+    runtime.signal(&id, Signal::KILL).unwrap();
+    assert_eq!(
+        runtime.link(&id),
+        Err(Refusal::NotRunning(id.clone(), "link"))
+    );
+}
+
+/// Kiln plan step 35 (AC-T7.4.1): a link whose endpoint never reported is refused as `Runtime::link` says. Do: refuse a
+/// box's link for its connection's end, this side's own close among them, then for the endpoint's reset of its control
+/// lane. Expect: `NotRunning(id, "link: its run ended")` for the end; `Os` for the reset, in Shards' words, naming the box.
+#[test]
+fn s35_a_link_with_no_report_is_refused_typed() {
+    let id = BoxId::new("image-link-refused").unwrap();
+    assert_eq!(
+        link_refused(&id, Fault::Lost(shards_api::control::Ended::Local)),
+        Refusal::NotRunning(id.clone(), "link: its run ended")
+    );
+    let reset = link_refused(&id, Fault::Revoked);
+    assert!(
+        matches!(&reset, Refusal::Os { why, .. } if why.starts_with("box image-link-refused: ")),
+        "{reset:?}"
     );
 }

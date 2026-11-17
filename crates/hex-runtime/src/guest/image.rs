@@ -17,8 +17,9 @@
 //! refuses the call, as the node's broken state. A caller waits at most its learned W* ([`ImageWaits`]), a bound only
 //! while answers come within it (decision 9, the person's ruling of 2026-11-13): past it the run-out is told to the
 //! census and the call is refused `Lifecycle { Pending }`, the boot or stop going on, and its answer, however long it
-//! took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards call, and a run
-//! is let go of only once its stop has returned, since D231 stops a run it drops.
+//! took, is the sample W* rises to, recorded by the call that takes it. No lock is held over a Shards call but a run's
+//! link report's own, which only the calls asking that run's link take ([`Steering::link`]), and a run is let go of
+//! only once its stop has returned, since D231 stops a run it drops.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -29,16 +30,17 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HomeVolume, HostUse,
-    ImageMember, ImageVolume, LifecycleCause, Member, MemberKind, NodeRun, Proc, Program, Refusal,
-    ShardsImage, Signal, Stdio, Upstream, Usage, VmSize, VolumeCause, WarmHeld, WarmPool,
+    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, ControlLink, Exit, Given, GuestTime, HomeVolume,
+    HostUse, ImageMember, ImageVolume, LifecycleCause, Member, MemberKind, Negotiated, NodeRun,
+    Proc, Program, Refusal, ShardsImage, Signal, Stdio, Upstream, Usage, VmSize, VolumeCause,
+    WarmHeld, WarmPool,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::control::{
-    Controller, ExecControl, Execs, Fault, Got, Hangup, Identity, Input, McpConnection,
-    Member as MemberLane, MemberControl, Output, Subscriptions, Unstarted, Unsteered,
-    exec_admissions,
+    Controller, ExecControl, Execs, Fault, Got, Granted, Hangup, Identity, Input, Linked,
+    McpConnection, Member as MemberLane, MemberControl, Output, Subscriptions, Unstarted,
+    Unsteered, exec_admissions,
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, FinalUse, Gave, ImageGuest, ImagePools, ImageRefusal,
@@ -112,8 +114,9 @@ pub(super) struct ImageBoot {
 
 /// The agent-control of this class's runs (D238, D252; goal 2's item 2): its own key, made once from the OS's random
 /// numbers, which every run's endpoint takes alone ([`ControlAsk`]); each box's controller, dialed as the first lane to
-/// one of its run's members is asked (a signal, an MCP connection, an exec), and kept for the run it was dialed for while
-/// that run is held, so later lanes ride its one connection; and the waits its members' lanes make ([`LaneWaits`]).
+/// one of its run's members (a signal, an MCP connection, an exec) or its link is asked, and kept for the run it was
+/// dialed for while that run is held, so later calls ride its one connection; and the waits its lanes make
+/// ([`LaneWaits`]).
 struct Control {
     identity: Mutex<Option<Arc<Identity>>>,
     dialed: Mutex<BTreeMap<BoxId, Arc<Steering>>>,
@@ -134,14 +137,23 @@ struct LaneWaits {
     /// A program's start in a member (D243), from its exec's ask until the member's host says it started or why not
     /// ([`Steering::exec`]).
     exec: Patience,
+    /// The run's endpoint's report of its link (D238, D254), from a link call's ask until the report, which the endpoint
+    /// sends once the link's handshake is done: Shards waits for it or the connection's end alone, so W* is where its
+    /// run-out is told, never where it ends ([`Steering::link`]).
+    link: Patience,
 }
 
 /// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
-/// its members' lanes, and its hangup, which ends its connection, and its driver with it, as its last holder lets it go.
+/// its members' lanes, where its endpoint's report of its link is heard, and its hangup, which ends its connection, and
+/// its driver with it, as its last holder lets it go.
 struct Steering {
     /// The run it steers: one dialed for another run of the box, or for one gone, is dialed anew.
     guest: Weak<dyn ImageGuest>,
     execs: Execs,
+    /// Where its endpoint's report is heard: both ends' TLS and every lane its controller was granted (D238, D254),
+    /// which Shards keeps once heard. Locked by the call waiting for it, so a second call for the same run waits behind
+    /// it for the same report ([`Steering::link`]).
+    link: Mutex<Linked>,
     _hangup: Hangup,
 }
 
@@ -156,6 +168,7 @@ impl Control {
                 signal: Patience::measuring("hex.image.signal"),
                 mcp: Patience::measuring("hex.image.mcp"),
                 exec: Patience::measuring("hex.image.exec"),
+                link: Patience::measuring("hex.image.link"),
             },
         }
     }
@@ -229,6 +242,7 @@ impl Control {
         let steering = Arc::new(Steering {
             guest: Arc::downgrade(guest),
             execs,
+            link: Mutex::new(connected.link),
             _hangup: connected.hangup,
         });
         dialed.insert(id.try_clone()?, Arc::clone(&steering));
@@ -326,6 +340,48 @@ impl Steering {
             })
             .map_err(|fault| exec_refused(id, index, fault))
     }
+
+    /// Box `id`'s run's agent-control link as its endpoint's report has it (`Linked::report`; D238, D254; kiln plan step
+    /// 35): both ends' TLS and every lane its controller was granted, by Shards' names. Shards waits for that report or
+    /// the connection's end alone, taking no patience, so `waits.link`'s W* is where the census is told a run-out, never
+    /// where the wait ends, as a stats ask's is ([`timed_stats`]): the answer, however late, the sample W* rises to; a
+    /// fault the endpoint answered with a refusal's sample; the connection's end, which answered nothing, none. Shards
+    /// keeps the report once heard, so a later call answers at once. Refused, typed, as `Runtime::link` says
+    /// ([`link_refused`]).
+    fn link(&self, waits: &LaneWaits, id: &BoxId) -> Result<ControlLink, Refusal> {
+        let mut linked = self.link.lock().map_err(poisoned)?;
+        let asked = Instant::now();
+        let bound = waits.link.deadline();
+        let report = linked.report();
+        let took = asked.elapsed();
+        if let Some(bound) = bound.filter(|bound| took > *bound) {
+            waits.link.ran_out(
+                bound,
+                took,
+                &[
+                    Piece::Kind("the agent-control connection of box "),
+                    Piece::Name(id.as_str()),
+                    Piece::Kind(", its endpoint's report of its link"),
+                ],
+            );
+        }
+        match report {
+            Ok(report) => {
+                waits.link.answered(took);
+                Ok(ControlLink {
+                    controller: negotiated(report.link.controller),
+                    endpoint: negotiated(report.link.endpoint),
+                    lanes: report.lanes.iter().map(Granted::name).collect(),
+                })
+            }
+            Err(fault) => {
+                if !matches!(fault, Fault::Lost(_)) {
+                    waits.link.refused(took);
+                }
+                Err(link_refused(id, fault))
+            }
+        }
+    }
 }
 
 /// A program started in a member (D243), as its exec lane gave it: its stdout, its stderr (none on a terminal, which no
@@ -375,6 +431,32 @@ fn mcp_refused(id: &BoxId, index: u32, fault: Fault) -> Refusal {
             op: "waiting for a member's MCP connection",
             why: format!("box {id}'s member {index}: {fault}"),
         },
+    }
+}
+
+/// Why box `id`'s run's link has no report, as `Runtime::link` says it: its connection ended before its endpoint
+/// reported, or what else Shards said (the endpoint's refusal of the link's control lane, or its reset), in its words.
+fn link_refused(id: &BoxId, fault: Fault) -> Refusal {
+    match fault {
+        Fault::Lost(_) => match id.try_clone() {
+            Ok(id) => Refusal::NotRunning(id, "link: its run ended"),
+            Err(refused) => refused,
+        },
+        fault => Refusal::Os {
+            op: "waiting for a Shards image VM's report of its agent-control link",
+            why: format!("box {id}: {fault}"),
+        },
+    }
+}
+
+/// One end's word on a link's TLS (Shards' `Negotiated`) as Hex's seam says it: its suite's and its group's IANA codes,
+/// each with its name as rustls says it.
+fn negotiated(end: shards_api::control::Negotiated) -> Negotiated {
+    Negotiated {
+        suite: end.suite,
+        suite_name: end.suite_name(),
+        group: end.group,
+        group_name: end.group_name(),
     }
 }
 
@@ -3641,6 +3723,23 @@ impl ImageClass {
         )?))
     }
 
+    /// Image box `record`'s agent-control link (`Runtime::link`; kiln plan step 35's `/runs/control`): its run's
+    /// controller, dialed where none is yet ([`Control::steering`]), then its endpoint's report ([`Steering::link`]). As
+    /// `mcp` is, Pending while it boots, held, and `NotRunning(id, "link")` before its start and once its stop has begun.
+    pub(super) fn link_image(&self, record: BoxRecord) -> Result<ControlLink, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id, "link"));
+            }
+        };
+        let control = &self.image()?.control;
+        control.steering(&id, &guest)?.link(&control.waits, &id)
+    }
+
     /// Retires image VM `record`, its receipt its profile's under its census numbers (joint plan step 14): its run stopped
     /// as its delete stops it, its run forgotten, and the box kept retired (`BoxRecord::retire`). One held or still
     /// booting is refused, typed, as its delete is.
@@ -4037,6 +4136,10 @@ impl hex_api::Runtime for ImageClass {
 
     fn mcp(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
         self.mcp_image(self.called(id)?, member)
+    }
+
+    fn link(&self, id: &BoxId) -> Result<ControlLink, Refusal> {
+        self.link_image(self.called(id)?)
     }
 
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {

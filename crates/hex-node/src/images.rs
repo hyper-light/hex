@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use hex_api::lease::Lessors;
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, Class, HomeVolume, HostUse, Member, Proc, Program, Refusal, Runtime,
-    Signal, Stdio, Usage, WarmHeld, WarmPool,
+    BoxId, BoxInfo, BoxSpec, Class, ControlLink, HomeVolume, HostUse, Member, Proc, Program,
+    Refusal, Runtime, Signal, Stdio, Usage, WarmHeld, WarmPool,
 };
 use hex_core::record::{BoxRecord, PoolRecord};
 use hex_runtime::devices::{Books, PoolPreparationCheck, PoolRecords, Records, Transaction};
@@ -346,6 +346,9 @@ impl Runtime for ImageRuntime {
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         self.class.exec_member(id, member, program, stdio)
+    }
+    fn link(&self, id: &BoxId) -> Result<ControlLink, Refusal> {
+        self.class.link(id)
     }
     fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
         self.class.signal_member(id, member, signal)

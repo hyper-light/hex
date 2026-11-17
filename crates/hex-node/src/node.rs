@@ -2287,6 +2287,23 @@ impl Runtime for Node {
         })
     }
 
+    /// A VM box's backend answers its agent-control link (kiln plan step 35); any other box has none, refused as the
+    /// trait refuses it.
+    fn link(&self, id: &BoxId) -> Result<hex_api::ControlLink, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.link(id);
+        }
+        if self.cgroup(id).is_none() {
+            return Err(Refusal::NoSuchBox(id.clone()));
+        }
+        Err(Refusal::Invalid {
+            what: "link",
+            why: format!(
+                "box {id} isn't a Shards image box: only its run has an agent-control link"
+            ),
+        })
+    }
+
     /// A VM box's backend signals its member (goal 2's item 2); any other box has none, refused as the trait refuses it.
     fn signal_member(
         &self,

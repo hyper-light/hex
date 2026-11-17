@@ -111,6 +111,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   its outputs are open; and a run that ends on its own keeps the final use its VM tells with that end (D260) in its
   record, which its delete with its host use answers. Unit-tested over the model's real endpoint on loopback and the
   simulator. Closes with: their real-VM runs (ROOT's) and a member exec on the node's wire.
+  A running VM's agent-control link (`Runtime::link`, kiln plan step 35's `/runs/control`) answers both ends' TLS and
+  every lane its controller was granted, `mcp:N` among them, on Shards' `Linked::report` (`8c9c03cc4`), in process alone:
+  the node's wire carries none yet. Closes with: its real-VM run, kiln's step 35 drives (ROOT's).
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

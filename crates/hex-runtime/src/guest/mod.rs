@@ -1519,6 +1519,22 @@ impl Runtime for GuestRuntime {
         }
     }
 
+    /// Kiln plan step 35's `/runs/control`: an image VM's agent-control link (D238, D254), as both its ends say it; any
+    /// other box's refused as the trait refuses it.
+    fn link(&self, id: &BoxId) -> Result<hex_api::ControlLink, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self.images.link_image(record),
+            books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
+                what: "link",
+                why: format!(
+                    "box {id} isn't a Shards image box: only its run has an agent-control link"
+                ),
+            }),
+        }
+    }
+
     /// Goal 2's item 2: a signal to an image VM's member alone, on its own lane; any other box's refused as the trait
     /// refuses it.
     fn signal_member(
@@ -2330,6 +2346,10 @@ impl<P: Runtime> Runtime for WithGuest<P> {
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.exec_member(id, member, program, stdio)
+    }
+
+    fn link(&self, id: &BoxId) -> Result<hex_api::ControlLink, Refusal> {
+        self.holder(id)?.link(id)
     }
 
     fn signal_member(
