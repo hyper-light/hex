@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `8d6029e4d69392d93640135c8fa781239e92a769` (main).
+Revision: `04481e36be379b1c0a26575e66ef9c254be87865` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -178,6 +178,13 @@ complete I/O (D215 amended, 927ba0119, 2726a8deb). So the take list and this wor
 (D209 Part 10 and D163, 03c0b8603, adc48df03: `shards_ipc::deadline_text` and `deadline_in` in place
 of `grace_text` and `grace_until`, `RETRY` beside `GRACE`), and the demand rule's refill window made
 public (D26, e80ae3775: `Demand::window`), neither of which Hex calls.
+
+Past 8d6029e4d this revision, Shards' main as its version became 0.8.0, still speaks image channel 51,
+and no file Hex takes changes a type, a signature or a dependency: D215's judge reads a Windows
+process's runnable threads and learns no rate from an answer that read no work (c16719483); an
+AF_UNIX path shards-afunix refuses says which and why, where a bare InvalidInput said neither
+(a982c9be0, D276 amended); shards-testdir says each panic of a test process on stderr as it happens
+(c0c852156); and remote's loopback test goes on past Winsock's WSAECONNRESET (d1b1e1412).
 
 ## Recorded changes
 
