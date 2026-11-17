@@ -4,7 +4,16 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `9975d1f55`, image channel v36 (an orchestrator's run told the memory it may plug, as a
+Merged on Hex's main at Shards `f1e8a097b`, image channel v51 (a share given to members as they start, D277, v37, which
+the class gives from a share's member scope, `Mount::members`, P1.4, and a member's working directory its guest can't
+enter refused typed, `ImageRefusal::Workdir`, v42 and v43, the spec's; a member's generations, its restart and a
+component's swap, D270, v38 to v49, each member stream and end named by its generation, the class's members' their
+first, as it restarts and swaps none; each member's own reach within its ceiling, D278, v39, and a member's grants on a
+network shared by runs, D285, v50, neither of which this class asks, their refusals typed; a share's files run from it or
+not, D279, v41, every share of the class's run from, as before; its members' stdio served as its endpoint's lanes,
+D252, v44, which the class doesn't ask; its run host's budget holding the run's link and its members' first lanes, a run
+with no room for them refused `ImageRefusal::Capacity`, D252, v51, the host's; `9975d1f55` before it, image channel v36:
+an orchestrator's run told the memory it may plug, as a
 daemon's is, D275: harness members are no longer ended at their boot share, a member past its run's room still held at
 the run's hold (D275's share within a room held back); an HVF vCPU taking memory plugged after it as memory, D274; live volumes, `ImageGuest::plug(&Plug)` and
 `ImageSpec::plug_roots`, D271, v35, and a run's grants past its microVM changed as it runs, D273, v36, neither of which
@@ -39,7 +48,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
   `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`,
-  `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee` and `9975d1f55`) and
+  `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee`, `9975d1f55` and `f1e8a097b`) and
   its research record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e0cc059c`): the decision
   this class binds to, its Windows run host among it (731b5e54, 53277586). At `e0cc059c` beside it: D234 (a nested
   runtime's grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member,
@@ -80,7 +89,7 @@ Sources, read at the revisions named:
   a run's stop returning released (D231, `c133bfb56`: its run host exited and reaped, every process it started gone).
   At `2246a8829`, version 30: every socket a run's agent-control endpoint holds (D252 amended, `d3950c7d1`:
   `ControlAt::waker`, `wake`, `sockets`).
-- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`, `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee` and `9975d1f55`: `crates/api/src/image.rs` (`Images`, its `boot` and
+- `shards_api::image` at `e0cc059c`, `740fa372`, `db4168345`, `3114e082f`, `097ec0047`, `37ddeb080`, `16451e19f`, `ce80cbb37`, `2737fc4ec`, `2246a8829`, `d7ff8a094`, `9d8a05f6a`, `0290f1e9f`, `fa953e3ce`, `888879412`, `d993d83ee`, `9975d1f55` and `f1e8a097b`: `crates/api/src/image.rs` (`Images`, its `boot` and
   patience, `ImageGuest`, `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process,
   `shards_ipc::spawn_with`, `stop`, `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`,
   `StatsScope`, `RunEnd`, `Narrowing`, `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps
@@ -204,10 +213,15 @@ harness member's):
   a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
   read-only. The boot asks Shards for exactly those, in order (default deny: the image's grants widen none), and a
   share Shards refuses refuses the start as `Invalid`, in Shards' words. A member gets one where its image's
-  `VOLUME` at that path is for it (D109), the run's own command where no `VOLUME` declares it.
+  `VOLUME` at that path is for it (D109), or where the share's member scope names it (`Mount::members`, P1.4: Shards'
+  `ImageShare::members`, D277, image channel v37, given as each member starts, so a harness works in its project from
+  its first instruction), and the run's own command gets every one. A scope's members are checked as a grant's member
+  is, each once; Shards refuses one its image doesn't declare, and a working directory no member's guest enters,
+  `ImageRefusal::Workdir`, mapped `Invalid` in Shards' words. Every share's files run from it (D279's `exec`).
 - `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
   stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
-  its end (`wait_member`; `WithRun` is the run's end, as the box's own). It is no process of this host
+  its end (`wait_member`, its first generation's, D270; `WithRun` is the run's end, as the box's own, and a run that
+  failed refuses it `Failed` in its runtime's words, kiln P2.3). It is no process of this host
   (`on_this_host` false, no pid: D231 names none), and its own kill is KILL on its own lane of the run's endpoint,
   its end then `Signal(9)` (a member that has ended has nothing to end); the box's KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
@@ -409,7 +423,7 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `9975d1f55` or later (image channel version 36: Hex's `shards` and its shards-init, rebuilt on each host by
+  `f1e8a097b` or later (image channel version 51: Hex's `shards` and its shards-init, rebuilt on each host by
   `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
   create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec
