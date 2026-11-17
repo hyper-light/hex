@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HostUse, ImageMember,
-    LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
-    Usage, VmSize,
+    BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HomeVolume, HostUse,
+    ImageMember, ImageVolume, LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal,
+    ShardsImage, Signal, Upstream, Usage, VmSize, VolumeCause,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -40,9 +40,10 @@ use shards_api::control::{
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, NetRefusal, PlugFor, RunEnd, RunEnded, Secret, Stats,
-    StatsScope,
+    MemberEnd, MemberName, MemberSpec, NetRefusal, Plug, PlugFor, PlugRefusal, PlugSource, RunEnd,
+    RunEnded, Secret, Stats, StatsScope,
 };
+use shards_api::volumes::{ClearCause, VolumeRefusal};
 
 use super::{GuestRuntime, poisoned};
 use crate::devices::{self, Books};
@@ -820,9 +821,36 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             op: what,
             why: format!("{kind:?}"),
         },
-        // Only a plug or an unplug (D235) is refused so, and this class makes neither.
-        ImageRefusal::Plug(cause, why) => {
-            Refusal::Broken(format!("Shards refused {op} as a plug ({cause:?}): {why}"))
+        // Only a plug or an unplug (D235, D271) is refused so, and this class's only plugs are the volumes a run starts
+        // with (kiln plan 01a1dd2e…, P6.2): what holds a volume typed by its retry (D281), and the rest the spec's, its
+        // host's or its microVM's. An unplug's own (`Unknown`, `Busy`) is the class's own fault: it unplugs nothing.
+        ImageRefusal::Plug(PlugRefusal::Bound, why) => Refusal::Volume {
+            cause: VolumeCause::Bound,
+            why,
+        },
+        ImageRefusal::Plug(PlugRefusal::Clearing, why) => Refusal::Volume {
+            cause: VolumeCause::Clearing,
+            why,
+        },
+        ImageRefusal::Plug(
+            cause @ (PlugRefusal::Request
+            | PlugRefusal::Member
+            | PlugRefusal::Outside
+            | PlugRefusal::Taken
+            | PlugRefusal::Volume),
+            why,
+        ) => Refusal::Invalid {
+            what: "shards image's volume",
+            why: format!("{cause:?}: {why}"),
+        },
+        ImageRefusal::Plug(cause @ (PlugRefusal::Host | PlugRefusal::Device), why) => Refusal::Os {
+            op,
+            why: format!("plugging a volume into the run ({cause:?}): {why}"),
+        },
+        ImageRefusal::Plug(cause @ (PlugRefusal::Unknown | PlugRefusal::Busy), why) => {
+            Refusal::Broken(format!(
+                "Shards refused {op} as an unplug ({cause:?}), which this class asks of no run: {why}"
+            ))
         }
         // Only a room (D241), a rate (D247) or a terminal's resize (D244) is refused so, and this class asks none.
         ImageRefusal::Room(why) => Refusal::Broken(format!("Shards refused {op} as a room: {why}")),
@@ -936,6 +964,120 @@ fn admitted_size(allocation: &hex_api::Allocation) -> Result<VmSize, Refusal> {
             size.vcpus, size.memory_mib
         ))),
         Err(why) => Err(invalid(format!("allocation: {why}"))),
+    }
+}
+
+/// The plug roots a box's run is granted at its start (kiln plan 01a1dd2e…, P6.2; Shards' D271): the top-level
+/// directory of each of its volumes' places, each once, where its guest takes one as a root (Shards' own check,
+/// `shards_abi::run::plug::root_name`: none of its init's own directories), else refused naming the volume. A root that
+/// is a share's top-level directory too is its run host's already, which takes it once.
+fn plug_roots(image: &ShardsImage) -> Result<Vec<String>, Refusal> {
+    let mut roots: Vec<String> = Vec::new();
+    for (i, volume) in image.volumes.iter().enumerate() {
+        let root = format!("/{}", volume.at.split('/').nth(1).unwrap_or_default());
+        if shards_abi::run::plug::root_name(root.as_bytes()).is_none() {
+            return Err(Refusal::Invalid {
+                what: "shards image",
+                why: format!(
+                    "volumes[{i}].at {:?} lies beneath {root:?}, which its guest grants no plug beneath",
+                    volume.at
+                ),
+            });
+        }
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
+/// What a box's admitted disk leaves its run host's diagnostics (the review's B-9) once its volumes' bounds are drawn
+/// from it (kiln plan 01a1dd2e…, P6.2): every byte the box may write on its node's disk, its volumes' and its
+/// diagnostics', within what it was admitted with, each byte charged once. Refused where its volumes' bounds together
+/// pass it: no box is given a volume past its admission. A box admitted with no receipt has no disk to draw them from
+/// and none to hold its file within.
+fn diagnostics_within(spec: &BoxSpec, image: &ShardsImage) -> Result<u64, Refusal> {
+    let bounds = image
+        .volumes
+        .iter()
+        .try_fold(0u64, |all, v| all.checked_add(v.bound.get()))
+        .ok_or_else(|| Refusal::Invalid {
+            what: "shards image",
+            why: "its volumes' bounds together pass 2^64 bytes".to_owned(),
+        })?;
+    let admitted = spec
+        .allocation
+        .as_ref()
+        .map_or(u64::MAX, |allocation| allocation.resources.disk_bytes);
+    admitted
+        .checked_sub(bounds)
+        .ok_or_else(|| Refusal::Invalid {
+            what: "shards image",
+            why: format!(
+                "its volumes' bounds, {bounds} bytes together, pass the disk it was admitted with, {admitted} bytes: \
+                 a volume's bound is drawn from its box's admitted disk"
+            ),
+        })
+}
+
+/// A box's volume as Shards plugs it into the members it names (D271), held to its bound (D281), made empty in the
+/// home's store where it isn't there. Its files run from it as every share's here do (D279's `exec`): what a member
+/// installs into a volume it keeps runs in its next session too.
+fn volume_plug(volume: &ImageVolume) -> Plug {
+    Plug {
+        source: PlugSource::Volume {
+            name: volume.name.clone(),
+            bound: Some(volume.bound),
+        },
+        to: PlugFor::Members(volume.members.iter().map(member_name).collect()),
+        at: volume.at.clone(),
+        read_only: volume.read_only,
+        exec: true,
+    }
+}
+
+/// A run's volumes plugged into its members as it starts (kiln plan 01a1dd2e…, P6.2), in its spec's order, on its
+/// boot's thread before its boot answers: no call takes the run, nor a member's streams, before every volume is in
+/// place. Each waits for its run host's answer or its run's end, as the boot does, the boot's own wait following it
+/// (decision 9). The first refused refuses the boot.
+fn plug_volumes(guest: &dyn ImageGuest, plugs: &[Plug]) -> Result<(), ImageRefusal> {
+    plugs
+        .iter()
+        .try_for_each(|plug| guest.plug(plug, Duration::MAX))
+}
+
+/// Shards' refusal of its home's volumes' listing or a clearing (D281), typed as the call it answers: what held a
+/// volume from its clearing as [`Refusal::Volume`], by its retry; a name the store takes no volume by the call's own;
+/// and the rest its run of `shards api-volumes`, as a run host's start is.
+fn volume_refused(op: &'static str, why: VolumeRefusal) -> Refusal {
+    match why {
+        VolumeRefusal::Clear(ClearCause::InUse, why) => Refusal::Volume {
+            cause: VolumeCause::InUse,
+            why,
+        },
+        VolumeRefusal::Clear(ClearCause::Unknown, why) => Refusal::Volume {
+            cause: VolumeCause::Unknown,
+            why,
+        },
+        VolumeRefusal::Clear(ClearCause::Name, why) => Refusal::Invalid {
+            what: "volume",
+            why,
+        },
+        VolumeRefusal::Clear(ClearCause::Store, why) => Refusal::Os {
+            op,
+            why: format!("its files were not all removed: {why}"),
+        },
+        VolumeRefusal::Os { what, kind } => Refusal::Os {
+            op: what,
+            why: format!("{kind:?}"),
+        },
+        other @ (VolumeRefusal::Start(_)
+        | VolumeRefusal::Ended { .. }
+        | VolumeRefusal::Version(_)
+        | VolumeRefusal::Wire(_)) => Refusal::Os {
+            op,
+            why: other.to_string(),
+        },
     }
 }
 
@@ -1785,13 +1927,16 @@ impl ImageBoot {
 /// its host's end alone (`Duration::MAX`), and `stop` stops it mid-boot (D231's `BootStop`). A booted run's host keeps
 /// its diagnostics in `kept` from then on, after what it kept until then, the file held within `bound` bytes, or where
 /// that is short of the tail Shards keeps to quote a run's end (a VM whose root is in its RAM is admitted with no disk),
-/// within that tail, Shards' own bound, its longest report of a VM's end (the review's B-9); a run whose host can't is
-/// stopped, its host and every process it started followed to their end, and its boot is refused in those words.
+/// within that tail, Shards' own bound, its longest report of a VM's end (the review's B-9); then each of `plugs`, its
+/// volumes, plugged into its members ([`plug_volumes`]). A run whose host can't keep its diagnostics, or that refuses
+/// one of its volumes, is stopped, its host and every process it started followed to their end, and its boot is
+/// refused in those words.
 fn boot_on_its_thread(
     images: Arc<dyn Images>,
     spec: ImageSpec,
     kept: std::fs::File,
     bound: u64,
+    plugs: Vec<Plug>,
     party: Party<Booted>,
     stop: Arc<BootStop>,
 ) -> std::io::Result<()> {
@@ -1814,10 +1959,11 @@ fn boot_on_its_thread(
                         },
                         held => held,
                     };
+                    let held = held.and_then(|()| plug_volumes(guest.as_ref(), &plugs));
                     match held {
                         Ok(()) => Ok(guest),
                         // Never left to its drop: the run is stopped, which answers once its host and every process
-                        // it started are gone (D231's stop), and the boot refused in the keep's words.
+                        // it started are gone (D231's stop), and the boot refused in the keep's or the plug's words.
                         Err(why) => {
                             let _ = guest.stop();
                             Err(why)
@@ -2073,9 +2219,9 @@ impl ImageClass {
             upstream_roots: Vec::new(),
             // No GPU report (Shards' D233, image channel v29): it renders on no GPU.
             gpu_report: None,
-            // No plug root (Shards' D271, image channel v35): its shares are the start's, and nothing is plugged
-            // into its run as it runs.
-            plug_roots: Vec::new(),
+            // The top-level directory of each of its volumes' places (Shards' D271; kiln plan 01a1dd2e…, P6.2), beneath
+            // which they are plugged as its run starts ([`plug_volumes`]): no other root, and nothing else plugged.
+            plug_roots: plug_roots(image)?,
             // No member's reach past its image's grants (Shards' D278, image channel v39): its grants are the start's,
             // and this class changes no member's reach as it runs.
             egress_ceiling: Vec::new(),
@@ -2313,6 +2459,10 @@ impl ImageClass {
             crate::grants::program(image)?;
             // As are credentials no one can lease here (joint plan step 33).
             self.can_lease(image)?;
+            // As are volumes beneath no root its guest grants, or past the disk the box was admitted with (kiln plan
+            // 01a1dd2e…, P6.2).
+            plug_roots(image)?;
+            diagnostics_within(&spec, image)?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
@@ -2353,6 +2503,12 @@ impl ImageClass {
         // The run's lessor, its orchestrator's, made before any effect (joint plan step 33): a run granting no
         // credential has none and asks nothing.
         spec.lessor = self.run_lessor(&id, shards)?;
+        // Its diagnostics are its own output on the node's disk, charged to it: their file is held within the disk its
+        // box was admitted with, no number picked (the review's B-9, ROOT's ruling of 2026-11-14), less its volumes'
+        // bounds, which are drawn from the same disk (kiln plan 01a1dd2e…, P6.2); a box admitted with no receipt has no
+        // disk to hold it within.
+        let kept_within = diagnostics_within(&record.spec, shards)?;
+        let plugs: Vec<Plug> = shards.volumes.iter().map(volume_plug).collect();
         // Where its run host's diagnostics are kept, whole (D258): named in its record with the boot's intent, and gone
         // with its delete.
         let diagnostics = image.diagnostics.join(format!("{id}.log"));
@@ -2407,15 +2563,7 @@ impl ImageClass {
         // 2026-11-13). D231 shows no run before it starts, so the boot is followed by its own answer: its run's start,
         // or its host's end, refused.
         let bound = waits.boot.deadline();
-        // Its diagnostics are its own output on the node's disk, charged to it: their file is held within the disk its box
-        // was admitted with, no number picked (the review's B-9, ROOT's ruling of 2026-11-14); a box admitted with no
-        // receipt has no disk to hold it within.
-        let kept_within = record
-            .spec
-            .allocation
-            .as_ref()
-            .map_or(u64::MAX, |allocation| allocation.resources.disk_bytes);
-        if let Err(why) = boot_on_its_thread(images, spec, kept, kept_within, party, stop) {
+        if let Err(why) = boot_on_its_thread(images, spec, kept, kept_within, plugs, party, stop) {
             // No boot began: the box ends, its intent's record kept with its end.
             image.runs.insert(&id, Run::Ended(End::unknown(None)))?;
             self.record_end(&id, &End::unknown(None))?;
@@ -3290,6 +3438,35 @@ impl hex_api::Runtime for ImageClass {
             return record.retired_info();
         }
         self.started_image(record)
+    }
+
+    /// The volumes of the Shards home its run hosts are given, as `shards api-volumes list` reads them (Shards' D281):
+    /// the class's own `shards` binary, in that home.
+    fn volumes(&self) -> Result<Vec<HomeVolume>, Refusal> {
+        self.image()?;
+        let listed =
+            shards_api::volumes::volumes(Some(self.binary.as_path()), &self.run_host_env())
+                .map_err(|why| volume_refused("listing a Shards home's volumes", why))?;
+        Ok(listed
+            .into_iter()
+            .map(|v| HomeVolume {
+                name: v.name,
+                bytes: v.bytes,
+                bound: v.bound,
+                charge: v.charge,
+                created_ns: v.created_ns,
+                anonymous: v.anonymous,
+            })
+            .collect())
+    }
+
+    /// Volume `name` of that home cleared as `shards api-volumes clear` clears one (Shards' D281). Whether a run holds
+    /// it is Shards' to say, by its holds: each run given it holds it from its start's plug to its end, so a box
+    /// created and not yet started holds nothing, and its start's plug then makes the volume anew, empty.
+    fn clear_volume(&self, name: &str) -> Result<(), Refusal> {
+        self.image()?;
+        shards_api::volumes::clear_volume(Some(self.binary.as_path()), &self.run_host_env(), name)
+            .map_err(|why| volume_refused("clearing a Shards home's volume", why))
     }
 }
 

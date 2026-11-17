@@ -367,6 +367,10 @@ struct ModelRun {
     /// Whether its stops' threads end with no answer, as the test sets it: a stop asked unwinds before its run's end, as
     /// a stop whose thread failed would (D231's stop is never refused, so only its thread's end leaves it unanswered).
     abandon_stops: AtomicBool,
+    /// Each plug its run host took, in order (kiln plan 01a1dd2e…, P6.2: a run's volumes as it starts).
+    plugs: Mutex<Vec<shards_api::image::Plug>>,
+    /// What its run host refuses the next plug with, as the test sets it: none, each plug taken.
+    refuse_plug: Mutex<Option<ImageRefusal>>,
 }
 
 impl ModelRun {
@@ -601,7 +605,8 @@ impl ImageGuest for ModelGuest {
         })
     }
     // Ready on time where its run gave its command the nesting grant; refused as Shards refuses a run that asks none
-    // (D234), and the plugs of a model with none (D235).
+    // (D234). Its plugs taken and kept, or refused as the test asks (D271: a run's volumes as it starts); its unplugs
+    // refused, the class asking none.
     fn wait_ready(
         &self,
         _: Option<shards_api::image::Ready>,
@@ -615,16 +620,17 @@ impl ImageGuest for ModelGuest {
             why: "the run asked no nesting grant".to_owned(),
         })
     }
-    fn plug(&self, _: &shards_api::image::Plug, _: Duration) -> Result<(), ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "the model's plugs",
-            why: "it has none".to_owned(),
-        })
+    fn plug(&self, plug: &shards_api::image::Plug, _: Duration) -> Result<(), ImageRefusal> {
+        if let Some(why) = self.run.refuse_plug.lock().unwrap().take() {
+            return Err(why);
+        }
+        self.run.plugs.lock().unwrap().push(plug.clone());
+        Ok(())
     }
     fn unplug(&self, _: &str, _: Duration) -> Result<(), ImageRefusal> {
         Err(ImageRefusal::Unsupported {
-            what: "the model's plugs",
-            why: "it has none".to_owned(),
+            what: "the model's unplugs",
+            why: "the class asks none".to_owned(),
         })
     }
     fn egress(&self) -> shards_api::image::Narrowing {
@@ -1682,6 +1688,287 @@ fn b9_a_box_admitted_with_less_disk_than_shards_keeps_holds_that_tail() {
     runtime.start(&id).unwrap();
     assert_eq!(*images.run.diagnostics_bounds.lock().unwrap(), [tail]);
     assert_eq!(images.run.diagnostics.lock().unwrap().len(), 1);
+}
+
+/// An image VM's spec given `volumes` (kiln plan 01a1dd2e…, P6.2), its box admitted with the sim's VM and `disk` bytes
+/// of disk, which its volumes' bounds are drawn from.
+fn volumed(name: &str, disk: u64, volumes: Vec<ImageVolume>) -> BoxSpec {
+    let mut cost = allocation().cost;
+    cost.ceiling.disk_bytes = disk;
+    let mut workload = allocation().resources;
+    workload.disk_bytes = disk;
+    BoxSpec {
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            volumes,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        allocation: Some(cost.allocate(workload).unwrap()),
+        ..spec(name, None)
+    }
+}
+
+/// A GiB, a volume's bound in these tests.
+const GIB: u64 = 1 << 30;
+
+/// A harness's 1 GiB volume, read-write at `/volumes/cache` (kiln's own place for an agent's volumes).
+fn cache() -> ImageVolume {
+    ImageVolume {
+        name: "kiln-agent-cache".to_owned(),
+        bound: NonZeroU64::new(GIB).unwrap(),
+        at: "/volumes/cache".to_owned(),
+        members: vec![Member {
+            kind: MemberKind::Harness,
+            name: "claude".to_owned(),
+        }],
+        read_only: false,
+    }
+}
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1; Shards' D271, D281): an image VM's volumes are plugged into its members as its
+/// run starts, beneath the plug root its run is granted, each held to its bound, and its diagnostics held within what
+/// its admitted disk leaves. Do start a VM admitted with 3 GiB of disk, given a 1 GiB volume read-write into its
+/// harness and a 1 GiB one read-only into its harness and an agent, both beneath `/volumes`. Expect its boot granted
+/// `/volumes` alone as a plug root, each volume plugged once and in its order, by its name and bound, into its members,
+/// at its place, read-only as asked and its files runnable, before its start answers; and its diagnostics held within
+/// the 1 GiB its volumes leave.
+#[test]
+fn p6_2_an_image_vms_volumes_are_plugged_beneath_their_root_as_it_starts() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let harness = cache().members;
+    let both = vec![
+        harness[0].clone(),
+        Member {
+            kind: MemberKind::Agent,
+            name: "helper".to_owned(),
+        },
+    ];
+    let notes = ImageVolume {
+        name: "kiln-agent-notes".to_owned(),
+        at: "/volumes/notes".to_owned(),
+        members: both.clone(),
+        read_only: true,
+        ..cache()
+    };
+    let id = runtime
+        .create(volumed("image-volumes", 3 * GIB, vec![cache(), notes]))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    assert_eq!(
+        images.asked.lock().unwrap().last().unwrap().plug_roots,
+        ["/volumes"]
+    );
+    let bound = Some(NonZeroU64::new(GIB).unwrap());
+    let plug = |name: &str, members: &[Member], at: &str, read_only: bool| Plug {
+        source: PlugSource::Volume {
+            name: name.to_owned(),
+            bound,
+        },
+        to: PlugFor::Members(members.iter().map(member_name).collect()),
+        at: at.to_owned(),
+        read_only,
+        exec: true,
+    };
+    assert_eq!(
+        *images.run.plugs.lock().unwrap(),
+        [
+            plug("kiln-agent-cache", &harness, "/volumes/cache", false),
+            plug("kiln-agent-notes", &both, "/volumes/notes", true),
+        ]
+    );
+    assert_eq!(*images.run.diagnostics_bounds.lock().unwrap(), [GIB]);
+}
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1; Shards' D281, R04): a volume its run host refuses as the run starts refuses
+/// the start, typed by what holds the volume, the run stopped and the box ended in Shards' words. Do start a VM given a
+/// volume its run host refuses `Bound` (the runs holding it serve it with another bound), then one given a volume
+/// refused `Clearing` (a clearing holds it). Expect each start refused `Volume` with that cause in Shards' words,
+/// nothing plugged, its run stopped once, and the box shown Empty, its exit unknown and its `ended` quoting them.
+#[test]
+fn p6_2_a_volume_its_run_host_refuses_refuses_the_start_typed() {
+    for (cause, typed) in [
+        (PlugRefusal::Bound, VolumeCause::Bound),
+        (PlugRefusal::Clearing, VolumeCause::Clearing),
+    ] {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let words = format!("volume kiln-agent-cache: {cause:?}, as the test asked");
+        *images.run.refuse_plug.lock().unwrap() = Some(ImageRefusal::Plug(cause, words.clone()));
+        let id = runtime
+            .create(volumed("image-volume-refused", GIB, vec![cache()]))
+            .unwrap()
+            .id;
+        assert_eq!(
+            runtime.start(&id),
+            Err(Refusal::Volume {
+                cause: typed,
+                why: words.clone()
+            })
+        );
+        assert!(images.run.plugs.lock().unwrap().is_empty());
+        assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+        let info = runtime.inspect(&id).unwrap();
+        assert_eq!(
+            (info.state, info.exit),
+            (BoxState::Empty, Some(Exit::Unknown))
+        );
+        assert!(
+            info.ended
+                .as_deref()
+                .is_some_and(|ended| ended.contains(&words)),
+            "{info:?}"
+        );
+    }
+}
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1): a VM's volumes are refused before anything is made where they could never be
+/// given: their bounds together past the disk its box was admitted with (no box writes past its admission), or one
+/// beneath a directory its guest keeps its own (Shards' `plug::root_name`). Do create a VM admitted with 1 GiB of disk
+/// given two 1 GiB volumes, and one given a volume beneath `/proc`. Expect each refused Invalid saying why, with no
+/// record made. Do create one admitted with 2 GiB given the same two. Expect it made.
+#[test]
+fn p6_2_volumes_past_the_admitted_disk_or_beneath_inits_own_are_refused_at_create() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let notes = ImageVolume {
+        name: "kiln-agent-notes".to_owned(),
+        at: "/volumes/notes".to_owned(),
+        ..cache()
+    };
+    match runtime.create(volumed(
+        "image-volumes-past",
+        GIB,
+        vec![cache(), notes.clone()],
+    )) {
+        Err(Refusal::Invalid { why, .. }) => assert!(why.contains("admitted"), "{why}"),
+        other => panic!("volumes past the admitted disk: {other:?}"),
+    }
+    let proc = ImageVolume {
+        at: "/proc/cache".to_owned(),
+        ..cache()
+    };
+    match runtime.create(volumed("image-volume-proc", GIB, vec![proc])) {
+        Err(Refusal::Invalid { why, .. }) => assert!(why.contains("\"/proc\""), "{why}"),
+        other => panic!("a volume beneath /proc: {other:?}"),
+    }
+    for refused in ["image-volumes-past", "image-volume-proc"] {
+        assert!(record(&owner, &BoxId::new(refused).unwrap()).is_none());
+    }
+    runtime
+        .create(volumed("image-volumes-fit", 2 * GIB, vec![cache(), notes]))
+        .unwrap();
+}
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1, R04): each of Shards' plug refusals typed by what refused it, a run's volumes
+/// as it starts being the class's only plugs. Expect what holds the volume, `Bound` and `Clearing`, as `Volume` by its
+/// retry; the spec's (`Request`, `Member`, `Outside`, `Taken`, `Volume`) as Invalid; its host's and its microVM's
+/// (`Host`, `Device`) as Os; an unplug's (`Unknown`, `Busy`) as the class's own fault, Broken; each in Shards' words.
+#[test]
+fn p6_2_each_plug_refusal_is_typed_by_what_refused_it() {
+    let id = BoxId::new("image-plug-refused").unwrap();
+    let words = "Shards' words".to_owned();
+    let typed = |cause| {
+        refused(
+            &id,
+            "booting a Shards image VM",
+            ImageRefusal::Plug(cause, words.clone()),
+        )
+    };
+    assert_eq!(
+        typed(PlugRefusal::Bound),
+        Refusal::Volume {
+            cause: VolumeCause::Bound,
+            why: words.clone()
+        }
+    );
+    assert_eq!(
+        typed(PlugRefusal::Clearing),
+        Refusal::Volume {
+            cause: VolumeCause::Clearing,
+            why: words.clone()
+        }
+    );
+    for cause in [
+        PlugRefusal::Request,
+        PlugRefusal::Member,
+        PlugRefusal::Outside,
+        PlugRefusal::Taken,
+        PlugRefusal::Volume,
+    ] {
+        assert!(
+            matches!(typed(cause), Refusal::Invalid { what: "shards image's volume", ref why } if why.contains(&words)),
+            "{cause:?}"
+        );
+    }
+    for cause in [PlugRefusal::Host, PlugRefusal::Device] {
+        assert!(
+            matches!(typed(cause), Refusal::Os { op: "booting a Shards image VM", ref why } if why.contains(&words)),
+            "{cause:?}"
+        );
+    }
+    for cause in [PlugRefusal::Unknown, PlugRefusal::Busy] {
+        assert!(
+            matches!(typed(cause), Refusal::Broken(ref why) if why.contains(&words)),
+            "{cause:?}"
+        );
+    }
+}
+
+/// Kiln plan 01a1dd2e…, P6.2 (AC-T7.4.1, R04): Shards' refusals of its home's volumes' listing or a clearing typed as
+/// the call it answers. Expect a volume a run holds `Volume { InUse }` and one the home has none of `Volume { Unknown
+/// }`, each in Shards' words; a name the store takes no volume by Invalid; and files not all removed, a `shards` that
+/// didn't start, one that ended unanswered and one of another version, Os.
+#[test]
+fn p6_2_a_clearings_refusals_are_typed_by_what_refused_it() {
+    let op = "clearing a Shards home's volume";
+    assert_eq!(
+        volume_refused(
+            op,
+            VolumeRefusal::Clear(ClearCause::InUse, "held".to_owned())
+        ),
+        Refusal::Volume {
+            cause: VolumeCause::InUse,
+            why: "held".to_owned()
+        }
+    );
+    assert_eq!(
+        volume_refused(
+            op,
+            VolumeRefusal::Clear(ClearCause::Unknown, "none".to_owned())
+        ),
+        Refusal::Volume {
+            cause: VolumeCause::Unknown,
+            why: "none".to_owned()
+        }
+    );
+    assert_eq!(
+        volume_refused(op, VolumeRefusal::Clear(ClearCause::Name, "bad".to_owned())),
+        Refusal::Invalid {
+            what: "volume",
+            why: "bad".to_owned()
+        }
+    );
+    for why in [
+        VolumeRefusal::Clear(ClearCause::Store, "left".to_owned()),
+        VolumeRefusal::Start("no shards there".to_owned()),
+        VolumeRefusal::Ended {
+            status: Some(1),
+            said: "said".to_owned(),
+        },
+        VolumeRefusal::Version(9),
+    ] {
+        assert!(
+            matches!(
+                volume_refused(op, why.clone()),
+                Refusal::Os {
+                    op: "clearing a Shards home's volume",
+                    ..
+                }
+            ),
+            "{why:?}"
+        );
+    }
 }
 
 /// Joint plan step 12 (D258's `keep_diagnostics`; ROOT, 2026-11-13): a box's run host's diagnostics are kept whole in one

@@ -227,6 +227,52 @@ pub trait Runtime: Send + Sync {
             why: "this runtime runs no charge learner to take kiln's reservations".to_owned(),
         })
     }
+
+    /// Every volume of the Shards home its Shards image VMs' volumes are kept in (Shards' D281; kiln plan 01a1dd2e…,
+    /// P6.2: an agent's volumes as its person sees them, and what an admission reads), by name, as Shards' store reads
+    /// them as it is asked: each volume's files walked, a cost for a page or an admission, never for a start. A runtime
+    /// that boots no Shards image VM refuses it, naming why.
+    fn volumes(&self) -> Result<Vec<HomeVolume>, Refusal> {
+        Err(Refusal::Invalid {
+            what: "volumes",
+            why: "this runtime boots no Shards image VM, so it keeps no Shards home's volumes"
+                .to_owned(),
+        })
+    }
+
+    /// Volume `name` of that home removed with its files (Shards' D281), so that the next run given it finds it empty,
+    /// once no run holds it: each run given it holds it from its start's plug to its end, a daemon's run as an image
+    /// box's. Refused at once, never waited for: [`VolumeCause::InUse`] where a run holds it, its files kept, and
+    /// [`VolumeCause::Unknown`] where the home has none of that name, each [`Refusal::Volume`] in Shards' words;
+    /// `Invalid` for a name the store takes no volume by; `Os` where its files were not all removed. A runtime that
+    /// boots no Shards image VM refuses it, naming why.
+    fn clear_volume(&self, name: &str) -> Result<(), Refusal> {
+        let _ = name;
+        Err(Refusal::Invalid {
+            what: "clear_volume",
+            why: "this runtime boots no Shards image VM, so it keeps no Shards home's volumes"
+                .to_owned(),
+        })
+    }
+}
+
+/// A volume of a node's Shards home ([`Runtime::volumes`]), as Shards' store reads it (D281).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeVolume {
+    pub name: String,
+    /// The bytes its files take, as `system df` counts a volume's (each file's length, a hard link's once); none where
+    /// its files could not all be read.
+    pub bytes: Option<u64>,
+    /// The most its files may take ([`crate::ImageVolume::bound`]); none where it has none, its host's room alone
+    /// bounding it.
+    pub bound: Option<u64>,
+    /// What its files take by its bound's measure, which an admission holds to its bound: the count its servers share
+    /// while a run holds it bounded, else walked as it is asked; none where its files could not all be read.
+    pub charge: Option<u64>,
+    /// When it was made, in nanoseconds since the Unix epoch.
+    pub created_ns: u64,
+    /// Made for one run alone, for an image's `VOLUME` no share stands in for, and gone with it: no agent's.
+    pub anonymous: bool,
 }
 
 /// Whether a VM process's CPU time holds its vCPUs' guest time (Shards' D265), as that process learned it from its own
@@ -2834,6 +2880,30 @@ pub enum Refusal {
         op: &'static str,
         failure: GuestFailure,
     },
+    /// A volume of its node's Shards home (Shards' D281) refused by what holds it, `cause`, in Shards' words, `why`,
+    /// which name it: a start's plug of a volume its box is given ([`crate::ShardsImage::volumes`]), or a clearing
+    /// ([`Runtime::clear_volume`]). After `Guest` (append-only).
+    #[error("a Shards home's volume, {cause}: {why}")]
+    Volume { cause: VolumeCause, why: String },
+}
+
+/// What held a volume of a node's Shards home from a start or a clearing ([`Refusal::Volume`]; Shards' D281), each by
+/// its own retry. The node's wire tags each by its place here, so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum VolumeCause {
+    /// Asked with another bound than the one the runs holding it serve it with: its bound changes only while no run
+    /// holds it, so a start that asks it again once none does is given the bound it asks.
+    #[error("asked with another bound than the runs holding it serve it with")]
+    Bound,
+    /// A clearing holds it alone: asked again once that clearing has answered, it is made anew, empty.
+    #[error("being cleared")]
+    Clearing,
+    /// A run holds it, each run given it holding it until it ends: its files are kept.
+    #[error("held by a run")]
+    InUse,
+    /// The home has none of that name.
+    #[error("not in its home")]
+    Unknown,
 }
 
 /// How a Shards guest failed a call ([`Refusal::Guest`]): each of Shards' kinds by itself (Shards R04), so a caller

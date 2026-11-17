@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use hex_api::lease::Lessors;
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, Class, HostUse, Member, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, Class, HomeVolume, HostUse, Member, Proc, Program, Refusal, Runtime,
+    Signal, Stdio, Usage,
 };
 use hex_core::record::{BoxRecord, PoolRecord};
 use hex_runtime::devices::{Books, PoolPreparationCheck, PoolRecords, Records, Transaction};
@@ -346,6 +346,12 @@ impl Runtime for ImageRuntime {
     }
     fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.class.started(id)
+    }
+    fn volumes(&self) -> Result<Vec<HomeVolume>, Refusal> {
+        self.class.volumes()
+    }
+    fn clear_volume(&self, name: &str) -> Result<(), Refusal> {
+        self.class.clear_volume(name)
     }
 }
 

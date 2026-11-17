@@ -117,11 +117,13 @@ impl ImageClass {
         // Its diagnostics held within the disk its allocation was admitted with, or the tail Shards keeps to quote a run's
         // end where that is less, as an image box's are (the review's B-9).
         let kept_within = vm.allocation.resources.disk_bytes;
+        // A node VM is given no volume: its boot plugs none.
         if let Err(why) = boot_on_its_thread(
             images,
             spec,
             kept,
             kept_within,
+            Vec::new(),
             Party(Arc::clone(&slot)),
             stop,
         ) {
