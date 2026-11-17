@@ -14,7 +14,8 @@
 //! by start, ended by KILL, its members unreached (their exec and signals refused as awaiting Shards'
 //! agent-control endpoint), and its guest time per vCPU read while it runs. The simulated VM runs every
 //! vCPU the whole time it runs: the most guest time a real one can report, so a consumer's bound holds
-//! against it.
+//! against it. The warm pools it's asked to keep ([`Runtime::keep_pool`]) are names alone, at most one for each box it
+//! may hold: it boots no host ahead of a box, so none is ever warm or starting.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -25,7 +26,7 @@ use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
     Exit, GuestTime, Member, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime,
-    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage,
+    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage, WarmHeld, WarmPool,
 };
 
 /// The echo program: what comes in on `stdin` goes out on `stdout`, at most [`SIM_ECHO_BYTES`] of it, and it ends
@@ -85,6 +86,8 @@ pub struct SimRuntime {
     term_ends_init: bool,
     /// A specific initialized endpoint, when exercising routing between distinct backends.
     backend: Option<Class>,
+    /// The warm pools it keeps, by name alone, at most [`SIM_BOXES`].
+    pools: Mutex<std::collections::BTreeSet<WarmPool>>,
 }
 
 struct SimBox {
@@ -753,6 +756,37 @@ impl Runtime for SimRuntime {
         }
         Ok(())
     }
+
+    /// Kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1: at most one pool for each box it may hold, as a node keeps at
+    /// most one for each of its boxes, refused `Full` past them.
+    fn keep_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        pool.check()?;
+        let mut pools = self.pools.lock().map_err(poisoned)?;
+        if !pools.contains(pool) && pools.len() >= SIM_BOXES {
+            return Err(Refusal::Full(SIM_BOXES));
+        }
+        pools.insert(pool.clone());
+        Ok(())
+    }
+
+    fn let_go_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        self.pools.lock().map_err(poisoned)?.remove(pool);
+        Ok(())
+    }
+
+    fn pools(&self) -> Result<Vec<WarmHeld>, Refusal> {
+        Ok(self
+            .pools
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .map(|pool| WarmHeld {
+                pool: pool.clone(),
+                warm: 0,
+                starting: 0,
+            })
+            .collect())
+    }
 }
 
 /// A simulated program, and the caller's ends of the streams its exec asked for until they are taken.
@@ -1106,6 +1140,30 @@ mod tests {
             (info.state, info.exit),
             (BoxState::Empty, Some(Exit::Signal(15)))
         );
+    }
+
+    /// Kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1 (CLAUDE.md §2): do keep as many pools as the simulator may hold
+    /// boxes, then one more. Expect: the one more refused `Full`, one kept already kept again, and a pool let go making
+    /// room for the one more.
+    #[test]
+    fn p3_1_the_simulator_refuses_a_pool_past_its_box_bound() {
+        let rt = SimRuntime::new();
+        let size = sim_vm_allocation().unwrap().vm_size().unwrap();
+        let pool = |n: usize| WarmPool {
+            image: format!("hex-sim-pool-{n}@sha256:{}", "0".repeat(64)),
+            size,
+        };
+        for n in 0..SIM_BOXES {
+            rt.keep_pool(&pool(n)).unwrap();
+        }
+        assert_eq!(
+            rt.keep_pool(&pool(SIM_BOXES)),
+            Err(Refusal::Full(SIM_BOXES))
+        );
+        assert_eq!(rt.keep_pool(&pool(0)), Ok(()), "one kept already");
+        assert_eq!(rt.pools().unwrap().len(), SIM_BOXES);
+        rt.let_go_pool(&pool(0)).unwrap();
+        assert_eq!(rt.keep_pool(&pool(SIM_BOXES)), Ok(()));
     }
 
     #[test]

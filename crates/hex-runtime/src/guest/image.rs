@@ -1,7 +1,9 @@
 //! The Shards class on Agentfile images (joint plan step 12; docs/design/shards-image-class.md): each box
 //! a microVM Shards boots its image in under shards-init (Shards' D231, `shards_api::image`), its members
 //! started as the image's Agentfile declares them. The box's record is the guest's Books' (the node's
-//! Store); its run is this process's, for a run ends with its owner in D231's first version.
+//! Store); its run is this process's, for a run ends with its owner in D231's first version. A box boots on a warm run
+//! host of Shards' pools (D253) where a pool kiln named for its image and size is kept, each host charged to its owner's
+//! room ([`ImageClass::bind_room`]; kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1), else on a run host of its own.
 //!
 //! What the record and the run say of a box ([`State`], R04): Created (`Creating`), Booting and Running
 //! (`Ready`, a boot or run of this process), Stopping, Ended (`Ready` with its exit), and Held (`Ready` or
@@ -29,7 +31,7 @@ use std::time::{Duration, Instant};
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HostUse, ImageMember,
     LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal, ShardsImage, Signal, Upstream,
-    Usage, VmSize,
+    Usage, VmSize, WarmHeld, WarmPool,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -39,8 +41,9 @@ use shards_api::control::{
     exec_admissions,
 };
 use shards_api::image::{
-    BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats, StatsScope,
+    BootStop, Channel, ControlAsk, Gave, ImageGuest, ImagePools, ImageRefusal, ImageShare,
+    ImageSpec, Images, MemberEnd, MemberName, MemberSpec, RunEnd, RunEnded, Secret, Stats,
+    StatsScope, WarmHost, WarmRoom,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -424,6 +427,54 @@ pub struct ImageClass {
     /// What leases its VMs' credentials, its orchestrator's (joint plan step 33; [`ImageClass::with_lessors`]): none,
     /// so a box granting a credential is refused as it is created.
     pub(super) lessors: Option<Arc<dyn hex_api::lease::Lessors>>,
+    /// The warm pools it keeps and the room their hosts are charged to, bound once ([`ImageClass::bind_room`]): none
+    /// bound, it keeps none.
+    kept: OnceLock<Kept>,
+}
+
+/// The warm pools the class keeps (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1; Shards' D253): for each kiln
+/// names, by its boxes' image and admitted size, Shards' pools of warm run hosts, each host charged to `room` before it
+/// starts. Shards' pools are kept one for each named pool, as letting one go ends its hosts alone, which Shards' release
+/// of the coldest hosts of every pool can't. At most one for each box a node holds ([`crate::MAX_BOXES`]), as kiln's own
+/// simulator keeps one for each run it holds: past it a keep is refused `Full`.
+struct Kept {
+    room: Arc<dyn WarmRoom>,
+    pools: Mutex<BTreeMap<WarmPool, Arc<ImagePools>>>,
+}
+
+/// The class's room as each of its pools is charged to it ([`ImagePools::new`] takes one of its own): its owner's, shared.
+struct PoolRoom(Arc<dyn WarmRoom>);
+
+impl WarmRoom for PoolRoom {
+    fn claim(&self, host: &WarmHost) -> bool {
+        self.0.claim(host)
+    }
+
+    fn give(&self, host: &WarmHost, why: Gave) {
+        self.0.give(host, why);
+    }
+}
+
+/// What `pool`'s Shards pools hold now, summed: one Shards pool for each microVM its boxes booted, as Shards keys its
+/// pools by a run's whole microVM (`wire::Request::exemplar`: its shares, grants and credentials among it).
+fn held_of(pool: WarmPool, pools: &ImagePools) -> Result<WarmHeld, Refusal> {
+    let counted = |n: Option<usize>| {
+        n.ok_or_else(|| Refusal::Broken("a warm pool's hosts past a usize".to_owned()))
+    };
+    pools.held().iter().try_fold(
+        WarmHeld {
+            pool,
+            warm: 0,
+            starting: 0,
+        },
+        |held, shards| {
+            Ok(WarmHeld {
+                warm: counted(held.warm.checked_add(shards.warm))?,
+                starting: counted(held.starting.checked_add(shards.starting))?,
+                pool: held.pool,
+            })
+        },
+    )
 }
 
 /// A boot's answer: its run's guest, or Shards' refusal.
@@ -884,19 +935,22 @@ fn vm_size(spec: &BoxSpec) -> Result<VmSize, Refusal> {
 
 /// The VM size `allocation` admits, held to what Shards boots on this host, as [`vm_size`] holds a box's.
 fn admitted_size(allocation: &hex_api::Allocation) -> Result<VmSize, Refusal> {
-    let size = allocation.vm_size()?;
-    let invalid = |why: String| Refusal::Invalid {
-        what: "shards image",
-        why,
-    };
+    booted_as(allocation.vm_size()?, "shards image", "allocation")
+}
+
+/// `size` where Shards boots it as asked on this host (`shards_api::envelope`), as [`vm_size`] holds a box's and
+/// [`hex_api::Runtime::keep_pool`] a warm pool's; any other refused `Invalid` naming `what`, its `field` and what Shards
+/// would boot for it.
+fn booted_as(size: VmSize, what: &'static str, field: &str) -> Result<VmSize, Refusal> {
+    let invalid = |why: String| Refusal::Invalid { what, why };
     match shards_api::envelope(std::env::consts::ARCH, size.vcpus, size.memory_mib) {
         Ok((vcpus, memory_mib)) if (vcpus, memory_mib) == (size.vcpus, size.memory_mib) => Ok(size),
         Ok((vcpus, memory_mib)) => Err(invalid(format!(
-            "allocation: {} vCPUs and {} MiB of guest memory, which Shards boots as {vcpus} and {memory_mib} MiB \
+            "{field}: {} vCPUs and {} MiB of guest memory, which Shards boots as {vcpus} and {memory_mib} MiB \
              (shards_api::envelope)",
             size.vcpus, size.memory_mib
         ))),
-        Err(why) => Err(invalid(format!("allocation: {why}"))),
+        Err(why) => Err(invalid(format!("{field}: {why}"))),
     }
 }
 
@@ -1843,6 +1897,7 @@ impl ImageClass {
             binary,
             native_paths: None,
             lessors: None,
+            kept: OnceLock::new(),
         }
     }
 
@@ -1891,6 +1946,25 @@ impl ImageClass {
     /// ([`GuestRuntime::bind_books`]).
     pub fn bind_books(&self, books: Weak<dyn Books>) -> Result<(), Refusal> {
         super::books::bind_once(&self.books, books)
+    }
+
+    /// The room its warm pools' hosts are charged to, `room`, its owner's, bound once (kiln plan
+    /// `01a1dd2e313f72f69c6d93061143cc2e`, P3.1; Shards' D253: the room its owner admits its boxes from, which decides
+    /// each claim alone, so a warm host never holds room a box was admitted to): from then on it keeps the warm pools it
+    /// is asked to keep ([`hex_api::Runtime::keep_pool`]). Bound again, the same room is taken, as the record
+    /// authority's is ([`ImageClass::bind_books`]), and another refused `Broken`, the first kept.
+    pub fn bind_room(&self, room: Arc<dyn WarmRoom>) -> Result<(), Refusal> {
+        let bound = self.kept.get_or_init(|| Kept {
+            room: Arc::clone(&room),
+            pools: Mutex::new(BTreeMap::new()),
+        });
+        if Arc::ptr_eq(&bound.room, &room) {
+            Ok(())
+        } else {
+            Err(Refusal::Broken(
+                "the image class's warm room cannot be rebound".to_owned(),
+            ))
+        }
     }
 
     fn uses_books(&self) -> bool {
@@ -1953,6 +2027,28 @@ impl ImageClass {
         Ok(self
             .recorded_box(id)?
             .filter(|record| matches!(record.spec.class, ClassSpec::ShardsImage(_))))
+    }
+
+    /// What boots a box of `image` and `size` (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): the warm pool kept
+    /// for both where one is, which boots it on a warm host of its where one is ready and teaches its pool its microVM
+    /// where none is; else `plain`, the class's own boot, on a run host of its own, no pool made of it.
+    fn boot_of(
+        &self,
+        plain: Arc<dyn Images>,
+        image: &str,
+        size: VmSize,
+    ) -> Result<Arc<dyn Images>, Refusal> {
+        let Some(kept) = self.kept.get() else {
+            return Ok(plain);
+        };
+        let pool = WarmPool {
+            image: image.to_owned(),
+            size,
+        };
+        Ok(match kept.pools.lock().map_err(poisoned)?.get(&pool) {
+            Some(pools) => Arc::clone(pools) as Arc<dyn Images>,
+            None => plain,
+        })
     }
 
     /// The image Shards boots for a box: its pinned image and command, its admitted size, its grants as
@@ -2258,7 +2354,7 @@ impl ImageClass {
     pub(super) fn start_image(&self, record: BoxRecord) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let image = self.image()?;
-        let images = Arc::clone(image.images()?);
+        let plain = Arc::clone(image.images()?);
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}
@@ -2276,7 +2372,9 @@ impl ImageClass {
                 "a Shards image record of another class".to_owned(),
             ));
         };
-        let mut spec = self.image_spec(shards, vm_size(&record.spec)?)?;
+        let size = vm_size(&record.spec)?;
+        let images = self.boot_of(plain, &shards.image, size)?;
+        let mut spec = self.image_spec(shards, size)?;
         // The run's lessor, its orchestrator's, made before any effect (joint plan step 33): a run granting no
         // credential has none and asks nothing.
         spec.lessor = self.run_lessor(&id, shards)?;
@@ -3215,6 +3313,58 @@ impl hex_api::Runtime for ImageClass {
             return record.retired_info();
         }
         self.started_image(record)
+    }
+
+    /// Shards' pools made for `pool` where it isn't kept already, their threads started and no host: its image pinned and
+    /// its size what Shards boots as asked, as a box's are held. Made under the lock, as their making waits on nothing
+    /// and only their drop, which follows their hosts to their end, waits (`let_go_pool`).
+    fn keep_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        let kept = self.kept.get().ok_or_else(Refusal::no_warm_room)?;
+        pool.check()?;
+        booted_as(pool.size, "warm pool", "size")?;
+        let mut pools = kept.pools.lock().map_err(poisoned)?;
+        if pools.contains_key(pool) {
+            return Ok(());
+        }
+        if pools.len() >= crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        // D26's keep-alive, which the daemon's pools keep: an idle pool's hosts end past it.
+        let made =
+            ImagePools::new(PoolRoom(Arc::clone(&kept.room)), ImagePools::KEEP).map_err(|why| {
+                Refusal::Os {
+                    op: "keeping a warm pool",
+                    why: why.to_string(),
+                }
+            })?;
+        pools.insert(pool.clone(), Arc::new(made));
+        Ok(())
+    }
+
+    /// Shards' pools of `pool` dropped outside the lock, which ends their hosts before it returns.
+    fn let_go_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        let kept = self.kept.get().ok_or_else(Refusal::no_warm_room)?;
+        let gone = kept.pools.lock().map_err(poisoned)?.remove(pool);
+        drop(gone);
+        Ok(())
+    }
+
+    /// Each pool's Shards pools asked what they hold outside the lock.
+    fn pools(&self) -> Result<Vec<WarmHeld>, Refusal> {
+        let Some(kept) = self.kept.get() else {
+            return Ok(Vec::new());
+        };
+        let pools: Vec<(WarmPool, Arc<ImagePools>)> = kept
+            .pools
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .map(|(pool, pools)| (pool.clone(), Arc::clone(pools)))
+            .collect();
+        pools
+            .into_iter()
+            .map(|(pool, pools)| held_of(pool, &pools))
+            .collect()
     }
 }
 

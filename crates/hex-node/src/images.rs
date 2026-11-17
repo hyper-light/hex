@@ -11,12 +11,12 @@ use std::time::Duration;
 use hex_api::lease::Lessors;
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, HostUse, Member, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    Stdio, Usage, WarmHeld, WarmPool,
 };
 use hex_core::record::{BoxRecord, PoolRecord};
 use hex_runtime::devices::{Books, PoolPreparationCheck, PoolRecords, Records, Transaction};
 use hex_runtime::guest::{ImageClass, ImageWaits, host_images};
-use shards_api::image::Images;
+use shards_api::image::{Images, WarmRoom};
 
 use crate::store::{Store, TURNS};
 use crate::turns::Turns;
@@ -118,6 +118,13 @@ impl ImageRuntime {
     /// to boot, read and stop its node VM, its records this runtime's own Store.
     pub fn class(&self) -> &ImageClass {
         &self.class
+    }
+
+    /// The room its warm pools' hosts are charged to, `room`, its owner's, the room its owner admits its boxes from,
+    /// bound once ([`ImageClass::bind_room`]; kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1): from then on it keeps
+    /// the warm pools it is asked to keep. A runtime given none refuses a pool, `Unconfigured` ([`hex_api::WARM_ROOM`]).
+    pub fn bind_room(&self, room: Arc<dyn WarmRoom>) -> Result<(), Refusal> {
+        self.class.bind_room(room)
     }
 
     /// Whether box `id`'s turn is free now, held by no transaction: what the tests of the runtime's turns read.
@@ -346,6 +353,15 @@ impl Runtime for ImageRuntime {
     }
     fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.class.started(id)
+    }
+    fn keep_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        self.class.keep_pool(pool)
+    }
+    fn let_go_pool(&self, pool: &WarmPool) -> Result<(), Refusal> {
+        self.class.let_go_pool(pool)
+    }
+    fn pools(&self) -> Result<Vec<WarmHeld>, Refusal> {
+        self.class.pools()
     }
 }
 
