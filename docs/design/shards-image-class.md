@@ -43,8 +43,8 @@ that, at `8aa7c028`; `e0cc059c` before that, at `c8b4ce6b`), with a failed run's
 runtime's words (`32b66a10`, `94d519d6`), the class whole and its host use read to its end (`ae7038d7`, `2a8bf6be`), a
 member's arguments and the VM's shares (`cf535152`), and `NoSuchBox` where a shared guest holds no record (`fac528d9`).
 On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, and HEX-IMG-2 to 5 on macOS HVF at
-`cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF at `fac528d9` or later, and every case on Windows WHP. Built (branch
-`root/hex-p31`, not merged), kiln plan `01a1dd2e313f72f69c6d93061143cc2e` P3.1: the warm pools kiln names, each booting
+`cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF at `fac528d9` or later, and every case on Windows WHP. Merged from
+`root/hex-p31`, kiln plan `01a1dd2e313f72f69c6d93061143cc2e` P3.1: the warm pools kiln names, each booting
 its boxes through Shards' `ImagePools`, its hosts charged to the room its owner binds (§10); its real-VM runs owed.
 
 Sources, read at the revisions named:
@@ -624,8 +624,8 @@ pool making one.
 ## 11. A class of its own (kiln plan 01a1dd2e…, P2.2)
 
 The Hex lead's note, approved in kiln plan `01a1dd2e195c7328b7a9bf2b12fb923a`'s P2.2: `Class::ShardsImage` appended,
-listed only where the image backend boots and Shards' check of the host says it runs microVMs. Built on
-`root/hex-p22`, not merged; its tests are written and owed to ROOT's runs.
+listed only where the image backend boots and Shards' check of the host says it runs microVMs. Merged from
+`root/hex-p22`; its tests are written and owed to ROOT's runs.
 
 - **The class.** `hex_api::Class::ShardsImage`, named `shards-image`, the wire's class tag 4 after every older one: an
   image box's class (`ClassSpec::ShardsImage`), as its inspect and a node's listing say it. Its backend is still the
@@ -653,7 +653,7 @@ listed only where the image backend boots and Shards' check of the host says it 
   runtime was initialized for it, Shards' check among that, and on the hypervisor Shards boots it on, as Shards' own
   class is held (KVM, Hypervisor.framework; on Windows Shards' check is the one fact of it). Peer rows, launch
   observations, traces and needs name it `shards-image`. The generator draws none, as no recorded trace carries one.
-- **Admitted by the scheduler** (built on `root/p2-finish`, on `root/hex-p22`, not merged). Before it, Hex's
+- **Admitted by the scheduler** (merged from `root/p2-finish`, on `root/hex-p22`). Before it, Hex's
   scheduler never admitted an image box: `placement::validate` checked a payload with `BoxSpec::check`, which an image
   spec passes only with its allocation, and then refused a payload naming one, the scheduler deriving it; and the
   initialized admission takes a class only through its routes, which none carried. Now:

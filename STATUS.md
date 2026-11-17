@@ -79,11 +79,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   run host started holding only its stdio (D248, Hex's former 0001 upstream); its usage carries each vCPU's guest
   time (D241); a node on macOS or Windows runs an image VM's calls itself; a node whose SHARDS_KERNEL and
   SHARDS_INIT aren't a pair serves none.
-  Its own class (kiln plan 01a1dd2e…, P2.2; `shards-image-class.md` §11), built on `root/hex-p22`, not merged:
+  Its own class (kiln plan 01a1dd2e…, P2.2; `shards-image-class.md` §11), merged from `root/hex-p22`:
   `Class::ShardsImage` (`shards-image`, wire tag 4), listed only where the node's image boot runs and Shards' check of
   its host (`shards_api::host_check`, D262) says it runs microVMs, each answer mapped and a node that can't refusing an
   image VM in Shards' words; its capacity, learned charge, client waits and start costs its own; placed by hex-sim only
-  on a node listing it. Hex's scheduler admits image boxes (built on `root/p2-finish`, not merged): the class's
+  on a node listing it. Hex's scheduler admits image boxes (merged from `root/p2-finish`): the class's
   capacity offers its one route, a microVM of its own, at a per-box cost of its own (Shards' envelope on the node's
   plane, census-free); its payloads are checked without the allocation the scheduler derives; a node preflights its
   records as the class's. Closes with: ROOT's runs of its tests.
@@ -106,13 +106,13 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   runs hold with another bound, or one a clearing holds, refuses the start typed (`Refusal::Volume`). The home's
   volumes are listed and cleared through `shards_api::volumes` (`Runtime::volumes`, `Runtime::clear_volume`: in
   process, the class, `ImageRuntime` and the simulator; not on the node's wire), a held one refused
-  `Volume { InUse }`. Built, its tests written and none run yet: closes with those and its runs on KVM, HVF and WHP
+  `Volume { InUse }`. Merged from `root/hex-p6`, its tests written and none run yet: closes with those and its runs on KVM, HVF and WHP
   (ROOT's, shards-image-class.md §8).
   A program runs in any member of a running image VM (`Runtime::exec_member`, kiln's P7.1b: Shards' D243 on D238's
   exec lane, given at `9975d1f55`), in process alone (the node's wire carries none yet), its kill riding its lane while
   its outputs are open; and a run that ends on its own keeps the final use its VM tells with that end (D260) in its
-  record, which its delete with its host use answers. Unit-tested over the model's real endpoint on loopback and the
-  simulator. Closes with: their real-VM runs (ROOT's) and a member exec on the node's wire.
+  record, which its delete with its host use answers. Merged from `root/hex-p7`, its unit tests (over the model's real
+  endpoint on loopback and the simulator) written and owed to ROOT's runs. Closes with: their real-VM runs (ROOT's) and a member exec on the node's wire.
   A running VM's agent-control link (`Runtime::link`, kiln plan step 35's `/runs/control`) answers both ends' TLS and
   every lane its controller was granted, `mcp:N` among them, on Shards' `Linked::report` (`8c9c03cc4`), in process alone:
   the node's wire carries none yet. Closes with: its real-VM run, kiln's step 35 drives (ROOT's).
