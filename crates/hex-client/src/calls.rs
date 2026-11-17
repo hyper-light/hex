@@ -3279,6 +3279,26 @@ impl<T: Transport> Runtime for Core<T> {
         )
     }
 
+    /// Refused, typed, before anything is sent: the node's wire carries no member exec yet (kiln's P7.1b runs its programs
+    /// in members through a runtime made in its own process, hex-node's `ImageRuntime`), and the trait's refusal would
+    /// read as a box with no members.
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let _ = (member, program, stdio);
+        Err(Refusal::Invalid {
+            what: "exec_member",
+            why: format!(
+                "box {id}: the node's wire carries no member exec yet; a program in a member runs through a runtime in \
+                 the node's own process"
+            ),
+        })
+    }
+
     // Joint plan step 14: a box's room, rate and host use are told and read in the node's own process, by its charge
     // learner and by a runtime made in its caller's process; the node's wire carries none of them yet.
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {

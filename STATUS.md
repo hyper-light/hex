@@ -106,6 +106,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   process, the class, `ImageRuntime` and the simulator; not on the node's wire), a held one refused
   `Volume { InUse }`. Built, its tests written and none run yet: closes with those and its runs on KVM, HVF and WHP
   (ROOT's, shards-image-class.md §8).
+  A program runs in any member of a running image VM (`Runtime::exec_member`, kiln's P7.1b: Shards' D243 on D238's
+  exec lane, given at `9975d1f55`), in process alone (the node's wire carries none yet), its kill riding its lane while
+  its outputs are open; and a run that ends on its own keeps the final use its VM tells with that end (D260) in its
+  record, which its delete with its host use answers. Unit-tested over the model's real endpoint on loopback and the
+  simulator. Closes with: their real-VM runs (ROOT's) and a member exec on the node's wire.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

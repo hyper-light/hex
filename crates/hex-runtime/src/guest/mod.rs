@@ -1444,12 +1444,8 @@ impl Runtime for GuestRuntime {
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         let snapshot = match self.routed(id)? {
             books::Routed::Retired(record) => return Err(record.retired_refusal()?),
-            // A member's program is the agent-control endpoint's (joint plan step 11).
-            books::Routed::Image(_) => {
-                return Err(Refusal::Awaits {
-                    needs: hex_api::Upstream::MemberExec,
-                });
-            }
+            // A program in an image VM runs in a member it names (`exec_member`).
+            books::Routed::Image(_) => return Err(image::unnamed_member(id)),
             books::Routed::Other(snapshot) => snapshot,
         };
         let snapshot = snapshot.as_ref();
@@ -1480,6 +1476,29 @@ impl Runtime for GuestRuntime {
                 what: "member",
                 why: format!(
                     "box {id} isn't a Shards image box: only one has members its caller drives"
+                ),
+            }),
+        }
+    }
+
+    /// A program in an image VM's member (Shards' D243, on its run's exec lane); any other box's refused as the trait
+    /// refuses it.
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
+            books::Routed::Image(record) => self
+                .images
+                .exec_member_image(record, member, program, stdio),
+            books::Routed::Other(_) => Err(Refusal::Invalid {
+                what: "member",
+                why: format!(
+                    "box {id} isn't a Shards image box: only one has members a program runs in"
                 ),
             }),
         }
@@ -2301,6 +2320,16 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn mcp(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.mcp(id, member)
+    }
+
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &hex_api::Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.holder(id)?.exec_member(id, member, program, stdio)
     }
 
     fn signal_member(

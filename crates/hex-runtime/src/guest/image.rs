@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Given, GuestTime, HomeVolume, HostUse,
-    ImageMember, ImageVolume, LifecycleCause, Member, MemberKind, NodeRun, Proc, Refusal,
-    ShardsImage, Signal, Upstream, Usage, VmSize, VolumeCause, WarmHeld, WarmPool,
+    ImageMember, ImageVolume, LifecycleCause, Member, MemberKind, NodeRun, Proc, Program, Refusal,
+    ShardsImage, Signal, Stdio, Upstream, Usage, VmSize, VolumeCause, WarmHeld, WarmPool,
 };
 use hex_core::patience::{Patience, Piece};
 use hex_core::record::{BootSession, BoxRecord, Phase};
@@ -41,9 +41,10 @@ use shards_api::control::{
     exec_admissions,
 };
 use shards_api::image::{
-    BootStop, Channel, ControlAsk, Gave, ImageGuest, ImagePools, ImageRefusal, ImageShare,
-    ImageSpec, Images, MemberEnd, MemberName, MemberSpec, NetRefusal, Plug, PlugFor, PlugRefusal,
-    PlugSource, RunEnd, RunEnded, Secret, Stats, StatsScope, WarmHost, WarmRoom,
+    BootStop, Channel, ControlAsk, FinalUse, Gave, ImageGuest, ImagePools, ImageRefusal,
+    ImageShare, ImageSpec, Images, MemberEnd, MemberName, MemberSpec, Microvm, NetRefusal, Plug,
+    PlugFor, PlugRefusal, PlugSource, RunEnd, RunEnded, Secret, Stats, StatsScope, WarmHost,
+    WarmRoom,
 };
 use shards_api::volumes::{ClearCause, VolumeRefusal};
 
@@ -110,9 +111,9 @@ pub(super) struct ImageBoot {
 }
 
 /// The agent-control of this class's runs (D238, D252; goal 2's item 2): its own key, made once from the OS's random
-/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); each box's controller, dialed as the first
-/// signal to one of its run's members goes, and kept for the run it was dialed for while that run is held, so later
-/// signals ride its one connection; and the waits its members' lanes make ([`LaneWaits`]).
+/// numbers, which every run's endpoint takes alone ([`ControlAsk`]); each box's controller, dialed as the first lane to
+/// one of its run's members is asked (a signal, an MCP connection, an exec), and kept for the run it was dialed for while
+/// that run is held, so later lanes ride its one connection; and the waits its members' lanes make ([`LaneWaits`]).
 struct Control {
     identity: Mutex<Option<Arc<Identity>>>,
     dialed: Mutex<BTreeMap<BoxId, Arc<Steering>>>,
@@ -130,6 +131,9 @@ struct LaneWaits {
     /// A member's harness's next connection to its MCP bridge (D254), from its ask until the harness connects, which may
     /// be never: past W* the wait follows the run's connection, however long that is ([`Steering::mcp`]).
     mcp: Patience,
+    /// A program's start in a member (D243), from its exec's ask until the member's host says it started or why not
+    /// ([`Steering::exec`]).
+    exec: Patience,
 }
 
 /// A run's controller (Shards' own, `shards_api::control::Controller`), its driver on a thread of its own: where it opens
@@ -151,6 +155,7 @@ impl Control {
                 lane: Patience::measuring("hex.image.member"),
                 signal: Patience::measuring("hex.image.signal"),
                 mcp: Patience::measuring("hex.image.mcp"),
+                exec: Patience::measuring("hex.image.exec"),
             },
         }
     }
@@ -290,6 +295,66 @@ impl Steering {
             .map_err(|fault| mcp_refused(id, index, fault))?;
         followed(&waits.mcp, &party, |patience| asked.wait(patience))?
             .map_err(|fault| mcp_refused(id, index, fault))
+    }
+
+    /// `spec` run in member `index` of box `id`'s run, on a lane of its own (D238's exec lane, D243's member exec): its
+    /// ask goes once, and its start is waited for as decision 9 has it ([`followed`], `waits.exec`), within its W*, past
+    /// it on by the run's connection's life. Refused, typed ([`exec_refused`]).
+    fn exec(
+        &self,
+        waits: &LaneWaits,
+        id: &BoxId,
+        index: u32,
+        spec: shards_abi::run::Spec,
+    ) -> Result<Started, Refusal> {
+        let party = [
+            Piece::Kind("the agent-control connection of box "),
+            Piece::Name(id.as_str()),
+            Piece::Kind(", a program in its member "),
+            Piece::Number(u64::from(index)),
+        ];
+        let mut asked = self
+            .execs
+            .exec(index, spec)
+            .map_err(|fault| exec_refused(id, index, fault))?;
+        followed(&waits.exec, &party, |patience| asked.wait(patience))?
+            .map(|exec| Started {
+                stdout: exec.stdout,
+                stderr: exec.stderr,
+                stdin: exec.stdin,
+                control: exec.control,
+            })
+            .map_err(|fault| exec_refused(id, index, fault))
+    }
+}
+
+/// A program started in a member (D243), as its exec lane gave it: its stdout, its stderr (none on a terminal, which no
+/// exec of this class asks), its stdin where it reads one, and its lane's control.
+struct Started {
+    stdout: Output,
+    stderr: Option<Output>,
+    stdin: Option<Input>,
+    control: ExecControl,
+}
+
+/// Why a program in box `id`'s member `index` didn't start, or ended with its end untold, as `Runtime::exec_member` says
+/// it (as `mcp_refused` says an MCP connection's): its member refused it as its init refuses a member's exec (Shards'
+/// `Unstarted::Refused`: it has ended, or its confinement refused what it asked), the run's connection ended, or what
+/// else Shards said, in its words.
+fn exec_refused(id: &BoxId, index: u32, fault: Fault) -> Refusal {
+    let not_running = |why| match id.try_clone() {
+        Ok(id) => Refusal::NotRunning(id, why),
+        Err(refused) => refused,
+    };
+    match fault {
+        Fault::Unstarted(Unstarted::Refused) => {
+            not_running("exec in a member: its member refused it, ended or confined")
+        }
+        Fault::Lost(_) => not_running("exec in a member: its run ended"),
+        fault => Refusal::Os {
+            op: "running a program in a member of a Shards image VM",
+            why: format!("box {id}'s member {index}: {fault}"),
+        },
     }
 }
 
@@ -696,10 +761,10 @@ enum Settled {
     None,
     /// Its boot, its answer not yet given.
     Booting,
-    /// Its boot's answer, taken here: its run has started.
-    Started(Arc<dyn ImageGuest>),
-    /// Its run, started before.
-    Running(Arc<dyn ImageGuest>),
+    /// Its boot's answer, taken here: its run has started, at the instant given.
+    Started(Arc<dyn ImageGuest>, Instant),
+    /// Its run, started before, at the instant given.
+    Running(Arc<dyn ImageGuest>, Instant),
     /// Its stop, its answer not yet given.
     Stopping(Arc<Slot<RunEnd>>, Stop),
     /// Its end, known: its boot refused, its stop's answer taken, or found so before.
@@ -716,16 +781,18 @@ enum State {
     Held,
 }
 
-/// How a box's run ended: its exit, and where the run failed, why, in its runtime's words ([`BoxInfo::ended`]).
+/// How a box's run ended: its exit, where the run failed, why, in its runtime's words ([`BoxInfo::ended`]), and, where it
+/// ended on its own, what its VM used in all as it told it with its end (Shards' D260), kept until its delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct End {
     exit: Exit,
     why: Option<String>,
+    used: Option<HostUse>,
 }
 
 impl End {
     /// A run's end as Shards' run host tells it ([`exit_of`]), with its words where it failed: its VM, its host or its
-    /// guest failed, or its own command never started (D249).
+    /// guest failed, or its own command never started (D249). No use of it kept.
     fn of(end: &RunEnd) -> Self {
         Self {
             exit: exit_of(end),
@@ -733,15 +800,19 @@ impl End {
                 RunEnd::Failed(why) => Some(why.clone()),
                 RunEnd::Exited(_) | RunEnd::Stopped => None,
             },
+            used: None,
         }
     }
 
     /// A stopped run's end, `end` as its run host told it, with the grants' refusal as why where its run was stopped for
-    /// breaking them (N6): the why outlives the call that found it (ROOT, 2026-11-14).
+    /// breaking them (N6): the why outlives the call that found it (ROOT, 2026-11-14). A run whose own end was seen
+    /// before its stop keeps the use its VM told with that end.
     fn stopped(end: &RunEnd, stop: &Stop) -> Self {
         let mut stopped = Self::of(end);
-        if let Stop::Grants(why) = stop {
-            stopped.why = Some(why.to_string());
+        match stop {
+            Stop::Grants(why) => stopped.why = Some(why.to_string()),
+            Stop::Ended(seen) => stopped.used.clone_from(&seen.used),
+            Stop::Asked => {}
         }
         stopped
     }
@@ -763,6 +834,7 @@ impl End {
         Self {
             exit: Exit::Unknown,
             why,
+            used: None,
         }
     }
 }
@@ -1177,23 +1249,42 @@ fn started_from(from: shards_api::image::StartedFrom) -> hex_api::StartedFrom {
 /// own memory, as its run host read the process, and each of its `vcpus` vCPUs' guest time ([`per_vcpu`]). A part the run
 /// host did not read is refused, naming why, never read as none.
 fn host_use_of(stats: &Stats, vcpus: u32, window: Duration) -> Result<HostUse, Refusal> {
-    let unread = |why: String| Refusal::Os {
-        op: "reading a Shards image VM's use of its host",
-        why,
-    };
-    let microvm = stats
-        .microvm
-        .as_ref()
-        .ok_or_else(|| unread("its run host told nothing of its microVM".to_owned()))?;
-    let host = microvm.host.as_ref().map_err(|why| unread(why.clone()))?;
+    let microvm = stats.microvm.as_ref().ok_or_else(|| Refusal::Os {
+        op: HOST_USE,
+        why: "its run host told nothing of its microVM".to_owned(),
+    })?;
+    microvm_use(microvm, vcpus, window)
+}
+
+/// What [`host_use_of`] and a final use's read are refused under.
+const HOST_USE: &str = "reading a Shards image VM's use of its host";
+
+/// What a VM costs its host, from its microVM part as its run host or its VM said it (D241's `Stats::microvm`, D260's
+/// final use: one form), over `window`: its VM process's CPU time and own memory, and each of its `vcpus` vCPUs' guest
+/// time ([`guest_ns`]). A part not read is refused, naming why, never read as none.
+fn microvm_use(microvm: &Microvm, vcpus: u32, window: Duration) -> Result<HostUse, Refusal> {
+    let host = microvm.host.as_ref().map_err(|why| Refusal::Os {
+        op: HOST_USE,
+        why: why.clone(),
+    })?;
     Ok(HostUse {
         cpu_ns: host.cpu_ns,
         footprint_bytes: host.footprint_bytes,
         resident_bytes: host.resident_bytes,
-        guest_ns: per_vcpu(stats, vcpus)?,
+        guest_ns: guest_ns(microvm, vcpus)?,
         window,
         charged: charged_of(host.charged),
     })
+}
+
+/// What a run's VM used of its host in all as its end told it (Shards' D260's final use, read by its VM once its machine
+/// was down), over `window`, where it told it whole; none where it told none (`FinalUse::Unread`, Shards' `Unused`
+/// saying why) or only part, which no use made up stands in for: its delete with its host use then refuses, typed.
+fn final_use_of(said: &FinalUse, vcpus: u32, window: Duration) -> Option<HostUse> {
+    match said {
+        FinalUse::Read(microvm) => microvm_use(microvm, vcpus, window).ok(),
+        FinalUse::Unread(_) => None,
+    }
 }
 
 /// Whether a VM process's CPU holds its vCPUs' guest time, as Shards says it (D265), in Hex's words: one for one.
@@ -1212,14 +1303,24 @@ pub(crate) fn charged_of(said: shards_api::image::Charged) -> hex_api::Charged {
 /// read before, which no longer says the vCPU's time now), a count other than the VM's size, or time of vCPUs the
 /// VM no longer has, which no vCPU of its size holds.
 fn per_vcpu(stats: &Stats, vcpus: u32) -> Result<Vec<u64>, Refusal> {
-    let op = "reading a Shards image VM's guest time per vCPU";
-    let unread = |why: String| Refusal::Os { op, why };
-    let microvm = stats
-        .microvm
-        .as_ref()
-        .ok_or_else(|| unread("its run host told nothing of its microVM".to_owned()))?;
-    let times = microvm.guest.as_ref().map_err(|why| unread(why.clone()))?;
-    vcpus_ns(times, vcpus, op)
+    let microvm = stats.microvm.as_ref().ok_or_else(|| Refusal::Os {
+        op: GUEST_TIME,
+        why: "its run host told nothing of its microVM".to_owned(),
+    })?;
+    guest_ns(microvm, vcpus)
+}
+
+/// What [`per_vcpu`] and [`guest_ns`] are refused under.
+const GUEST_TIME: &str = "reading a Shards image VM's guest time per vCPU";
+
+/// What each of the VM's `vcpus` vCPUs has run of its guest, by index, as its microVM part says it ([`vcpus_ns`]); its
+/// guest time unread refused, naming why.
+fn guest_ns(microvm: &Microvm, vcpus: u32) -> Result<Vec<u64>, Refusal> {
+    let times = microvm.guest.as_ref().map_err(|why| Refusal::Os {
+        op: GUEST_TIME,
+        why: why.clone(),
+    })?;
+    vcpus_ns(times, vcpus, GUEST_TIME)
 }
 
 /// What each of a VM's `vcpus` vCPUs has run of its guest, by index, as its VM process read it (`GUEST_TIME`; an image
@@ -1561,33 +1662,37 @@ fn pump_out(
     index: u32,
     mut from: Output,
     mut end: ExecControl,
-    mut caller: std::io::PipeWriter,
+    caller: std::io::PipeWriter,
     party: Party<Result<Exit, Refusal>>,
     killed: &AtomicBool,
 ) {
-    use std::io::Write as _;
-    let mut heard = true;
-    let finished = loop {
-        match from.next_record() {
-            Ok(Got::Record { bytes, .. }) => {
-                // A caller that let its stdout go hears no more: the rest is read and let go, so the harness is never
-                // held by an output no one takes.
-                if heard && caller.write_all(&bytes).is_err() {
-                    heard = false;
-                }
-            }
-            Ok(Got::Finished) => break Ok(()),
-            Err(fault) => break Err(fault),
-        }
-    };
-    drop(caller);
-    let told = finished.and_then(|()| end.wait());
+    let told = copy_out(&mut from, Some(caller)).and_then(|()| end.wait());
     let exit = match told {
         _ if killed.load(Ordering::Acquire) => Ok(Exit::Signal(Signal::KILL.number())),
         Ok(status) => Ok(Exit::Code(status)),
         Err(fault) => Err(mcp_refused(id, index, fault)),
     };
     party.0.put(exit);
+}
+
+/// `from`'s records to `caller` as they come, until it has finished, `caller` then let go: a caller that let its end go,
+/// or that never took one (none), hears no more, the rest read and let go, so its writer in the guest is never held by
+/// an output no one takes. Its lane's fault where it ends with one.
+fn copy_out(from: &mut Output, mut caller: Option<std::io::PipeWriter>) -> Result<(), Fault> {
+    use std::io::Write as _;
+    loop {
+        match from.next_record()? {
+            Got::Record { bytes, .. } => {
+                let heard = caller
+                    .as_mut()
+                    .is_some_and(|writer| writer.write_all(&bytes).is_ok());
+                if !heard {
+                    caller = None;
+                }
+            }
+            Got::Finished => return Ok(()),
+        }
+    }
 }
 
 /// What the caller writes, to the harness of an MCP connection as it comes, a record of at most Shards' run chunk
@@ -1643,26 +1748,9 @@ impl Proc for McpProc {
         self.wait_for(Duration::ZERO)
     }
 
-    /// Its end, once its output's pump has told it, waited for at most `timeout` (a timeout past what the clock holds:
-    /// until it comes); refused where the pump ended with none told.
+    /// Its end, once its output's pump has told it ([`told_end`]).
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        if let Some(ended) = &self.ended {
-            return ended.clone().map(Some);
-        }
-        let bound = Instant::now().checked_add(timeout).map(|_| timeout);
-        match self.end.told_within(bound)? {
-            Told::NotYet => Ok(None),
-            Told::Gone => Err(Refusal::Broken(
-                "an MCP connection's output pump ended with its end untold".to_owned(),
-            )),
-            Told::Came => {
-                let (ended, _) = self.end.take()?.ok_or_else(|| {
-                    Refusal::Broken("an MCP connection's end was taken twice".to_owned())
-                })?;
-                self.ended = Some(ended.clone());
-                ended.map(Some)
-            }
-        }
+        told_end(&self.end, &mut self.ended, timeout, "an MCP connection")
     }
 
     /// Aborts what the harness is sent ([`abort_mcp`]).
@@ -1703,6 +1791,297 @@ fn abort_mcp(to: &Mutex<Option<Input>>, killed: &AtomicBool, end: &McpEnd) -> Re
         let _ = to.abort(ECONNRESET);
     }
     Ok(())
+}
+
+/// A lane's end its thread tells in `end` (an MCP connection's, a program's in a member), kept in `kept` once taken:
+/// waited for at most `timeout` (a timeout past what the clock holds: until it comes); refused where that thread ended
+/// with it untold, `what` naming whose.
+fn told_end(
+    end: &Slot<Result<Exit, Refusal>>,
+    kept: &mut Option<Result<Exit, Refusal>>,
+    timeout: Duration,
+    what: &str,
+) -> Result<Option<Exit>, Refusal> {
+    if let Some(ended) = kept {
+        return ended.clone().map(Some);
+    }
+    let bound = Instant::now().checked_add(timeout).map(|_| timeout);
+    match end.told_within(bound)? {
+        Told::NotYet => Ok(None),
+        Told::Gone => Err(Refusal::Broken(format!(
+            "{what}'s end went untold: the thread telling it ended"
+        ))),
+        Told::Came => {
+            let (ended, _) = end
+                .take()?
+                .ok_or_else(|| Refusal::Broken(format!("{what}'s end was taken twice")))?;
+            *kept = Some(ended.clone());
+            ended.map(Some)
+        }
+    }
+}
+
+/// A program run in a member (Shards' D243, on D238's exec lane; `Runtime::exec_member`), as its caller's program: no
+/// process of this host. Its stdout and stderr go to the caller's ends record by record, and the caller's stdin to it,
+/// each by a thread of its own for as long as that stream lasts: an MCP connection's cost (the review's D-10), Shards'
+/// lanes reading and writing without a wait only on a controller's event loop (`Dialed::wake`), which the class runs
+/// none of. Its end is its status as Shards tells it once both outputs have finished, `Signal(9)` where its kill ended
+/// it, or why none came ([`exec_refused`]). Its lane's control is held for its kill until both outputs have finished,
+/// then taken by the thread that waits for its exit ([`exec_end`]).
+struct ExecProc {
+    control: Arc<Mutex<Option<ExecControl>>>,
+    end: ExecEnd,
+    /// Its kill was sent: an end by KILL then reads `Signal(9)`.
+    killed: Arc<AtomicBool>,
+    given: Option<Given>,
+    ended: Option<Result<Exit, Refusal>>,
+}
+
+/// A program's end in a member, as the thread that waits for its exit tells it: its exit, or why none came.
+type ExecEnd = Arc<Slot<Result<Exit, Refusal>>>;
+
+/// What the thread that pumps a program's stdout and tells its end holds ([`exec_end`]): whose it is, its lane's
+/// control, its kill's mark, and its end's party.
+struct Ending {
+    id: BoxId,
+    index: u32,
+    control: Arc<Mutex<Option<ExecControl>>>,
+    killed: Arc<AtomicBool>,
+    party: Party<Result<Exit, Refusal>>,
+}
+
+impl ExecProc {
+    /// Box `id`'s member `index`'s program, `started`, its stdio `stdio`'s (each end the program's; the caller's ends of
+    /// those it asked for in `given`), its pumps begun: its stdin's, its stderr's, then the thread that pumps its stdout
+    /// and tells its end. Refused where one can't start: its control then let go before its exit, which hangs the program
+    /// up (Shards' `ExecControl`), and the pumps begun end with its lanes.
+    fn start(
+        id: &BoxId,
+        index: u32,
+        started: Started,
+        stdio: Stdio,
+        given: Given,
+    ) -> Result<Self, Refusal> {
+        let Started {
+            stdout,
+            stderr,
+            stdin,
+            control,
+        } = started;
+        let Stdio {
+            stdin: caller_in,
+            stdout: caller_out,
+            stderr: caller_err,
+            ..
+        } = stdio;
+        let thread = |name: &str| std::thread::Builder::new().name(name.to_owned());
+        if let (Some(input), Some(caller)) = (stdin, caller_in) {
+            thread("hex-image-exec-in")
+                .spawn(move || pump_in(caller, &Mutex::new(Some(input))))
+                .map_err(|why| Refusal::os("starting a member's program's stdin pump", why))?;
+        }
+        let errors = match stderr {
+            Some(mut from) => Some(
+                thread("hex-image-exec-err")
+                    .spawn(move || copy_out(&mut from, caller_err))
+                    .map_err(|why| Refusal::os("starting a member's program's stderr pump", why))?,
+            ),
+            None => None,
+        };
+        let control = Arc::new(Mutex::new(Some(control)));
+        let end = Arc::new(Slot::new());
+        let killed = Arc::new(AtomicBool::new(false));
+        let ending = Ending {
+            id: id.try_clone()?,
+            index,
+            control: Arc::clone(&control),
+            killed: Arc::clone(&killed),
+            party: Party(Arc::clone(&end)),
+        };
+        thread("hex-image-exec-out")
+            .spawn(move || exec_end(ending, stdout, caller_out, errors))
+            .map_err(|why| Refusal::os("starting a member's program's stdout pump", why))?;
+        Ok(Self {
+            control,
+            end,
+            killed,
+            given: Some(given),
+            ended: None,
+        })
+    }
+}
+
+/// A program's stdout to the caller's `to`, record by record ([`copy_out`]), then, once its stderr's pump (`errors`) has
+/// ended too, its end, told to its party's slot: its status as Shards tells it once both its outputs have finished,
+/// `Signal(9)` where its kill ended it, or why none came ([`exec_refused`]). Its lane's control is taken for that wait
+/// alone, so a kill reaches the program while its outputs are open.
+fn exec_end(
+    ending: Ending,
+    mut from: Output,
+    to: Option<std::io::PipeWriter>,
+    errors: Option<std::thread::JoinHandle<Result<(), Fault>>>,
+) {
+    let Ending {
+        id,
+        index,
+        control,
+        killed,
+        party,
+    } = ending;
+    let out = copy_out(&mut from, to);
+    let pumped = match (out, errors.map(std::thread::JoinHandle::join)) {
+        (Err(fault), _) | (Ok(()), Some(Ok(Err(fault)))) => Err(exec_refused(&id, index, fault)),
+        (Ok(()), Some(Err(_))) => Err(Refusal::Broken(
+            "a member's program's stderr pump ended with no word".to_owned(),
+        )),
+        (Ok(()), None | Some(Ok(Ok(())))) => Ok(()),
+    };
+    // Both its outputs over, its exit comes next on its lane: its control taken from its kill to wait for it. Where an
+    // output's lane failed, that control goes as this ends, hanging the program up.
+    let taken = control.lock().ok().and_then(|mut held| held.take());
+    let exit = match (pumped, taken) {
+        (Err(why), _) => Err(why),
+        (Ok(()), None) => Err(Refusal::Broken(
+            "a member's program's control was let go before its end".to_owned(),
+        )),
+        (Ok(()), Some(mut held)) => match held.wait() {
+            Ok(status) if killed.load(Ordering::Acquire) && status == ended_by(Signal::KILL) => {
+                Ok(Exit::Signal(Signal::KILL.number()))
+            }
+            Ok(status) => Ok(Exit::Code(status)),
+            Err(fault) => Err(exec_refused(&id, index, fault)),
+        },
+    };
+    party.0.put(exit);
+}
+
+/// The status Shards' exec lane tells of a program `signal` ended (its `exec::End::status`, `docker run`'s): 128 plus
+/// the signal's number.
+fn ended_by(signal: Signal) -> i32 {
+    signal.number().saturating_add(128)
+}
+
+/// A program's kill in a member: KILL on its own lane (D243's `EXEC_SIGNAL`), its end then `Signal(9)`, while its outputs
+/// are open and its control held for it; one that has ended has nothing left to end, answered at once. Once both its
+/// outputs have finished, its control waits for its exit, and Shards' `ExecControl` steers nothing beside that wait: a
+/// kill then is refused `Awaits(ExecSignalAfterOutput)` where the program hasn't ended.
+fn kill_exec(
+    control: &Mutex<Option<ExecControl>>,
+    killed: &AtomicBool,
+    end: &ExecEnd,
+) -> Result<(), Refusal> {
+    if !matches!(end.told_within(Some(Duration::ZERO))?, Told::NotYet) {
+        return Ok(());
+    }
+    let held = control.lock().map_err(poisoned)?;
+    let Some(control) = held.as_ref() else {
+        return match end.told_within(Some(Duration::ZERO))? {
+            Told::NotYet => Err(Refusal::Awaits {
+                needs: Upstream::ExecSignalAfterOutput,
+            }),
+            Told::Came | Told::Gone => Ok(()),
+        };
+    };
+    killed.store(true, Ordering::Release);
+    control
+        .signal(signal_number(Signal::KILL)?)
+        .map_err(|fault| {
+            killed.store(false, Ordering::Release);
+            Refusal::Os {
+                op: "killing a member's program",
+                why: fault.to_string(),
+            }
+        })
+}
+
+impl Proc for ExecProc {
+    /// A program in a member is its guest's: no process of this host, and no pid is told.
+    fn pid(&self) -> u32 {
+        0
+    }
+
+    fn on_this_host(&self) -> bool {
+        false
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        self.wait_for(Duration::ZERO)
+    }
+
+    /// Its end, once the thread that waits for its exit has told it ([`told_end`]).
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        told_end(&self.end, &mut self.ended, timeout, "a member's program")
+    }
+
+    /// KILL on its lane ([`kill_exec`]).
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.ended.is_some() {
+            return Ok(());
+        }
+        kill_exec(&self.control, &self.killed, &self.end)
+    }
+
+    fn streams(&mut self) -> Result<Given, Refusal> {
+        Ok(self.given.take().unwrap_or_default())
+    }
+
+    /// Its kill, apart from it ([`kill_exec`]), for a holder whose wait holds it.
+    fn killer(&mut self) -> Option<hex_api::Killer> {
+        let (control, killed, end) = (
+            Arc::clone(&self.control),
+            Arc::clone(&self.killed),
+            Arc::clone(&self.end),
+        );
+        Some(Box::new(move || kill_exec(&control, &killed, &end)))
+    }
+}
+
+/// `program` as Shards' exec lane carries a member's exec (D243's `run::Spec`): its arguments; its variables, each
+/// `NAME=VALUE`, which the member's own lie under; its working directory, none for the member's; its stdin where `stdin`;
+/// pipes, no terminal; and nothing a member's exec doesn't take, its user and setup being its member's. Refused
+/// `Invalid` before anything is asked: a program that can't be started, one naming a user, and one past what the lane
+/// carries (`run::MAX_PAYLOAD`, the run protocol's own bound, as large as Linux execs).
+fn member_exec(program: &Program, stdin: bool) -> Result<shards_abi::run::Spec, Refusal> {
+    program.check()?;
+    if program.user.is_some() {
+        return Err(Refusal::Invalid {
+            what: "program",
+            why: "a program in a Shards image VM's member runs as its member does (Shards' D243): it names no user"
+                .to_owned(),
+        });
+    }
+    let spec = shards_abi::run::Spec {
+        argv: program
+            .args
+            .iter()
+            .map(|arg| arg.as_bytes().to_vec())
+            .collect(),
+        env: program
+            .env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}").into_bytes())
+            .collect(),
+        cwd: program
+            .cwd
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec(),
+        stdin,
+        ..shards_abi::run::Spec::default()
+    };
+    let most = usize::try_from(shards_abi::run::MAX_PAYLOAD).unwrap_or(usize::MAX);
+    match spec.encoded_len() {
+        Some(len) if len <= most => Ok(spec),
+        len => Err(Refusal::Invalid {
+            what: "program",
+            why: format!(
+                "its arguments, environment and working directory take {} bytes as Shards' exec lane carries them; it \
+                 carries at most {most} (shards_abi::run::MAX_PAYLOAD)",
+                len.map_or_else(|| "more than usize::MAX".to_owned(), |len| len.to_string())
+            ),
+        }),
+    }
 }
 
 fn pending(id: &BoxId) -> Result<Refusal, Refusal> {
@@ -1813,7 +2192,7 @@ impl Runs {
                     let at = slot.asked.checked_add(took).unwrap_or_else(Instant::now);
                     let guest: Arc<dyn ImageGuest> = Arc::from(guest);
                     *run = Run::Running(Arc::clone(&guest), at);
-                    Settled::Started(guest)
+                    Settled::Started(guest, at)
                 }
                 // Its stop ended it mid-boot, as its delete asked (D231's `BootStop`): its run never started, and the
                 // time to its stop is no boot's answer, so no sample.
@@ -1838,7 +2217,7 @@ impl Runs {
                     Settled::Ends(end)
                 }
             },
-            Run::Running(guest, _) => Settled::Running(Arc::clone(guest)),
+            Run::Running(guest, at) => Settled::Running(Arc::clone(guest), *at),
             Run::Stopping(slot, stop) => match slot.take()? {
                 None => Settled::Stopping(Arc::clone(slot), stop.clone()),
                 Some((end, took)) => {
@@ -2395,7 +2774,8 @@ impl ImageClass {
 
     /// Writes the box's end, its exit and why where its run failed, once, where its record lacks it: a failed run's
     /// words, then its run host's last diagnostics from the box's file (D258), as many bytes as Shards quotes of a VM's
-    /// end ([`GuestRuntime::quote_bound`]). Returns the end its record holds.
+    /// end ([`GuestRuntime::quote_bound`]); and what its VM used in all where its run ended on its own (D260's final use),
+    /// which its delete with its host use answers. Returns the end its record holds.
     fn record_end(&self, id: &BoxId, end: &End) -> Result<End, Refusal> {
         let bound = end.why.as_ref().map(|_| self.quote_bound());
         let mut recorded = None;
@@ -2407,6 +2787,7 @@ impl ImageClass {
                 recorded = Some(End {
                     exit,
                     why: record.ended.clone(),
+                    used: record.final_use.clone(),
                 });
                 return Ok(());
             }
@@ -2416,10 +2797,12 @@ impl ImageClass {
             };
             record.exit = Some(end.exit);
             record.ended.clone_from(&why);
+            record.final_use.clone_from(&end.used);
             transaction.put(&record)?;
             recorded = Some(End {
                 exit: end.exit,
                 why,
+                used: end.used.clone(),
             });
             Ok(())
         })?;
@@ -2470,6 +2853,7 @@ impl ImageClass {
         let recorded = |exit| End {
             exit,
             why: record.ended.clone(),
+            used: record.final_use.clone(),
         };
         let Some(image) = &self.image else {
             return Ok(match (record.exit, record.phase) {
@@ -2492,17 +2876,17 @@ impl ImageClass {
             // its start, which settles it next. Its run then read as any running VM's is (the review's B-3): one that
             // ended as it started (D249: its command never started) is seen ended by whichever call took the answer, as
             // by its start, never Running.
-            Settled::Started(guest) => {
+            Settled::Started(guest, at) => {
                 self.keep_started(record, guest.as_ref())?;
-                match self.settle_running(image, id, guest)? {
+                match self.settle_running(image, &record.spec, guest, at)? {
                     // Held to its grants by whichever call took its boot's answer, as by its start (N6).
                     State::Running(guest) => self.hold_grants(image, &record.spec, guest),
                     state => Ok(state),
                 }
             }
-            Settled::Running(guest) => {
+            Settled::Running(guest, at) => {
                 self.keep_started(record, guest.as_ref())?;
-                self.settle_running(image, id, guest)
+                self.settle_running(image, &record.spec, guest, at)
             }
             Settled::Ends(end) => {
                 let end = self.record_end(id, &end)?;
@@ -2524,6 +2908,7 @@ impl ImageClass {
             Some(exit) => Ok(State::Ended(End {
                 exit,
                 why: now.ended,
+                used: now.final_use,
             })),
             None if image.earlier_boot(&now) => {
                 Ok(State::Ended(self.record_end(id, &End::unknown(None))?))
@@ -2575,21 +2960,32 @@ impl ImageClass {
         })
     }
 
-    /// A running VM whose run may have ended on its own: its host is then reaped through its stop, so no
-    /// run is let go of before its host has exited, and the box's end is the one its run reached, in its words.
+    /// Box `spec`'s running VM, whose run started at `at` and may have ended on its own: its host is then reaped through
+    /// its stop, so no run is let go of before its host has exited, and the box's end is the one its run reached, in its
+    /// words, with what its VM used in all as it told it with that end (Shards' D260's final use; kiln's P7.1b), kept
+    /// until its delete answers it: its window from `at` to here, where this process first sees that end, a delete
+    /// with its host use seeing it at once where no call did before.
     fn settle_running(
         &self,
         image: &ImageBoot,
-        id: &BoxId,
+        spec: &BoxSpec,
         guest: Arc<dyn ImageGuest>,
+        at: Instant,
     ) -> Result<State, Refusal> {
+        let id = &spec.id;
         let Some(ended) = guest
             .wait_for(Duration::ZERO)
             .map_err(|why| refused(id, "reading a Shards image VM's end", why))?
         else {
             return Ok(State::Running(guest));
         };
-        let reached = Stop::Ended(End::of(&ended.end));
+        let used = vm_size(spec)
+            .ok()
+            .and_then(|size| final_use_of(&ended.final_use, size.vcpus, at.elapsed()));
+        let reached = Stop::Ended(End {
+            used,
+            ..End::of(&ended.end)
+        });
         let slot = image.stop(guest, Some(ended.end))?;
         // Where another call moved it on first, its stop is that call's, and this one's thread returns with the same
         // end.
@@ -3191,6 +3587,60 @@ impl ImageClass {
         Ok(Box::new(McpProc::start(&id, index, connection)?))
     }
 
+    /// `program` run in member `member` of image box `record` (`Runtime::exec_member`; Shards' D243 on D238's exec lane),
+    /// as a program ([`ExecProc`]), its stdio `stdio`'s as an exec takes them. The program is checked before anything of
+    /// its run ([`member_exec`]); then, as `mcp` is, Pending while it boots, held, and `NotRunning(id, "exec in a
+    /// member")` before its start and once its stop has begun; `Invalid` for a member its run declares not, and
+    /// `NotRunning(id, "exec in a member: it runs no program")` for one of files alone; then its start's own refusals
+    /// ([`Steering::exec`]).
+    pub(super) fn exec_member_image(
+        &self,
+        record: BoxRecord,
+        member: &Member,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let id = record.spec.id.try_clone()?;
+        stdio.check()?;
+        let reads = stdio.stdin.is_some() || stdio.ask.stdin;
+        let spec = member_exec(&program, reads)?;
+        let guest = match self.settle(&record)? {
+            State::Running(guest) => guest,
+            State::Held => return Err(held()),
+            State::Booting => return Err(pending(&id)?),
+            State::Created | State::Stopping(..) | State::Ended(_) => {
+                return Err(Refusal::NotRunning(id, "exec in a member"));
+            }
+        };
+        let name = member_name(member);
+        let Some(declared) = guest
+            .members()
+            .iter()
+            .find(|declared| declared.kind == name.kind && declared.name == name.name)
+        else {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s run declares no {member}"),
+            });
+        };
+        if !declared.runs {
+            return Err(Refusal::NotRunning(
+                id,
+                "exec in a member: it runs no program",
+            ));
+        }
+        let index = declared.index;
+        // The caller's ends made before the ask, so a pipe the OS refuses asks nothing of the run.
+        let given = stdio.make_asked()?;
+        let control = &self.image()?.control;
+        let started = control
+            .steering(&id, &guest)?
+            .exec(&control.waits, &id, index, spec)?;
+        Ok(Box::new(ExecProc::start(
+            &id, index, started, stdio, given,
+        )?))
+    }
+
     /// Retires image VM `record`, its receipt its profile's under its census numbers (joint plan step 14): its run stopped
     /// as its delete stops it, its run forgotten, and the box kept retired (`BoxRecord::retire`). One held or still
     /// booting is refused, typed, as its delete is.
@@ -3292,14 +3742,31 @@ impl ImageClass {
     }
 
     /// Box `id`'s VM's final use of its host, in its run's state `state` (the review's B-5): a running one's read as it
-    /// runs, its refusal the delete's; none where its run never started; and `NotRunning` where its run, which started,
-    /// had ended or was being stopped before the delete, Shards' stats answering only a running run, so no use is left
-    /// to read and none is made up.
+    /// runs, its refusal the delete's; one whose run ended on its own, the use its VM told with that end (Shards' D260),
+    /// kept since ([`ImageClass::settle_running`]); none where its run never started; and `NotRunning` where its run,
+    /// which started, ended with none kept or was being stopped before the delete ([`ended_first`]): Shards' stats answer
+    /// only a running run, so no use is left to read, and none is made up.
     fn final_use(&self, id: &BoxId, state: &State) -> Result<Option<HostUse>, Refusal> {
         match state {
             State::Running(_) => self.host_use_image(record_now(self, id)?).map(Some),
-            State::Stopping(..) | State::Ended(_) if ran(&record_now(self, id)?) => {
-                Err(ended_first(id.try_clone()?))
+            State::Stopping(
+                _,
+                Stop::Ended(End {
+                    used: Some(used), ..
+                }),
+            )
+            | State::Ended(End {
+                used: Some(used), ..
+            }) => Ok(Some(used.clone())),
+            State::Stopping(_, stop) if ran(&record_now(self, id)?) => {
+                let seen = match stop {
+                    Stop::Ended(end) => Some(end),
+                    Stop::Asked | Stop::Grants(_) => None,
+                };
+                Err(ended_first(id.try_clone()?, seen))
+            }
+            State::Ended(end) if ran(&record_now(self, id)?) => {
+                Err(ended_first(id.try_clone()?, Some(end)))
             }
             State::Created
             | State::Booting
@@ -3505,10 +3972,17 @@ impl hex_api::Runtime for ImageClass {
         _: hex_api::Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         self.called(id)?;
-        // A member's program is the agent-control endpoint's (joint plan step 11).
-        Err(Refusal::Awaits {
-            needs: Upstream::MemberExec,
-        })
+        Err(unnamed_member(id))
+    }
+
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.exec_member_image(self.called(id)?, member, program, stdio)
     }
 
     fn run(
@@ -3676,22 +4150,42 @@ impl hex_api::Runtime for ImageClass {
     }
 }
 
-/// `id`'s record as it is now.
+/// What an exec in Shards image box `id` that names no member is refused (`Runtime::exec`): a program runs in one of its
+/// run's members alone, as its exec lane asks it of one (D243), which `Runtime::exec_member` names.
+pub(super) fn unnamed_member(id: &BoxId) -> Refusal {
+    Refusal::Invalid {
+        what: "exec",
+        why: format!(
+            "box {id} is a Shards image VM: a program runs in one of its members, which exec_member names"
+        ),
+    }
+}
+
 /// Whether box `record`'s run started: its record keeps how its microVM started (D253) once a call took its boot's answer,
 /// which no boot refused or stopped before its run gives.
 fn ran(record: &BoxRecord) -> bool {
     record.started_from.is_some()
 }
 
-/// A delete with its host use of box `id`, whose run started and had ended, or was being stopped, before it: Shards'
-/// stats answer only a running run, so no use is left to read (the review's B-5), and none is made up.
-fn ended_first(id: BoxId) -> Refusal {
-    Refusal::NotRunning(
-        id,
-        "read its final use of its host: its run had ended, or was being stopped, before its delete",
-    )
+/// A delete with its host use of box `id`, whose run started and ended, `end`, or was being stopped, before it, with no
+/// use of it kept (the review's B-5), none made up: its run stopped (its own end never seen before its stop, Shards'
+/// stats answering only a running run, its VM's use going with it), or its VM telling none whole at its end (Shards'
+/// D260's `Unused`, or a part of it unread).
+fn ended_first(id: BoxId, end: Option<&End>) -> Refusal {
+    let stopped = Exit::Signal(Signal::KILL.number());
+    match end {
+        Some(End { exit, .. }) if *exit != stopped => Refusal::NotRunning(
+            id,
+            "read its final use of its host: its run ended on its own, its VM telling none of it whole",
+        ),
+        Some(_) | None => Refusal::NotRunning(
+            id,
+            "read its final use of its host: its run was stopped before its delete, what its VM used going with it",
+        ),
+    }
 }
 
+/// `id`'s record as it is now.
 fn record_now(class: &ImageClass, id: &BoxId) -> Result<BoxRecord, Refusal> {
     class
         .image_record(id)?

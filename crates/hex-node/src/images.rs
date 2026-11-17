@@ -338,6 +338,15 @@ impl Runtime for ImageRuntime {
     fn mcp(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
         self.class.mcp(id, member)
     }
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.class.exec_member(id, member, program, stdio)
+    }
     fn signal_member(&self, id: &BoxId, member: &Member, signal: Signal) -> Result<(), Refusal> {
         self.class.signal_member(id, member, signal)
     }

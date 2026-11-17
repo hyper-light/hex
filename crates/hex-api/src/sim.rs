@@ -11,8 +11,9 @@
 //!
 //! A Shards image VM ([`ClassSpec::ShardsImage`]) is a box whose init is its run's command, as the
 //! image class's own cases ([`crate::conformance::IMAGE_CASES`]) hold it: created without a VM, booted
-//! by start, ended by KILL, its members unreached (their exec and signals refused as awaiting Shards'
-//! agent-control endpoint), and its guest time per vCPU read while it runs. The simulated VM runs every
+//! by start, ended by KILL, its members the ones its spec names (taken, signalled, and running the
+//! simulator's programs as a member's exec, `Runtime::exec_member`; an exec naming no member refused as
+//! the class refuses it), and its guest time per vCPU read while it runs. The simulated VM runs every
 //! vCPU the whole time it runs: the most guest time a real one can report, so a consumer's bound holds
 //! against it. The warm pools it's asked to keep ([`Runtime::keep_pool`]) are names alone, at most one for each box it
 //! may hold: it boots no host ahead of a box, so none is ever warm or starting. Its volumes ([`ShardsImage::volumes`],
@@ -29,7 +30,7 @@ use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
     Exit, GuestTime, Member, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime,
-    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage, WarmHeld, WarmPool,
+    RuntimeCost, ShardsImage, Signal, Stdio, Usage, WarmHeld, WarmPool,
 };
 use crate::{HomeVolume, VolumeCause};
 
@@ -311,6 +312,75 @@ impl SimRuntime {
         Ok(())
     }
 
+    /// `program` started in box `b` with `stdio`, the caller's asked ends `given` handed with it: the simulator's
+    /// programs, each run as an exec's is, at most [`SIM_PROCS`] in a box.
+    fn started(
+        b: &mut SimBox,
+        program: &Program,
+        mut stdio: Stdio,
+        given: crate::Given,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        if b.procs.len() >= SIM_PROCS {
+            return Err(Refusal::Full(SIM_PROCS));
+        }
+        let proc = Arc::new(SimProc::default());
+        let name = program.args.first().map(String::as_str).unwrap_or_default();
+        let bounds = &b.spec.bounds;
+        match name {
+            "say" => {
+                let words = program.args.get(1..).unwrap_or_default().join(" ");
+                write(stdio.stdout.as_mut(), format!("{words}\n").as_bytes());
+                proc.end(Exit::Code(0))?;
+            }
+            "fail" => {
+                let code: i32 = arg(program, 1)?;
+                write(stdio.stderr.as_mut(), b"failing\n");
+                proc.end(Exit::Code(code))?;
+            }
+            "wait" => {}
+            "hog" => {
+                let bytes: u64 = arg(program, 1)?;
+                if bounds.memory_max.is_some_and(|m| bytes > m) {
+                    b.usage.oom_kills = b.usage.oom_kills.saturating_add(1);
+                    proc.end(Exit::Signal(Signal::KILL.number()))?;
+                } else {
+                    b.usage.memory_peak_bytes = b.usage.memory_peak_bytes.max(bytes);
+                    proc.end(Exit::Code(0))?;
+                }
+            }
+            "spawn" => {
+                let n: u64 = arg(program, 1)?;
+                // The program is a process itself, so n more need n + 1 within the bound.
+                if bounds.pids_max.is_some_and(|m| n >= u64::from(m)) {
+                    b.usage.pids_refused = b.usage.pids_refused.saturating_add(1);
+                    write(stdio.stderr.as_mut(), b"spawn: can't fork\n");
+                    proc.end(Exit::Code(2))?;
+                } else {
+                    proc.end(Exit::Code(0))?;
+                }
+            }
+            "pwd" => {
+                let cwd = program.cwd.clone().unwrap_or_else(|| "/".to_owned());
+                write(stdio.stdout.as_mut(), format!("{cwd}\n").as_bytes());
+                proc.end(Exit::Code(0))?;
+            }
+            "echo" => echo(Arc::clone(&proc), stdio.stdin.take(), stdio.stdout.take())?,
+            other => {
+                return Err(Refusal::Invalid {
+                    what: "program",
+                    why: format!(
+                        "{other:?}: the simulator runs say, fail, wait, hog, spawn, pwd and echo"
+                    ),
+                });
+            }
+        }
+        if let Some(run) = &b.run {
+            run.left.lock().map_err(poisoned)?.push(Arc::clone(&proc));
+        }
+        b.procs.push(Arc::clone(&proc));
+        Ok(Box::new(SimHandle(proc, Some(given))))
+    }
+
     /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does; any other is its run's
     /// members', which its image runs and take it as their lanes give it (goal 2's item 2), the VM running on;
     /// once it has ended, none reaches it.
@@ -567,70 +637,79 @@ impl Runtime for SimRuntime {
         let b = boxes
             .get_mut(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        // A program in an image VM runs in a member it names, as the class refuses one that names none.
         if b.vm.is_some() {
-            return Err(Refusal::Awaits {
-                needs: Upstream::MemberExec,
+            return Err(Refusal::Invalid {
+                what: "exec",
+                why: format!(
+                    "box {id} is a Shards image VM: a program runs in one of its members, which exec_member names"
+                ),
             });
         }
-        if b.procs.len() >= SIM_PROCS {
-            return Err(Refusal::Full(SIM_PROCS));
+        Self::started(b, &program, stdio, given)
+    }
+
+    /// A program in a member of a running image VM its spec names (`Runtime::exec_member`), run as an exec's program is:
+    /// its run's members the spec's here, as `signal_member` has them. Refused as the class refuses it: a program naming
+    /// a user, Invalid; a member the spec names not, Invalid; a VM not running, or a member its caller took that has
+    /// ended, NotRunning.
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &Member,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        program.check()?;
+        program.fits(&SIM_EXEC_LIMIT)?;
+        if program.user.is_some() {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: "a program in a Shards image VM's member runs as its member does: it names no user"
+                    .to_owned(),
+            });
         }
-        let proc = Arc::new(SimProc::default());
-        let name = program.args.first().map(String::as_str).unwrap_or_default();
-        let bounds = &b.spec.bounds;
-        match name {
-            "say" => {
-                let words = program.args.get(1..).unwrap_or_default().join(" ");
-                write(stdio.stdout.as_mut(), format!("{words}\n").as_bytes());
-                proc.end(Exit::Code(0))?;
-            }
-            "fail" => {
-                let code: i32 = arg(&program, 1)?;
-                write(stdio.stderr.as_mut(), b"failing\n");
-                proc.end(Exit::Code(code))?;
-            }
-            "wait" => {}
-            "hog" => {
-                let bytes: u64 = arg(&program, 1)?;
-                if bounds.memory_max.is_some_and(|m| bytes > m) {
-                    b.usage.oom_kills = b.usage.oom_kills.saturating_add(1);
-                    proc.end(Exit::Signal(Signal::KILL.number()))?;
-                } else {
-                    b.usage.memory_peak_bytes = b.usage.memory_peak_bytes.max(bytes);
-                    proc.end(Exit::Code(0))?;
-                }
-            }
-            "spawn" => {
-                let n: u64 = arg(&program, 1)?;
-                // The program is a process itself, so n more need n + 1 within the bound.
-                if bounds.pids_max.is_some_and(|m| n >= u64::from(m)) {
-                    b.usage.pids_refused = b.usage.pids_refused.saturating_add(1);
-                    write(stdio.stderr.as_mut(), b"spawn: can't fork\n");
-                    proc.end(Exit::Code(2))?;
-                } else {
-                    proc.end(Exit::Code(0))?;
-                }
-            }
-            "pwd" => {
-                let cwd = program.cwd.clone().unwrap_or_else(|| "/".to_owned());
-                write(stdio.stdout.as_mut(), format!("{cwd}\n").as_bytes());
-                proc.end(Exit::Code(0))?;
-            }
-            "echo" => echo(Arc::clone(&proc), stdio.stdin.take(), stdio.stdout.take())?,
-            other => {
-                return Err(Refusal::Invalid {
-                    what: "program",
-                    why: format!(
-                        "{other:?}: the simulator runs say, fail, wait, hog, spawn, pwd and echo"
-                    ),
-                });
-            }
+        let given = stdio.make_asked()?;
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let ClassSpec::ShardsImage(image) = &b.spec.class else {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!(
+                    "box {id} isn't a Shards image box: only one has members a program runs in"
+                ),
+            });
+        };
+        if !image.members.iter().any(|m| &m.member == member) {
+            return Err(Refusal::Invalid {
+                what: "member",
+                why: format!("box {id}'s run declares no {member}"),
+            });
         }
-        if let Some(run) = &b.run {
-            run.left.lock().map_err(poisoned)?.push(Arc::clone(&proc));
+        let running = match &b.init {
+            Some(init) => b.started && init.exit()?.is_none(),
+            None => false,
+        };
+        if !running {
+            return Err(Refusal::NotRunning(id.clone(), "exec in a member"));
         }
-        b.procs.push(Arc::clone(&proc));
-        Ok(Box::new(SimHandle(proc, Some(given))))
+        let taken = b.vm.as_ref().and_then(|vm| {
+            vm.taken
+                .iter()
+                .find(|(taken, _)| taken == member)
+                .map(|(_, proc)| Arc::clone(proc))
+        });
+        if let Some(proc) = taken
+            && proc.exit()?.is_some()
+        {
+            return Err(Refusal::NotRunning(
+                id.clone(),
+                "exec in a member: its member refused it, ended or confined",
+            ));
+        }
+        Self::started(b, &program, stdio, given)
     }
 
     /// A member of a running image VM its spec names takes a signal alone (goal 2's item 2), its run's members the
@@ -1174,6 +1253,100 @@ mod tests {
             .unwrap();
         assert!(matches!(
             runtime.member(&plain, &claude),
+            Err(Refusal::Invalid { what: "member", .. })
+        ));
+    }
+
+    /// Kiln's P7.1b (Shards' D243, `Runtime::exec_member`; AC-T7.4.1): do run `say` in a running sim image box's
+    /// member its spec names, its stdout asked for; expect its words on its stdout and its end 0. Expect a program
+    /// naming a user refused Invalid naming the program, a member its spec names not Invalid naming the member, an exec
+    /// naming no member Invalid naming exec, one before the box's start and one in a process box refused as the class
+    /// refuses them.
+    #[test]
+    fn a_sim_image_boxs_member_runs_a_program_named_for_it() {
+        use std::io::Read as _;
+        let runtime = SimRuntime::new();
+        let claude = Member {
+            kind: crate::MemberKind::Harness,
+            name: "claude".to_owned(),
+        };
+        let id = BoxId::new("sim-exec").unwrap();
+        runtime
+            .create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+                    members: vec![crate::ImageMember::new(claude.clone())],
+                    ..ShardsImage::new(SIM_IMAGE)
+                })),
+                owner: None,
+                devices: Vec::new(),
+                allocation: Some(sim_vm_allocation().unwrap()),
+                route: None,
+                band: 0,
+            })
+            .unwrap();
+        let out = || Stdio {
+            ask: crate::Ask {
+                stdout: true,
+                ..crate::Ask::default()
+            },
+            ..Stdio::null()
+        };
+        assert!(matches!(
+            runtime.exec_member(&id, &claude, Program::of(&["say", "hi"]), out()),
+            Err(Refusal::NotRunning(_, "exec in a member"))
+        ));
+        runtime.start(&id).unwrap();
+        let mut proc = runtime
+            .exec_member(&id, &claude, Program::of(&["say", "hi"]), out())
+            .unwrap();
+        let mut from = crate::OwnedStream::from(proc.streams().unwrap().stdout.unwrap());
+        let mut said = String::new();
+        from.read_to_string(&mut said).unwrap();
+        assert_eq!(said, "hi\n");
+        assert_eq!(
+            proc.wait_for(Duration::from_secs(60)).unwrap(),
+            Some(Exit::Code(0))
+        );
+        let as_root = Program {
+            user: Some(crate::User::default()),
+            ..Program::of(&["say", "hi"])
+        };
+        assert!(matches!(
+            runtime.exec_member(&id, &claude, as_root, Stdio::null()),
+            Err(Refusal::Invalid {
+                what: "program",
+                ..
+            })
+        ));
+        let helper = Member {
+            kind: crate::MemberKind::Agent,
+            name: "helper".to_owned(),
+        };
+        assert!(matches!(
+            runtime.exec_member(&id, &helper, Program::of(&["say", "hi"]), Stdio::null()),
+            Err(Refusal::Invalid { what: "member", .. })
+        ));
+        assert!(matches!(
+            runtime.exec(&id, Program::of(&["say", "hi"]), Stdio::null()),
+            Err(Refusal::Invalid { what: "exec", .. })
+        ));
+        let plain = BoxId::new("sim-exec-process").unwrap();
+        runtime
+            .create(BoxSpec {
+                id: plain.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Process,
+                owner: None,
+                devices: Vec::new(),
+                allocation: None,
+                route: None,
+                band: 0,
+            })
+            .unwrap();
+        assert!(matches!(
+            runtime.exec_member(&plain, &claude, Program::of(&["say", "hi"]), Stdio::null()),
             Err(Refusal::Invalid { what: "member", .. })
         ));
     }

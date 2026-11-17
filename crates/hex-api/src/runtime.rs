@@ -64,7 +64,8 @@ pub trait Runtime: Send + Sync {
     fn start(&self, id: &BoxId) -> Result<(), Refusal>;
 
     /// Runs `program` in box `id` with `stdio`: a host process in a `process` box, a process in the
-    /// container's namespaces in an `oci` box.
+    /// container's namespaces in an `oci` box. A Shards image VM runs a program in one of its members alone,
+    /// which [`Runtime::exec_member`] names: its `exec` is refused `Invalid` naming exec.
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
 
     /// Makes a `process` box from `spec` and runs `program` in it with `stdio`, as one call: the box a
@@ -107,6 +108,33 @@ pub trait Runtime: Send + Sync {
             what: "member",
             why: format!(
                 "box {id} isn't a Shards image box: only one has members its caller drives"
+            ),
+        })
+    }
+
+    /// Runs `program` in member `member` of running Shards image box `id` (Shards' D243), on a lane of its own of its
+    /// run's agent-control endpoint (D238), with `stdio` as [`Runtime::exec`] takes it. It runs as its member does: its
+    /// user, confinement, namespaces and cgroup the member's own, so `program` names no user; its environment the
+    /// member's with `program`'s variables over it; its working directory `program`'s, else the member's; pipes, no
+    /// terminal. Any member its run declares that runs a program, driven by its caller or not. Its end is its status as
+    /// Shards tells it once its outputs have finished (`Exit::Code`, 128 plus a signal's number where one ended it), or
+    /// `Signal(9)` where its own kill ended it; it is no process of this host. Its start is waited for as decision 9 has a
+    /// wait follow its party. Refused, typed: `Invalid` for a program that can't be started, names a user, or is past
+    /// what the lane carries, and for a member its run declares not; as `mcp` is for a box that isn't running;
+    /// `NotRunning` where the member runs no program, refused it (it has ended, or its confinement refused what it
+    /// asked) or the run's connection ended first. A class whose boxes have no members refuses it, naming the class.
+    fn exec_member(
+        &self,
+        id: &BoxId,
+        member: &crate::Member,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let _ = (member, program, stdio);
+        Err(Refusal::Invalid {
+            what: "member",
+            why: format!(
+                "box {id} isn't a Shards image box: only one has members a program runs in"
             ),
         })
     }
@@ -187,13 +215,16 @@ pub trait Runtime: Send + Sync {
     /// plan steps 12 and 14, C1): counters since the VM booted, so a reader's window is between two of its reads.
     /// Refused, typed, for a part its run host didn't read, never read as none, for a box not running, and by a class
     /// whose boxes run no VM process of their own, naming the class.
-    /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run, read as its
-    /// run ended (goal 54's change 3: a Shards image VM's final [`HostUse`], its window the whole run): `None` where the
-    /// box has no VM process of its own or its run never started (docs/design/shards-image-class.md §3: kiln charges
-    /// nothing then). A run that started answers its use or is refused, typed, the box left as it was (the review's
-    /// B-5): its read's own refusal where that read is refused, and [`Refusal::NotRunning`] where its run had ended, or
-    /// was being stopped, before its delete, a run's use being read only as it runs. A box already gone is refused
-    /// `NoSuchBox`, never answered with a use made up.
+    /// Deletes box `id` as [`Runtime::delete`] does, answering what its VM cost its host over its whole run (goal 54's
+    /// change 3: a Shards image VM's final [`HostUse`], its window the whole run): a run up at its delete read as it
+    /// runs, just before its delete's stop; a run that ended on its own before it, the final use its VM read once its
+    /// machine was down (Shards' D260), kept with its end until its delete, its window ending where its node first saw
+    /// that end. `None` where the box has no VM process of its own or its run never started
+    /// (docs/design/shards-image-class.md §3: kiln charges nothing then). A run that started answers its use or is
+    /// refused, typed, the box left as it was (the review's B-5): its read's own refusal where that read is refused, and
+    /// [`Refusal::NotRunning`] where its run ended with none kept (stopped before its delete, its use gone with its VM,
+    /// or its VM telling none whole at its end). A box already gone is refused `NoSuchBox`, never answered with a use
+    /// made up.
     fn delete_with_host_use(&self, id: &BoxId) -> Result<Option<HostUse>, Refusal> {
         self.delete(id).map(|()| None)
     }
@@ -304,7 +335,8 @@ pub struct HomeVolume {
 /// less its vCPUs'; where its hypervisor runs them apart from its threads (WHP's under the classic and core schedulers,
 /// every Windows Server's), its CPU is its own and its vCPUs' time is beside it. Not yet told, it is read as apart, so a
 /// VM is never charged less than it ran.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Charged {
     #[default]
     Unknown,
@@ -324,8 +356,9 @@ impl Charged {
 }
 
 /// What a box's VM costs its host beside its guest (Shards' D241, `Stats::microvm`; joint plan steps 12 and 14), each
-/// a counter since the VM booted, as its run host read its VM process.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// a counter since the VM booted, as its run host read its VM process. A run's final use, which a box's record keeps
+/// until its delete where its run ended on its own (Shards' D260), is kept in this form.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostUse {
     /// Its VM process's CPU time, user and system together, in nanoseconds: its vCPUs' guest time among it, read just
     /// before it, where `charged` says its OS counts it there ([`Charged::own`] its VMM's own).
@@ -337,7 +370,8 @@ pub struct HostUse {
     /// Nanoseconds each vCPU has run the guest, by vCPU index, one for each vCPU of the VM's size.
     pub guest_ns: Vec<u64>,
     /// The time these counters span: from the VM's run's start, as its boot answered, to this read (goal 54's change
-    /// 3: kiln learns the overhead a VM costs its host over its window, at usage and at its delete).
+    /// 3: kiln learns the overhead a VM costs its host over its window, at usage and at its delete); for a final use its
+    /// VM read once its machine was down (Shards' D260), to where its node first saw that run's end.
     pub window: Duration,
     /// Whether `cpu_ns` holds the vCPUs' guest time (D265). Appended after the other fields.
     pub charged: Charged,
@@ -3017,7 +3051,9 @@ pub enum Upstream {
     /// has no field for it (Shards e82b9403).
     GuestCpuTimePerVcpu,
     /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
-    /// endpoint.
+    /// endpoint. Given at Shards 9975d1f55, Hex's vendor point (D238's exec lanes, `Execs::exec`, D243's member exec): a
+    /// program runs in a member on a lane of its own, in process (`Runtime::exec_member`), so no call awaits it now. Its
+    /// tag stays, the wire being append-only.
     MemberExec,
     /// A microVM member's UDP flows to a host's name: Shards' destinations (D236) reach a name by TCP
     /// alone.
@@ -3082,11 +3118,16 @@ pub enum Upstream {
     /// its VM says it with each rate's answer since image channel version 31, which the charge learner reads each window
     /// (joint plan step 14, C1), so no call awaits it now. Its tag stays, the wire being append-only.
     RatePeriod,
+    /// A signal to a program run in a Shards member once its outputs have finished: Shards' exec lane tells its exit
+    /// after them, and its controller's one handle of it (`ExecControl`, at 9975d1f55) steers nothing while that exit is
+    /// waited for, where a member's own lane gives its steering and its end apart (`MemberSteering`, `MemberEnd`). An
+    /// exec's kill rides its lane while its outputs are open (`Runtime::exec_member`).
+    ExecSignalAfterOutput,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 17] = [
+    pub const ALL: [Upstream; 18] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -3104,6 +3145,7 @@ impl Upstream {
         Upstream::MemberDestinations,
         Upstream::NestedChannel,
         Upstream::RatePeriod,
+        Upstream::ExecSignalAfterOutput,
     ];
 }
 
@@ -3148,6 +3190,10 @@ impl std::fmt::Display for Upstream {
             }
             Self::RatePeriod => {
                 "the period a Shards VM's rate holds over (D191's governor; given by D247's ImageGuest::rate_period)"
+            }
+            Self::ExecSignalAfterOutput => {
+                "a signal to a program run in a Shards member once its outputs have finished (its exec lane's \
+                 ExecControl steers nothing while its exit is waited for)"
             }
         })
     }
