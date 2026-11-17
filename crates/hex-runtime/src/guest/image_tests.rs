@@ -484,13 +484,16 @@ impl ImageGuest for ModelGuest {
     fn started_from(&self) -> StartedFrom {
         self.started_from
     }
+    // The model runs each member's first generation alone (Shards' D270: 0), all the class asks: another's streams
+    // are none it holds, and its end never comes, as Shards answers a generation not started.
     fn take_output(
         &self,
         member: &MemberName,
+        generation: u32,
         channel: Channel,
     ) -> Result<std::io::PipeReader, ImageRefusal> {
         let mut outside = self.outside.lock().unwrap();
-        let ends = outside.get_mut(&member.name);
+        let ends = outside.get_mut(&member.name).filter(|_| generation == 0);
         let taken = match channel {
             Channel::Stdout => ends.and_then(|e| e.1.take()),
             Channel::Stderr => ends.and_then(|e| e.2.take()),
@@ -500,10 +503,15 @@ impl ImageGuest for ModelGuest {
             why: format!("{}'s output was taken, or it doesn't run", member.name),
         })
     }
-    fn take_input(&self, member: &MemberName) -> Result<std::io::PipeWriter, ImageRefusal> {
+    fn take_input(
+        &self,
+        member: &MemberName,
+        generation: u32,
+    ) -> Result<std::io::PipeWriter, ImageRefusal> {
         let mut outside = self.outside.lock().unwrap();
         outside
             .get_mut(&member.name)
+            .filter(|_| generation == 0)
             .and_then(|e| e.0.take())
             .ok_or_else(|| ImageRefusal::Spec {
                 what: "member",
@@ -513,6 +521,7 @@ impl ImageGuest for ModelGuest {
     fn wait_member(
         &self,
         member: &MemberName,
+        generation: u32,
         _: Duration,
     ) -> Result<Option<MemberEnd>, ImageRefusal> {
         Ok(self
@@ -521,7 +530,42 @@ impl ImageGuest for ModelGuest {
             .lock()
             .unwrap()
             .get(&member.name)
-            .copied())
+            .copied()
+            .filter(|_| generation == 0))
+    }
+    fn restart(&self, _: &MemberName, _: &[Vec<u8>], _: Duration) -> Result<u32, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's restarts",
+            why: "it restarts no member: the class asks none".to_owned(),
+        })
+    }
+    fn swap(
+        &self,
+        _: &str,
+        _: &str,
+        _: shards_api::image::SwapWhen,
+        _: Option<&[Vec<u8>]>,
+        _: Duration,
+    ) -> Result<shards_api::image::Swapped, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's swaps",
+            why: "it swaps no component: the class asks none".to_owned(),
+        })
+    }
+    fn restore(
+        &self,
+        _: &str,
+        _: shards_api::image::SwapWhen,
+        _: Option<&[Vec<u8>]>,
+        _: Duration,
+    ) -> Result<shards_api::image::Swapped, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's swaps",
+            why: "it swaps no component: the class asks none".to_owned(),
+        })
+    }
+    fn components(&self) -> Vec<shards_api::image::ComponentAt> {
+        Vec::new()
     }
     fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
         self.run.stats_asked.lock().unwrap().push(patience);
@@ -606,6 +650,17 @@ impl ImageGuest for ModelGuest {
             why: "it changes none as its run runs".to_owned(),
         })
     }
+    fn member_egress(
+        &self,
+        _: &MemberName,
+        _: Option<&shards_api::image::Reach>,
+        _: Duration,
+    ) -> Result<shards_api::image::Narrowing, ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's grants past its microVM",
+            why: "it changes none as its run runs".to_owned(),
+        })
+    }
     fn pause(&self, _: Duration) -> Result<shards_api::image::Paused, ImageRefusal> {
         Err(ImageRefusal::Unsupported {
             what: "the model's pauses",
@@ -665,6 +720,7 @@ impl ImageGuest for ModelGuest {
     fn wait_channel(
         &self,
         member: &MemberName,
+        _: u32,
         _: Channel,
         _: Duration,
     ) -> Result<Option<ChannelEnd>, ImageRefusal> {
@@ -2046,8 +2102,9 @@ fn a_member_that_ends_with_its_run_ends_as_the_run_did() {
 
 /// Shards' #72 (image channel v27, `MemberEnd::Signaled`): a member's end is typed, a signal that killed it its own end
 /// beside its exit, never folded into the status `docker run` reports (128 plus its number), which an exit can be too.
-/// Do: take three members of a running VM; have one killed by TERM, one by KILL, and one exit 143. Expect
-/// `Exit::Signal(15)`, `Exit::Signal(9)` and `Exit::Code(143)`, each its own.
+/// Do: take four members of a running VM; have one killed by TERM, one by KILL, one exit 143, and one ended at once by
+/// a restart (Shards' D270, image channel v38: `MemberEnd::Killed`, every process of it killed). Expect
+/// `Exit::Signal(15)`, `Exit::Signal(9)`, `Exit::Code(143)` and `Exit::Signal(9)`, each its own.
 #[test]
 fn r12_a_members_end_tells_a_signal_from_its_exit() {
     let images = ModelImages::new();
@@ -2060,6 +2117,7 @@ fn r12_a_members_end_tells_a_signal_from_its_exit() {
         ("termed", MemberEnd::Signaled(15), Exit::Signal(15)),
         ("killed", MemberEnd::Signaled(9), Exit::Signal(9)),
         ("exited", MemberEnd::Exited(143), Exit::Code(143)),
+        ("restarted", MemberEnd::Killed, Exit::Signal(9)),
     ];
     let mut boxed = spec("image-member-ends", None);
     if let ClassSpec::ShardsImage(image) = &mut boxed.class {
@@ -2079,6 +2137,57 @@ fn r12_a_members_end_tells_a_signal_from_its_exit() {
             .insert(name.to_owned(), end);
         assert_eq!(proc.wait_for(Duration::ZERO).unwrap(), Some(exit), "{name}");
     }
+}
+
+/// Shards' image channel 51 (AC-T7.4.1; CLAUDE.md §3): each refusal Shards added past 9975d1f55 is typed by what it
+/// refused. Do: map a run host's budget with no room for the run's lanes (D252), a member's working directory its guest
+/// couldn't enter (D277), a member's restart and a component's swap (D270, which this class asks of no run), and a
+/// shared network's grant refused (D285). Expect the budget's as the host's (`Os`), the working directory's and the
+/// network's as the spec's (`Invalid`), each in Shards' words, and the restart's and the swap's as the class's own
+/// fault (`Broken`).
+#[test]
+fn v51_shards_new_refusals_are_typed_by_what_they_refused() {
+    let id = BoxId::new("v51-refused").unwrap();
+    let full = refused(
+        &id,
+        "booting a Shards image VM",
+        ImageRefusal::Capacity("no room for its link".to_owned()),
+    );
+    assert!(
+        matches!(&full, Refusal::Os { why, .. } if why.contains("no room for its link")),
+        "{full:?}"
+    );
+    let unentered = refused(
+        &id,
+        "waiting for a member's end",
+        ImageRefusal::Workdir("Harness codex: /w: errno 2".to_owned()),
+    );
+    assert!(
+        matches!(&unentered, Refusal::Invalid { what: "shards image", why } if why.contains("errno 2")),
+        "{unentered:?}"
+    );
+    for asked_of_none in [
+        ImageRefusal::Restart(
+            shards_api::image::RestartRefusal::Capacity,
+            "no room".to_owned(),
+        ),
+        ImageRefusal::Swap(
+            shards_api::image::SwapRefusal::Workdir,
+            "errno 2".to_owned(),
+        ),
+    ] {
+        let mapped = refused(&id, "a call", asked_of_none);
+        assert!(matches!(&mapped, Refusal::Broken(_)), "{mapped:?}");
+    }
+    let taken = refused(
+        &id,
+        "a call",
+        ImageRefusal::Net(shards_api::image::NetRefusal::NameTaken, "codex".to_owned()),
+    );
+    assert!(
+        matches!(&taken, Refusal::Invalid { what: "shards image's network", why } if why.contains("NameTaken")),
+        "{taken:?}"
+    );
 }
 
 /// Goal 2's r13 (decision 9; Shards' pending lane handles, 155b5ee2e; AC-T7.4.1): a member lane's ask goes once, and
@@ -4262,6 +4371,8 @@ fn node_vm() -> NodeVm {
             host: std::path::PathBuf::from("/srv/node-state"),
             at: "/run/hex/shares/0".to_owned(),
             read_only: false,
+            exec: true,
+            members: None,
         }],
         controller: [9; 32],
         lanes: 6,
@@ -4311,8 +4422,10 @@ fn w39_a_node_vm_boots_under_shards_init_through_the_image_class_and_is_never_a_
                 lanes: vm.lanes,
                 window: u32::try_from(hex_core::stream::MAX_FRAME).unwrap(),
             }),
+            stdio: false,
         })
     );
+    assert!(spec.egress_ceiling.is_empty());
     assert_eq!(
         (booted.run, booted.control, booted.ready),
         (vm.run, model_control(), shards_api::image::Ready::OnTime)
@@ -4519,6 +4632,7 @@ fn serve_members(
             inputs: &[],
             execs: Some(shards_api::control::exec_admissions()),
             sockets: None,
+            bridges: &[],
         },
     )
     .unwrap();
@@ -4572,6 +4686,7 @@ fn serve_mcp(
             inputs: &[],
             execs: Some(shards_api::control::exec_admissions()),
             sockets: None,
+            bridges: &[],
         },
     )
     .unwrap();
@@ -4664,6 +4779,7 @@ fn serve_lanes(
                 lanes: grant.lanes,
                 window: grant.window,
             }),
+            bridges: &[],
         },
     )
     .unwrap();

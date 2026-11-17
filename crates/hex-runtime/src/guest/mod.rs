@@ -1091,6 +1091,11 @@ impl GuestRuntime {
                     host: share.dir.clone(),
                     at: share.at.clone(),
                     read_only: share.read_only,
+                    // Its containers' programs may run from a share, as before Shards' D279 (image channel v41).
+                    exec: true,
+                    // Its run's own root alone (Shards' D277, image channel v37): Hex's init, the run's own command,
+                    // mounts it, and the node image runs no member.
+                    members: None,
                 })
                 .collect(),
             controller: identity.fingerprint(),
