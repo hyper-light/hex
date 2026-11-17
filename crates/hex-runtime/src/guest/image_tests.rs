@@ -1473,10 +1473,12 @@ fn w12_a_members_mcp_bridge_rides_its_boot_member() {
 }
 
 /// Joint plan step 12 for kiln's step 18 (D231's shares): an image VM's guest sees the host directories its caller
-/// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only; one granted egress and
-/// sharing none; then one whose share Shards refuses. Expect the first boot to ask Shards for exactly those two shares,
-/// each its host directory, where the guest sees it and whether read-only, in order; the second for none, its grants
-/// widening no share; the third's start refused as Invalid, in Shards' own words.
+/// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only, the project given to its
+/// harness as it starts (its member scope, Shards' D277; P1.4); one granted egress and sharing none; then one whose
+/// share Shards refuses. Expect the first boot to ask Shards for exactly those two shares, each its host directory,
+/// where the guest sees it and whether read-only, in order, its files run from (D279's `exec`), the home the run's own
+/// root's alone and the project its harness's too; the second for none, its grants widening no share; the third's
+/// start refused as Invalid, in Shards' own words.
 #[test]
 fn w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names() {
     use hex_api::{Destination, Grant, Member, MemberKind, Mount, Ports, Proto};
@@ -1485,11 +1487,16 @@ fn w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names() {
             source: std::path::PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
             destination: "/home/agent/.claude".to_owned(),
             read_only: false,
+            members: Vec::new(),
         },
         Mount {
             source: std::path::PathBuf::from("/srv/projects/hex"),
             destination: "/work/hex".to_owned(),
             read_only: true,
+            members: vec![Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            }],
         },
     ];
     let boot_of = |shares: Vec<Mount>, grants: Vec<Grant>| {
@@ -1524,6 +1531,20 @@ fn w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names() {
         .map(|m| (m.source.clone(), m.destination.clone(), m.read_only))
         .collect();
     assert_eq!(asked, named);
+    assert_eq!(
+        shared
+            .shares
+            .iter()
+            .map(|s| (s.exec, s.members.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (true, None),
+            (
+                true,
+                Some(PlugFor::Members(vec![MemberName::harness("codex")]))
+            ),
+        ]
+    );
     let granted = boot_of(
         Vec::new(),
         vec![Grant::Egress {

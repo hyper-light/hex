@@ -889,6 +889,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             source: "/hex-conformance/data".into(),
             destination: "/data".to_owned(),
             read_only: true,
+            members: Vec::new(),
         }],
         hostname: Some("conformance".to_owned()),
         network: Network::Private,
@@ -900,6 +901,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
                 source: "/hex-conformance/data".into(),
                 destination: "data".to_owned(),
                 read_only: true,
+                members: Vec::new(),
             }];
         }),
         ("rootfs.layers", |s| s.rootfs = Rootfs::Layers(Vec::new())),

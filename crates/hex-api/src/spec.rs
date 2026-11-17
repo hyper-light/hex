@@ -313,8 +313,9 @@ pub struct ShardsImage {
     /// step 18: a person's home volumes, and a project at its host path, D235): each a `Mount`, its `source` the host
     /// directory, absolute on the host its node runs on, its `destination` where the guest sees it, absolute, and
     /// `read_only` whether the guest may write it. A member gets one where its image's `VOLUME` at that path is for it
-    /// (Shards' D109), the run's own command where no `VOLUME` declares it. None by default: the guest sees only the
-    /// shares named here, the image's own grants widening none. After the members (append-only).
+    /// (Shards' D109), or where its member scope names it (`Mount::members`, Shards' D277), and the run's own command
+    /// gets every one. None by default: the guest sees only the shares named here, the image's own grants widening none.
+    /// After the members (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<Mount>,
     /// Its members' credentials, granted by reference (Shards' D242; joint plan step 33; docs/design/credential-grants.md):
@@ -496,6 +497,18 @@ impl ShardsImage {
                     share.destination
                 )));
             }
+            // Its member scope (Shards' D277): each member named as a grant's member is, once, as Shards refuses a
+            // share given to one twice.
+            for (i, member) in share.members.iter().enumerate() {
+                member
+                    .check_named(&format!("shares[{at}].members[{i}]"))
+                    .map_err(invalid_image)?;
+                if share.members.get(..i).unwrap_or_default().contains(member) {
+                    return Err(invalid_image(format!(
+                        "shares[{at}].members[{i}] names {member} again"
+                    )));
+                }
+            }
         }
         // Its credentials, each one that could be filled in exactly as it says over the grants just taken (joint plan
         // step 33, docs/design/credential-grants.md C2).
@@ -603,6 +616,12 @@ impl OciSpec {
             if path_parts(&m.destination).all(|part| part.is_empty() || part == ".") {
                 return Err(invalid_spec(format!(
                     "{field} is the root: a mount over it would hide the rootfs"
+                )));
+            }
+            if !m.members.is_empty() {
+                return Err(invalid_spec(format!(
+                    "mounts[{i}].members names members a container doesn't have: a member scope is a Shards image \
+                     VM's share's"
                 )));
             }
         }
@@ -733,13 +752,21 @@ pub enum Rootfs {
     Layers(Vec<PathBuf>),
 }
 
-/// A host path bound into a container.
+/// A host path bound into a container, or a host directory a Shards image VM's guest sees ([`ShardsImage::shares`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mount {
     pub source: PathBuf,
     /// Where it appears in the container: an absolute path.
     pub destination: String,
     pub read_only: bool,
+    /// Its member scope, a Shards image VM's share's alone (Shards' D277, `ImageShare::members`): the members given it
+    /// as they start, at `destination` in each one's own root before its command runs, so one may work in it from its
+    /// first instruction (a project its harness's working directory is in), each named once by the kind and name its
+    /// image's Agentfile gives it, and one its image declares that runs (Shards refuses another at boot). None: the
+    /// run's own root alone, a member seeing it only where its image's `VOLUME` there is for it (D109). A container has
+    /// no members: an `oci` mount naming one is refused. After `read_only` (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<crate::Member>,
 }
 
 /// What a container sees of the network.
@@ -1166,6 +1193,7 @@ mod tests {
                 source: "/srv/data".into(),
                 destination: "/data".to_owned(),
                 read_only: true,
+                members: Vec::new(),
             }],
             hostname: Some("box-1.example".to_owned()),
             network: Network::Private,
@@ -1493,6 +1521,7 @@ mod tests {
             source: PathBuf::from(source),
             destination: destination.to_owned(),
             read_only,
+            members: Vec::new(),
         };
         let home = share(
             "/var/lib/kiln/homes/ada/.claude",
@@ -1544,6 +1573,60 @@ mod tests {
         }
     }
 
+    /// P1.4 (kiln's share member scope; Shards' D277, AC-T7.4.1): a share names the members given it as they start. Do
+    /// check a VM sharing a project with its harness; one whose share names its harness twice, or a member by no
+    /// member's name; and a container mounting a directory for a member. Expect the first to pass and read back whole
+    /// from JSON, a share with no scope written without one; the two shares refused as Invalid naming their member's
+    /// field; and the container's mount refused as Invalid naming its members.
+    #[test]
+    fn p14_a_shares_member_scope_is_checked_and_a_containers_mount_names_none() {
+        let codex = crate::Member {
+            kind: crate::MemberKind::Harness,
+            name: "codex".to_owned(),
+        };
+        let share = |members: Vec<crate::Member>| Mount {
+            source: PathBuf::from("/srv/projects/hex"),
+            destination: "/work/hex".to_owned(),
+            read_only: false,
+            members,
+        };
+        let with = |shares: Vec<Mount>| ShardsImage {
+            shares,
+            ..ShardsImage::new(crate::sim::SIM_IMAGE)
+        };
+        let scoped = with(vec![share(vec![codex.clone()])]);
+        scoped.check().unwrap();
+        let json = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(serde_json::from_value::<ShardsImage>(json).unwrap(), scoped);
+        let unscoped = serde_json::to_value(share(Vec::new())).unwrap();
+        assert!(unscoped.get("members").is_none(), "{unscoped}");
+        let unnamed = crate::Member {
+            kind: crate::MemberKind::Agent,
+            name: "Not A Name".to_owned(),
+        };
+        for (members, field) in [
+            (vec![codex.clone(), codex.clone()], "shares[0].members[1]"),
+            (vec![unnamed], "shares[0].members[0]"),
+        ] {
+            match with(vec![share(members)]).check() {
+                Err(Refusal::Invalid {
+                    what: "shards image",
+                    why,
+                }) => assert!(why.contains(field), "{why}"),
+                other => panic!("not refused as Invalid: {other:?}"),
+            }
+        }
+        let mut container = spec();
+        container.mounts = vec![share(vec![codex])];
+        match container.check() {
+            Err(Refusal::Invalid {
+                what: "oci spec",
+                why,
+            }) => assert!(why.contains("mounts[0].members"), "{why}"),
+            other => panic!("not refused as Invalid: {other:?}"),
+        }
+    }
+
     /// The review's B-10 (AC-T7.4.1, joint plan step 12): two shares the guest sees at one place are one share too
     /// many, however their paths are spelled, or the read-only one's intent is lost to the order they are mounted in.
     /// Do check a VM sharing a project read-only at `/work/hex` beside another directory, read-write, at the same place
@@ -1557,6 +1640,7 @@ mod tests {
             source: PathBuf::from(source),
             destination: destination.to_owned(),
             read_only,
+            members: Vec::new(),
         };
         let with = |first: &str, second: &str| ShardsImage {
             shares: vec![

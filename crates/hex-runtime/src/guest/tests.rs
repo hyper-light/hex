@@ -130,6 +130,7 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
         source: PathBuf::from(source),
         destination: destination.to_owned(),
         read_only,
+        members: Vec::new(),
     }
 }
 

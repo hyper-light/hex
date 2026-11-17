@@ -40,7 +40,8 @@ use shards_api::control::{
 };
 use shards_api::image::{
     BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
-    MemberEnd, MemberName, MemberSpec, NetRefusal, RunEnd, RunEnded, Secret, Stats, StatsScope,
+    MemberEnd, MemberName, MemberSpec, NetRefusal, PlugFor, RunEnd, RunEnded, Secret, Stats,
+    StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -2029,8 +2030,10 @@ impl ImageClass {
                     // Its files run from it, as every share's did before Shards' D279 (image channel v41): a box's
                     // share names no `noexec`.
                     exec: true,
-                    // The run's own root alone (Shards' D277, image channel v37), as before.
-                    members: None,
+                    // Its member scope (Shards' D277, image channel v37; P1.4): the members it names given it as they
+                    // start, each where it is seen in its own root; none, the run's own root alone, as before.
+                    members: (!m.members.is_empty())
+                        .then(|| PlugFor::Members(m.members.iter().map(member_name).collect())),
                 })
                 .collect(),
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.

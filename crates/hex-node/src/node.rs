@@ -3567,6 +3567,7 @@ mod rendered {
                     source: "/srv/data".into(),
                     destination: "/data".to_owned(),
                     read_only: true,
+                    members: Vec::new(),
                 }],
                 hostname: Some("box".to_owned()),
                 network,

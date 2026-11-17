@@ -632,6 +632,7 @@ fn oci_spec() -> BoxSpec {
                 source: PathBuf::from("/data"),
                 destination: "/mnt".to_owned(),
                 read_only: true,
+                members: Vec::new(),
             }],
             hostname: Some("box".to_owned()),
             network: Network::Private,
@@ -2502,6 +2503,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
                         source,
                         destination,
                         read_only,
+                        members: Vec::new(),
                     })
                     .collect(),
                 hostname,
@@ -5809,11 +5811,13 @@ fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
                     source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
                     destination: "/home/agent/.claude".to_owned(),
                     read_only: false,
+                    members: Vec::new(),
                 },
                 Mount {
                     source: PathBuf::from("/srv/projects/hex"),
                     destination: "/work/hex".to_owned(),
                     read_only: true,
+                    members: Vec::new(),
                 },
             ],
             ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
@@ -6084,9 +6088,10 @@ fn unchecked_credentials(list: &[CredentialGrant]) -> Vec<u8> {
 }
 
 /// Joint plan step 33 (every credential grant in Hex's record of the VM; Shards' D242): do create a Shards image VM
-/// granting its harness a credential toward its provider, beside a share. Expect it read back whole, its credentials
-/// written right after the share, last of the image. Do write one whose credential its harness's egress doesn't reach,
-/// and read it as a peer that skipped the check would send it. Expect both refused as invalid credentials.
+/// granting its harness a credential toward its provider, beside a share given to that harness as it starts (its member
+/// scope, Shards' D277). Expect it read back whole, the share's member scope right after its read-only flag, and its
+/// credentials right after the share, last of the image. Do write one whose credential its harness's egress doesn't
+/// reach, and read it as a peer that skipped the check would send it. Expect both refused as invalid credentials.
 #[test]
 fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
     let spec = |credentials: Vec<CredentialGrant>| BoxSpec {
@@ -6098,6 +6103,7 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
                 source: PathBuf::from("/srv/projects/hex"),
                 destination: "/work/hex".to_owned(),
                 read_only: true,
+                members: vec![harness()],
             }],
             credentials,
             ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
@@ -6119,9 +6125,14 @@ fn w33_a_shards_image_vms_credential_grants_cross_the_wire_after_its_shares() {
     put_credentials(&mut listed, &granted, &each_way()).unwrap();
     let listed = listed.done().unwrap();
     let share = b"/work/hex";
-    // After the share's guest path, its read-only flag, then the credentials.
-    let at = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len() + 1;
-    assert_eq!(bytes[at - 1], 1);
+    let mut scope = Writer::new(MAX_MESSAGE);
+    scope.list(&[harness()], put_member).unwrap();
+    let scope = scope.done().unwrap();
+    // After the share's guest path, its read-only flag, then its member scope, then the credentials.
+    let flag = bytes.windows(share.len()).position(|w| w == share).unwrap() + share.len();
+    assert_eq!(bytes[flag], 1);
+    assert_eq!(&bytes[flag + 1..flag + 1 + scope.len()], scope.as_slice());
+    let at = flag + 1 + scope.len();
     assert_eq!(&bytes[at..at + listed.len()], listed.as_slice());
     let unreached = openai_credential("evil.example");
     let refused = Request::Call(Call::Create(Box::new(spec(unreached.clone()))));
