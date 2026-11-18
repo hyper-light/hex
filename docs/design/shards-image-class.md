@@ -5,12 +5,12 @@ runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is 
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
 Merged on Hex's main at Shards `04481e36b`, image channel v51 as at `f1e8a097b` (a share given to members as they start, D277, v37, which
-the class gives from a share's member scope, `Mount::members`, P1.4, and a member's working directory its guest can't
+the class gives from a share's member scope, `ImageShare::members`, P1.4, and a member's working directory its guest can't
 enter refused typed, `ImageRefusal::Workdir`, v42 and v43, the spec's; a member's generations, its restart and a
 component's swap, D270, v38 to v49, each member stream and end named by its generation, the class's members' their
-first, as it restarts and swaps none; each member's own reach within its ceiling, D278, v39, and a member's grants on a
+current, a component's swap and restore starting them again (`Runtime::swap`, `restore` and `components`, §13); each member's own reach within its ceiling, D278, v39, and a member's grants on a
 network shared by runs, D285, v50, neither of which this class asks, their refusals typed; a share's files run from it or
-not, D279, v41, every share of the class's run from, as before; its members' stdio served as its endpoint's lanes,
+not, D279, v41, as each share's `ImageShare::exec` says (§13); its members' stdio served as its endpoint's lanes,
 D252, v44, which the class doesn't ask; its run host's budget holding the run's link and its members' first lanes, a run
 with no room for them refused `ImageRefusal::Capacity`, D252, v51, the host's; `9975d1f55` before it, image channel v36:
 an orchestrator's run told the memory it may plug, as a
@@ -46,6 +46,7 @@ On real VMs, HEX-IMG-1 to 7 passed on Linux KVM at `c8b4ce6b` and `8aa7c028`, an
 `cf535152`. Owed (§8): HEX-IMG-1, 6 and 7 on HVF at `fac528d9` or later, and every case on Windows WHP. Merged from
 `root/hex-p31`, kiln plan `01a1dd2e313f72f69c6d93061143cc2e` P3.1: the warm pools kiln names, each booting
 its boxes through Shards' `ImagePools`, its hosts charged to the room its owner binds (§10); its real-VM runs owed.
+Merged from `cp/t7-p5-5b-pause-v2`: a box's pause and resume through its node (kiln plan P5.5b, D267; §12).
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e0cc059c`, `740fa372`,
@@ -199,6 +200,7 @@ split, so a box can be admitted and recorded before it is needed:
 | `exec_member` | `Execs::exec` on a lane of its own of the run's agent-control endpoint (D238's exec lane, D243's member exec), its stdio pumped and its end waited for. |
 | `inspect`, `list` | The record's phase and exit, and this process's run (`wait_for` with no wait). |
 | `usage` | `stats(StatsScope::Run)` (§4). |
+| `pause`, `resume` | `ImageGuest::pause`, `resume` (D267; kiln plan P5.5b, §12): its vCPUs held out of its guest by its VMM, or let go, one move at a time, refused typed where the box isn't as the move asks. |
 | `delete` | `Deleting`, then `stop` if it runs, to its run's end, then the record removed. |
 
 Every member operation D231 doesn't give (a terminal; a signal to an exec once its outputs have finished) is refused
@@ -215,17 +217,18 @@ typed, naming the capability (`Refusal::Awaits`), never stubbed. A member's own 
 - `ShardsImage::shares` names the host directories the guest sees (D231's shares, `-v HOST:AT[:ro]`; kiln's step
   18: a person's home volumes and a project at its host path, D235), each a `Mount`: its host directory, checked as
   a mount's source; where the guest sees it, absolute, no `..`, never the guest's root, each seen once; and whether
-  read-only. The boot asks Shards for exactly those, in order (default deny: the image's grants widen none), and a
+  read-only, and whether its files may be run (D279, §13). The boot asks Shards for exactly those, in order (default
+  deny: the image's grants widen none), and a
   share Shards refuses refuses the start as `Invalid`, in Shards' words. A member gets one where its image's
-  `VOLUME` at that path is for it (D109), or where the share's member scope names it (`Mount::members`, P1.4: Shards'
+  `VOLUME` at that path is for it (D109), or where the share's member scope names it (`ImageShare::members`, P1.4: Shards'
   `ImageShare::members`, D277, image channel v37, given as each member starts, so a harness works in its project from
   its first instruction), and the run's own command gets every one. A scope's members are checked as a grant's member
   is, each once; Shards refuses one its image doesn't declare, and a working directory no member's guest enters,
-  `ImageRefusal::Workdir`, mapped `Invalid` in Shards' words. Every share's files run from it (D279's `exec`).
+  `ImageRefusal::Workdir`, mapped `Invalid` in Shards' words.
 - `Runtime::member(id, member)` hands the caller that member as a `Proc`: the caller's ends of its stdin, stdout and
   stderr (D231's `take_input` and `take_output`, each once, so a second call is refused as Shards refuses it), and
-  its end (`wait_member`, its first generation's, D270; `WithRun` is the run's end, as the box's own, and a run that
-  failed refuses it `Failed` in its runtime's words, kiln P2.3). It is no process of this host
+  its end (`wait_member`; `WithRun` is the run's end, as the box's own, and a run that failed refuses it `Failed` in
+  its runtime's words, kiln P2.3), each its current generation's (D270, §13). It is no process of this host
   (`on_this_host` false, no pid: D231 names none), and its own kill is KILL on its own lane of the run's endpoint,
   its end then `Signal(9)` (a member that has ended has nothing to end); the box's KILL or delete ends it with its VM. Refused for a member the spec doesn't name, and as every call is for a box that
   isn't running here. The class serves it in process (`GuestRuntime`, `WithGuest`, `Recorded`, the Linux `Node`)
@@ -428,7 +431,8 @@ The record (the guest's Books, the node's Store) and this process's run:
 |---|---|---|---|
 | Created | `Creating`, no exit | none | start: Booting; delete: removed |
 | Booting | `Ready`, no exit | a boot in flight, on a thread of its own | its answer: Running, or Ended where Shards refused the run (past its patience among it); delete: Deleting, its boot followed to its answer |
-| Running | `Ready`, no exit | the run held | KILL, or its own end: Ended; delete: Deleting |
+| Running | `Ready`, no exit | the run held | KILL, or its own end: Ended; delete: Deleting; pause: Paused |
+| Paused | `Ready`, no exit | the run held, its vCPUs held out of its guest or a move of them under way (§12) | resume: Running; KILL, or its failure: Ended; delete: Deleting |
 | Ended | `Ready`, its exit | none | delete: removed |
 | Deleting | `Deleting` | stopping, or none | its stop's return, its run's end: removed |
 | Held | `Ready` or `Deleting`, no exit | none: a run of an earlier node process | a host reboot (§5) |
@@ -481,6 +485,10 @@ native owner (`Supervisor::running_vms`): its VMM's use on the host. An image VM
 running in the node's own process tree (§8), so the learner neither learns nor places it, and it stays booked at its
 receipt, whole. Its Usage above is its run's in the guest, short of the guest kernel's and the run host's own, and
 is no stand-in for the host's. The run host's launch through the client's native owner gives the learner its cgroup.
+
+**Paused time** is D267's: the run's stats carry how long its owner has held it paused since it started (`Stats::paused`,
+every pause so far and the one under way among it), which `Usage::paused_ns` and `HostUse::paused` carry, refused,
+naming why, where its run host told none, never read as none (§12).
 
 D231's STATS has no memory peak, OOM kill count or refused fork count. The image class reports none of these
 (0, as the Windows process class reports no refused forks), and says so here; Shards owes them for a full Usage.
@@ -599,6 +607,15 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   use's window, which ends where this process first sees the run's end, at its next settling call: Shards tells no
   instant with its end, and a wait on each run's end beside it (a thread for each run's life) is the alternative, its
   cost unmeasured.
+- **Pause and resume on real VMs** (§12, ROOT's): HEX-IMG-10 through `image_real` on Linux KVM, macOS HVF and Windows
+  WHP, at Shards `9975d1f55` or later (image channel version 33 or later: D267's pause), and the learned charge across
+  a pause on a macOS or Windows node's recorded trace.
+- **Swaps on real VMs** (§13, ROOT's): HEX-IMG-11 through `image_real` on Linux KVM, macOS HVF and Windows WHP, at
+  Shards `f17b8fb77` or later (image channel version 41), each node's Shards home holding a component for the image's
+  harness (`HEX_IMAGE_COMPONENT`), and a swap now of a harness whose output no caller reads past what a pipe holds.
+- **From Shards, for swaps** (§13): a start again that gives its member the run-time arguments its first start had
+  (D256's `MemberSpec::args`; a swap now restarts its member with none, so a harness started with kiln's flags, its
+  `--resume` among them, starts again without them), and MCP servers' paths (D270 slice 4's "not yet").
 
 ## 9. What would falsify it
 
@@ -612,6 +629,10 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   Hex keeps a record of its own boxes' beside them, §2a).
 - A box whose volumes and diagnostics together take more of its node's disk than it was admitted with, past Shards'
   diagnostics tail (then the bounds are not drawn from its admission, §2a).
+- A paused VM whose guest time grows, or a pause that waits on its guest (then D267's hold is no pause, and §12's
+  paused windows hide use, or its patience is wrong for a hung guest).
+- A member's next generation started before its last's channels ended, or a channel's end told after its swap's answer
+  (then §13's drains are not what holds a start again, or a joined drain waits for its run's end).
 
 ## 10. Warm pools (kiln plan `01a1dd2e313f72f69c6d93061143cc2e`, P3.1)
 
@@ -743,3 +764,188 @@ What would falsify it:
 - An allocation under the class's cost that Shards boots at another size (then `image::cost` misreads Shards' rule).
 - A node whose plane total moves while it runs (then a receipt's cost differs from the offer's at create, refused
   `validate_route`, and the ceiling wants another bound).
+
+## 12. Pause and resume (kiln plan P5.5b)
+
+Decided 2026-11-15, merged from `cp/t7-p5-5b-pause-v2`. Kiln's sessions pause and resume a running agent
+(kiln plan `01a1dd2e8618733a87f2793aab1322a8`, P5.5c), through Hex: an image box pauses and resumes through its node,
+its usage saying its paused time, and a paused box holds its room (P5.5b's acceptance).
+
+Sources, read at the revisions named: Shards' D267 ("An orchestrator's run paused and resumed: `ImageGuest::pause` and
+`resume`, the VMM's own hold of every vCPU", `docs/design/architecture.md` at `9975d1f55`); `shards_api::image` at
+`9975d1f55` (`ImageGuest::pause`, `resume`, `Paused`, `ImageRefusal::Paused`, `ImageRefusal::Pause`, `Stats::paused`,
+`RunEnded::paused`); `crates/shards/src/api_run.rs` at `9975d1f55` (`Pause`'s states, a run's stats while paused);
+`learned-charge.md` C1 (a window's sample, Karn's point).
+
+- **The calls.** `Runtime::pause(id)` and `Runtime::resume(id)`, typed, each answering nothing past its done: the box's
+  state is inspect's (`BoxState::Paused`, appended, the wire's tag 3) and its paused time usage's. The node's wire
+  carries them as appended calls, `Call::Pause` (kind `0x0022`) and `Call::Resume` (`0x0023`), answered `Done`;
+  hex-client's `Core` sends them on every transport (the local socket on Linux, macOS and Windows, a guest's stream,
+  QUIC), each timed by a box kind of its own (`client.answer.pause.<class>`, `client.answer.resume.<class>`), which
+  measures in every table as `mcp` does. Every runtime that holds an image box passes them to its class (`WithGuest`,
+  `GuestRuntime`, `Recorded`, Linux's `Node`, hex-node's `ImageRuntime`); the trait's own answer for any other is the
+  class refusal below, naming the class inspect says.
+- **The refusals.** `Refusal::Pause { id, op, cause }` (appended, tag 17), `cause` a `PauseCause` (append-only, tags 0
+  to 4): `Paused` where it is paused already, a pause's; `Running` where it isn't paused, a resume's; `NotRunning`
+  before its start and once its stop has begun; `Ended` once its run has ended (Shards' `ImageRefusal::Ended` among
+  it); `Class(class)` for a box of any other class or form, a Shards guest's oci box among them. Its boot under way is
+  `Lifecycle { Pending }` as every call's is, a move of it under way `Lifecycle { Busy }`, a held run
+  `Awaits(AttachAfterCrash)`. A move its VM didn't make, its machine stopped before every vCPU was held (D267's
+  `ImageRefusal::Pause`), is `Refusal::Guest { op, failure: GuestFailure::Pause(why) }` (appended, tag 5), in its words.
+  Shards answers a pause of a paused run as done (ROOT's ruling for it, 2026-11-14); Hex's seam refuses one typed
+  (ROOT's P5.5b brief, 2026-11-15: already paused, not running, ended and the class can't pause, each typed), and never
+  asks Shards a move its run is in already, so a caller that lost its answer reads `Paused` or `Running` as its move
+  done.
+- **One move at a time.** The run keeps its vCPUs' motion, D267's own states one for one: going, pausing, paused,
+  resuming. A pause is begun only from going and a resume only from paused, under the runs' lock, which moves the run to
+  the move under way; the move is asked of Shards outside it, and ended under it as Shards answered: paused or going
+  where it was made, back where it was not. A move asked while another is under way is refused `Busy`, never queued
+  behind it, so a pause and a resume asked together never leave Hex's word and the VM's apart, and a move Shards is
+  slow to answer stalls no other call. A stop or delete taken meanwhile wins, as Shards orders the asks: the move's end
+  leaves a stopping run as it is. The motion is this process's alone, as the run is (§5): a restarted node holds a
+  paused run as any run of an earlier process.
+- **Its wait.** D267's VMM makes a move at once, asking nothing of its guest, which may be slow or hung, so the ask
+  waits on its VM's answer or its run's end alone (`Duration::MAX`), never a timer, as a room's and a rate's do.
+- **While paused** (from its pause's ask to its resume's answer, as D267's run host refuses its guest's asks), a call
+  that needs its guest's answer is refused at once, `Pause { cause: Paused }`, never waited on: a signal but KILL and a
+  member's signal (whose lane would wait for its guest, on one of serve's workers for a remote member's kill), its room
+  (Shards' `ImageRefusal::Paused`, typed so), and the usage of a run whose guest had said no stats before its pause.
+  Answered as ever: KILL and delete (its final use read as it pauses), inspect (its publishes and endpoint still told),
+  its usage (its guest's lines as last said before the pause, its guest time flat), its host use, its rate and its
+  period, and its members' streams. An MCP connection's ask and an in-process member's own kill ride their lanes,
+  which its guest takes once it goes on (D267: a lane's connections stay open), each waiting on it as its lane always
+  does.
+- **Usage.** `Usage::paused_ns`, appended (the wire writes it after how its microVM started), and `HostUse::paused`,
+  appended: D267's `Stats::paused`, refused where untold. `HostUse::window` keeps its meaning, the run's whole life
+  since its boot answered, its paused time among it: D267 has an orchestrator's window take the paused time off, and
+  Hex gives both parts instead, since kiln's meter divides a read's CPU growth by its window's, which a window that
+  stops growing through a pause would divide by none. A reader takes the paused time's growth off the window's for
+  what ran between two reads.
+- **Its room held.** A pause changes no record, receipt or claim, so the node's ledger and the scheduler keep the box's
+  receipt booked, and its learned charge keeps its booking: a span between two of a learner's reads that holds any of
+  a pause, its paused time having grown, is no sample (`learned-charge.md` C1), so the windows before the pause keep
+  making its charge, and the room they book is there for its resume. Linux's learner learns no image VM (§4), which
+  stays booked at its receipt whole. A paused window still tells what the VM used of its CPU cap, so the cap's
+  water-filling lends what it leaves to the others for that window alone, its booking its share throughout. Its room
+  isn't told while paused (Shards refuses it at once), and the window after its resume tells it again, as D267 has an
+  orchestrator do.
+- **Simulator and fakes.** `hex_api::sim::SimRuntime` pauses and resumes an image box at once, its guest time flat
+  while paused, its usage its paused time, its refusals the class's; HEX-IMG-10 holds every runtime of the class to them.
+
+**Alternatives not taken.** Shards' idempotent answer at Hex's seam (the brief names a typed refusal; a caller still
+reads it as done). A lock held across Shards' move (a stuck move would stall each next call of the run behind it;
+`Busy` tells the caller instead). The paused time taken off `HostUse::window` (D267's suggestion: it changes an existing
+field's meaning under kiln's meter). The cgroup freezer for process and oci boxes (P5.5b pauses image boxes; D267
+refused SIGSTOP and a freezer for a VM, whose device threads and link they freeze).
+
+**Tests.** HEX-IMG-10 (`hex_api::conformance`) through the simulator in process, through a node's socket
+(`the_image_cases_hold_through_a_nodes_socket`) and, ROOT's, on real VMs (`image_real`); over QUIC
+(`p5_5b_a_vms_pause_and_resume_go_through_quic`); the class over a model of D267 (`image_tests.rs`, `p5_5b_*`: its
+moves, `Busy`, a move its VM didn't make, its end while paused, a mute paused run's usage); the wire's round trips; and
+the learner holding a paused VM's charge and booking through SEEDABLE paused windows
+(`p5_5b_a_paused_image_vm_keeps_its_charge_and_booking`), which taking those windows as samples turns red.
+
+**What would falsify it.** A VM whose guest time grows while Hex says it paused; a resumed VM whose use passes the
+charge its pre-pause windows made more often than one window in SEEDABLE, the windows around its pause left out; a
+caller of kiln's that needs a move it lost the answer of answered as done rather than refused typed.
+
+## 13. Component swaps and a share's exec (Shards' D270 slices 3b and 4, D279)
+
+Decided 2026-11-16, built on `cp/t7-v41-swaps` and merged on Hex's local main (not pushed), AC-T7.4.1. The Hex lead's
+brief (2026-11-16): bring Hex to Shards' vendor point `f17b8fb77` (image channel v41), expose a member's component swaps
+through Hex as P5.5b exposed pause and resume (§12), and carry a volume's `exec` through the image class.
+
+Sources, read at the revisions named: Shards' D270 ("Components swapped into running image VMs, sans rebuild", slices
+3b and 4, with the faults its HVF runs found), D277 (a share given its members as they start), D278 (a member's own
+grants past its microVM) and D279 (a share's or a plug's files may be refused execution), `docs/design/architecture.md`
+at `f17b8fb77`; `shards_api::image` at `f17b8fb77` (`ImageGuest::swap`, `restore`, `components`, `restart`, the
+generation on `take_output`, `take_input`, `wait_member` and `wait_channel`, `ImageRefusal::Swap` with `SwapRefusal`,
+`ImageRefusal::Restart`, `MemberEnd::Killed`, `ImageShare::exec` and `members`, `Plug::exec`, `ImageSpec::egress_ceiling`),
+`image/session.rs` (each generation's pumps, given room as they start; a reader that left has the rest let go) and
+`image/wire.rs` (`SwapAsk`, `SwapAnswer`, `ComponentAt`, `Swapped`); `crates/shards/src/api_run.rs` at `f17b8fb77`
+(`swap`, `restart_turn`, `last_output_ended`, `end_channel`).
+
+- **The calls.** `Runtime::swap(id, at, digest, when)`, `Runtime::restore(id, at, when)` and `Runtime::components(id)`,
+  typed. `at` is a member's path (`/agents/NAME`, `/harness/NAME`), `digest` the manifest digest of an OSI artifact its
+  node's Shards store holds, `when` `SwapWhen::NextStart` or `SwapWhen::Now` (the wire's tags 0 and 1). A swap or a
+  restore answers `Swapped`: every member's component after it (`ComponentAt`: its path, the digest its next start lays,
+  the one its current generation runs with, none for its image's own), the generation of its member a `Now` started, and
+  the bytes of the ended generation's output no caller had taken, let go (the draining rule, below). The node's wire
+  carries them appended: `Call::Swap` (kind `0x0024`), `Call::Restore` (`0x0025`) and `Call::Components` (`0x0026`),
+  answered `Answer::Swapped` (`0x8018`) and `Answer::Components` (`0x8019`). hex-client's `Core` sends them on every
+  transport, each timed by a box kind of its own (`client.answer.swap.<class>`, `.restore.`, `.components.`), measuring
+  as pause's do. Every runtime that holds an image box passes them to its class (`WithGuest`, `GuestRuntime`,
+  `Recorded`, Linux's `Node`, hex-node's `ImageRuntime`); the trait's own answer for any other is the class refusal.
+- **The refusals.** `Refusal::Swap { id, op, cause, why }` (appended, tag 18), `cause` a `SwapCause` (append-only, tags 0
+  to 10): Shards' `SwapRefusal` one for one, matched whole, `Unknown`, `Artifact`, `Kind`, `Platform`, `Asks`, `Device`,
+  `Running` and `Failed`, `why` Shards' words; then `NotRunning` before its start and once its stop has begun, `Ended`
+  once its run has ended (Shards' `ImageRefusal::Ended` among it), and `Class(class)` for a box of any other class or
+  form, a Shards guest's oci box among them. Its boot under way is `Lifecycle { Pending }`, a held run
+  `Awaits(AttachAfterCrash)`. While paused, a swap or a restore is refused at once, `Pause { cause: Paused }`, its guest
+  answering nothing (§12); `components` is answered as ever, from what its node holds. Shards' `ImageRefusal::Restart`
+  comes of a member's restart of its own, which this class asks none of (its starts again are its swaps'): `Broken`
+  where seen, as every refusal of an ask the class makes none of is.
+- **Its component first.** A swap or a restore is asked of Shards at its member's next start first: its artifact checked,
+  its image built where the store has none, plugged and mounted, or its image's own wanted back. Refused there, nothing
+  of its member is touched. Only then, where `Now` was asked, the same change is asked now, which starts its member
+  again, its component plugged already (the run host's plug of one plugged answers at once). Shards' `Now` would do
+  both in one ask, but the member's output would then be read from before its artifact was checked, and a swap refused
+  for its artifact would leave the node reading the output of a member that runs on.
+- **Generations.** A start again ends its member's current generation (SIGTERM to its command) and starts its next in
+  the namespaces its generations keep (D270 slice 3b), each generation's stdin, stdout, stderr and end its own. The
+  class keeps each member's current generation with its run, by declared index, from Shards' answer
+  (`Swapped::started`), and starts a member again through these calls alone, so nothing else moves it. `Runtime::member`
+  takes the member's current generation's streams, once each. A program taken before stays its generation's: its end is
+  that generation's (`MemberEnd::Killed`, a generation its start again ended at once, read `Signal(9)`), and its kill,
+  which rides the member's lane, is answered at once once its generation has ended, as a lane steers the generation
+  running as it opens.
+- **The draining rule.** Shards starts a member's next generation only once every channel of its last has ended, and its
+  run host takes no more of a channel while its orchestrator's pipe is unread (shards-api's pump writes each part into
+  the caller's pipe before it gives its host room for more; what no one reads backs up into that channel alone): a start
+  again whose last generation's output no one reads fails past its patience, `Failed`, and Shards lets that member go.
+  So before it asks the start again, the class takes each of the member's current output channels no caller took (a
+  member no caller drives has none taken; `take_output` refuses one taken, its taker's to read) and reads it on a
+  thread of its own to its end, letting its bytes go. A caller that took them reads them to their end, as it reads any
+  program's. Each channel's end comes before Shards' answer (one stream, in order), so once the swap is answered the
+  drains of channels told ended are joined, their bytes `Swapped::unread`; a channel told no end was never opened,
+  nothing of it came, and its thread ends with its run. Refused after its first ask, the drains read on to their
+  generation's end. The model's run host fails a start again whose last output no one could read (its worst case: past
+  what a pipe holds unread), so `d270_a_swap_now_lets_go_of_its_members_unread_output_and_its_start_again_goes_on`
+  fails without the drains.
+- **Its wait.** Each ask waits on its run host's answer or its run's end alone (`Duration::MAX`), never a timer, as a
+  pause's does. Shards' patience is its member's graceful end's too (ended at once past it, `MemberEnd::Killed`) and its
+  last output's: a bound of Hex's would kill a member slower to end than it guessed, and a start again it failed would
+  let its member go whole. With none, a member that never ends at its SIGTERM holds a `Now` until a KILL ends it, its
+  own (`Runtime::signal_member`) or its box's, and output a caller took and never reads holds it until it is read or the
+  run ends.
+- **A share's exec.** `ShardsImage::shares` are `ImageShare`s (`source`, `destination`, `read_only`, `exec`), no longer
+  `Mount`s, so an OCI mount keeps its own form. `exec` (D279) is on unless a spec says otherwise: serde's default, left
+  out of JSON where on, so every record and request written before it reads as it did; the wire writes it after
+  `read_only` in each share. The class gives it to Shards' `ImageShare::exec`; off, each of the share's mounts is
+  `noexec`. The node VM's own shares (§7, `HEX_GUEST_SHARES`) stay runnable: its containers' bind mounts come from them.
+  Every `ImageShare` the class makes names no members (D277's `None`: given where the image's `VOLUME` lies, as before)
+  and no member's ceiling (D278's `egress_ceiling` empty): kiln asks Hex for neither yet.
+- **Simulator and fakes.** `hex_api::sim::SimRuntime` swaps at once: its image runs one harness of its own
+  (`SIM_HARNESS`) beside the members its spec names, and its node's store holds one harness's component
+  (`SIM_COMPONENT`); a `Now` ends the program its caller took as TERM ends one with no handler, and its next
+  generation's streams are takeable anew; its refusals the class's. HEX-IMG-11 holds every runtime of the class to them,
+  the fixture naming its component (`Fixture::component`; `image_real` takes one from `HEX_IMAGE_COMPONENT`).
+
+**Alternatives not taken.** Shards' `Now` in one ask (above). Each unread reader dropped rather than read (Shards' pump
+then lets its bytes go uncounted; read, they are told). A finite patience (above). A `Runtime::restart` of its own (no
+caller asked one; a `NextStart` swap is laid by a later `Now`). `exec` on `Mount` (the OCI class would carry a field it
+honours nowhere yet).
+
+**Tests.** HEX-IMG-11 (`hex_api::conformance`) through the simulator in process, through a node's socket
+(`the_image_cases_hold_through_a_nodes_socket`) and, ROOT's, on real VMs (`image_real`); over QUIC
+(`d270_a_vms_swap_and_restore_go_through_quic`); the class over a model of D270 (`image_tests.rs`, `d270_*`: the drain,
+a driven member's generations each its own program, a generation killed at its start again, every refusal); the
+simulator's own (`d270_a_sim_members_swap_now_ends_its_program_and_its_next_is_taken_anew`); the wire's round trips,
+generators and bytes (`d270_a_swap_its_answer_and_its_refusal_cross_the_wire`,
+`d279_a_shares_exec_crosses_the_wire_after_its_read_only_flag`); a share's exec in JSON
+(`d279_a_shares_exec_is_on_unless_it_says_so`); and the class asking Shards for each share's exec
+(`w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names`).
+
+**What would falsify it.** A member's next generation started before its last's channels ended, or a channel's end told
+after its swap's answer (§9); a share whose files may not be run that runs a binary; a swap now that leaves its member's
+streams to its last generation's caller.

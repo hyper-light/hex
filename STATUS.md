@@ -122,6 +122,18 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   A running VM's agent-control link (`Runtime::link`, kiln plan step 35's `/runs/control`) answers both ends' TLS and
   every lane its controller was granted, `mcp:N` among them, on Shards' `Linked::report` (`8c9c03cc4`), in process alone:
   the node's wire carries none yet. Closes with: its real-VM run, kiln's step 35 drives (ROOT's).
+  A box's pause and resume (kiln plan P5.5b; `docs/design/shards-image-class.md` §12), merged from
+  `cp/t7-p5-5b-pause-v2`: Shards' D267, in process and over the node's wire (`Call::Pause`, `Call::Resume`, appended),
+  typed refusals, `BoxState::Paused`, its paused time in its usage, and its room held through its pause. Closes with:
+  HEX-IMG-10 on real VMs (KVM, HVF, WHP), ROOT's.
+  A member's component swapped in and its image's own back as its run runs (`docs/design/shards-image-class.md` §13),
+  merged from `cp/t7-v41-swaps`, built at Shards `f17b8fb77` (image channel v41) and carried to Hex's vendor point of
+  Shards `04481e36b` (image channel v51): Shards' D270 slice 4 (`Runtime::swap`, `restore`, `components`, in process and
+  over the node's wire, `Call::Swap`, `Call::Restore`, `Call::Components`, appended), typed refusals (`Refusal::Swap` by
+  `SwapCause`), each member's generations (slice 3b: `Runtime::member` takes its current one's streams), its last
+  generation's output no caller took read to its end and let go so its start again goes on, told in `Swapped::unread`;
+  and whether a share's files may be run (D279: `ImageShare::exec`, on by default, beside its member scope). Closes
+  with: HEX-IMG-11 on real VMs (KVM, HVF, WHP) with a component in each node's store (`HEX_IMAGE_COMPONENT`), ROOT's.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
