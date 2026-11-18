@@ -382,6 +382,44 @@ grants, never widen them. A run so narrowed of an image that links its members p
 its network process letting nothing past (D250, Shards 3a16dbd92); before D250, Shards refused it "cannot run without
 a network", which refused every Hex create of such an image (Codex's).
 
+## 2b. Shares another server serves (Shards' D286; kiln goal 01a1ec34599974448f6b7663ddb07001)
+
+kiln's microVM engine shares each agent's slates volume into its guest over slates' own virtio-fs device and DAX
+window, slates serving it on a stream handed to Shards, with no mount of the host's between them. Shards' image boot
+takes such a share as `ImageSpec::served` (D286, image channel v52): a stream its run host is handed with the run's
+request and puts in the share slot after the run's own shares', with a DAX window where they have one, the server
+answering the guest's FUSE requests and the window's mappings on it. Status, 2026-11-17: written against D286 on
+Shards' branch `agents/g265-kiln-shards-microvm-served-image-share` (not yet on Shards' main, which ROOT lands after its
+v0.8.0 tag), unit-tested over the model and the simulators; no real VM has run it (§8).
+
+- **The spec.** `ShardsImage::served`, each a `ServedMount`: its source, in its server's own words (for kiln's, a slates
+  volume's name), not empty and with no NUL; where its guest sees it, checked as a share's place is (absolute, no
+  `..`, never the guest's root) and at no share's, volume's or other served share's place however its path is
+  spelled; whether read-only; and its members, given it as they start as a share's are (D277). `ShardsImage::check`
+  refuses each by its field (`served[i].…`). The node's wire carries them after the volumes.
+- **The seam** (CLAUDE.md §9): `hex_api::serve::Servers`, the node's server of such shares, which makes each one's
+  stream for one boot, its simulator `SimServers`, and its contract (`hex_api::serve::conformance`, HEX-SERVE-1 to 3: a
+  stream of a source it serves is answered for that source, writable or read-only as asked; a source it serves none of
+  is refused `Invalid`, naming it, with no stream). Its orchestrator binds it once (`ImageClass::bind_servers`, hex-node's
+  `ImageRuntime::bind_servers`), as it binds its warm room. The stream is in no spec, record or wire: it is a descriptor
+  of the node's own process, made for one boot alone, so a box with one runs where its server is.
+  - *Alternatives* (§5): a stream lent with the spec (in-process alone, a field the node's wire and its records would
+    drop, and one a recovered or warm boot could never be given again), or a new `Runtime` call carrying descriptors
+    beside `create` (every implementation, the node's wire among them, changed for one class's need). Taken: the spec
+    names the share by its source, and the node asks its own server as it boots, as it asks its lessors for a run's
+    credentials (joint plan step 33's C3): nothing in a record that a restarted node couldn't ask for again.
+- **Created.** A box naming one on a node bound no server is refused `Unconfigured` (`hex_api::serve::unconfigured`)
+  before any record, as a box granting a credential is on a node given no lessors; the simulator refuses it alike.
+- **Started.** Before the boot's intent, where its lessor is made, each served share's stream is asked of the server
+  (`ImageClass::served`), in the spec's order: the first refused refuses the start, in the server's words, the box left
+  Creating and nothing booted. Each goes to Shards at its place, read-only as asked, its files run from (D279, as every
+  share's of the class are), and given to its members as they start (D277). Shards hands its run host a copy of each with
+  the request; this process's copy goes with the boot's spec as the boot answers, so the server sees the share end once
+  the run host and the VM have closed theirs, with the run.
+- **What it doesn't do**, Shards' D286's: a box with one boots on a run host of its own, never a warm pool's (its warm
+  host's share process starts before its run's streams come), and no save of its run is made (its server keeps the
+  share's state, which no snapshot holds).
+
 ## 3. States
 
 The record (the guest's Books, the node's Store) and this process's run:
@@ -551,6 +589,10 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   start refused `Volume { Bound }` while another box holds it with another bound; its clearing refused
   `Volume { InUse }` while a box holds it, then its files gone once none does. The node's wire carries no listing or
   clearing yet (`Runtime::volumes`, `clear_volume`): in process alone.
+- **Shares another server serves (§2b), from Shards and real-VM runs:** D286 on Shards' main and Hex re-vendored there
+  (its image channel v52, its run hosts rebuilt with it); then a box given a slates volume's stream through kiln's server
+  whose member reads and writes the volume and maps a file through its slot's DAX window, on KVM, HVF and WHP (ROOT's and
+  kiln's end-to-end runs).
 - **A member's program and a run's kept final use** (kiln's P7.1b; §2, §3): their real-VM runs (ROOT's): a program
   run in a running image VM's harness, its output and its end, its kill, and a run that ends on its own deleted with
   its host use, on KVM, HVF and WHP; a member exec carried by the node's wire, which carries none yet; and the final
