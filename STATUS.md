@@ -108,6 +108,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   process, the class, `ImageRuntime` and the simulator; not on the node's wire), a held one refused
   `Volume { InUse }`. Merged from `root/hex-p6`, its tests written and none run yet: closes with those and its runs on KVM, HVF and WHP
   (ROOT's, shards-image-class.md §8).
+  A box's shares another server serves (`ShardsImage::served`; Shards' D286, kiln goal 01a1ec34…): each one's stream
+  asked of the server its node's orchestrator bound (`hex_api::serve::Servers`, `ImageRuntime::bind_servers`) as its
+  start boots it, handed to Shards in a share slot of its own; refused `Unconfigured` at create where none is bound.
+  Written against D286 on Shards' branch, unit-tested over the model and the simulators (`SimServers` passes
+  HEX-SERVE-1 to 3); closes with D286 on Shards' main, Hex re-vendored there, and its real-VM runs (shards-image-class.md
+  §2b, §8).
   A program runs in any member of a running image VM (`Runtime::exec_member`, kiln's P7.1b: Shards' D243 on D238's
   exec lane, given at `9975d1f55`), in process alone (the node's wire carries none yet), its kill riding its lane while
   its outputs are open; and a run that ends on its own keeps the final use its VM tells with that end (D260) in its

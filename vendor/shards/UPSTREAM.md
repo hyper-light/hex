@@ -188,7 +188,11 @@ AF_UNIX path shards-afunix refuses says which and why, where a bare InvalidInput
 
 ## Recorded changes
 
-None. Hex's two changes at e82b9403 are upstream at this revision: its run host started holding
+| File | Change | Why | Recorded as |
+|---|---|---|---|
+| `crates/api/src/image.rs`, `crates/api/src/image/{wire,pool,session}.rs`, `crates/ipc/src/lib.rs` | Shards' D286: an image run given shares another server serves (`ImageSpec::served`, `ServedShare`, `ServedStream`; image channel 52, `wire::Request::served`, `ServedAt`; the streams handed beside the request, on Unix on the run host's links socket, `shards_ipc::kind::SERVED_SHARES` (117), on Windows duplicated into its process; no pool's, no save) | kiln's microVM engine shares each agent's slates volume into its guest over slates' own virtio-fs device, a stream handed to Shards with no host mount between (kiln goal 01a1ec34599974448f6b7663ddb07001; docs/design/shards-image-class.md §2b). Upstream on Shards' branch `agents/g265-kiln-shards-microvm-served-image-share` (4ff40fc99, on its main 4776b2e56; e4e0118c8 the same change on this revision), which ROOT lands on Shards' main after its v0.8.0 tag. Dropped once Hex takes a Shards revision holding it. Its run host's side (`crates/shards`) is in no crate Hex takes: kiln's copy of Shards, which builds the `shards` kiln carries, holds it whole | `0001-shards-api-shards-ipc-an-image-run-takes-shares-another.patch` |
+
+Hex's two changes at e82b9403 are upstream at this revision: its run host started holding
 its three standard streams alone as D248 (9bdd4a7ec, through `shards_ipc::spawn_with` rather than
 Hex's `image/spawn.rs`), and each member's reach of the destinations kept as D246 (7a4ef5c02,
 image channel version 12, where Hex's had carried it as version 9).
