@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `85cecd75bb6d7b01520afd2ef9796e05fe770e8b` (main).
+Revision: `1799412f9b18598f548a92124da51a5a534a5114` (main).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -194,8 +194,8 @@ its whole thread group has, a Linux zombie leader with threads left counted as l
 shards-ipc and the API's `taken`); and D215's judge refuses a party by its rate only once two
 answers have taught it, `Rated` counting them (`answers`, 739907a94), a type Hex names nowhere.
 
-Past f74f8e3ef this revision, Shards' main as its v0.8.0 tag nears, still speaks image channel 51
-and changes one call Hex makes: a VM's AppContainer profile records are kept per user, beside the
+Past f74f8e3ef, 85cecd75b (once the tag's candidate) still spoke image channel 51 and changed one
+call Hex makes: a VM's AppContainer profile records are kept per user, beside the
 profiles in the user's own LocalAppData, where they were in the VM's cache (D141 amended, 1c155368a),
 so `shards_api::release_app_containers` takes the VM's identity and its end alone and
 `app_container_records` says where the records are; Hex's Windows-managed receipt keeps no runtime
@@ -204,6 +204,19 @@ is beneath (c3ae0c61d; shards-ipc takes windows-sys's `Win32_System_Environment`
 Cargo.lock is unchanged); a bind or connect shards-afunix refuses says its path and its call
 (08bfe4176); and the judge's `LOOKS_TO_REFUSE` and `Judge::refused_within` bound a still party by its
 rule (85cecd75b), which Hex calls nowhere.
+
+Past 85cecd75b this revision, Shards' main as its v0.8.0 tag nears, still speaks image channel 51,
+and Hex takes one crate more: D215's judge is a crate of its own, shards-judge (8365ad7e8), which
+shards-api depends on by path and re-exports whole as before (`Judge`, `Stall` and the rest, and on
+Windows its thread listing, `threads_held`, `threads_said` and `ThreadsHeld`, 49781fe4f). So
+`crates/judge` is taken: without it shards-api's manifest names a crate the copy lacks
+(`shards-judge = { path = "../judge" }`), and no build of Hex's resolves. No other file Hex takes
+changes a type, a signature or a dependency Hex reads: a refusal for a stall says its party's threads
+(`Stall::account`, 1ab6a60ea); shards-ipc adds the exit status of a warm VM whose template is broken
+(`TEMPLATE_FAILED_STATUS`, ee003a1b9) and, on Windows, a vsock connection its spawner carries
+(`vsock_carried`, d711594e2); and an input shards-remote's endpoint let go ends its lane alone
+(03c2c9118). shards-api's and shards-remote's tests wait judged through shards-testwait, a
+dev-dependency no build of Hex's reads.
 
 ## Recorded changes
 
