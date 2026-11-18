@@ -4,7 +4,7 @@ Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln ha
 runtime"), AC-T7.4.1. Status, 2026-11-13 (built, merged and live apart; live is GitHub's main, `025aae6d`): **built to
 Shards' D231**, on Linux, macOS and Windows hosts, its run host started holding only its stdio by Shards' own spawn
 (D248, §1) and each vCPU's guest time in its usage (D241, §4). Live at Shards `1389dc0b` (`68ed140a`, `2c728252`).
-Merged on Hex's main at Shards `1799412f9`, image channel v51 as at `f1e8a097b` (a share given to members as they start, D277, v37, which
+Merged on Hex's main at Shards `aa819b058` (v0.8.0), image channel v51 as at `f1e8a097b` (a share given to members as they start, D277, v37, which
 the class gives from a share's member scope, `Mount::members`, P1.4, and a member's working directory its guest can't
 enter refused typed, `ImageRefusal::Workdir`, v42 and v43, the spec's; a member's generations, its restart and a
 component's swap, D270, v38 to v49, each member stream and end named by its generation, the class's members' their

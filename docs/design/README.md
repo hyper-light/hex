@@ -73,7 +73,7 @@ live from its next push. Built means on a branch and not merged.
 | Storage: a CSI-like interface; images from Reliquary, lazily | CP-T7.8 | open |
 | The Kubernetes API subset | CP-T7.13 | open |
 
-`vendor/shards` pins Shards main `1799412f9` on Hex's main (`04481e36b` before it, at `955e15c06`; `8d6029e4d` before that, at `996ddad4d`; `f1e8a097b` before that, at `b06bb8686`; `9975d1f55` before that, at `1969a423e`; `1c4570e36` before that, at `f386be7af`; `d993d83ee` before that, at `414aa30d3`; `888879412` before that, at `3b19a179`; `fa953e3ce` before that, at `2a1073956`; `0290f1e9f` before that, at `c2c91669b`; `9d8a05f6a` before that; `d7ff8a094` before that, at `641856cf`; `2246a8829`
+`vendor/shards` pins Shards `aa819b058`, its v0.8.0 tag, on Hex's main (`04481e36b` before it, at `955e15c06`; `8d6029e4d` before that, at `996ddad4d`; `f1e8a097b` before that, at `b06bb8686`; `9975d1f55` before that, at `1969a423e`; `1c4570e36` before that, at `f386be7af`; `d993d83ee` before that, at `414aa30d3`; `888879412` before that, at `3b19a179`; `fa953e3ce` before that, at `2a1073956`; `0290f1e9f` before that, at `c2c91669b`; `9d8a05f6a` before that; `d7ff8a094` before that, at `641856cf`; `2246a8829`
 before that, at `d91ebb32`;
 `2737fc4ec` before that, at `20015fb5`;
 `ce80cbb37` before that, at `9ff60efb`; `16451e19f` before that, at `cf844022`; `37ddeb080` before that, at `2f55dccf`; `097ec0047` before that, at

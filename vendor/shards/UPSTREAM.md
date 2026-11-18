@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `1799412f9b18598f548a92124da51a5a534a5114` (main).
+Revision: `aa819b0585649563d7185298db58bda8ac9dd533` (its tag v0.8.0).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -205,7 +205,7 @@ Cargo.lock is unchanged); a bind or connect shards-afunix refuses says its path 
 (08bfe4176); and the judge's `LOOKS_TO_REFUSE` and `Judge::refused_within` bound a still party by its
 rule (85cecd75b), which Hex calls nowhere.
 
-Past 85cecd75b this revision, Shards' main as its v0.8.0 tag nears, still speaks image channel 51,
+Past 85cecd75b, `1799412f9`, Shards' main as its v0.8.0 tag neared, still speaks image channel 51,
 and Hex takes one crate more: D215's judge is a crate of its own, shards-judge (8365ad7e8), which
 shards-api depends on by path and re-exports whole as before (`Judge`, `Stall` and the rest, and on
 Windows its thread listing, `threads_held`, `threads_said` and `ThreadsHeld`, 49781fe4f). So
@@ -217,6 +217,39 @@ changes a type, a signature or a dependency Hex reads: a refusal for a stall say
 (`vsock_carried`, d711594e2); and an input shards-remote's endpoint let go ends its lane alone
 (03c2c9118). shards-api's and shards-remote's tests wait judged through shards-testwait, a
 dev-dependency no build of Hex's reads.
+
+Past 1799412f9 this revision, Shards' v0.8.0 tag (`aa819b058`), still speaks image channel 51, and Hex
+takes one crate more: every durable write Shards makes goes through shards-durable (`crates/durable`,
+2abcc4344f), declared in its home's slot file to whoever follows its process, and shards-api
+(e3e1819b19) and shards-remote (61b83b3461) depend on it by path, shards-apple's tests too. So
+`crates/durable` is taken: without it their manifests name a crate the copy lacks
+(`shards-durable = { path = "../durable" }`), and no build of Hex's resolves. Cargo.lock locks
+shards-durable 0.1.0 with libc and windows-sys 0.61.2, both locked already, windows-sys with the
+features the scaffold names and the three shards-durable's manifest adds (`Win32_Security`,
+`Win32_System_IO`, `Win32_System_Performance`); shards-testdir takes windows-sys too, sweeping an
+ended test process's directories on Windows as on Unix (e200d8dbe7); and clippy.toml refuses the OS's
+syncs outside shards-durable, where shards-ipc's `sync_durable` went (61b83b3461). One change reaches
+Hex's code: the judge's work is a `Work` (333e3e53f7: on Windows the cycles a process's threads ran,
+elsewhere their CPU time), which `Record::teach` and `Judge::answered` take and `Stall::most`, `Rate`'s
+`work` (its `cpu` before), `Rated`'s `most` and `Span`'s `work` hold, a `Span` holding its host's hold
+beside it (`held`, 6c42136ec0). Hex's adapter test, which teaches a record an answer that read no
+work, teaches it `Work::ZERO` where it taught `Duration::ZERO`: the same lesson at either revision, the
+slowest alone. Nothing else changes what Hex calls: a look reads its host's threads once (`Listing`,
+37508e2780), which `Watch::of`, `look` and `starved` take, and whose `runnable_threads` and, on
+Windows, `threads_said` shards-api no longer re-exports; a wait's `Bound` gains `Work`, a start
+refused once it has done more work than any start took (`Judge::by_work`, D215, 13b764f5e0);
+`ProcessOperation` gains `ProcBsdInfo`, macOS's read of an exit under way (877fff23ad), an enum Hex
+makes values of and matches nowhere; shards-ipc adds `LAYER_LOST` (0e0fba5d15),
+`HOST_REFUSED_STATUS` (D261, 303ae2dd78), `host_committable` and, on Windows, `memory_refused_said`
+(b6301e2f1a); shards-api's `min_memory_mib` is shards-abi's, the same function (`shards_abi::bounds`,
+43d2ac727d); shards-judge adds `SPREAD` (D217, a552796e32) and `waited_past_most` (5576fec52c); a
+look says what it read of its host's work for a thread waiting in its kernel (`kernel`, 3f8bd903ab),
+and a process is followed apart from its tree (`of_pid_alone`, c17bd4c750); shards-apple reads a
+volume's completed I/O (`volume_completed`, e3e1819b19); and shards-remote writes its identity and
+invitations through shards-durable, its other changes its tests' (7d3263a909). `LAYER_LOST` is kind
+117, the number the recorded change below gives `SERVED_SHARES` on a run host's links socket, which no
+`LAYER_LOST` travels; and the decision that change names, D286, is Shards' main's for its durable
+writes: both numbers are taken there before the record lands on it.
 
 ## Recorded changes
 
