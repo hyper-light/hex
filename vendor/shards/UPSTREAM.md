@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `04481e36be379b1c0a26575e66ef9c254be87865` (main).
+Revision: `aa819b0585649563d7185298db58bda8ac9dd533` (its tag v0.8.0).
 
 The API, ABI, IPC, DNS-name, remote-control, AF_UNIX transport, Apple-frameworks and test-directory crates, license,
 formatting, lint configuration and binding policy are copied exactly from this revision, with
@@ -186,11 +186,77 @@ AF_UNIX path shards-afunix refuses says which and why, where a bare InvalidInput
 (a982c9be0, D276 amended); shards-testdir says each panic of a test process on stderr as it happens
 (c0c852156); and remote's loopback test goes on past Winsock's WSAECONNRESET (d1b1e1412).
 
+Past 04481e36b, f74f8e3ef (once the tag's candidate) still spoke image channel 51, and no file
+Hex takes changed a type, a signature or a dependency Hex reads: shards-afunix tells
+every AF_UNIX socket its directory by afunix.h's parent-path controls, its address its file name
+alone, so a socket beneath a long path works on Windows (0e7773c19); a process has exited only once
+its whole thread group has, a Linux zombie leader with threads left counted as living (26942ced5,
+shards-ipc and the API's `taken`); and D215's judge refuses a party by its rate only once two
+answers have taught it, `Rated` counting them (`answers`, 739907a94), a type Hex names nowhere.
+
+Past f74f8e3ef, 85cecd75b (once the tag's candidate) still spoke image channel 51 and changed one
+call Hex makes: a VM's AppContainer profile records are kept per user, beside the
+profiles in the user's own LocalAppData, where they were in the VM's cache (D141 amended, 1c155368a),
+so `shards_api::release_app_containers` takes the VM's identity and its end alone and
+`app_container_records` says where the records are; Hex's Windows-managed receipt keeps no runtime
+paths for it (de5ee7490). Beside it: a confined child is given the LOCALAPPDATA its profile's folder
+is beneath (c3ae0c61d; shards-ipc takes windows-sys's `Win32_System_Environment` for it, a feature, so
+Cargo.lock is unchanged); a bind or connect shards-afunix refuses says its path and its call
+(08bfe4176); and the judge's `LOOKS_TO_REFUSE` and `Judge::refused_within` bound a still party by its
+rule (85cecd75b), which Hex calls nowhere.
+
+Past 85cecd75b, `1799412f9`, Shards' main as its v0.8.0 tag neared, still speaks image channel 51,
+and Hex takes one crate more: D215's judge is a crate of its own, shards-judge (8365ad7e8), which
+shards-api depends on by path and re-exports whole as before (`Judge`, `Stall` and the rest, and on
+Windows its thread listing, `threads_held`, `threads_said` and `ThreadsHeld`, 49781fe4f). So
+`crates/judge` is taken: without it shards-api's manifest names a crate the copy lacks
+(`shards-judge = { path = "../judge" }`), and no build of Hex's resolves. No other file Hex takes
+changes a type, a signature or a dependency Hex reads: a refusal for a stall says its party's threads
+(`Stall::account`, 1ab6a60ea); shards-ipc adds the exit status of a warm VM whose template is broken
+(`TEMPLATE_FAILED_STATUS`, ee003a1b9) and, on Windows, a vsock connection its spawner carries
+(`vsock_carried`, d711594e2); and an input shards-remote's endpoint let go ends its lane alone
+(03c2c9118). shards-api's and shards-remote's tests wait judged through shards-testwait, a
+dev-dependency no build of Hex's reads.
+
+Past 1799412f9 this revision, Shards' v0.8.0 tag (`aa819b058`), still speaks image channel 51, and Hex
+takes one crate more: every durable write Shards makes goes through shards-durable (`crates/durable`,
+2abcc4344f), declared in its home's slot file to whoever follows its process, and shards-api
+(e3e1819b19) and shards-remote (61b83b3461) depend on it by path, shards-apple's tests too. So
+`crates/durable` is taken: without it their manifests name a crate the copy lacks
+(`shards-durable = { path = "../durable" }`), and no build of Hex's resolves. Cargo.lock locks
+shards-durable 0.1.0 with libc and windows-sys 0.61.2, both locked already, windows-sys with the
+features the scaffold names and the three shards-durable's manifest adds (`Win32_Security`,
+`Win32_System_IO`, `Win32_System_Performance`); shards-testdir takes windows-sys too, sweeping an
+ended test process's directories on Windows as on Unix (e200d8dbe7); and clippy.toml refuses the OS's
+syncs outside shards-durable, where shards-ipc's `sync_durable` went (61b83b3461). One change reaches
+Hex's code: the judge's work is a `Work` (333e3e53f7: on Windows the cycles a process's threads ran,
+elsewhere their CPU time), which `Record::teach` and `Judge::answered` take and `Stall::most`, `Rate`'s
+`work` (its `cpu` before), `Rated`'s `most` and `Span`'s `work` hold, a `Span` holding its host's hold
+beside it (`held`, 6c42136ec0). Hex's adapter test, which teaches a record an answer that read no
+work, teaches it `Work::ZERO` where it taught `Duration::ZERO`: the same lesson at either revision, the
+slowest alone. Nothing else changes what Hex calls: a look reads its host's threads once (`Listing`,
+37508e2780), which `Watch::of`, `look` and `starved` take, and whose `runnable_threads` and, on
+Windows, `threads_said` shards-api no longer re-exports; a wait's `Bound` gains `Work`, a start
+refused once it has done more work than any start took (`Judge::by_work`, D215, 13b764f5e0);
+`ProcessOperation` gains `ProcBsdInfo`, macOS's read of an exit under way (877fff23ad), an enum Hex
+makes values of and matches nowhere; shards-ipc adds `LAYER_LOST` (0e0fba5d15),
+`HOST_REFUSED_STATUS` (D261, 303ae2dd78), `host_committable` and, on Windows, `memory_refused_said`
+(b6301e2f1a); shards-api's `min_memory_mib` is shards-abi's, the same function (`shards_abi::bounds`,
+43d2ac727d); shards-judge adds `SPREAD` (D217, a552796e32) and `waited_past_most` (5576fec52c); a
+look says what it read of its host's work for a thread waiting in its kernel (`kernel`, 3f8bd903ab),
+and a process is followed apart from its tree (`of_pid_alone`, c17bd4c750); shards-apple reads a
+volume's completed I/O (`volume_completed`, e3e1819b19); and shards-remote writes its identity and
+invitations through shards-durable, its other changes its tests' (7d3263a909). `LAYER_LOST` is kind
+117, the number the recorded change below gives `SERVED_SHARES` on a run host's links socket, which no
+`LAYER_LOST` travels; and the decision that change names, D286, is Shards' main's for its durable
+writes: both numbers are taken there before the record lands on it.
+
 ## Recorded changes
 
 | File | Change | Why | Recorded as |
 |---|---|---|---|
 | `crates/api/src/image.rs`, `crates/api/src/image/{wire,pool,session}.rs`, `crates/ipc/src/lib.rs` | Shards' D286: an image run given shares another server serves (`ImageSpec::served`, `ServedShare`, `ServedStream`; image channel 52, `wire::Request::served`, `ServedAt`; the streams handed beside the request, on Unix on the run host's links socket, `shards_ipc::kind::SERVED_SHARES` (117), on Windows duplicated into its process; no pool's, no save) | kiln's microVM engine shares each agent's slates volume into its guest over slates' own virtio-fs device, a stream handed to Shards with no host mount between (kiln goal 01a1ec34599974448f6b7663ddb07001; docs/design/shards-image-class.md §2b). Upstream on Shards' branch `agents/g265-kiln-shards-microvm-served-image-share` (4ff40fc99 and its fix 5376b406a, on its main 4776b2e56; e4e0118c8 and 74d1bc82f the same changes on this revision), which ROOT lands on Shards' main after its v0.8.0 tag. Dropped once Hex takes a Shards revision holding it. Its run host's side (`crates/shards`) is in no crate Hex takes: kiln's copy of Shards, which builds the `shards` kiln carries, holds it whole | `0001-shards-api-shards-ipc-an-image-run-takes-shares-another.patch` |
+| `crates/api/Cargo.toml`, `crates/remote/Cargo.toml` | Their dev-dependencies name no `shards-testwait` (and its comment): Hex's layout alone | Hex takes none of Shards' tests, nor `crates/testwait`, which needs `shards-vmm` and much more of Shards; named, the vendored workspace wouldn't load and `cargo fmt --all`, Hex's first gate, failed at `84c870b0f` | `0002-hex-s-vendored-shards-names-no-shards-testwait-among-shards.patch` |
 
 Hex's two changes at e82b9403 are upstream at this revision: its run host started holding
 its three standard streams alone as D248 (9bdd4a7ec, through `shards_ipc::spawn_with` rather than
