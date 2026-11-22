@@ -243,8 +243,8 @@ host from both sides (a member that would reach more than its grants, or less, r
 reaches Hex's start typed, through shards-api's `ImageRefusal`: a widening `Invalid` past the image's grants, the
 image's `Invalid` naming the image (a grant for a member it doesn't declare), the request's `Invalid` naming the
 request (Hex names each member once, which the property test pins). The channel is at version 13 for every request,
-the hold a flag in it (D246's version 12, D247's rate 13), so the run host must speak version 13, as Hex's `shards`
-built by `scripts/shards-gpu/build.sh` at the vendored revision does: an older one refuses the request by its
+the hold a flag in it (D246's version 12, D247's rate 13), so the run host must speak version 13, as Shards' own
+release at the revision Hex pins does: an older one refuses the request by its
 version (`Cause::Request`, naming both versions) and never runs it.
 
 | A box's grants | What Shards holds (D236, D246, D250) | Hex |
@@ -400,8 +400,9 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 - **Owed to Hex's lead, real VMs**: `image_grants_real`'s ignored test, on a node booting the probe image, a harness
   whose program tries its egress targets and reports each typed on every connection to its ports and every line on
   its stdin (`scripts/grants-probe/build.sh` makes its context on each host: the probe built static for the guest's
-  arch, `<arch>-unknown-linux-musl`, by rust-lld), with `SHARDS_BIN` and `SHARDS_INIT` from one build of Hex's
-  `shards` at the vendored revision (`scripts/shards-gpu/build.sh`). On Linux KVM, macOS HVF and Windows WHP, once
+  arch, `<arch>-unknown-linux-musl`, by rust-lld), with `SHARDS_BIN` and `SHARDS_INIT` from Shards' own release at the
+  revision Hex pins (its shards-init by content, as `shards inspect guest` names it). On Linux KVM, macOS HVF and
+  Windows WHP, once
   the image class boots there (goal 12):
   - a destination the image grants not refuses the boot, past the image's grants, before anything starts;
   - a harness image booted with no grants, its probe asked on its stdin: its names unresolved (no DNS answer) and

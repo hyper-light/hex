@@ -134,6 +134,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   generation's output no caller took read to its end and let go so its start again goes on, told in `Swapped::unread`;
   and whether a share's files may be run (D279: `ImageShare::exec`, on by default, beside its member scope). Closes
   with: HEX-IMG-11 on real VMs (KVM, HVF, WHP) with a component in each node's store (`HEX_IMAGE_COMPONENT`), ROOT's.
+  A running box's network and folders changed in place (kiln plan P6b.3; `docs/design/shards-image-class.md` §14),
+  built on `cp/t7-p6b3-live` at Shards v0.8.0: `Runtime::change` in process and over the node's wire (`Call::Change`,
+  appended), its change a grant added or taken back (a publish held to its member alone, a member's reach given whole,
+  D278), a member on a network shared by runs or off it (D285), a host directory plugged in or unplugged (D271, D279's
+  `exec`); `ShardsImage::plug_roots` and `ceiling`; `BoxInfo::live`; typed refusals (`Refusal::Live` by `LiveCause`).
+  Closes with: HEX-IMG-12 and HEX-IMG-13 on real VMs (KVM, HVF, WHP), ROOT's.
 - **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
   silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
   `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an

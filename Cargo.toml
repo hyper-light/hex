@@ -29,10 +29,20 @@ hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
 hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 hex-quic = { path = "crates/hex-quic", version = "0.1.0" }
 hex-wait = { path = "crates/hex-wait", version = "0.1.0" }
-# Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
-# Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
-# vendor/shards as every other vendored project (vendor/shards/Cargo.toml says which).
-shards-api = "0.1"
+# Shards, Hex's microVMs (docs/design/shards-guest.md, shards-image-class.md): its crates by git at the one revision Hex
+# builds on, never a copy of Hex's own; kiln, which vendors Hex and Shards both, builds Hex on its own copy of Shards.
+# The revision is Shards' main at b271669b6, the one kiln vendors: batch 12's served shares (D287:
+# `shards_ipc::kind::SERVED_SHARES`), a served share's resync channel (D288, image channel 53: its server's, through
+# `Servers::stream_resyncing`), every path a Windows checkout takes, MSVC builds carrying their own C runtime, D251 as
+# amended (54291fd13: a socket lane its relay's socket closes gives its controller every byte the relay wrote, then its
+# FIN, and refuses the controller's writes, STOP_SENDING, never a reset), and batch 14 (D289's restored served shares,
+# D290's POSIX ACLs), which changes none of the Shards crates Hex builds.
+shards-api = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
+shards-abi = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
+shards-afunix = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
+shards-ipc = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
+shards-remote = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
+shards-testdir = { git = "https://github.com/hyper-light/shards", rev = "b271669b6ec9a1c69ff6fc5853326cd5c760213e" }
 flate2 = "1.1.10"
 # hyper-swim's failure detector and the timing it runs on, for hex-sim's crash class (hyper-raft,
 # vendored at vendor/hyper-raft, vendor/MANIFEST.toml): by name, patched to that copy below, as kiln
@@ -172,7 +182,6 @@ hyper-swim = { path = "vendor/hyper-raft/crates/hyper-swim" }
 hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }
 hyper-quic = { path = "vendor/hyper-raft/crates/hyper-quic" }
 hyper-transport = { path = "vendor/hyper-raft/crates/hyper-transport" }
-shards-api = { path = "vendor/shards/crates/api" }
 # shards-api's controller of a run's agent-control endpoint (shards-remote, D238 and D252) takes hyper-quic from
 # hyper-raft by git upstream: here it is the one vendored copy above, so hex builds one hyper-quic and fetches none.
 [patch."https://github.com/hyper-light/hyper-raft"]

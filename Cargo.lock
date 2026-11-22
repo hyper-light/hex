@@ -1243,10 +1243,12 @@ dependencies = [
 [[package]]
 name = "shards-abi"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 
 [[package]]
 name = "shards-afunix"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -1254,6 +1256,7 @@ dependencies = [
 [[package]]
 name = "shards-api"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "libc",
  "rustls-pki-types",
@@ -1276,6 +1279,7 @@ dependencies = [
 [[package]]
 name = "shards-apple"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "libc",
 ]
@@ -1283,10 +1287,12 @@ dependencies = [
 [[package]]
 name = "shards-dns"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 
 [[package]]
 name = "shards-durable"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1295,6 +1301,7 @@ dependencies = [
 [[package]]
 name = "shards-ipc"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "libc",
  "shards-abi",
@@ -1304,6 +1311,7 @@ dependencies = [
 [[package]]
 name = "shards-judge"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -1311,6 +1319,7 @@ dependencies = [
 [[package]]
 name = "shards-remote"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1326,6 +1335,7 @@ dependencies = [
 [[package]]
 name = "shards-testdir"
 version = "0.1.0"
+source = "git+https://github.com/hyper-light/shards?rev=b271669b6ec9a1c69ff6fc5853326cd5c760213e#b271669b6ec9a1c69ff6fc5853326cd5c760213e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",

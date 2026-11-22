@@ -573,9 +573,8 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
-  `f1e8a097b` or later (image channel version 51: Hex's `shards` and its shards-init, rebuilt on each host by
-  `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
-  create.
+  `f1e8a097b` or later (image channel version 51: Shards' own release at the revision Hex pins, and the shards-init
+  it carries), as a run host and the API of different versions refuse each other at create.
 - **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), an exec's steering apart
   from its end, as a member's own lane gives them (`ExecSignalAfterOutput`: `ExecControl` steers nothing while its exit
   is waited for, §2), STATS' memory peak, OOM kills and refused forks, Windows arm64's run host
@@ -613,6 +612,9 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 - **Swaps on real VMs** (§13, ROOT's): HEX-IMG-11 through `image_real` on Linux KVM, macOS HVF and Windows WHP, at
   Shards `f17b8fb77` or later (image channel version 41), each node's Shards home holding a component for the image's
   harness (`HEX_IMAGE_COMPONENT`), and a swap now of a harness whose output no caller reads past what a pipe holds.
+- **Live changes on real VMs** (§14, ROOT's): HEX-IMG-12 through `image_real` on Linux KVM, macOS HVF and Windows WHP,
+  each run given a ceiling and a plug root, and a member's flow to a granted host made, then refused once its grant was
+  taken back.
 - **From Shards, for swaps** (§13): a start again that gives its member the run-time arguments its first start had
   (D256's `MemberSpec::args`; a swap now restarts its member with none, so a harness started with kiln's flags, its
   `--resume` among them, starts again without them), and MCP servers' paths (D270 slice 4's "not yet").
@@ -949,3 +951,65 @@ generators and bytes (`d270_a_swap_its_answer_and_its_refusal_cross_the_wire`,
 **What would falsify it.** A member's next generation started before its last's channels ended, or a channel's end told
 after its swap's answer (§9); a share whose files may not be run that runs a binary; a swap now that leaves its member's
 streams to its last generation's caller.
+
+## 14. A running box's network and folders, changed in place (kiln plan 01a1dd2e…, P6b.3; Shards' D269, D271, D278, D279, D285)
+
+kiln changes a running session's ports, egress, networks and folders in place (its P6b.4; the person, 2026-11-15:
+"without having to force the user to re-build the agentfile or MicroVM"), and Shards' image run takes each live (its
+P6b.1 and P6b.2, image channel v50 and later, unchanged since v0.8.0 by Shards' ROOT, 2026-11-19): `ImageGuest::publish`
+and `unpublish` (D269), `member_egress` (D278), `connect` and `disconnect` (D285), `plug` and `unplug` (D271, with
+D279's `exec`). Decided by Hex's lead, 2026-11-19.
+
+- **One call.** `Runtime::change(id, Live)`, one wire call, as kiln's seam has one (`Run::change`): a change is data, and
+  one call keeps one settle, one refusal and one record for all of them. Its change is one of:
+  - `Grant(Grant)` and `Revoke(Grant)`: a grant of N1 (docs/design/network-grants.md) added to the run as it goes, or
+    taken back. A `Publish` is bound on the host as a boot binds one (`publish`) and held to its receiver as N6 holds a
+    boot's: the port must reach the grant's member alone (`Bound::to`), else it is let go at once (`unpublish`) and the
+    change refused, `Invalid` naming whom it reaches. An `Egress` or `Host` grant is its member's: Hex gives Shards that
+    member's reach whole (`member_egress`), its boot's grants and every one added since, made by N4's one program, so the
+    member stays held apart as at its boot (D246). Taken back, the same way: a `Publish` let go, a reach given again
+    without it.
+  - `Connect { member, network, grant }` and `Disconnect`: the member on a network shared with other runs under its
+    grant whole (D285's `NetworkGrant`: its name there, its peer by its name there, one protocol's ports, which way),
+    checked by Shards' own rule (`NetworkGrant::refused`) before it's asked, and again by the run host.
+  - `Plug(ImagePlug)` and `Unplug { at }`: a host directory plugged in for members (every one, or those named) at a path
+    strictly beneath one of its plug roots, read-only where it says, its files run from it or not (`exec`; where not,
+    each member's mount of it is `noexec`, D279), as D271 plugs one; or the one at `at` unplugged.
+- **Its ceiling and its roots, at its boot.** Shards refuses a live grant past the image's grants and the run's ceiling
+  (`ImageSpec::egress_ceiling`, D278), and a plug outside the run's plug roots (`ImageSpec::plug_roots`, D271): both are
+  given as the run starts and never widened after, as Landlock only narrows. So `ShardsImage` gains both, append-only:
+  `plug_roots`, top-level directories of its members' view, and `ceiling`, grants (N1's `Egress` and `Host`) that are
+  the most each member may be given live, programmed per member into Shards' `MemberCeiling` by N4's program and checked
+  by N5's one check. None of either: nothing live past the boot's grants, and no plug but beneath its shares' own
+  directories. A box whose spec says neither boots as it did.
+- **The record.** A change taken is the box's own from then on: `BoxInfo.live` says the run's grants, connections and
+  plugs as taken, in order, each with what Shards answered (a publish's bound socket and its receiver, a connection's
+  place on its network), beside the spec's `grants`, so every grant its VM holds is in Hex's record (N6; joint plan
+  step 15). It is the run's, as `published` is: a run doesn't outlive its owner (D231's first version), and the box's
+  spec, which a create gave it, is never rewritten; a caller that starts it again gives its changes again (kiln's
+  overrides do, at each start).
+- **Paused.** Shards' network process binds a publish while its guest is paused (D269), but a reach, a connection and a
+  plug are its guest's too: those are refused `Pause(Paused)` at once, its guest answering nothing, as a swap is (§13);
+  a publish and its letting go are taken.
+- **Waits.** Each asks Shards and waits on its run host's answer or its run's end alone (`Duration::MAX`), never a
+  timer, as a pause and a swap do (§6).
+- **Refused, typed** (`Refusal::Live { op, cause, why }`, appended): `NotRunning` before its start and once its stop
+  has begun, `Ended` once its run has ended, `Class` for a box of another class, and Shards' own causes, in its words:
+  `Widening` (past its image's grants and its ceiling), `NoNetwork` (a run with no network device), `Unknown` (nothing
+  there to take back, or a member that runs not), `NameTaken`, `NoSuchNetwork`, `Exhausted`, `Overlaps`, `Ipv6`,
+  `PairedElsewhere`, `Unheld`, `Network` (its network process's or guest's other refusals), and `Plug` (a plug's own: a
+  place outside its roots or taken, a source that is none). A change's form is checked first, by N5's one check with
+  the grants the box holds, so no flow is named twice, and refused `Invalid` there; a grant held already is done already,
+  as Shards' connect has one.
+- **kiln's side** (its `sandbox::hexvm`, owed with this): its launch's `plug_roots` and `egress_ceiling` (`host:port`
+  each, for every member it drives) given as the box's, and each of its seam's changes asked as one `Live`. Its seam's
+  publish names no member (Shards' D269 takes a guest port alone); kiln gives it its driven member, the harness, which
+  Hex then holds the port to.
+
+**Simulator and conformance.** `SimRuntime` holds each change as its record, refusing as the class does (the same
+checks), and HEX-IMG-12 holds every runtime of the class to them: a grant added and taken back, each seen in
+`BoxInfo.live`; a publish reaching its member; a connection named whole; a plug beneath a root, and refused outside
+them; each refused once the run has ended; a reach, a connection and a plug refused while paused, a publish taken.
+
+**What would falsify it.** A flow the run admits after its grant was taken back; a plug a member sees that wasn't
+given it; a live grant reaching past the ceiling; a change Hex says it took that Shards never made.

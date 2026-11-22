@@ -391,9 +391,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   - Counts each block that still held them in an atomic counter, which the test reads; while freeing it never
     allocates, takes a lock or prints.
 
-Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
-no Hex change (`vendor/MANIFEST.toml`): every change Hex carried is upstream. Its `unsafe` follows Shards'
-rules, not this list.
+Shards is never vendored here: Hex takes its crates by git at one revision (Cargo.toml's `[workspace.dependencies]`),
+and a real-VM run takes `shards` from Shards' own release at that revision, never a build of Hex's. kiln, which
+vendors Hex and Shards both, builds Hex on its own copy of Shards. Shards' `unsafe` follows Shards' rules, not this
+list.
 
 ## 13. Lean code
 
